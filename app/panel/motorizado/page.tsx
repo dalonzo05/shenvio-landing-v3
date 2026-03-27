@@ -3,26 +3,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import {
-  collection,
-  onSnapshot,
-  query,
-  where,
-  doc,
-  serverTimestamp,
-  Timestamp,
-  writeBatch,
+  collection, onSnapshot, query, where,
+  doc, serverTimestamp, Timestamp, writeBatch,
 } from 'firebase/firestore';
-
 import { auth, db } from '@/fb/config';
 
+// ─── Types ───────────────────────────────────────────────────────────────────
+
 type EstadoSolicitud =
-  | 'pendiente_confirmacion'
-  | 'confirmada'
-  | 'asignada'
-  | 'en_camino_retiro'
-  | 'retirado'
-  | 'en_camino_entrega'
-  | 'entregado';
+  | 'pendiente_confirmacion' | 'confirmada' | 'asignada'
+  | 'en_camino_retiro' | 'retirado' | 'en_camino_entrega' | 'entregado';
 
 type EstadoAceptacion = 'pendiente' | 'aceptada' | 'rechazada' | 'expirada';
 
@@ -32,47 +22,32 @@ type Solicitud = {
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
   entregadoAt?: Timestamp;
-
-  cliente?: {
-    nombre?: string;
-    telefono?: string;
-    direccionTexto?: string;
+  tipoCliente?: 'contado' | 'credito';
+  cliente?: { nombre?: string; telefono?: string };
+  comercio?: { nombre?: string; direccionTexto?: string };
+  recoleccion?: { nombreApellido?: string; celular?: string; direccionEscrita?: string };
+  entrega?: { nombreApellido?: string; celular?: string; direccionEscrita?: string };
+  confirmacion?: { precioFinalCordobas?: number };
+  cobroContraEntrega?: { aplica?: boolean; monto?: number };
+  pagoDelivery?: {
+    tipo?: string;
+    quienPaga?: string;
+    montoSugerido?: number | null;
+    deducirDelCobroContraEntrega?: boolean;
   };
-
-  comercio?: {
-    nombre?: string;
-    direccionTexto?: string;
-  };
-
-  recoleccion?: {
-    nombreApellido?: string;
-    celular?: string;
-    direccionEscrita?: string;
-  };
-
-  entrega?: {
-    nombreApellido?: string;
-    celular?: string;
-    direccionEscrita?: string;
-  };
-
-  confirmacion?: {
-    precioFinalCordobas?: number;
-  };
-
   asignacion?: {
     motorizadoId?: string;
     motorizadoAuthUid?: string;
     motorizadoNombre?: string;
-    motorizadoTelefono?: string;
     asignadoAt?: Timestamp;
     aceptarAntesDe?: Timestamp;
     estadoAceptacion?: EstadoAceptacion;
     aceptadoAt?: Timestamp | null;
     rechazadoAt?: Timestamp | null;
-    motivoRechazo?: string;
   } | null;
 };
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function tsToDate(v: any): Date | null {
   if (!v) return null;
@@ -81,580 +56,609 @@ function tsToDate(v: any): Date | null {
   return null;
 }
 
-function formatMoney(n?: number) {
+function fmt(n?: number) {
   if (typeof n !== 'number') return '-';
-  return `C$ ${n}`;
+  return `C$ ${n.toLocaleString('es-NI')}`;
 }
 
-function formatDateTime(v: any) {
+function fmtTime(v: any) {
   const d = tsToDate(v);
   if (!d) return '-';
-  return d.toLocaleString();
+  return d.toLocaleString('es-NI', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' });
 }
 
-function formatRemaining(ms: number) {
+function fmtDateInput(d: Date) {
+  return d.toISOString().slice(0, 10);
+}
+
+function isToday(d: Date) {
+  const t = new Date();
+  return d.getDate() === t.getDate() && d.getMonth() === t.getMonth() && d.getFullYear() === t.getFullYear();
+}
+
+function isSameDay(d: Date, ref: Date) {
+  return d.getDate() === ref.getDate() && d.getMonth() === ref.getMonth() && d.getFullYear() === ref.getFullYear();
+}
+
+function fmtRemaining(ms: number) {
   if (ms <= 0) return '00:00';
-  const totalSec = Math.floor(ms / 1000);
-  const mm = Math.floor(totalSec / 60)
-    .toString()
-    .padStart(2, '0');
-  const ss = (totalSec % 60).toString().padStart(2, '0');
-  return `${mm}:${ss}`;
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`;
 }
 
-function getSemaforo(ms: number) {
-  if (ms <= 0) return 'Vencido';
-  if (ms <= 2 * 60 * 1000) return 'Urgente';
-  if (ms <= 5 * 60 * 1000) return 'Atención';
-  return 'A tiempo';
+function semStyle(ms: number) {
+  if (ms <= 0) return { bg: '#fff1f0', text: '#cf1322', border: '#ffa39e', accent: '#ef4444', label: 'VENCIDO' };
+  if (ms <= 2 * 60000) return { bg: '#fff1f0', text: '#cf1322', border: '#ffa39e', accent: '#ef4444', label: 'URGENTE' };
+  if (ms <= 5 * 60000) return { bg: '#fffbe6', text: '#d46b08', border: '#ffe58f', accent: '#f59e0b', label: 'ATENCIÓN' };
+  return { bg: '#f6ffed', text: '#389e0d', border: '#b7eb8f', accent: '#16a34a', label: 'A TIEMPO' };
 }
 
-function sortByDateDesc(arr: Solicitud[], field: keyof Solicitud = 'createdAt') {
-  return [...arr].sort((a, b) => {
-    const da = tsToDate(a[field]);
-    const db = tsToDate(b[field]);
-    return (db?.getTime() || 0) - (da?.getTime() || 0);
-  });
-}
-
-function estadoOrdenTexto(estado?: EstadoSolicitud) {
+function estadoStyle(estado?: EstadoSolicitud) {
   switch (estado) {
-    case 'asignada':
-      return 'Asignada';
-    case 'en_camino_retiro':
-      return 'En camino a retiro';
-    case 'retirado':
-      return 'Retirado';
-    case 'en_camino_entrega':
-      return 'En camino a entrega';
-    case 'entregado':
-      return 'Entregado';
-    case 'confirmada':
-      return 'Confirmada';
-    case 'pendiente_confirmacion':
-      return 'Pendiente confirmación';
-    default:
-      return estado || '-';
+    case 'en_camino_retiro': return { bg: '#fffbe6', text: '#d46b08', border: '#ffe58f', accent: '#f59e0b' };
+    case 'retirado': return { bg: '#e6f4ff', text: '#0958d9', border: '#91caff', accent: '#2563eb' };
+    case 'en_camino_entrega': return { bg: '#f9f0ff', text: '#531dab', border: '#d3adf7', accent: '#7c3aed' };
+    case 'entregado': return { bg: '#f6ffed', text: '#389e0d', border: '#b7eb8f', accent: '#16a34a' };
+    default: return { bg: '#f5f5f5', text: '#595959', border: '#d9d9d9', accent: '#9ca3af' };
   }
 }
 
-function estadoBadgeClass(estado?: EstadoSolicitud) {
-  switch (estado) {
-    case 'en_camino_retiro':
-    case 'retirado':
-    case 'en_camino_entrega':
-      return 'bg-yellow-50 text-yellow-700 border-yellow-200';
-    case 'entregado':
-      return 'bg-green-50 text-green-700 border-green-200';
-    case 'asignada':
-      return 'bg-blue-50 text-blue-700 border-blue-200';
-    default:
-      return 'bg-gray-50 text-gray-700 border-gray-200';
-  }
+function estadoTexto(e?: EstadoSolicitud) {
+  const m: Record<string, string> = {
+    asignada: 'Nueva orden', en_camino_retiro: 'Yendo a retiro',
+    retirado: 'Paquete retirado', en_camino_entrega: 'En camino a entrega', entregado: 'Entregado ✓',
+  };
+  return m[e || ''] || e || '-';
 }
 
-function getNextActions(estado?: EstadoSolicitud) {
-  if (estado === 'asignada') {
-    return ['en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado'] as EstadoSolicitud[];
-  }
-
-  if (estado === 'en_camino_retiro') {
-    return ['retirado', 'en_camino_entrega', 'entregado'] as EstadoSolicitud[];
-  }
-
-  if (estado === 'retirado') {
-    return ['en_camino_entrega', 'entregado'] as EstadoSolicitud[];
-  }
-
-  if (estado === 'en_camino_entrega') {
-    return ['entregado'] as EstadoSolicitud[];
-  }
-
-  return [] as EstadoSolicitud[];
+function nextActions(e?: EstadoSolicitud): EstadoSolicitud[] {
+  if (e === 'asignada') return ['en_camino_retiro'];
+  if (e === 'en_camino_retiro') return ['retirado'];
+  if (e === 'retirado') return ['en_camino_entrega'];
+  if (e === 'en_camino_entrega') return ['entregado'];
+  return [];
 }
 
-function actionLabel(estado: EstadoSolicitud) {
-  switch (estado) {
-    case 'en_camino_retiro':
-      return 'Voy a retiro';
-    case 'retirado':
-      return 'Retirado';
-    case 'en_camino_entrega':
-      return 'En camino entrega';
-    case 'entregado':
-      return 'Entregado';
-    default:
-      return estado;
-  }
+function actionLabel(e: EstadoSolicitud) {
+  const m: Record<string, string> = {
+    en_camino_retiro: '🛵 Voy al retiro', retirado: '📦 Paquete recogido',
+    en_camino_entrega: '🚀 Voy a entregar', entregado: '✅ Marcar como entregado',
+  };
+  return m[e] || e;
 }
+
+function sortDesc(arr: Solicitud[], field: keyof Solicitud = 'createdAt') {
+  return [...arr].sort((a, b) => (tsToDate(b[field])?.getTime() || 0) - (tsToDate(a[field])?.getTime() || 0));
+}
+
+// ─── Deposit calculation ──────────────────────────────────────────────────────
+// Returns what the motorizado collected and where it should go.
+type DepositoInfo = {
+  tieneProducto: boolean;
+  montoProducto: number;       // → depositar al comercio
+  tieneDelivery: boolean;
+  montoDelivery: number;       // → depositar a Storkhub
+  deliveryPorTransferencia: boolean; // → si true, delivery ya pagado, depositar todo al comercio
+  totalAlComercio: number;
+  totalAStorkhub: number;
+  descripcion: string;
+};
+
+function calcDeposito(s: Solicitud): DepositoInfo {
+  const ceAplica = !!s.cobroContraEntrega?.aplica;
+  const montoProducto = ceAplica ? (s.cobroContraEntrega?.monto || 0) : 0;
+  const precioDelivery = s.confirmacion?.precioFinalCordobas || 0;
+  const quienPaga = s.pagoDelivery?.quienPaga || '';
+  const deducir = !!s.pagoDelivery?.deducirDelCobroContraEntrega;
+  const esPorTransferencia = quienPaga === 'transferencia';
+  const esCredito = s.tipoCliente === 'credito' || quienPaga === 'credito_semanal';
+
+  // Delivery: el motorizado lo recauda en efectivo solo si quienPaga es recoleccion o entrega
+  const motorizadoRecaudeDelivery = !esPorTransferencia && !esCredito && precioDelivery > 0;
+  const montoDelivery = motorizadoRecaudeDelivery ? precioDelivery : 0;
+
+  // Si el delivery se deduce del cobro CE: el motorizado entrega al comercio (producto - delivery)
+  const productoNeto = deducir ? Math.max(0, montoProducto - precioDelivery) : montoProducto;
+
+  // Total al comercio = producto neto (cobro CE)
+  // Si delivery fue por transferencia, el motorizado solo deposita el producto al comercio
+  const totalAlComercio = productoNeto;
+  // Total a Storkhub = delivery en efectivo (si aplica)
+  const totalAStorkhub = esPorTransferencia ? 0 : (esCredito ? 0 : montoDelivery);
+
+  // Descripción legible
+  let partes: string[] = [];
+  if (ceAplica) partes.push(`Cobró producto C$${montoProducto}`);
+  if (motorizadoRecaudeDelivery) partes.push(`Cobró delivery C$${precioDelivery}`);
+  if (deducir) partes.push(`Dedujo delivery del CE`);
+  if (esPorTransferencia) partes.push(`Delivery ya pagado por transferencia`);
+  if (esCredito) partes.push(`Delivery en crédito semanal`);
+  if (!ceAplica && !motorizadoRecaudeDelivery) partes.push(`No recaudó efectivo`);
+
+  return {
+    tieneProducto: ceAplica,
+    montoProducto,
+    tieneDelivery: motorizadoRecaudeDelivery,
+    montoDelivery,
+    deliveryPorTransferencia: esPorTransferencia,
+    totalAlComercio,
+    totalAStorkhub,
+    descripcion: partes.join(' · '),
+  };
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
 
 export default function PanelMotorizadoPage() {
   const [user, setUser] = useState<User | null>(null);
-  const [todasLasOrdenes, setTodasLasOrdenes] = useState<Solicitud[]>([]);
+  const [ordenes, setOrdenes] = useState<Solicitud[]>([]);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
-  const [nowTick, setNowTick] = useState(Date.now());
+  const [actionId, setActionId] = useState<string | null>(null);
+  const [tick, setTick] = useState(Date.now());
+  const [tab, setTab] = useState<'pendientes' | 'en_curso' | 'historial' | 'depositos'>('pendientes');
 
+  // Historial filters
+  const [histFecha, setHistFecha] = useState<'hoy' | 'ayer' | 'personalizado'>('hoy');
+  const [histDesde, setHistDesde] = useState(fmtDateInput(new Date()));
+
+  useEffect(() => { const id = setInterval(() => setTick(Date.now()), 1000); return () => clearInterval(id); }, []);
   useEffect(() => {
-    const id = setInterval(() => setNowTick(Date.now()), 1000);
-    return () => clearInterval(id);
+    return onAuthStateChanged(auth, (u) => { setUser(u); setLoading(false); });
+  }, []);
+
+  const cargar = useCallback(() => {
+    const u = auth.currentUser;
+    if (!u) { setOrdenes([]); return () => {}; }
+    setErr(null);
+    const q = query(collection(db, 'solicitudes_envio'), where('asignacion.motorizadoAuthUid', '==', u.uid));
+    return onSnapshot(q,
+      (s) => { setOrdenes(s.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))); setErr(null); },
+      (e) => { console.error(e); setErr('Error cargando órdenes.'); }
+    );
   }, []);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-    });
-    return () => unsub();
-  }, []);
+    if (!user) { setOrdenes([]); return; }
+    const unsub = cargar();
+    return () => { if (typeof unsub === 'function') unsub(); };
+  }, [user, cargar]);
 
-  const cargarOrdenes = useCallback(() => {
-    const currentUser = auth.currentUser;
-    if (!currentUser) {
-      setTodasLasOrdenes([]);
-      setRefreshing(false);
-      return () => {};
-    }
-
-    setRefreshing(true);
-    setErr(null);
-
-    const ref = collection(db, 'solicitudes_envio');
-    const qByAuthUid = query(
-      ref,
-      where('asignacion.motorizadoAuthUid', '==', currentUser.uid)
-    );
-
-    const unsub = onSnapshot(
-      qByAuthUid,
-      (snap) => {
-        const rows: Solicitud[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as any),
-        }));
-
-        setTodasLasOrdenes(rows);
-        setErr(null);
-        setRefreshing(false);
-      },
-      (e) => {
-        console.error(e);
-        setErr('Error cargando órdenes del motorizado.');
-        setRefreshing(false);
-      }
-    );
-
-    return unsub;
-  }, []);
-
-  useEffect(() => {
-    if (!user) {
-      setTodasLasOrdenes([]);
-      return;
-    }
-
-    const unsub = cargarOrdenes();
-
-    return () => {
-      if (typeof unsub === 'function') unsub();
-    };
-  }, [user, cargarOrdenes]);
-
-  async function setMotorizadoEstado(motorizadoId: string | undefined, estado: string) {
-    if (!motorizadoId) return;
-    const motoRef = doc(db, 'motorizado', motorizadoId);
-    return { ref: motoRef, estado };
-  }
-
-  async function aceptarOrden(orden: Solicitud) {
-    if (!orden.id) return;
-
-    setErr(null);
-    setActionLoadingId(orden.id);
-
+  async function aceptar(o: Solicitud) {
+    if (!o.id) return;
+    setErr(null); setActionId(o.id);
     try {
-      const batch = writeBatch(db);
-      const ordenRef = doc(db, 'solicitudes_envio', orden.id);
-
-      batch.update(ordenRef, {
-        'asignacion.estadoAceptacion': 'aceptada',
-        'asignacion.aceptadoAt': serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-
-      const motorizado = await setMotorizadoEstado(orden.asignacion?.motorizadoId, 'ocupado');
-      if (motorizado) {
-        batch.update(motorizado.ref, {
-          estado: motorizado.estado,
-          updatedAt: serverTimestamp(),
-        });
-      }
-
-      await batch.commit();
-    } catch (e) {
-      console.error(e);
-      setErr('No se pudo aceptar la orden.');
-    } finally {
-      setActionLoadingId(null);
-    }
+      const b = writeBatch(db);
+      b.update(doc(db, 'solicitudes_envio', o.id), { 'asignacion.estadoAceptacion': 'aceptada', 'asignacion.aceptadoAt': serverTimestamp(), updatedAt: serverTimestamp() });
+      if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: 'ocupado', updatedAt: serverTimestamp() });
+      await b.commit();
+    } catch (e) { console.error(e); setErr('No se pudo aceptar.'); }
+    finally { setActionId(null); }
   }
 
-  async function rechazarOrden(orden: Solicitud) {
-    if (!orden.id) return;
-
-    setErr(null);
-    setActionLoadingId(orden.id);
-
+  async function rechazar(o: Solicitud) {
+    if (!o.id) return;
+    setErr(null); setActionId(o.id);
     try {
-      const batch = writeBatch(db);
-      const ordenRef = doc(db, 'solicitudes_envio', orden.id);
-
-      batch.update(ordenRef, {
-        estado: 'confirmada',
-        asignacion: null,
-        updatedAt: serverTimestamp(),
-      });
-
-      const motorizado = await setMotorizadoEstado(orden.asignacion?.motorizadoId, 'disponible');
-      if (motorizado) {
-        batch.update(motorizado.ref, {
-          estado: motorizado.estado,
-          updatedAt: serverTimestamp(),
-        });
-      }
-
-      await batch.commit();
-    } catch (e) {
-      console.error(e);
-      setErr('No se pudo rechazar la orden.');
-    } finally {
-      setActionLoadingId(null);
-    }
+      const b = writeBatch(db);
+      b.update(doc(db, 'solicitudes_envio', o.id), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() });
+      if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() });
+      await b.commit();
+    } catch (e) { console.error(e); setErr('No se pudo rechazar.'); }
+    finally { setActionId(null); }
   }
 
-  async function cambiarEstado(orden: Solicitud, nuevo: EstadoSolicitud) {
-    if (!orden.id) return;
-
-    setErr(null);
-    setActionLoadingId(`${orden.id}:${nuevo}`);
-
+  async function cambiar(o: Solicitud, nuevo: EstadoSolicitud) {
+    if (!o.id) return;
+    setErr(null); setActionId(`${o.id}:${nuevo}`);
     try {
-      const batch = writeBatch(db);
-      const ordenRef = doc(db, 'solicitudes_envio', orden.id);
-
-      const payload: any = {
-        estado: nuevo,
-        updatedAt: serverTimestamp(),
-      };
-
-      if (nuevo === 'entregado') {
-        payload.entregadoAt = serverTimestamp();
-      }
-
-      batch.update(ordenRef, payload);
-
-      const nuevoEstadoMotorizado = nuevo === 'entregado' ? 'disponible' : 'ocupado';
-      const motorizado = await setMotorizadoEstado(orden.asignacion?.motorizadoId, nuevoEstadoMotorizado);
-
-      if (motorizado) {
-        batch.update(motorizado.ref, {
-          estado: motorizado.estado,
-          updatedAt: serverTimestamp(),
-        });
-      }
-
-      await batch.commit();
-    } catch (e) {
-      console.error(e);
-      setErr('No se pudo cambiar el estado.');
-    } finally {
-      setActionLoadingId(null);
-    }
+      const b = writeBatch(db);
+      const p: any = { estado: nuevo, updatedAt: serverTimestamp() };
+      if (nuevo === 'entregado') p.entregadoAt = serverTimestamp();
+      b.update(doc(db, 'solicitudes_envio', o.id), p);
+      if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: nuevo === 'entregado' ? 'disponible' : 'ocupado', updatedAt: serverTimestamp() });
+      await b.commit();
+    } catch (e) { console.error(e); setErr('No se pudo cambiar.'); }
+    finally { setActionId(null); }
   }
 
-  const ordenesDelMotorizado = useMemo(() => {
-    if (!user) return [];
-    return sortByDateDesc(todasLasOrdenes);
-  }, [todasLasOrdenes, user]);
+  const todas = useMemo(() => (!user ? [] : sortDesc(ordenes)), [ordenes, user]);
 
-  const pendientes = useMemo(() => {
-    const rows = ordenesDelMotorizado.filter((o) => {
-      return o.estado === 'asignada' && o.asignacion?.estadoAceptacion === 'pendiente';
+  const pendientes = useMemo(() =>
+    todas.filter((o) => o.estado === 'asignada' && o.asignacion?.estadoAceptacion === 'pendiente')
+      .map((o) => {
+        const dl = tsToDate(o.asignacion?.aceptarAntesDe);
+        return { ...o, ms: dl ? dl.getTime() - tick : 0 };
+      }), [todas, tick]);
+
+  const enCurso = useMemo(() =>
+    todas.filter((o) => o.asignacion?.estadoAceptacion === 'aceptada' && ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'].includes(o.estado || '')),
+    [todas]);
+
+  const entregadas = useMemo(() => sortDesc(todas.filter((o) => o.estado === 'entregado'), 'entregadoAt'), [todas]);
+
+  // Historial filtered by date
+  const historialFiltrado = useMemo(() => {
+    const refDate = histFecha === 'personalizado'
+      ? new Date(histDesde + 'T00:00:00')
+      : histFecha === 'ayer'
+        ? (() => { const d = new Date(); d.setDate(d.getDate() - 1); return d; })()
+        : new Date();
+    return entregadas.filter((o) => {
+      const d = tsToDate(o.entregadoAt) || tsToDate(o.updatedAt);
+      return d && isSameDay(d, refDate);
     });
+  }, [entregadas, histFecha, histDesde]);
 
-    return rows.map((o) => {
-      const deadline = tsToDate(o.asignacion?.aceptarAntesDe);
-      const ms = deadline ? deadline.getTime() - nowTick : 0;
+  // Depósitos: today's delivered orders that have something to deposit
+  const depositosPendientes = useMemo(() =>
+    entregadas.filter((o) => {
+      const d = tsToDate(o.entregadoAt) || tsToDate(o.updatedAt);
+      if (!d || !isToday(d)) return false;
+      const dep = calcDeposito(o);
+      return dep.totalAlComercio > 0 || dep.totalAStorkhub > 0;
+    }), [entregadas]);
 
-      return {
-        ...o,
-        restanteMs: ms,
-        restanteTexto: formatRemaining(ms),
-        semaforo: getSemaforo(ms),
-      };
+  const resumenDepositos = useMemo(() => {
+    let alComercio = 0, aStorkhub = 0;
+    depositosPendientes.forEach((o) => {
+      const d = calcDeposito(o);
+      alComercio += d.totalAlComercio;
+      aStorkhub += d.totalAStorkhub;
     });
-  }, [ordenesDelMotorizado, nowTick]);
+    return { alComercio, aStorkhub, total: alComercio + aStorkhub };
+  }, [depositosPendientes]);
 
-  const enCurso = useMemo(() => {
-    return ordenesDelMotorizado.filter((o) => {
-      return (
-        o.asignacion?.estadoAceptacion === 'aceptada' &&
-        ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'].includes(o.estado || '')
-      );
-    });
-  }, [ordenesDelMotorizado]);
+  useEffect(() => { if (pendientes.length > 0) setTab('pendientes'); }, [pendientes.length]);
 
-  const historial = useMemo(() => {
-    return sortByDateDesc(
-      ordenesDelMotorizado.filter((o) => o.estado === 'entregado'),
-      'entregadoAt'
-    );
-  }, [ordenesDelMotorizado]);
+  if (loading) return (
+    <div style={{ minHeight: '100vh', background: '#f9fafb', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+      <div style={{ width: 36, height: 36, border: '3px solid #e5e7eb', borderTop: '3px solid #004aad', borderRadius: '50%' }} />
+      <p style={{ color: '#6b7280', fontSize: 14, margin: 0 }}>Cargando tu panel...</p>
+    </div>
+  );
 
-  if (loading) {
-    return <div className="max-w-5xl mx-auto p-6">Cargando panel motorizado...</div>;
-  }
+  if (!user) return (
+    <div style={{ minHeight: '100vh', background: '#f9fafb', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <p style={{ color: '#111827', fontSize: 16, fontWeight: 600 }}>Debes iniciar sesión</p>
+    </div>
+  );
 
-  if (!user) {
-    return (
-      <div className="max-w-5xl mx-auto p-6">
-        <h1 className="text-2xl font-bold mb-2">Panel Motorizado</h1>
-        <p className="text-gray-600">Debes iniciar sesión para ver tus órdenes.</p>
-      </div>
-    );
-  }
+  const tabs = [
+    { key: 'pendientes' as const, label: '🔔 Nuevas', count: pendientes.length },
+    { key: 'en_curso' as const, label: '🛵 En curso', count: enCurso.length },
+    { key: 'historial' as const, label: '📋 Historial', count: historialFiltrado.length },
+    { key: 'depositos' as const, label: '💰 Depósitos', count: depositosPendientes.length },
+  ];
 
   return (
-    <div className="max-w-6xl mx-auto p-4 md:p-6 space-y-8">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold">Panel Motorizado</h1>
-          <p className="text-sm text-gray-600 mt-1">Usuario actual: {user.email || '-'}</p>
-          <p className="text-sm text-gray-600">UID actual: {user.uid}</p>
-          <p className="text-sm text-gray-600">
-            Órdenes del motorizado: {ordenesDelMotorizado.length}
-          </p>
-          {err && <p className="text-sm text-red-600 mt-2">{err}</p>}
-        </div>
+    <div style={{ minHeight: '100vh', background: '#f9fafb', fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", maxWidth: 520, margin: '0 auto', paddingBottom: 48 }}>
 
-        <button
-          onClick={() => {
-            const unsub = cargarOrdenes();
-            if (typeof unsub === 'function') {
-              setTimeout(() => unsub(), 200);
-            }
-          }}
-          className="px-4 py-2 rounded-lg border"
-          disabled={refreshing}
-        >
-          {refreshing ? 'Actualizando...' : 'Actualizar'}
-        </button>
+      {/* Header */}
+      <div style={{ background: '#fff', borderBottom: '1px solid #e5e7eb', padding: '20px 20px 16px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h1 style={{ fontSize: 22, fontWeight: 800, color: '#111827', margin: 0, letterSpacing: -0.5 }}>Panel Motorizado</h1>
+            <p style={{ fontSize: 12, color: '#9ca3af', margin: '3px 0 0' }}>{user.email}</p>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 20, padding: '6px 12px' }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#16a34a', display: 'inline-block' }} />
+            <span style={{ fontSize: 12, color: '#16a34a', fontWeight: 600 }}>En línea</span>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+          <StatCard label="Nuevas" value={pendientes.length} color={pendientes.length > 0 ? '#d97706' : '#6b7280'} bg={pendientes.length > 0 ? '#fffbeb' : '#f9fafb'} border={pendientes.length > 0 ? '#fde68a' : '#e5e7eb'} />
+          <StatCard label="En curso" value={enCurso.length} color={enCurso.length > 0 ? '#2563eb' : '#6b7280'} bg={enCurso.length > 0 ? '#eff6ff' : '#f9fafb'} border={enCurso.length > 0 ? '#bfdbfe' : '#e5e7eb'} />
+          <StatCard label="Hoy" value={historialFiltrado.length} color="#16a34a" bg="#f0fdf4" border="#bbf7d0" />
+          <StatCard label="Depósitos" value={depositosPendientes.length} color={depositosPendientes.length > 0 ? '#7c3aed' : '#6b7280'} bg={depositosPendientes.length > 0 ? '#f5f3ff' : '#f9fafb'} border={depositosPendientes.length > 0 ? '#ddd6fe' : '#e5e7eb'} />
+        </div>
       </div>
 
-      <section className="border rounded-xl p-4 bg-white shadow-sm">
-        <h2 className="text-xl font-semibold mb-4">Pendientes de aceptar</h2>
+      {err && <div style={{ margin: '12px 16px 0', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12, padding: '10px 14px', color: '#dc2626', fontSize: 13 }}>⚠️ {err}</div>}
 
-        {pendientes.length === 0 ? (
-          <p className="text-gray-500">No tienes órdenes pendientes por aceptar.</p>
-        ) : (
-          <div className="grid gap-4">
-            {pendientes.map((o: any) => (
-              <div key={o.id} className="border rounded-lg p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                  <div>
-                    <p className="font-semibold">Orden #{o.id.slice(0, 6)}</p>
-                    <p className="text-sm text-gray-600">Asignada por aceptar</p>
+      {/* Tabs */}
+      <div style={{ display: 'flex', margin: '16px 16px 0', background: '#fff', borderRadius: 14, padding: 4, gap: 3, border: '1px solid #e5e7eb', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+        {tabs.map((t) => (
+          <button key={t.key} onClick={() => setTab(t.key)} style={{ flex: 1, padding: '9px 2px', border: 'none', cursor: 'pointer', background: tab === t.key ? '#004aad' : 'transparent', color: tab === t.key ? '#fff' : '#6b7280', fontSize: 11, fontWeight: 700, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, transition: 'all 0.15s' }}>
+            {t.label}
+            {t.count > 0 && <span style={{ background: tab === t.key ? 'rgba(255,255,255,0.25)' : '#004aad', color: '#fff', borderRadius: 10, padding: '1px 5px', fontSize: 10, fontWeight: 800 }}>{t.count}</span>}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ padding: '16px 16px 0' }}>
+
+        {/* ── PENDIENTES ── */}
+        {tab === 'pendientes' && (
+          <>
+            {pendientes.length === 0
+              ? <EmptyState icon="🔕" title="Sin órdenes nuevas" subtitle="Cuando el gestor te asigne una orden aparecerá aquí" />
+              : (pendientes as any[]).map((o) => {
+                const sem = semStyle(o.ms);
+                const isLoading = actionId === o.id;
+                const dep = calcDeposito(o);
+                return (
+                  <div key={o.id} style={card}>
+                    <div style={{ height: 4, background: sem.accent }} />
+                    <div style={{ padding: '14px 16px 0' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: sem.bg, border: `1px solid ${sem.border}`, borderRadius: 10, padding: '8px 14px' }}>
+                          <span>⏱</span>
+                          <span style={{ fontSize: 22, fontWeight: 900, color: sem.text, letterSpacing: -1 }}>{fmtRemaining(o.ms)}</span>
+                          <span style={{ fontSize: 11, fontWeight: 800, color: sem.text }}>{sem.label}</span>
+                        </div>
+                        <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</span>
+                      </div>
+
+                      {/* Price + deposit preview */}
+                      <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Delivery</span>
+                          <span style={{ fontSize: 20, fontWeight: 900, color: '#111827' }}>{fmt(o.confirmacion?.precioFinalCordobas)}</span>
+                        </div>
+                        {dep.tieneProducto && (
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
+                            <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Cobro producto</span>
+                            <span style={{ fontSize: 18, fontWeight: 800, color: '#7c3aed' }}>{fmt(dep.montoProducto)}</span>
+                          </div>
+                        )}
+                        <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0' }}>{dep.descripcion}</p>
+                      </div>
+
+                      <RoutePoint type="pickup" name={o.recoleccion?.nombreApellido || o.cliente?.nombre || '-'} phone={o.recoleccion?.celular || '-'} address={o.recoleccion?.direccionEscrita || '-'} />
+                      <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
+                      <RoutePoint type="dropoff" name={o.entrega?.nombreApellido || '-'} phone={o.entrega?.celular || '-'} address={o.entrega?.direccionEscrita || '-'} />
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, padding: 16 }}>
+                      <button onClick={() => rechazar(o)} disabled={isLoading} style={btnSecondary}>✕ Rechazar</button>
+                      <button onClick={() => aceptar(o)} disabled={isLoading} style={btnPrimary}>{isLoading ? 'Procesando...' : '✓ Aceptar orden'}</button>
+                    </div>
                   </div>
-
-                  <div className="text-right">
-                    <p className="text-sm font-medium">{o.semaforo}</p>
-                    <p className="text-sm text-gray-600">{o.restanteTexto}</p>
-                  </div>
-                </div>
-
-                <div className="grid md:grid-cols-2 gap-3 text-sm">
-                  <div>
-                    <p>
-                      <span className="font-medium">Remitente:</span>{' '}
-                      {o.recoleccion?.nombreApellido || o.cliente?.nombre || '-'}
-                    </p>
-                    <p>
-                      <span className="font-medium">Teléfono:</span>{' '}
-                      {o.recoleccion?.celular || o.cliente?.telefono || '-'}
-                    </p>
-                    <p>
-                      <span className="font-medium">Retiro:</span>{' '}
-                      {o.recoleccion?.direccionEscrita || o.comercio?.direccionTexto || '-'}
-                    </p>
-                  </div>
-
-                  <div>
-                    <p>
-                      <span className="font-medium">Destinatario:</span>{' '}
-                      {o.entrega?.nombreApellido || '-'}
-                    </p>
-                    <p>
-                      <span className="font-medium">Teléfono:</span> {o.entrega?.celular || '-'}
-                    </p>
-                    <p>
-                      <span className="font-medium">Entrega:</span>{' '}
-                      {o.entrega?.direccionEscrita || '-'}
-                    </p>
-                    <p>
-                      <span className="font-medium">Precio final:</span>{' '}
-                      {formatMoney(o.confirmacion?.precioFinalCordobas)}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="mt-4 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
-                  <button
-                    onClick={() => aceptarOrden(o)}
-                    disabled={actionLoadingId === o.id}
-                    className="w-full sm:w-auto px-4 py-2 rounded-lg bg-black text-white disabled:opacity-60"
-                  >
-                    {actionLoadingId === o.id ? 'Procesando...' : 'Aceptar'}
-                  </button>
-
-                  <button
-                    onClick={() => rechazarOrden(o)}
-                    disabled={actionLoadingId === o.id}
-                    className="w-full sm:w-auto px-4 py-2 rounded-lg border disabled:opacity-60"
-                  >
-                    {actionLoadingId === o.id ? 'Procesando...' : 'Rechazar'}
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
+                );
+              })}
+          </>
         )}
-      </section>
 
-      <section className="border rounded-xl p-4 bg-white shadow-sm">
-        <h2 className="text-xl font-semibold mb-4">Órdenes en curso</h2>
+        {/* ── EN CURSO ── */}
+        {tab === 'en_curso' && (
+          <>
+            {enCurso.length === 0
+              ? <EmptyState icon="🛵" title="Sin órdenes en curso" subtitle="Acepta una nueva orden para verla aquí" />
+              : enCurso.map((o) => {
+                const actions = nextActions(o.estado);
+                const est = estadoStyle(o.estado);
+                const dep = calcDeposito(o);
+                return (
+                  <div key={o.id} style={card}>
+                    <div style={{ height: 4, background: est.accent }} />
+                    <div style={{ padding: '14px 16px 0' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                        <div style={{ background: est.bg, border: `1px solid ${est.border}`, borderRadius: 10, padding: '8px 14px' }}>
+                          <span style={{ color: est.text, fontWeight: 700, fontSize: 13 }}>{estadoTexto(o.estado)}</span>
+                        </div>
+                        <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</span>
+                      </div>
 
-        {enCurso.length === 0 ? (
-          <p className="text-gray-500">No tienes órdenes en curso.</p>
-        ) : (
-          <div className="grid gap-4">
-            {enCurso.map((o) => {
-              const actions = getNextActions(o.estado);
+                      <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                          <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Delivery</span>
+                          <span style={{ fontSize: 20, fontWeight: 900, color: '#111827' }}>{fmt(o.confirmacion?.precioFinalCordobas)}</span>
+                        </div>
+                        {dep.tieneProducto && (
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6 }}>
+                            <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Cobro producto</span>
+                            <span style={{ fontSize: 18, fontWeight: 800, color: '#7c3aed' }}>{fmt(dep.montoProducto)}</span>
+                          </div>
+                        )}
+                        <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0' }}>{dep.descripcion}</p>
+                      </div>
 
-              return (
-                <div key={o.id} className="border rounded-lg p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                    <div>
-                      <p className="font-semibold">Orden #{o.id.slice(0, 6)}</p>
-                      <div className="mt-1">
-                        <span
-                          className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${estadoBadgeClass(
-                            o.estado
-                          )}`}
-                        >
-                          {estadoOrdenTexto(o.estado)}
-                        </span>
+                      <RoutePoint type="pickup" name={o.recoleccion?.nombreApellido || o.cliente?.nombre || '-'} phone={o.recoleccion?.celular || '-'} address={o.recoleccion?.direccionEscrita || '-'} />
+                      <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
+                      <RoutePoint type="dropoff" name={o.entrega?.nombreApellido || '-'} phone={o.entrega?.celular || '-'} address={o.entrega?.direccionEscrita || '-'} />
+
+                      <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8, padding: '14px 0 16px' }}>
+                        {actions.map((a) => {
+                          const lk = `${o.id}:${a}`;
+                          return (
+                            <button key={a} onClick={() => cambiar(o, a)} disabled={!!actionId} style={a === 'entregado' ? btnGreen : btnBlue}>
+                              {actionId === lk ? 'Actualizando...' : actionLabel(a)}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
-
-                    <div className="text-right text-sm text-gray-600">
-                      <p>Aceptada: {formatDateTime(o.asignacion?.aceptadoAt)}</p>
-                    </div>
                   </div>
-
-                  <div className="grid md:grid-cols-2 gap-3 text-sm">
-                    <div>
-                      <p>
-                        <span className="font-medium">Remitente:</span>{' '}
-                        {o.recoleccion?.nombreApellido || o.cliente?.nombre || '-'}
-                      </p>
-                      <p>
-                        <span className="font-medium">Teléfono:</span>{' '}
-                        {o.recoleccion?.celular || o.cliente?.telefono || '-'}
-                      </p>
-                      <p>
-                        <span className="font-medium">Retiro:</span>{' '}
-                        {o.recoleccion?.direccionEscrita || o.comercio?.direccionTexto || '-'}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p>
-                        <span className="font-medium">Destinatario:</span>{' '}
-                        {o.entrega?.nombreApellido || '-'}
-                      </p>
-                      <p>
-                        <span className="font-medium">Teléfono:</span> {o.entrega?.celular || '-'}
-                      </p>
-                      <p>
-                        <span className="font-medium">Entrega:</span>{' '}
-                        {o.entrega?.direccionEscrita || '-'}
-                      </p>
-                      <p>
-                        <span className="font-medium">Precio final:</span>{' '}
-                        {formatMoney(o.confirmacion?.precioFinalCordobas)}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
-                    {actions.map((accion) => {
-                      const isPrimary = accion === 'entregado';
-                      const loadingKey = `${o.id}:${accion}`;
-
-                      return (
-                        <button
-                          key={accion}
-                          onClick={() => cambiarEstado(o, accion)}
-                          disabled={actionLoadingId === loadingKey}
-                          className={`w-full sm:w-auto px-4 py-2 rounded-lg disabled:opacity-60 ${
-                            isPrimary
-                              ? 'bg-green-600 text-white'
-                              : 'border'
-                          }`}
-                        >
-                          {actionLoadingId === loadingKey
-                            ? 'Procesando...'
-                            : actionLabel(accion)}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+          </>
         )}
-      </section>
 
-      <section className="border rounded-xl p-4 bg-white shadow-sm">
-        <h2 className="text-xl font-semibold mb-4">Historial</h2>
+        {/* ── HISTORIAL ── */}
+        {tab === 'historial' && (
+          <>
+            {/* Date filter */}
+            <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: '14px 16px', marginBottom: 16, boxShadow: '0 1px 2px rgba(0,0,0,0.04)' }}>
+              <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 10px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Filtrar historial</p>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const }}>
+                {(['hoy', 'ayer', 'personalizado'] as const).map((f) => (
+                  <button key={f} onClick={() => setHistFecha(f)} style={{ padding: '8px 14px', borderRadius: 10, border: `1px solid ${histFecha === f ? '#004aad' : '#e5e7eb'}`, background: histFecha === f ? '#004aad' : '#fff', color: histFecha === f ? '#fff' : '#374151', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+                    {f === 'hoy' ? 'Hoy' : f === 'ayer' ? 'Ayer' : 'Fecha'}
+                  </button>
+                ))}
+                {histFecha === 'personalizado' && (
+                  <input type="date" value={histDesde} onChange={(e) => setHistDesde(e.target.value)} style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid #e5e7eb', fontSize: 13, outline: 'none' }} />
+                )}
+              </div>
+            </div>
 
-        {historial.length === 0 ? (
-          <p className="text-gray-500">Aún no hay entregas en historial.</p>
-        ) : (
-          <div className="grid gap-4">
-            {historial.map((o) => (
-              <div key={o.id} className="border rounded-lg p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="font-semibold">Orden #{o.id.slice(0, 6)}</p>
-                    <p className="text-sm text-gray-600">
-                      Destinatario: {o.entrega?.nombreApellido || '-'}
+            {historialFiltrado.length === 0
+              ? <EmptyState icon="📋" title="Sin entregas en este período" subtitle="Cambia el filtro de fecha para ver otros días" />
+              : (
+                <>
+                  {/* Day summary */}
+                  <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 14, padding: '14px 16px', marginBottom: 16 }}>
+                    <p style={{ fontSize: 12, fontWeight: 700, color: '#16a34a', margin: '0 0 6px', textTransform: 'uppercase' as const }}>Resumen del período</p>
+                    <p style={{ fontSize: 24, fontWeight: 900, color: '#111827', margin: 0 }}>{historialFiltrado.length} entrega{historialFiltrado.length !== 1 ? 's' : ''}</p>
+                    <p style={{ fontSize: 13, color: '#16a34a', margin: '4px 0 0' }}>
+                      Total delivery: {fmt(historialFiltrado.reduce((s, o) => s + (o.confirmacion?.precioFinalCordobas || 0), 0))}
                     </p>
                   </div>
 
-                  <div className="text-right text-sm text-gray-600">
-                    <p>Entregada: {formatDateTime(o.entregadoAt)}</p>
-                    <p>Precio: {formatMoney(o.confirmacion?.precioFinalCordobas)}</p>
-                  </div>
+                  {historialFiltrado.map((o) => {
+                    const dep = calcDeposito(o);
+                    return (
+                      <div key={o.id} style={{ background: '#fff', borderRadius: 16, marginBottom: 10, border: '1px solid #e5e7eb', overflow: 'hidden', boxShadow: '0 1px 2px rgba(0,0,0,0.04)' }}>
+                        <div style={{ height: 3, background: '#16a34a' }} />
+                        <div style={{ padding: '12px 14px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{o.entrega?.nombreApellido || '-'}</p>
+                              <p style={{ fontSize: 12, color: '#9ca3af', margin: '0 0 2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{o.entrega?.direccionEscrita || '-'}</p>
+                              <p style={{ fontSize: 11, color: '#d1d5db', margin: 0 }}>{fmtTime(o.entregadoAt)}</p>
+                            </div>
+                            <div style={{ textAlign: 'right' as const, flexShrink: 0, marginLeft: 12 }}>
+                              <p style={{ fontSize: 15, fontWeight: 800, color: '#16a34a', margin: '0 0 2px' }}>{fmt(o.confirmacion?.precioFinalCordobas)}</p>
+                              {dep.tieneProducto && <p style={{ fontSize: 12, color: '#7c3aed', margin: 0, fontWeight: 700 }}>+{fmt(dep.montoProducto)}</p>}
+                            </div>
+                          </div>
+                          {dep.descripcion && (
+                            <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0', padding: '6px 0 0', borderTop: '1px solid #f3f4f6' }}>{dep.descripcion}</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+          </>
+        )}
+
+        {/* ── DEPÓSITOS ── */}
+        {tab === 'depositos' && (
+          <>
+            {/* Summary banner */}
+            <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: '16px', marginBottom: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+              <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Resumen de hoy</p>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 12, padding: '12px 14px' }}>
+                  <p style={{ fontSize: 11, color: '#7c3aed', fontWeight: 700, textTransform: 'uppercase' as const, margin: '0 0 4px', letterSpacing: 0.5 }}>Al comercio</p>
+                  <p style={{ fontSize: 22, fontWeight: 900, color: '#7c3aed', margin: 0 }}>{fmt(resumenDepositos.alComercio)}</p>
+                  <p style={{ fontSize: 11, color: '#a78bfa', margin: '4px 0 0' }}>Cobro producto</p>
+                </div>
+                <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 12, padding: '12px 14px' }}>
+                  <p style={{ fontSize: 11, color: '#2563eb', fontWeight: 700, textTransform: 'uppercase' as const, margin: '0 0 4px', letterSpacing: 0.5 }}>A Storkhub</p>
+                  <p style={{ fontSize: 22, fontWeight: 900, color: '#2563eb', margin: 0 }}>{fmt(resumenDepositos.aStorkhub)}</p>
+                  <p style={{ fontSize: 11, color: '#60a5fa', margin: '4px 0 0' }}>Delivery en efectivo</p>
                 </div>
               </div>
-            ))}
-          </div>
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '12px 14px', marginTop: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 13, color: '#374151', fontWeight: 600 }}>Total a depositar hoy</span>
+                  <span style={{ fontSize: 22, fontWeight: 900, color: '#111827' }}>{fmt(resumenDepositos.total)}</span>
+                </div>
+              </div>
+            </div>
+
+            {depositosPendientes.length === 0
+              ? <EmptyState icon="✅" title="Sin depósitos pendientes" subtitle="Hoy no hay efectivo por depositar" />
+              : (
+                <>
+                  <p style={{ fontSize: 12, color: '#9ca3af', marginBottom: 10, fontWeight: 600 }}>DETALLE POR ORDEN</p>
+                  {depositosPendientes.map((o) => {
+                    const dep = calcDeposito(o);
+                    return (
+                      <div key={o.id} style={{ background: '#fff', borderRadius: 16, marginBottom: 10, border: '1px solid #e5e7eb', overflow: 'hidden', boxShadow: '0 1px 2px rgba(0,0,0,0.04)' }}>
+                        <div style={{ height: 3, background: '#7c3aed' }} />
+                        <div style={{ padding: '12px 14px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
+                            <div>
+                              <p style={{ fontSize: 13, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{o.entrega?.nombreApellido || '-'}</p>
+                              <p style={{ fontSize: 11, color: '#9ca3af', margin: 0, fontFamily: 'monospace' }}>#{o.id.slice(0, 10)}</p>
+                            </div>
+                            <p style={{ fontSize: 11, color: '#9ca3af', margin: 0 }}>{fmtTime(o.entregadoAt)}</p>
+                          </div>
+
+                          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
+                            {dep.totalAlComercio > 0 && (
+                              <div style={{ background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 10, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div>
+                                  <p style={{ fontSize: 11, fontWeight: 700, color: '#7c3aed', textTransform: 'uppercase' as const, margin: '0 0 2px', letterSpacing: 0.5 }}>🏪 Depositar al comercio</p>
+                                  <p style={{ fontSize: 11, color: '#a78bfa', margin: 0 }}>Cobro del producto entregado</p>
+                                </div>
+                                <span style={{ fontSize: 18, fontWeight: 900, color: '#7c3aed' }}>{fmt(dep.totalAlComercio)}</span>
+                              </div>
+                            )}
+                            {dep.totalAStorkhub > 0 && (
+                              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div>
+                                  <p style={{ fontSize: 11, fontWeight: 700, color: '#2563eb', textTransform: 'uppercase' as const, margin: '0 0 2px', letterSpacing: 0.5 }}>🏦 Depositar a Storkhub</p>
+                                  <p style={{ fontSize: 11, color: '#60a5fa', margin: 0 }}>Delivery en efectivo</p>
+                                </div>
+                                <span style={{ fontSize: 18, fontWeight: 900, color: '#2563eb' }}>{fmt(dep.totalAStorkhub)}</span>
+                              </div>
+                            )}
+                            {dep.deliveryPorTransferencia && (
+                              <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '10px 14px' }}>
+                                <p style={{ fontSize: 12, color: '#16a34a', fontWeight: 600, margin: 0 }}>✓ Delivery pagado por transferencia — no hay efectivo que depositar por delivery</p>
+                              </div>
+                            )}
+                          </div>
+
+                          <p style={{ fontSize: 11, color: '#9ca3af', margin: '10px 0 0', padding: '8px 0 0', borderTop: '1px solid #f3f4f6' }}>{dep.descripcion}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+          </>
         )}
-      </section>
+      </div>
+    </div>
+  );
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+const card: React.CSSProperties = { background: '#fff', borderRadius: 20, marginBottom: 16, border: '1px solid #e5e7eb', overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' };
+const btnPrimary: React.CSSProperties = { flex: 1, background: '#004aad', border: 'none', borderRadius: 14, padding: '14px 18px', color: '#fff', fontSize: 15, fontWeight: 800, cursor: 'pointer' };
+const btnSecondary: React.CSSProperties = { flexShrink: 0, background: '#fff', border: '1px solid #fecaca', borderRadius: 14, padding: '14px 18px', color: '#dc2626', fontSize: 14, fontWeight: 700, cursor: 'pointer' };
+const btnBlue: React.CSSProperties = { background: '#004aad', border: 'none', borderRadius: 14, padding: '16px 20px', color: '#fff', fontSize: 15, fontWeight: 800, cursor: 'pointer', width: '100%' };
+const btnGreen: React.CSSProperties = { background: '#16a34a', border: 'none', borderRadius: 14, padding: '16px 20px', color: '#fff', fontSize: 15, fontWeight: 800, cursor: 'pointer', width: '100%' };
+
+function StatCard({ label, value, color, bg, border }: { label: string; value: number; color: string; bg: string; border: string }) {
+  return (
+    <div style={{ flex: 1, background: bg, border: `1px solid ${border}`, borderRadius: 12, padding: '10px 10px' }}>
+      <p style={{ fontSize: 22, fontWeight: 900, color, margin: '0 0 2px', letterSpacing: -1 }}>{value}</p>
+      <p style={{ fontSize: 10, fontWeight: 600, color: '#9ca3af', margin: 0, textTransform: 'uppercase', letterSpacing: 0.3 }}>{label}</p>
+    </div>
+  );
+}
+
+function RoutePoint({ type, name, phone, address }: { type: 'pickup' | 'dropoff'; name: string; phone: string; address: string }) {
+  const ip = type === 'pickup';
+  return (
+    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+      <div style={{ width: 26, height: 26, borderRadius: '50%', background: ip ? '#fef3c7' : '#dcfce7', border: `2px solid ${ip ? '#f59e0b' : '#16a34a'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 2 }}>
+        <span style={{ fontSize: 10, fontWeight: 900, color: ip ? '#d97706' : '#16a34a' }}>{ip ? 'A' : 'B'}</span>
+      </div>
+      <div style={{ flex: 1, paddingBottom: 6 }}>
+        <p style={{ fontSize: 10, fontWeight: 800, color: '#9ca3af', letterSpacing: 1, textTransform: 'uppercase', margin: '0 0 2px' }}>{ip ? 'RETIRO' : 'ENTREGA'}</p>
+        <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{name}</p>
+        <a href={`tel:${phone}`} style={{ fontSize: 13, color: '#2563eb', textDecoration: 'none', fontWeight: 600, display: 'block', marginBottom: 2 }}>📞 {phone}</a>
+        <p style={{ fontSize: 13, color: '#6b7280', margin: 0, lineHeight: 1.4 }}>{address}</p>
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ icon, title, subtitle }: { icon: string; title: string; subtitle: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '60px 20px', gap: 8 }}>
+      <span style={{ fontSize: 44 }}>{icon}</span>
+      <p style={{ fontSize: 17, fontWeight: 700, color: '#111827', margin: '6px 0 0' }}>{title}</p>
+      <p style={{ fontSize: 14, color: '#9ca3af', textAlign: 'center', margin: 0, lineHeight: 1.5 }}>{subtitle}</p>
     </div>
   );
 }

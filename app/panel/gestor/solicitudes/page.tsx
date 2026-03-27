@@ -36,6 +36,7 @@ import {
   SlidersHorizontal,
   Eraser,
   CalendarDays,
+  Lock,
 } from 'lucide-react'
 
 type EstadoSolicitud =
@@ -465,13 +466,13 @@ export default function GestorSolicitudesPage() {
   }, [toast])
 
   useEffect(() => {
-    if (estadoFiltro === 'entregado' && fechaFiltro === 'todos') {
+    if (estadoFiltro === 'entregado') {
       const hoyStr = formatDateInput(new Date())
       setFechaFiltro('hoy')
       setFechaDesde(hoyStr)
       setFechaHasta(hoyStr)
     }
-  }, [estadoFiltro, fechaFiltro])
+  }, [estadoFiltro])
 
   useEffect(() => {
     ;(async () => {
@@ -790,21 +791,6 @@ export default function GestorSolicitudesPage() {
         d.getDate() === hoyLocal.getDate() &&
         d.getMonth() === hoyLocal.getMonth() &&
         d.getFullYear() === hoyLocal.getFullYear()
-      )
-    }).length
-  }, [allItems])
-
-  const entregadasAyer = useMemo(() => {
-    const ayer = new Date()
-    ayer.setDate(ayer.getDate() - 1)
-    return allItems.filter((s) => {
-      if (s.estado !== 'entregado') return false
-      const d = tsToDate(s.updatedAt) || tsToDate(s.confirmacion?.confirmadoAt) || tsToDate(s.createdAt)
-      if (!d) return false
-      return (
-        d.getDate() === ayer.getDate() &&
-        d.getMonth() === ayer.getMonth() &&
-        d.getFullYear() === ayer.getFullYear()
       )
     }).length
   }, [allItems])
@@ -1205,7 +1191,7 @@ export default function GestorSolicitudesPage() {
             })}
           </div>
 
-          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
             <div className="rounded-xl border border-gray-200 bg-gray-50/70 px-4 py-3">
               <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
                 Pendientes por confirmar
@@ -1227,13 +1213,6 @@ export default function GestorSolicitudesPage() {
                 Entregadas hoy
               </div>
               <div className="mt-1 text-xl font-bold text-gray-900 tabular-nums">{hoyEntregadas}</div>
-            </div>
-
-            <div className="rounded-xl border border-gray-200 bg-gray-50/70 px-4 py-3">
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                Entregadas ayer
-              </div>
-              <div className="mt-1 text-xl font-bold text-gray-900 tabular-nums">{entregadasAyer}</div>
             </div>
           </div>
 
@@ -1336,7 +1315,7 @@ export default function GestorSolicitudesPage() {
                 <thead className="sticky top-0 z-20 bg-gray-50 border-b border-gray-200 shadow-sm">
                   <tr className="text-left text-gray-600">
                     <th className="px-4 py-3 font-medium min-w-[220px] border-r border-gray-200">Orden</th>
-                    <th className="px-4 py-3 font-medium min-w-[190px] border-r border-gray-200">Estado</th>
+                    <th className="px-4 py-3 font-medium min-w-[220px] border-r border-gray-200">Estado</th>
                     <th className="px-4 py-3 font-medium min-w-[340px] border-r border-gray-200">Retiro</th>
                     <th className="px-4 py-3 font-medium min-w-[340px] border-r border-gray-200">Entrega</th>
                     <th className="px-4 py-3 font-medium min-w-[170px] border-r border-gray-200">Precio</th>
@@ -1358,7 +1337,7 @@ export default function GestorSolicitudesPage() {
                     </th>
 
                     <th className="px-3 py-2 border-r border-gray-200 bg-gray-50">
-                      <div className="text-xs text-gray-500">Editable por gestor</div>
+                      <div className="text-xs text-gray-500">Editable hasta entregar</div>
                     </th>
 
                     <th className="px-3 py-2 border-r border-gray-200 bg-gray-50">
@@ -1420,6 +1399,7 @@ export default function GestorSolicitudesPage() {
                   {itemsPaginados.map((s) => {
                     const retiroMaps = getBestMapsUrl(s, 'recoleccion')
                     const entregaMaps = getBestMapsUrl(s, 'entrega')
+                    const esEntregada = s.estado === 'entregado'
 
                     const rem =
                       s.estado === 'pendiente_confirmacion'
@@ -1469,17 +1449,25 @@ export default function GestorSolicitudesPage() {
                             <label className="block text-[11px] font-medium uppercase tracking-wide text-gray-500 mb-1">
                               Corregir estado
                             </label>
-                            <select
-                              value={s.estado}
-                              onChange={(e) => cambiarEstado(s.id, e.target.value as EstadoSolicitud)}
-                              className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs outline-none focus:border-blue-300"
-                            >
-                              {ESTADOS.map((estado) => (
-                                <option key={estado.key} value={estado.key}>
-                                  {estado.label}
-                                </option>
-                              ))}
-                            </select>
+
+                            {esEntregada ? (
+                              <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-2 text-xs text-gray-600">
+                                <Lock className="h-3.5 w-3.5" />
+                                Orden cerrada
+                              </div>
+                            ) : (
+                              <select
+                                value={s.estado}
+                                onChange={(e) => cambiarEstado(s.id, e.target.value as EstadoSolicitud)}
+                                className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs outline-none focus:border-blue-300"
+                              >
+                                {ESTADOS.map((estado) => (
+                                  <option key={estado.key} value={estado.key}>
+                                    {estado.label}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
                           </div>
                         </td>
 
@@ -1735,6 +1723,7 @@ export default function GestorSolicitudesPage() {
             {itemsPaginados.map((s) => {
               const retiroMaps = getBestMapsUrl(s, 'recoleccion')
               const entregaMaps = getBestMapsUrl(s, 'entrega')
+              const esEntregada = s.estado === 'entregado'
 
               const rem =
                 s.estado === 'pendiente_confirmacion'
@@ -1767,17 +1756,25 @@ export default function GestorSolicitudesPage() {
                     <label className="block text-[11px] font-medium uppercase tracking-wide text-gray-500 mb-1">
                       Corregir estado
                     </label>
-                    <select
-                      value={s.estado}
-                      onChange={(e) => cambiarEstado(s.id, e.target.value as EstadoSolicitud)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-300"
-                    >
-                      {ESTADOS.map((estado) => (
-                        <option key={estado.key} value={estado.key}>
-                          {estado.label}
-                        </option>
-                      ))}
-                    </select>
+
+                    {esEntregada ? (
+                      <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">
+                        <Lock className="h-4 w-4" />
+                        Orden cerrada
+                      </div>
+                    ) : (
+                      <select
+                        value={s.estado}
+                        onChange={(e) => cambiarEstado(s.id, e.target.value as EstadoSolicitud)}
+                        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-300"
+                      >
+                        {ESTADOS.map((estado) => (
+                          <option key={estado.key} value={estado.key}>
+                            {estado.label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </div>
 
                   <div className="mt-3 space-y-2 text-sm">
