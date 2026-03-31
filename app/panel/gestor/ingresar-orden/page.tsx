@@ -238,13 +238,34 @@ function usePuntosFavoritos(uid: string | null) {
       }
 
       const data = snap.data() as Record<string, any>
-      const container: Record<string, any> = data?.puntosRetiro || {}
 
-      const items: PuntoFavorito[] = Object.entries(container)
-        .filter(([, val]) => {
-          if (typeof val !== 'object' || val === null || Array.isArray(val)) return false
-          return val.nombre || val.direccion || val.label
-        })
+      // Campos que NO son puntos de ubicación en la raíz del doc
+      const NON_LOCATION_KEYS = new Set([
+        'name', 'phone', 'address', 'accounts', 'updatedAt', 'activo',
+        'rol', 'email', 'puntosRetiro', 'createdAt',
+      ])
+
+      const isLocationObject = (val: unknown): val is Record<string, any> => {
+        if (typeof val !== 'object' || val === null || Array.isArray(val)) return false
+        const v = val as Record<string, any>
+        return !!(v.nombre || v.direccion || v.label || v.coord)
+      }
+
+      // Nueva estructura: data.puntosRetiro
+      const newFormat: Record<string, any> = data?.puntosRetiro || {}
+
+      // Estructura vieja: campos raíz como casa, oficina, etc.
+      const legacyFormat: Record<string, any> = Object.fromEntries(
+        Object.entries(data).filter(
+          ([key, val]) => !NON_LOCATION_KEYS.has(key) && isLocationObject(val)
+        )
+      )
+
+      // Merge: nueva estructura tiene prioridad sobre la vieja
+      const merged: Record<string, any> = { ...legacyFormat, ...newFormat }
+
+      const items: PuntoFavorito[] = Object.entries(merged)
+        .filter(([, val]) => isLocationObject(val))
         .map(([key, raw]) => ({
           key,
           label: raw.label || raw.nombre || key,

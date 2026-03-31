@@ -80,7 +80,7 @@ export default function PanelHome() {
           Panel del cliente
         </div>
 
-        <h1 className="text-3xl font-bold mt-4">¡Bienvenido!</h1>
+        <h1 className="text-3xl font-bold mt-4 text-[#004aad]">Bienvenido a tu panel</h1>
         <p className="text-gray-600 mt-2 max-w-3xl">
           Desde aquí podés cotizar precios, solicitar envíos y más adelante revisar el historial
           de tus pedidos, tus direcciones guardadas y el seguimiento de tus entregas.

@@ -10,6 +10,7 @@ import {
   ClipboardList,
   Bike,
   BarChart3,
+  Database,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react'
@@ -110,6 +111,14 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               icon={<Bike size={18} />}
               label="Motorizados"
               active={pathname.startsWith('/panel/gestor/motorizados')}
+              collapsed={collapsed}
+            />
+
+            <NavItem
+              href="/panel/gestor/base-datos"
+              icon={<Database size={18} />}
+              label="Base de datos"
+              active={pathname.startsWith('/panel/gestor/base-datos')}
               collapsed={collapsed}
             />
 
