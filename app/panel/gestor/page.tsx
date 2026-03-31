@@ -17,6 +17,7 @@ import {
   Search,
   ChevronRight,
   Eye,
+  Send,
 } from 'lucide-react'
 import { collection, onSnapshot, query } from 'firebase/firestore'
 import { db } from '@/fb/config'
@@ -173,6 +174,13 @@ export default function PanelGestorPage() {
       icon: ClipboardList,
       estado: 'Módulo activo',
     },
+    {
+      titulo: 'Ingresar orden',
+      descripcion: 'Crear pedidos manuales para comercios que escriben por WhatsApp.',
+      href: '/panel/gestor/ingresar-orden',
+      icon: Send,
+      estado: 'Módulo activo',
+    },  
     {
       titulo: 'Motorizados',
       descripcion: 'Base operativa de motorizados, disponibilidad y seguimiento.',
