@@ -67,7 +67,7 @@ export default function PanelHome() {
   if (loading || checkingRole) {
     return (
       <div className="max-w-6xl mx-auto px-4 py-10">
-        <p className="text-sm text-gray-600">Validando acceso...</p>
+        <p className="text-sm text-gray-600">Validando acceso haha es una pruebada y modifica esto...</p>
       </div>
     )
   }
