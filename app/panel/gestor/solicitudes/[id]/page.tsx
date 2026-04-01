@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
+import { getMapsLoader } from '@/lib/googleMaps'
 import {
   doc,
   onSnapshot,
@@ -89,6 +90,12 @@ type Solicitud = {
   }
 
   detalle?: string
+  historial?: {
+    en_camino_retiroAt?: any
+    retiradoAt?: any
+    en_camino_entregaAt?: any
+    entregadoAt?: any
+  }
   confirmacion?: {
     precioFinalCordobas?: number
     confirmadoPorUid?: string
@@ -366,6 +373,109 @@ function buildCopyTelegramFull(s: Solicitud) {
     .join('\n')
 }
 
+// ─── Mapa con retiro y entrega ───────────────────────────────────────────────
+
+type LatLng = { lat: number; lng: number }
+
+function MapaOrden({ retiro, entrega }: { retiro: LatLng | null; entrega: LatLng | null }) {
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!retiro && !entrega) return
+    let map: google.maps.Map
+    let destroyed = false
+
+    getMapsLoader()
+      .load()
+      .then(() => {
+        if (destroyed || !ref.current) return
+
+        const center = retiro ?? entrega!
+        map = new google.maps.Map(ref.current, {
+          center,
+          zoom: 13,
+          mapTypeControl: false,
+          streetViewControl: false,
+          fullscreenControl: false,
+          zoomControl: true,
+        })
+
+        const bounds = new google.maps.LatLngBounds()
+
+        if (retiro) {
+          bounds.extend(retiro)
+          new google.maps.Marker({
+            map,
+            position: retiro,
+            title: 'Retiro',
+            label: { text: 'R', color: 'white', fontWeight: 'bold' },
+            icon: {
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: 14,
+              fillColor: '#004aad',
+              fillOpacity: 1,
+              strokeColor: '#fff',
+              strokeWeight: 2,
+            },
+          })
+        }
+
+        if (entrega) {
+          bounds.extend(entrega)
+          new google.maps.Marker({
+            map,
+            position: entrega,
+            title: 'Entrega',
+            label: { text: 'E', color: 'white', fontWeight: 'bold' },
+            icon: {
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: 14,
+              fillColor: '#dc2626',
+              fillOpacity: 1,
+              strokeColor: '#fff',
+              strokeWeight: 2,
+            },
+          })
+        }
+
+        if (retiro && entrega) {
+          // Línea entre los dos puntos
+          new google.maps.Polyline({
+            map,
+            path: [retiro, entrega],
+            strokeColor: '#004aad',
+            strokeOpacity: 0.5,
+            strokeWeight: 2,
+            geodesic: true,
+          })
+          map.fitBounds(bounds, 60)
+        } else {
+          map.setCenter(center)
+          map.setZoom(15)
+        }
+      })
+      .catch(console.error)
+
+    return () => { destroyed = true }
+  }, [retiro, entrega])
+
+  if (!retiro && !entrega) return null
+
+  return (
+    <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <div className="flex items-center gap-3 px-5 py-3 border-b">
+        <MapPin className="h-4 w-4 text-gray-500" />
+        <h2 className="font-semibold text-gray-900">Mapa del viaje</h2>
+        <span className="flex items-center gap-1.5 text-xs text-gray-500">
+          <span className="inline-block w-3 h-3 rounded-full bg-[#004aad]" /> Retiro
+          <span className="ml-2 inline-block w-3 h-3 rounded-full bg-red-600" /> Entrega
+        </span>
+      </div>
+      <div ref={ref} className="w-full h-[300px]" />
+    </div>
+  )
+}
+
 function TimelineStep({
   title,
   done,
@@ -566,6 +676,7 @@ export default function GestorSolicitudDetallePage() {
       await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: nuevo,
         updatedAt: serverTimestamp(),
+        [`historial.${nuevo}At`]: serverTimestamp(),
       })
     } catch (e) {
       console.error(e)
@@ -636,21 +747,25 @@ export default function GestorSolicitudDetallePage() {
       title: 'Retiro en proceso',
       done: ['retirado', 'en_camino_entrega', 'entregado'].includes(estado),
       current: estado === 'en_camino_retiro',
+      subtitle: solicitud.historial?.en_camino_retiroAt ? formatDateTime(solicitud.historial.en_camino_retiroAt) : undefined,
     },
     {
       title: 'Paquete retirado',
       done: ['retirado', 'en_camino_entrega', 'entregado'].includes(estado),
       current: estado === 'retirado',
+      subtitle: solicitud.historial?.retiradoAt ? formatDateTime(solicitud.historial.retiradoAt) : undefined,
     },
     {
       title: 'En camino a entrega',
       done: ['entregado'].includes(estado),
       current: estado === 'en_camino_entrega',
+      subtitle: solicitud.historial?.en_camino_entregaAt ? formatDateTime(solicitud.historial.en_camino_entregaAt) : undefined,
     },
     {
       title: 'Entregado',
       done: estado === 'entregado',
       current: false,
+      subtitle: solicitud.historial?.entregadoAt ? formatDateTime(solicitud.historial.entregadoAt) : (solicitud as any).entregadoAt ? formatDateTime((solicitud as any).entregadoAt) : undefined,
     },
   ]
 
@@ -732,6 +847,11 @@ export default function GestorSolicitudDetallePage() {
               ))}
             </div>
           </div>
+
+          <MapaOrden
+            retiro={solicitud.cotizacion?.origenCoord ?? (solicitud.recoleccion as any)?.coord ?? null}
+            entrega={solicitud.cotizacion?.destinoCoord ?? (solicitud.entrega as any)?.coord ?? null}
+          />
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
             <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">

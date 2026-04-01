@@ -11,6 +11,7 @@ import {
   Bike,
   BarChart3,
   Database,
+  Store,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react'
@@ -111,6 +112,14 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               icon={<Bike size={18} />}
               label="Motorizados"
               active={pathname.startsWith('/panel/gestor/motorizados')}
+              collapsed={collapsed}
+            />
+
+            <NavItem
+              href="/panel/gestor/comercios"
+              icon={<Store size={18} />}
+              label="Comercios"
+              active={pathname.startsWith('/panel/gestor/comercios')}
               collapsed={collapsed}
             />
 

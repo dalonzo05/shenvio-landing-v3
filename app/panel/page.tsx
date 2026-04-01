@@ -8,7 +8,7 @@ import { doc, getDoc } from 'firebase/firestore'
 import { db } from '@/fb/config'
 import { useUser } from '@/app/Components/UserProvider'
 
-type Rol = 'admin' | 'gestor' | 'motorizado' | 'cliente' | null
+type Rol = 'admin' | 'gestor' | 'motorizado' | 'Comercio' | null
 
 async function getUserRole(uid: string): Promise<Rol> {
   const ref = doc(db, 'usuarios', uid)
@@ -102,17 +102,19 @@ export default function PanelHome() {
           <div className="mt-4 text-sm font-semibold text-[#004aad]">Abrir →</div>
         </Link>
 
-        <div className="pointer-events-none opacity-60 rounded-2xl border bg-white p-6 shadow-sm">
+        <Link
+          href="/panel/solicitar"
+          className="group rounded-2xl border bg-white p-6 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition"
+        >
           <div className="flex items-center gap-3">
             <div className="rounded-lg bg-[#004aad]/10 p-2">
               <Send className="h-6 w-6 text-[#004aad]" />
             </div>
             <h2 className="text-lg font-semibold">Solicitar envío</h2>
           </div>
-          <p className="text-gray-600 text-sm mt-2">
-            Próximamente: creá tu orden desde aquí.
-          </p>
-        </div>
+          <p className="text-gray-600 text-sm mt-2">Creá tu orden de entrega desde aquí.</p>
+          <div className="mt-4 text-sm font-semibold text-[#004aad]">Abrir →</div>
+        </Link>
 
         <div className="pointer-events-none opacity-60 rounded-2xl border bg-white p-6 shadow-sm">
           <div className="flex items-center gap-3">

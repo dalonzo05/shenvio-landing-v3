@@ -4,9 +4,18 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import {
   collection, onSnapshot, query, where,
-  doc, serverTimestamp, Timestamp, writeBatch,
+  doc, getDoc, serverTimestamp, Timestamp, writeBatch,
 } from 'firebase/firestore';
 import { auth, db } from '@/fb/config';
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+type BankAccount = { bank: string; number: string; holder: string; currency: string }
+
+const STORKHUB_ACCOUNTS: BankAccount[] = [
+  { bank: 'LAFISE', currency: 'C$', number: '130076402', holder: 'David Alonzo Orozco' },
+  { bank: 'BAC',    currency: '$',  number: '366321743', holder: 'David Alonzo Orozco' },
+]
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -18,6 +27,7 @@ type EstadoAceptacion = 'pendiente' | 'aceptada' | 'rechazada' | 'expirada';
 
 type Solicitud = {
   id: string;
+  userId?: string;
   estado?: EstadoSolicitud;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
@@ -25,8 +35,9 @@ type Solicitud = {
   tipoCliente?: 'contado' | 'credito';
   cliente?: { nombre?: string; telefono?: string };
   comercio?: { nombre?: string; direccionTexto?: string };
-  recoleccion?: { nombreApellido?: string; celular?: string; direccionEscrita?: string };
-  entrega?: { nombreApellido?: string; celular?: string; direccionEscrita?: string };
+  recoleccion?: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null; coord?: { lat: number; lng: number } | null; puntoGoogleLink?: string | null; puntoGoogleTexto?: string | null };
+  entrega?: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null; coord?: { lat: number; lng: number } | null; puntoGoogleLink?: string | null; puntoGoogleTexto?: string | null };
+  cotizacion?: { origenCoord?: { lat: number; lng: number } | null; destinoCoord?: { lat: number; lng: number } | null };
   confirmacion?: { precioFinalCordobas?: number };
   cobroContraEntrega?: { aplica?: boolean; monto?: number };
   pagoDelivery?: {
@@ -45,6 +56,7 @@ type Solicitud = {
     aceptadoAt?: Timestamp | null;
     rechazadoAt?: Timestamp | null;
   } | null;
+  ownerSnapshot?: { companyName?: string; nombre?: string; phone?: string };
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -253,7 +265,7 @@ export default function PanelMotorizadoPage() {
     setErr(null); setActionId(`${o.id}:${nuevo}`);
     try {
       const b = writeBatch(db);
-      const p: any = { estado: nuevo, updatedAt: serverTimestamp() };
+      const p: any = { estado: nuevo, updatedAt: serverTimestamp(), [`historial.${nuevo}At`]: serverTimestamp() };
       if (nuevo === 'entregado') p.entregadoAt = serverTimestamp();
       b.update(doc(db, 'solicitudes_envio', o.id), p);
       if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: nuevo === 'entregado' ? 'disponible' : 'ocupado', updatedAt: serverTimestamp() });
@@ -310,6 +322,20 @@ export default function PanelMotorizadoPage() {
   }, [depositosPendientes]);
 
   useEffect(() => { if (pendientes.length > 0) setTab('pendientes'); }, [pendientes.length]);
+
+  // Load comercio bank accounts for deposit orders
+  const [comercioAccounts, setComercioAccounts] = useState<Record<string, BankAccount[]>>({});
+  useEffect(() => {
+    const uids = [...new Set(depositosPendientes.map((o) => o.userId).filter(Boolean))] as string[];
+    if (uids.length === 0) return;
+    Promise.all(uids.map((uid) => getDoc(doc(db, 'comercios', uid)))).then((snaps) => {
+      const map: Record<string, BankAccount[]> = {};
+      snaps.forEach((snap, i) => {
+        if (snap.exists()) map[uids[i]] = (snap.data()?.accounts as BankAccount[]) || [];
+      });
+      setComercioAccounts(map);
+    });
+  }, [depositosPendientes]);
 
   if (loading) return (
     <div style={{ minHeight: '100vh', background: '#f9fafb', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
@@ -391,23 +417,11 @@ export default function PanelMotorizadoPage() {
                       </div>
 
                       {/* Price + deposit preview */}
-                      <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Delivery</span>
-                          <span style={{ fontSize: 20, fontWeight: 900, color: '#111827' }}>{fmt(o.confirmacion?.precioFinalCordobas)}</span>
-                        </div>
-                        {dep.tieneProducto && (
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
-                            <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Cobro producto</span>
-                            <span style={{ fontSize: 18, fontWeight: 800, color: '#7c3aed' }}>{fmt(dep.montoProducto)}</span>
-                          </div>
-                        )}
-                        <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0' }}>{dep.descripcion}</p>
-                      </div>
+                      <CobroBox o={o} dep={dep} />
 
-                      <RoutePoint type="pickup" name={o.recoleccion?.nombreApellido || o.cliente?.nombre || '-'} phone={o.recoleccion?.celular || '-'} address={o.recoleccion?.direccionEscrita || '-'} />
+                      <RoutePoint type="pickup" point={o.recoleccion} fallbackName={o.cliente?.nombre} retiroCoord={o.cotizacion?.origenCoord} />
                       <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
-                      <RoutePoint type="dropoff" name={o.entrega?.nombreApellido || '-'} phone={o.entrega?.celular || '-'} address={o.entrega?.direccionEscrita || '-'} />
+                      <RoutePoint type="dropoff" point={o.entrega} entregaCoord={o.cotizacion?.destinoCoord} />
                     </div>
                     <div style={{ display: 'flex', gap: 10, padding: 16 }}>
                       <button onClick={() => rechazar(o)} disabled={isLoading} style={btnSecondary}>✕ Rechazar</button>
@@ -439,23 +453,11 @@ export default function PanelMotorizadoPage() {
                         <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</span>
                       </div>
 
-                      <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                          <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Delivery</span>
-                          <span style={{ fontSize: 20, fontWeight: 900, color: '#111827' }}>{fmt(o.confirmacion?.precioFinalCordobas)}</span>
-                        </div>
-                        {dep.tieneProducto && (
-                          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6 }}>
-                            <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Cobro producto</span>
-                            <span style={{ fontSize: 18, fontWeight: 800, color: '#7c3aed' }}>{fmt(dep.montoProducto)}</span>
-                          </div>
-                        )}
-                        <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0' }}>{dep.descripcion}</p>
-                      </div>
+                      <CobroBox o={o} dep={dep} />
 
-                      <RoutePoint type="pickup" name={o.recoleccion?.nombreApellido || o.cliente?.nombre || '-'} phone={o.recoleccion?.celular || '-'} address={o.recoleccion?.direccionEscrita || '-'} />
+                      <RoutePoint type="pickup" point={o.recoleccion} fallbackName={o.cliente?.nombre} retiroCoord={o.cotizacion?.origenCoord} />
                       <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
-                      <RoutePoint type="dropoff" name={o.entrega?.nombreApellido || '-'} phone={o.entrega?.celular || '-'} address={o.entrega?.direccionEscrita || '-'} />
+                      <RoutePoint type="dropoff" point={o.entrega} entregaCoord={o.cotizacion?.destinoCoord} />
 
                       <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8, padding: '14px 0 16px' }}>
                         {actions.map((a) => {
@@ -507,14 +509,26 @@ export default function PanelMotorizadoPage() {
 
                   {historialFiltrado.map((o) => {
                     const dep = calcDeposito(o);
+                    const comercioNombre = o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre || 'Comercio';
+                    const rutaResumen = [o.recoleccion?.direccionEscrita, o.entrega?.direccionEscrita].filter(Boolean).join(' → ');
                     return (
                       <div key={o.id} style={{ background: '#fff', borderRadius: 16, marginBottom: 10, border: '1px solid #e5e7eb', overflow: 'hidden', boxShadow: '0 1px 2px rgba(0,0,0,0.04)' }}>
                         <div style={{ height: 3, background: '#16a34a' }} />
                         <div style={{ padding: '12px 14px' }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
-                              <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{o.entrega?.nombreApellido || '-'}</p>
-                              <p style={{ fontSize: 12, color: '#9ca3af', margin: '0 0 2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{o.entrega?.direccionEscrita || '-'}</p>
+                              {/* Comercio dueño de la orden */}
+                              <p style={{ fontSize: 13, fontWeight: 800, color: '#111827', margin: '0 0 3px' }}>{comercioNombre}</p>
+                              {/* Ruta resumida */}
+                              {rutaResumen && (
+                                <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+                                  📍 {rutaResumen}
+                                </p>
+                              )}
+                              {/* Destinatario */}
+                              <p style={{ fontSize: 11, color: '#9ca3af', margin: '0 0 2px' }}>
+                                Para: {o.entrega?.nombreApellido || '-'}
+                              </p>
                               <p style={{ fontSize: 11, color: '#d1d5db', margin: 0 }}>{fmtTime(o.entregadoAt)}</p>
                             </div>
                             <div style={{ textAlign: 'right' as const, flexShrink: 0, marginLeft: 12 }}>
@@ -581,21 +595,49 @@ export default function PanelMotorizadoPage() {
 
                           <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
                             {dep.totalAlComercio > 0 && (
-                              <div style={{ background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 10, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <div>
-                                  <p style={{ fontSize: 11, fontWeight: 700, color: '#7c3aed', textTransform: 'uppercase' as const, margin: '0 0 2px', letterSpacing: 0.5 }}>🏪 Depositar al comercio</p>
-                                  <p style={{ fontSize: 11, color: '#a78bfa', margin: 0 }}>Cobro del producto entregado</p>
+                              <div style={{ background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 10, padding: '10px 14px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                  <div>
+                                    <p style={{ fontSize: 11, fontWeight: 700, color: '#7c3aed', textTransform: 'uppercase' as const, margin: '0 0 2px', letterSpacing: 0.5 }}>🏪 Depositar al comercio</p>
+                                    <p style={{ fontSize: 11, color: '#a78bfa', margin: 0 }}>Cobro del producto entregado</p>
+                                  </div>
+                                  <span style={{ fontSize: 18, fontWeight: 900, color: '#7c3aed' }}>{fmt(dep.totalAlComercio)}</span>
                                 </div>
-                                <span style={{ fontSize: 18, fontWeight: 900, color: '#7c3aed' }}>{fmt(dep.totalAlComercio)}</span>
+                                {(comercioAccounts[o.userId || ''] || []).length > 0 ? (
+                                  <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
+                                    <p style={{ fontSize: 10, fontWeight: 700, color: '#6d28d9', textTransform: 'uppercase' as const, margin: 0, letterSpacing: 0.5 }}>Cuentas del comercio:</p>
+                                    {(comercioAccounts[o.userId || ''] || []).map((acc, ai) => (
+                                      <div key={ai} style={{ background: '#ede9fe', border: '1px solid #ddd6fe', borderRadius: 8, padding: '7px 10px' }}>
+                                        <p style={{ fontSize: 12, fontWeight: 700, color: '#5b21b6', margin: '0 0 2px' }}>{acc.bank} · {acc.currency}</p>
+                                        <p style={{ fontSize: 13, fontWeight: 800, color: '#4c1d95', margin: '0 0 2px', fontFamily: 'monospace' }}>{acc.number}</p>
+                                        <p style={{ fontSize: 11, color: '#7c3aed', margin: 0 }}>{acc.holder}</p>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p style={{ fontSize: 11, color: '#a78bfa', margin: 0, fontStyle: 'italic' }}>El comercio no tiene cuentas registradas. Coordiná el depósito directamente.</p>
+                                )}
                               </div>
                             )}
                             {dep.totalAStorkhub > 0 && (
-                              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <div>
-                                  <p style={{ fontSize: 11, fontWeight: 700, color: '#2563eb', textTransform: 'uppercase' as const, margin: '0 0 2px', letterSpacing: 0.5 }}>🏦 Depositar a Storkhub</p>
-                                  <p style={{ fontSize: 11, color: '#60a5fa', margin: 0 }}>Delivery en efectivo</p>
+                              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '10px 14px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                  <div>
+                                    <p style={{ fontSize: 11, fontWeight: 700, color: '#2563eb', textTransform: 'uppercase' as const, margin: '0 0 2px', letterSpacing: 0.5 }}>🏦 Depositar a Storkhub</p>
+                                    <p style={{ fontSize: 11, color: '#60a5fa', margin: 0 }}>Delivery en efectivo</p>
+                                  </div>
+                                  <span style={{ fontSize: 18, fontWeight: 900, color: '#2563eb' }}>{fmt(dep.totalAStorkhub)}</span>
                                 </div>
-                                <span style={{ fontSize: 18, fontWeight: 900, color: '#2563eb' }}>{fmt(dep.totalAStorkhub)}</span>
+                                <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
+                                  <p style={{ fontSize: 10, fontWeight: 700, color: '#1e40af', textTransform: 'uppercase' as const, margin: 0, letterSpacing: 0.5 }}>Cuentas Storkhub:</p>
+                                  {STORKHUB_ACCOUNTS.map((acc, ai) => (
+                                    <div key={ai} style={{ background: '#dbeafe', border: '1px solid #bfdbfe', borderRadius: 8, padding: '7px 10px' }}>
+                                      <p style={{ fontSize: 12, fontWeight: 700, color: '#1e3a8a', margin: '0 0 2px' }}>{acc.bank} · {acc.currency}</p>
+                                      <p style={{ fontSize: 13, fontWeight: 800, color: '#1e40af', margin: '0 0 2px', fontFamily: 'monospace' }}>{acc.number}</p>
+                                      <p style={{ fontSize: 11, color: '#3b82f6', margin: 0 }}>{acc.holder}</p>
+                                    </div>
+                                  ))}
+                                </div>
                               </div>
                             )}
                             {dep.deliveryPorTransferencia && (
@@ -636,8 +678,32 @@ function StatCard({ label, value, color, bg, border }: { label: string; value: n
   );
 }
 
-function RoutePoint({ type, name, phone, address }: { type: 'pickup' | 'dropoff'; name: string; phone: string; address: string }) {
+type PointData = { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null; coord?: { lat: number; lng: number } | null; puntoGoogleLink?: string | null; puntoGoogleTexto?: string | null } | undefined;
+
+function getMapsLink(point: PointData, coordOverride?: { lat: number; lng: number } | null): string | null {
+  const coord = coordOverride ?? point?.coord;
+  if (coord) return `https://www.google.com/maps?q=${coord.lat},${coord.lng}`;
+  if (point?.puntoGoogleLink?.trim()) return point.puntoGoogleLink.trim();
+  if (point?.puntoGoogleTexto?.trim()) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(point.puntoGoogleTexto.trim())}`;
+  if (point?.direccionEscrita?.trim()) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(point.direccionEscrita.trim())}`;
+  return null;
+}
+
+function RoutePoint({ type, point, fallbackName, retiroCoord, entregaCoord }: {
+  type: 'pickup' | 'dropoff';
+  point: PointData;
+  fallbackName?: string;
+  retiroCoord?: { lat: number; lng: number } | null;
+  entregaCoord?: { lat: number; lng: number } | null;
+}) {
   const ip = type === 'pickup';
+  const coordOverride = ip ? retiroCoord : entregaCoord;
+  const mapsUrl = getMapsLink(point, coordOverride);
+  const name = point?.nombreApellido || fallbackName || '-';
+  const phone = point?.celular || '-';
+  const address = point?.direccionEscrita || '-';
+  const nota = point?.nota?.trim();
+
   return (
     <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
       <div style={{ width: 26, height: 26, borderRadius: '50%', background: ip ? '#fef3c7' : '#dcfce7', border: `2px solid ${ip ? '#f59e0b' : '#16a34a'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 2 }}>
@@ -646,9 +712,46 @@ function RoutePoint({ type, name, phone, address }: { type: 'pickup' | 'dropoff'
       <div style={{ flex: 1, paddingBottom: 6 }}>
         <p style={{ fontSize: 10, fontWeight: 800, color: '#9ca3af', letterSpacing: 1, textTransform: 'uppercase', margin: '0 0 2px' }}>{ip ? 'RETIRO' : 'ENTREGA'}</p>
         <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{name}</p>
-        <a href={`tel:${phone}`} style={{ fontSize: 13, color: '#2563eb', textDecoration: 'none', fontWeight: 600, display: 'block', marginBottom: 2 }}>📞 {phone}</a>
-        <p style={{ fontSize: 13, color: '#6b7280', margin: 0, lineHeight: 1.4 }}>{address}</p>
+        <a href={`tel:${phone}`} style={{ fontSize: 13, color: '#2563eb', textDecoration: 'none', fontWeight: 600, display: 'block', marginBottom: 3 }}>📞 {phone}</a>
+        <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 4px', lineHeight: 1.4 }}>📍 {address}</p>
+        {nota && (
+          <p style={{ fontSize: 12, color: '#d97706', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '5px 9px', margin: '4px 0', lineHeight: 1.4 }}>
+            📝 {nota}
+          </p>
+        )}
+        {mapsUrl && (
+          <a href={mapsUrl} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginTop: 4, fontSize: 12, color: '#2563eb', fontWeight: 700, textDecoration: 'none', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '5px 10px' }}>
+            🗺 Abrir en Maps
+          </a>
+        )}
       </div>
+    </div>
+  );
+}
+
+function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
+  const delivery = o.confirmacion?.precioFinalCordobas ?? 0;
+  const totalCliente = (dep.tieneDelivery ? delivery : 0) + (dep.tieneProducto ? dep.montoProducto : 0);
+
+  return (
+    <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Delivery</span>
+        <span style={{ fontSize: 18, fontWeight: 900, color: '#111827' }}>{fmt(delivery)}</span>
+      </div>
+      {dep.tieneProducto && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
+          <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Cobro producto</span>
+          <span style={{ fontSize: 18, fontWeight: 800, color: '#7c3aed' }}>{fmt(dep.montoProducto)}</span>
+        </div>
+      )}
+      {totalCliente > 0 && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 10, borderTop: '1px solid #e2e8f0' }}>
+          <span style={{ fontSize: 13, color: '#111827', fontWeight: 700 }}>Total a cobrar al cliente</span>
+          <span style={{ fontSize: 22, fontWeight: 900, color: '#004aad' }}>{fmt(totalCliente)}</span>
+        </div>
+      )}
+      <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0' }}>{dep.descripcion}</p>
     </div>
   );
 }
