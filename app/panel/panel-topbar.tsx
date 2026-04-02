@@ -26,7 +26,7 @@ export default function PanelTopBar() {
   const items: { href?: string; label: string; disabled?: boolean }[] = [
     { href: '/panel', label: 'Inicio' },
     { href: '/panel/calculadora', label: 'Calculadora' },
-    { label: 'Solicitar envío', disabled: true },
+    { href: '/panel/solicitar', label: 'Solicitar envío' },
     { href: '/panel/ajustes', label: 'Ajustes' },
   ]
 

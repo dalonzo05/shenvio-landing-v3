@@ -265,9 +265,9 @@ export default function ComerciosPage() {
   const countPuntos = (c: Comercio) => Object.keys(c.puntosRetiro || {}).length
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="flex flex-col gap-4">
       {/* Header */}
-      <div className="mb-4">
+      <div>
         <h1 className="text-2xl font-black text-gray-900 tracking-tight">Comercios</h1>
         <p className="text-sm text-gray-500 mt-0.5">
           Gestioná los perfiles de todos los comercios registrados.
@@ -291,7 +291,7 @@ export default function ComerciosPage() {
       </div>
 
       {/* Table */}
-      <div className="flex-1 overflow-auto rounded-xl border border-gray-200 bg-white shadow-sm">
+      <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
         {loading ? (
           <div className="flex items-center justify-center py-20 text-sm text-gray-500">Cargando comercios…</div>
         ) : filtered.length === 0 ? (

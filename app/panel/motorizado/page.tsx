@@ -57,6 +57,21 @@ type Solicitud = {
     rechazadoAt?: Timestamp | null;
   } | null;
   ownerSnapshot?: { companyName?: string; nombre?: string; phone?: string };
+  cobrosMotorizado?: {
+    delivery?: { monto: number; recibio: boolean; at?: any };
+    producto?: { monto: number; recibio: boolean; at?: any };
+  };
+};
+
+type PendingConfirm = {
+  order: Solicitud;
+  nuevo: EstadoSolicitud;
+  showDelivery: boolean;
+  showProducto: boolean;
+  montoDelivery: number;
+  montoProducto: number;
+  recibioDelivery: boolean;
+  recibioProducto: boolean;
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -209,6 +224,7 @@ export default function PanelMotorizadoPage() {
   const [actionId, setActionId] = useState<string | null>(null);
   const [tick, setTick] = useState(Date.now());
   const [tab, setTab] = useState<'pendientes' | 'en_curso' | 'historial' | 'depositos'>('pendientes');
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
 
   // Historial filters
   const [histFecha, setHistFecha] = useState<'hoy' | 'ayer' | 'personalizado'>('hoy');
@@ -260,18 +276,54 @@ export default function PanelMotorizadoPage() {
     finally { setActionId(null); }
   }
 
-  async function cambiar(o: Solicitud, nuevo: EstadoSolicitud) {
+  async function executeCambiar(
+    o: Solicitud,
+    nuevo: EstadoSolicitud,
+    cobros?: { delivery?: { monto: number; recibio: boolean }; producto?: { monto: number; recibio: boolean } }
+  ) {
     if (!o.id) return;
     setErr(null); setActionId(`${o.id}:${nuevo}`);
     try {
       const b = writeBatch(db);
       const p: any = { estado: nuevo, updatedAt: serverTimestamp(), [`historial.${nuevo}At`]: serverTimestamp() };
       if (nuevo === 'entregado') p.entregadoAt = serverTimestamp();
+      if (cobros) {
+        if (cobros.delivery) p['cobrosMotorizado.delivery'] = { ...cobros.delivery, at: serverTimestamp() };
+        if (cobros.producto) p['cobrosMotorizado.producto'] = { ...cobros.producto, at: serverTimestamp() };
+      }
       b.update(doc(db, 'solicitudes_envio', o.id), p);
       if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: nuevo === 'entregado' ? 'disponible' : 'ocupado', updatedAt: serverTimestamp() });
       await b.commit();
     } catch (e) { console.error(e); setErr('No se pudo cambiar.'); }
     finally { setActionId(null); }
+  }
+
+  function cambiar(o: Solicitud, nuevo: EstadoSolicitud) {
+    const dep = calcDeposito(o);
+    const tipo = o.pagoDelivery?.tipo || '';
+    const quienPaga = o.pagoDelivery?.quienPaga || '';
+    const esRetiro = tipo === 'Ef. retiro' || quienPaga === 'recoleccion';
+
+    const showDelivery =
+      dep.tieneDelivery &&
+      ((nuevo === 'retirado' && esRetiro) || (nuevo === 'entregado' && !esRetiro));
+    const showProducto = nuevo === 'entregado' && dep.tieneProducto;
+
+    if (!showDelivery && !showProducto) {
+      executeCambiar(o, nuevo);
+      return;
+    }
+
+    setPendingConfirm({
+      order: o,
+      nuevo,
+      showDelivery,
+      showProducto,
+      montoDelivery: dep.montoDelivery,
+      montoProducto: dep.montoProducto,
+      recibioDelivery: true,
+      recibioProducto: true,
+    });
   }
 
   const todas = useMemo(() => (!user ? [] : sortDesc(ordenes)), [ordenes, user]);
@@ -459,16 +511,87 @@ export default function PanelMotorizadoPage() {
                       <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
                       <RoutePoint type="dropoff" point={o.entrega} entregaCoord={o.cotizacion?.destinoCoord} />
 
-                      <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8, padding: '14px 0 16px' }}>
-                        {actions.map((a) => {
-                          const lk = `${o.id}:${a}`;
-                          return (
-                            <button key={a} onClick={() => cambiar(o, a)} disabled={!!actionId} style={a === 'entregado' ? btnGreen : btnBlue}>
-                              {actionId === lk ? 'Actualizando...' : actionLabel(a)}
+                      {pendingConfirm?.order.id === o.id ? (
+                        /* ── Confirmación de cobro ── */
+                        <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 14, padding: '14px 16px', margin: '14px 0 16px' }}>
+                          <p style={{ fontSize: 13, fontWeight: 800, color: '#15803d', margin: '0 0 12px' }}>💰 Confirmar cobro</p>
+                          {pendingConfirm.showDelivery && (
+                            <div style={{ marginBottom: 12 }}>
+                              <p style={{ fontSize: 13, color: '#374151', fontWeight: 600, margin: '0 0 8px' }}>
+                                ¿Recibiste {fmt(pendingConfirm.montoDelivery)} de delivery?
+                              </p>
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                <button
+                                  onClick={() => setPendingConfirm((p) => p ? { ...p, recibioDelivery: true } : p)}
+                                  style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${pendingConfirm.recibioDelivery ? '#16a34a' : '#e5e7eb'}`, background: pendingConfirm.recibioDelivery ? '#16a34a' : '#fff', color: pendingConfirm.recibioDelivery ? '#fff' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
+                                >
+                                  ✅ Sí, recibí
+                                </button>
+                                <button
+                                  onClick={() => setPendingConfirm((p) => p ? { ...p, recibioDelivery: false } : p)}
+                                  style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${!pendingConfirm.recibioDelivery ? '#dc2626' : '#e5e7eb'}`, background: !pendingConfirm.recibioDelivery ? '#fee2e2' : '#fff', color: !pendingConfirm.recibioDelivery ? '#dc2626' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
+                                >
+                                  ❌ No recibí
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          {pendingConfirm.showProducto && (
+                            <div style={{ marginBottom: 12 }}>
+                              <p style={{ fontSize: 13, color: '#374151', fontWeight: 600, margin: '0 0 8px' }}>
+                                ¿Recibiste {fmt(pendingConfirm.montoProducto)} del producto?
+                              </p>
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                <button
+                                  onClick={() => setPendingConfirm((p) => p ? { ...p, recibioProducto: true } : p)}
+                                  style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${pendingConfirm.recibioProducto ? '#16a34a' : '#e5e7eb'}`, background: pendingConfirm.recibioProducto ? '#16a34a' : '#fff', color: pendingConfirm.recibioProducto ? '#fff' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
+                                >
+                                  ✅ Sí, recibí
+                                </button>
+                                <button
+                                  onClick={() => setPendingConfirm((p) => p ? { ...p, recibioProducto: false } : p)}
+                                  style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${!pendingConfirm.recibioProducto ? '#dc2626' : '#e5e7eb'}`, background: !pendingConfirm.recibioProducto ? '#fee2e2' : '#fff', color: !pendingConfirm.recibioProducto ? '#dc2626' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
+                                >
+                                  ❌ No recibí
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                            <button
+                              onClick={() => setPendingConfirm(null)}
+                              style={{ flexShrink: 0, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '12px 16px', color: '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
+                            >
+                              Cancelar
                             </button>
-                          );
-                        })}
-                      </div>
+                            <button
+                              disabled={!!actionId}
+                              onClick={() => {
+                                const pc = pendingConfirm;
+                                setPendingConfirm(null);
+                                executeCambiar(pc.order, pc.nuevo, {
+                                  delivery: pc.showDelivery ? { monto: pc.montoDelivery, recibio: pc.recibioDelivery } : undefined,
+                                  producto: pc.showProducto ? { monto: pc.montoProducto, recibio: pc.recibioProducto } : undefined,
+                                });
+                              }}
+                              style={{ flex: 1, background: '#16a34a', border: 'none', borderRadius: 12, padding: '12px 16px', color: '#fff', fontSize: 14, fontWeight: 800, cursor: 'pointer' }}
+                            >
+                              {actionId ? 'Guardando…' : 'Confirmar y avanzar →'}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8, padding: '14px 0 16px' }}>
+                          {actions.map((a) => {
+                            const lk = `${o.id}:${a}`;
+                            return (
+                              <button key={a} onClick={() => cambiar(o, a)} disabled={!!actionId} style={a === 'entregado' ? btnGreen : btnBlue}>
+                                {actionId === lk ? 'Actualizando...' : actionLabel(a)}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
