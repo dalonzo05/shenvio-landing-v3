@@ -25,10 +25,13 @@ export default function PanelLayout({ children }: { children: React.ReactNode })
 
   if (loading || !authUser || !authUser.emailVerified) return null
 
+  const isGestor = pathname?.startsWith('/panel/gestor')
+  const isComercio = pathname?.startsWith('/panel/comercio')
+
   return (
     <div className="min-h-screen bg-gray-50">
-      {!pathname?.startsWith('/panel/gestor') && <PanelTopBar />}
-      {pathname?.startsWith('/panel/gestor')
+      {!isGestor && !isComercio && <PanelTopBar />}
+      {(isGestor || isComercio)
         ? children
         : <div className="max-w-6xl mx-auto px-4 py-6">{children}</div>
       }

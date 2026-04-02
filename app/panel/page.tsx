@@ -54,6 +54,11 @@ export default function PanelHome() {
           return
         }
 
+        if (rol === 'Comercio') {
+          router.replace('/panel/comercio')
+          return
+        }
+
         setCheckingRole(false)
       } catch (e) {
         console.error(e)
