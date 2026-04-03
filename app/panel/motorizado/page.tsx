@@ -401,6 +401,10 @@ export default function PanelMotorizadoPage() {
     return { alComercio, aStorkhub, total: alComercio + aStorkhub };
   }, [depositosPendientes]);
 
+  // Load comercio bank accounts for deposit orders
+  const [comercioAccounts, setComercioAccounts] = useState<Record<string, BankAccount[]>>({});
+  const depositoUidsKey = depositosPendientes.map((o) => o.userId || '').join(',');
+
   // ── Grupos de depósito ────────────────────────────────────────────────────
   type GrupoComercio = { uid: string; nombre: string; orders: Solicitud[]; total: number; accounts: BankAccount[] }
   type GrupoStorkhub = { orders: Solicitud[]; total: number }
@@ -423,7 +427,6 @@ export default function PanelMotorizadoPage() {
         }
         comerciosMap[uid].orders.push(o)
         comerciosMap[uid].total += dep.totalAlComercio
-        // Update accounts if loaded
         if (comercioAccounts[uid]) comerciosMap[uid].accounts = comercioAccounts[uid]
       }
     })
@@ -434,10 +437,6 @@ export default function PanelMotorizadoPage() {
   const toggleExpandido = (key: string) => setExpandidos((p) => ({ ...p, [key]: !p[key] }))
 
   useEffect(() => { if (pendientes.length > 0) setTab('pendientes'); }, [pendientes.length]);
-
-  // Load comercio bank accounts for deposit orders
-  const [comercioAccounts, setComercioAccounts] = useState<Record<string, BankAccount[]>>({});
-  const depositoUidsKey = depositosPendientes.map((o) => o.userId || '').join(',');
   useEffect(() => {
     const uids = [...new Set(depositosPendientes.map((o) => o.userId).filter(Boolean))] as string[];
     if (uids.length === 0) return;
