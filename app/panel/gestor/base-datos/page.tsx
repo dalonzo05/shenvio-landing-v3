@@ -757,7 +757,7 @@ export default function BaseDatosPage() {
               <tr className="border-b bg-gray-50 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">
                 <Th>#</Th><Th>Estado</Th><Th>Semana</Th><Th>Motorizado</Th><Th>Fecha</Th><Th>Pagó</Th>
                 <Th>Comercio</Th><Th>Teléfono</Th><Th>Retiro</Th><Th>Entrega</Th><Th>Zona</Th><Th>Delivery</Th>
-                <Th>C/E Producto</Th><Th>F. Depósito</Th><Th>Depositado</Th><Th>Forma Pago</Th><Th>Dep. Motor.</Th>
+                <Th>C/E Producto</Th><Th>F. Depósito</Th><Th>Depositado</Th><Th>Forma Pago</Th>
                 <Th>C$</Th><Th>$</Th><Th>Dist.</Th>
               </tr>
             </thead>
@@ -799,9 +799,42 @@ export default function BaseDatosPage() {
                     <Td>{precio != null ? <span className="font-medium text-[#004aad]">C${precio}</span> : <span className="text-gray-300">—</span>}</Td>
                     <Td>{s.cobroContraEntrega?.aplica && s.cobroContraEntrega.monto ? <span className="font-medium text-green-700">C${s.cobroContraEntrega.monto}</span> : <span className="text-gray-300">C$0</span>}</Td>
                     <Td>
-                      <EditableCell value={s.registro?.deposito?.fecha ? s.registro.deposito.fecha.toDate().toISOString().split('T')[0] : ''} type="date" placeholder="fecha" onSave={(v) => updateRegistroNested(s.id, 'deposito.fecha', v ? Timestamp.fromDate(new Date(v)) : null)} />
+                      {(() => {
+                        const dep = s.registro?.deposito
+                        if (dep?.confirmadoMotorizado && dep?.confirmadoAt)
+                          return <span className="text-xs text-gray-700">{formatDateTime(dep.confirmadoAt)}</span>
+                        const dateC = dep?.confirmadoComercioAt
+                        const dateS = dep?.confirmadoStorkhubAt
+                        if (!dateC && !dateS) return <span className="text-gray-300 text-xs">—</span>
+                        if (!dateC || !dateS)
+                          return <span className="text-xs text-gray-700">{formatDateTime((dateC || dateS)!)}</span>
+                        const strC = formatDateTime(dateC), strS = formatDateTime(dateS)
+                        if (strC === strS) return <span className="text-xs text-gray-700">{strC}</span>
+                        return (
+                          <div className="flex flex-col gap-0.5 text-xs text-gray-700">
+                            <span title="Comercio">{strC}</span>
+                            <span title="Storkhub">{strS}</span>
+                          </div>
+                        )
+                      })()}
                     </Td>
-                    <Td><EditableCell value={s.registro?.deposito?.monto ?? ''} type="number" prefix="C$" placeholder="monto" onSave={(v) => updateRegistroNested(s.id, 'deposito.monto', v ? Number(v) : null)} /></Td>
+                    <Td>
+                      {(() => {
+                        const dep = s.registro?.deposito
+                        if (dep?.confirmadoMotorizado)
+                          return <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700">✓ Todo</span>
+                        const okC = dep?.confirmadoComercio
+                        const okS = dep?.confirmadoStorkhub
+                        if (!okC && !okS) return <span className="inline-flex items-center rounded-full bg-yellow-50 border border-yellow-200 px-2 py-0.5 text-[11px] font-semibold text-yellow-700">Pendiente</span>
+                        if (okC && okS) return <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700">✓ Todo</span>
+                        return (
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${okC ? 'bg-green-50 border-green-200 text-green-700' : 'bg-yellow-50 border-yellow-200 text-yellow-700'}`}>{okC ? '✓ Comercio' : '⏳ Comercio'}</span>
+                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${okS ? 'bg-green-50 border-green-200 text-green-700' : 'bg-yellow-50 border-yellow-200 text-yellow-700'}`}>{okS ? '✓ Storkhub' : '⏳ Storkhub'}</span>
+                          </div>
+                        )
+                      })()}
+                    </Td>
                     <Td>
                       <select value={s.registro?.deposito?.formaPago || ''} onChange={(e) => updateRegistroNested(s.id, 'deposito.formaPago', e.target.value || null)} className="rounded border border-gray-200 bg-transparent px-1 py-0.5 text-xs focus:outline-none">
                         <option value="">—</option>
@@ -810,25 +843,6 @@ export default function BaseDatosPage() {
                         <option value="deposito">Depósito</option>
                         <option value="credito">Crédito</option>
                       </select>
-                    </Td>
-                    <Td>
-                      {(() => {
-                        const dep = s.registro?.deposito
-                        // Flag viejo (compatibilidad)
-                        if (dep?.confirmadoMotorizado) {
-                          return <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700" title={dep.confirmadoAt ? formatDateTime(dep.confirmadoAt) : ''}>✓ Todo</span>
-                        }
-                        const okC = dep?.confirmadoComercio
-                        const okS = dep?.confirmadoStorkhub
-                        if (!okC && !okS) return <span className="inline-flex items-center rounded-full bg-yellow-50 border border-yellow-200 px-2 py-0.5 text-[11px] font-semibold text-yellow-700">Pendiente</span>
-                        if (okC && okS) return <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700">✓ Todo</span>
-                        return (
-                          <div className="flex flex-col gap-0.5">
-                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${okC ? 'bg-green-50 border-green-200 text-green-700' : 'bg-yellow-50 border-yellow-200 text-yellow-700'}`} title={dep?.confirmadoComercioAt ? formatDateTime(dep.confirmadoComercioAt) : ''}>{okC ? '✓ Comercio' : '⏳ Comercio'}</span>
-                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${okS ? 'bg-green-50 border-green-200 text-green-700' : 'bg-yellow-50 border-yellow-200 text-yellow-700'}`} title={dep?.confirmadoStorkhubAt ? formatDateTime(dep.confirmadoStorkhubAt) : ''}>{okS ? '✓ Storkhub' : '⏳ Storkhub'}</span>
-                          </div>
-                        )
-                      })()}
                     </Td>
                     <Td><EditableCell value={s.registro?.csRecaudado ?? ''} type="number" prefix="C$" placeholder="—" onSave={(v) => updateRegistro(s.id, { csRecaudado: v ? Number(v) : undefined })} /></Td>
                     <Td><EditableCell value={s.registro?.usdRecaudado ?? ''} type="number" prefix="$" placeholder="—" onSave={(v) => updateRegistro(s.id, { usdRecaudado: v ? Number(v) : undefined })} /></Td>
