@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { collection, onSnapshot, query, where, orderBy, Timestamp } from 'firebase/firestore'
+import { collection, onSnapshot, query, where, Timestamp } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { Package } from 'lucide-react'
 
@@ -89,11 +89,13 @@ export default function MisOrdenesPage() {
     if (!user) return
     const q = query(
       collection(db, 'solicitudes_envio'),
-      where('userId', '==', user.uid),
-      orderBy('createdAt', 'desc')
+      where('userId', '==', user.uid)
     )
     const unsub = onSnapshot(q, (snap) => {
-      setOrdenes(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() as any) }))
+        .sort((a, b) => (tsToDate(b.createdAt)?.getTime() || 0) - (tsToDate(a.createdAt)?.getTime() || 0))
+      setOrdenes(list)
       setLoading(false)
     })
     return () => unsub()

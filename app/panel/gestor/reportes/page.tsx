@@ -22,6 +22,11 @@ type Solicitud = {
   ownerSnapshot?: { companyName?: string; nombre?: string }
   confirmacion?: { precioFinalCordobas?: number }
   asignacion?: { motorizadoId?: string; motorizadoNombre?: string } | null
+  cobrosMotorizado?: {
+    delivery?: { monto: number; recibio: boolean; at?: any; justificacion?: string }
+    producto?: { monto: number; recibio: boolean; at?: any; justificacion?: string }
+    resolucion?: { resueltoPor: string; at?: any; nota?: string }
+  }
 }
 
 type Period = 'hoy' | 'semana' | 'mes' | 'custom'

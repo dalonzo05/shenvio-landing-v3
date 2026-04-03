@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import { auth, db } from '@/fb/config'
-import { doc, getDoc } from 'firebase/firestore'
+import { collection, doc, getDoc, onSnapshot, query, where } from 'firebase/firestore'
 import {
   LayoutDashboard,
   ClipboardList,
@@ -14,6 +14,7 @@ import {
   Store,
   ChevronLeft,
   ChevronRight,
+  AlertCircle,
 } from 'lucide-react'
 
 export default function GestorLayout({ children }: { children: React.ReactNode }) {
@@ -21,6 +22,7 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
   const pathname = usePathname()
   const [loading, setLoading] = useState(true)
   const [collapsed, setCollapsed] = useState(false)
+  const [cobrosPendientes, setCobrosPendientes] = useState(0)
 
   useEffect(() => {
     const run = async () => {
@@ -54,6 +56,18 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
 
     run()
   }, [router])
+
+  // Badge: cobros pendientes en tiempo real
+  useEffect(() => {
+    const q = query(
+      collection(db, 'solicitudes_envio'),
+      where('cobroPendiente', '==', true)
+    )
+    const unsub = onSnapshot(q, (snap) => {
+      setCobrosPendientes(snap.size)
+    })
+    return () => unsub()
+  }, [])
 
   if (loading) {
     return <div className="w-full px-6 py-6 text-sm text-gray-600">Validando permisos...</div>
@@ -138,6 +152,16 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               active={pathname.startsWith('/panel/gestor/reportes')}
               collapsed={collapsed}
             />
+
+            {/* Cobros — con badge si hay pendientes */}
+            <NavItem
+              href="/panel/gestor/cobros"
+              icon={<AlertCircle size={18} />}
+              label="Cobros"
+              active={pathname.startsWith('/panel/gestor/cobros')}
+              collapsed={collapsed}
+              badge={cobrosPendientes > 0 ? cobrosPendientes : undefined}
+            />
           </nav>
         </div>
       </aside>
@@ -155,25 +179,39 @@ function NavItem({
   label,
   active,
   collapsed,
+  badge,
 }: {
   href: string
   icon: React.ReactNode
   label: string
   active: boolean
   collapsed: boolean
+  badge?: number
 }) {
   return (
     <Link
       href={href}
       title={collapsed ? label : undefined}
-      className={`flex items-center rounded-xl px-3 py-3 text-sm font-medium transition ${
+      className={`relative flex items-center rounded-xl px-3 py-3 text-sm font-medium transition ${
         active
           ? 'bg-[#004aad] text-white shadow-sm'
           : 'text-gray-700 hover:bg-gray-100'
       } ${collapsed ? 'justify-center' : 'gap-3'}`}
     >
-      <span className="shrink-0">{icon}</span>
-      {!collapsed && <span>{label}</span>}
+      <span className="relative shrink-0">
+        {icon}
+        {badge !== undefined && collapsed && (
+          <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-black text-white">
+            {badge > 9 ? '9+' : badge}
+          </span>
+        )}
+      </span>
+      {!collapsed && <span className="flex-1">{label}</span>}
+      {!collapsed && badge !== undefined && (
+        <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-black text-white">
+          {badge > 99 ? '99+' : badge}
+        </span>
+      )}
     </Link>
   )
 }

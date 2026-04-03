@@ -18,9 +18,21 @@ import {
   ChevronRight,
   Eye,
   Send,
+  AlertCircle,
 } from 'lucide-react'
-import { collection, onSnapshot, query } from 'firebase/firestore'
+import { collection, onSnapshot, query, where, limit, Timestamp } from 'firebase/firestore'
 import { db } from '@/fb/config'
+
+type CobroAlerta = {
+  id: string
+  ownerSnapshot?: { companyName?: string; nombre?: string }
+  asignacion?: { motorizadoNombre?: string } | null
+  cobrosMotorizado?: {
+    delivery?: { monto: number; recibio: boolean; justificacion?: string }
+    producto?: { monto: number; recibio: boolean; justificacion?: string }
+  }
+  createdAt?: Timestamp
+}
 
 type Motorizado = {
   id: string
@@ -102,6 +114,20 @@ export default function PanelGestorPage() {
   const [loadingMotos, setLoadingMotos] = useState(true)
   const [busqueda, setBusqueda] = useState('')
   const [filtroEstado, setFiltroEstado] = useState<FiltroEstado>('todos')
+  const [cobrosAlerta, setCobrosAlerta] = useState<CobroAlerta[]>([])
+
+  // Cobros pendientes en tiempo real (máx 5 para el widget)
+  useEffect(() => {
+    const q = query(
+      collection(db, 'solicitudes_envio'),
+      where('cobroPendiente', '==', true),
+      limit(5)
+    )
+    const unsub = onSnapshot(q, (snap) => {
+      setCobrosAlerta(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
+    })
+    return () => unsub()
+  }, [])
 
   useEffect(() => {
     const ref = collection(db, 'motorizado')
@@ -238,6 +264,44 @@ export default function PanelGestorPage() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 md:py-8 space-y-6">
+
+      {/* ── Widget: cobros pendientes ── */}
+      {cobrosAlerta.length > 0 && (
+        <section className="rounded-2xl border border-orange-200 bg-orange-50 p-4 shadow-sm">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-orange-500" />
+              <h2 className="text-sm font-black text-orange-800">
+                {cobrosAlerta.length} cobro{cobrosAlerta.length !== 1 ? 's' : ''} sin confirmar
+              </h2>
+            </div>
+            <Link href="/panel/gestor/cobros" className="text-xs font-semibold text-orange-600 hover:underline flex items-center gap-1">
+              Ver todos <ArrowRight className="h-3 w-3" />
+            </Link>
+          </div>
+          <ul className="space-y-2">
+            {cobrosAlerta.map((c) => {
+              const comercio = c.ownerSnapshot?.companyName || c.ownerSnapshot?.nombre || '—'
+              const motorizado = c.asignacion?.motorizadoNombre || '—'
+              const partes: string[] = []
+              if (c.cobrosMotorizado?.delivery && !c.cobrosMotorizado.delivery.recibio) partes.push(`Delivery C$ ${c.cobrosMotorizado.delivery.monto}`)
+              if (c.cobrosMotorizado?.producto && !c.cobrosMotorizado.producto.recibio) partes.push(`Producto C$ ${c.cobrosMotorizado.producto.monto}`)
+              return (
+                <li key={c.id} className="flex items-center justify-between bg-white rounded-xl px-3 py-2 border border-orange-100">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">{comercio}</p>
+                    <p className="text-xs text-gray-500">Motorizado: {motorizado} · {partes.join(' + ')}</p>
+                  </div>
+                  <Link href="/panel/gestor/cobros" className="text-xs font-semibold text-orange-600 hover:underline">
+                    Resolver →
+                  </Link>
+                </li>
+              )
+            })}
+          </ul>
+        </section>
+      )}
+
       <section className="rounded-2xl border border-gray-200 bg-white p-5 md:p-7 shadow-sm">
         <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
           <div className="max-w-3xl">

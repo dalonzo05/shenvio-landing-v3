@@ -73,6 +73,7 @@ export default function MotorizadosPage() {
   // Edit fields
   const [eName, setEName] = useState('')
   const [ePhone, setEPhone] = useState('')
+  const [eAuthUid, setEAuthUid] = useState('')
   const [eActivo, setEActivo] = useState(true)
   const [eEstado, setEEstado] = useState<EstadoMoto>('disponible')
   const [saving, setSaving] = useState(false)
@@ -104,6 +105,7 @@ export default function MotorizadosPage() {
     setSelected(m)
     setEName(m.nombre || '')
     setEPhone(m.telefono || '')
+    setEAuthUid(m.authUid || '')
     setEActivo(m.activo !== false)
     setEEstado(m.estado || 'disponible')
     setMsg(null)
@@ -119,6 +121,7 @@ export default function MotorizadosPage() {
     setSelected(null)
     setEName('')
     setEPhone('')
+    setEAuthUid('')
     setEActivo(true)
     setEEstado('disponible')
     setMsg(null)
@@ -141,6 +144,7 @@ export default function MotorizadosPage() {
           telefono: ePhone.trim(),
           estado: eEstado,
           activo: eActivo,
+          authUid: eAuthUid.trim() || null,
           createdAt: serverTimestamp(),
         })
         setMsg('✅ Motorizado creado')
@@ -151,6 +155,7 @@ export default function MotorizadosPage() {
           telefono: ePhone.trim(),
           estado: eEstado,
           activo: eActivo,
+          authUid: eAuthUid.trim() || null,
         })
         setMsg('✅ Guardado')
       }
@@ -319,6 +324,11 @@ export default function MotorizadosPage() {
             <div>
               <label className={S.label}>Teléfono</label>
               <input value={ePhone} onChange={(e) => setEPhone(e.target.value)} placeholder="8888-8888" className={S.input} />
+            </div>
+            <div>
+              <label className={S.label}>UID de Firebase Auth <span className="text-gray-400 font-normal normal-case">(opcional)</span></label>
+              <input value={eAuthUid} onChange={(e) => setEAuthUid(e.target.value)} placeholder="abc123xyz..." className={S.input} />
+              <p className="text-xs text-gray-400 mt-1">Se asigna cuando el motorizado tenga cuenta creada en la app.</p>
             </div>
           </section>
 

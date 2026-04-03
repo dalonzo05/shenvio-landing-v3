@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import {
   collection, onSnapshot, query, where,
-  doc, getDoc, serverTimestamp, Timestamp, writeBatch,
+  doc, getDoc, updateDoc, serverTimestamp, Timestamp, writeBatch,
 } from 'firebase/firestore';
 import { auth, db } from '@/fb/config';
 
@@ -58,8 +58,14 @@ type Solicitud = {
   } | null;
   ownerSnapshot?: { companyName?: string; nombre?: string; phone?: string };
   cobrosMotorizado?: {
-    delivery?: { monto: number; recibio: boolean; at?: any };
-    producto?: { monto: number; recibio: boolean; at?: any };
+    delivery?: { monto: number; recibio: boolean; at?: any; justificacion?: string };
+    producto?: { monto: number; recibio: boolean; at?: any; justificacion?: string };
+  };
+  registro?: {
+    deposito?: {
+      confirmadoMotorizado?: boolean;
+      confirmadoAt?: Timestamp;
+    };
   };
 };
 
@@ -72,6 +78,8 @@ type PendingConfirm = {
   montoProducto: number;
   recibioDelivery: boolean;
   recibioProducto: boolean;
+  justDelivery: string;
+  justProducto: string;
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -279,7 +287,7 @@ export default function PanelMotorizadoPage() {
   async function executeCambiar(
     o: Solicitud,
     nuevo: EstadoSolicitud,
-    cobros?: { delivery?: { monto: number; recibio: boolean }; producto?: { monto: number; recibio: boolean } }
+    cobros?: { delivery?: { monto: number; recibio: boolean; justificacion?: string }; producto?: { monto: number; recibio: boolean; justificacion?: string } }
   ) {
     if (!o.id) return;
     setErr(null); setActionId(`${o.id}:${nuevo}`);
@@ -287,10 +295,20 @@ export default function PanelMotorizadoPage() {
       const b = writeBatch(db);
       const p: any = { estado: nuevo, updatedAt: serverTimestamp(), [`historial.${nuevo}At`]: serverTimestamp() };
       if (nuevo === 'entregado') p.entregadoAt = serverTimestamp();
+      let hayPendiente = false;
       if (cobros) {
-        if (cobros.delivery) p['cobrosMotorizado.delivery'] = { ...cobros.delivery, at: serverTimestamp() };
-        if (cobros.producto) p['cobrosMotorizado.producto'] = { ...cobros.producto, at: serverTimestamp() };
+        if (cobros.delivery) {
+          const rec = { monto: cobros.delivery.monto, recibio: cobros.delivery.recibio, at: serverTimestamp(), ...(cobros.delivery.justificacion ? { justificacion: cobros.delivery.justificacion } : {}) };
+          p['cobrosMotorizado.delivery'] = rec;
+          if (!cobros.delivery.recibio) hayPendiente = true;
+        }
+        if (cobros.producto) {
+          const rec = { monto: cobros.producto.monto, recibio: cobros.producto.recibio, at: serverTimestamp(), ...(cobros.producto.justificacion ? { justificacion: cobros.producto.justificacion } : {}) };
+          p['cobrosMotorizado.producto'] = rec;
+          if (!cobros.producto.recibio) hayPendiente = true;
+        }
       }
+      if (hayPendiente) p.cobroPendiente = true;
       b.update(doc(db, 'solicitudes_envio', o.id), p);
       if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: nuevo === 'entregado' ? 'disponible' : 'ocupado', updatedAt: serverTimestamp() });
       await b.commit();
@@ -302,7 +320,7 @@ export default function PanelMotorizadoPage() {
     const dep = calcDeposito(o);
     const tipo = o.pagoDelivery?.tipo || '';
     const quienPaga = o.pagoDelivery?.quienPaga || '';
-    const esRetiro = tipo === 'Ef. retiro' || quienPaga === 'recoleccion';
+    const esRetiro = quienPaga === 'recoleccion';
 
     const showDelivery =
       dep.tieneDelivery &&
@@ -323,6 +341,8 @@ export default function PanelMotorizadoPage() {
       montoProducto: dep.montoProducto,
       recibioDelivery: true,
       recibioProducto: true,
+      justDelivery: '',
+      justProducto: '',
     });
   }
 
@@ -354,13 +374,12 @@ export default function PanelMotorizadoPage() {
     });
   }, [entregadas, histFecha, histDesde]);
 
-  // Depósitos: today's delivered orders that have something to deposit
+  // Depósitos: all delivered orders with pending deposits (not yet confirmed by motorizado)
   const depositosPendientes = useMemo(() =>
     entregadas.filter((o) => {
-      const d = tsToDate(o.entregadoAt) || tsToDate(o.updatedAt);
-      if (!d || !isToday(d)) return false;
       const dep = calcDeposito(o);
-      return dep.totalAlComercio > 0 || dep.totalAStorkhub > 0;
+      if (dep.totalAlComercio === 0 && dep.totalAStorkhub === 0) return false;
+      return !o.registro?.deposito?.confirmadoMotorizado;
     }), [entregadas]);
 
   const resumenDepositos = useMemo(() => {
@@ -416,7 +435,7 @@ export default function PanelMotorizadoPage() {
       <div style={{ background: '#fff', borderBottom: '1px solid #e5e7eb', padding: '20px 20px 16px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <h1 style={{ fontSize: 22, fontWeight: 800, color: '#111827', margin: 0, letterSpacing: -0.5 }}>Panel Motorizado</h1>
+            <h1 style={{ fontSize: 22, fontWeight: 800, color: '#111827', margin: 0, letterSpacing: -0.5 }}>Motorizado</h1>
             <p style={{ fontSize: 12, color: '#9ca3af', margin: '3px 0 0' }}>{user.email}</p>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 20, padding: '6px 12px' }}>
@@ -513,73 +532,103 @@ export default function PanelMotorizadoPage() {
 
                       {pendingConfirm?.order.id === o.id ? (
                         /* ── Confirmación de cobro ── */
-                        <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 14, padding: '14px 16px', margin: '14px 0 16px' }}>
-                          <p style={{ fontSize: 13, fontWeight: 800, color: '#15803d', margin: '0 0 12px' }}>💰 Confirmar cobro</p>
-                          {pendingConfirm.showDelivery && (
-                            <div style={{ marginBottom: 12 }}>
-                              <p style={{ fontSize: 13, color: '#374151', fontWeight: 600, margin: '0 0 8px' }}>
-                                ¿Recibiste {fmt(pendingConfirm.montoDelivery)} de delivery?
-                              </p>
-                              <div style={{ display: 'flex', gap: 8 }}>
-                                <button
-                                  onClick={() => setPendingConfirm((p) => p ? { ...p, recibioDelivery: true } : p)}
-                                  style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${pendingConfirm.recibioDelivery ? '#16a34a' : '#e5e7eb'}`, background: pendingConfirm.recibioDelivery ? '#16a34a' : '#fff', color: pendingConfirm.recibioDelivery ? '#fff' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
-                                >
-                                  ✅ Sí, recibí
+                        (() => {
+                          const pc = pendingConfirm;
+                          const RAZONES = ['El comercio indicó que cobrará luego', 'El cliente no tenía efectivo', 'Error en el monto acordado', 'Se acordó cobrar en la entrega', 'Otro'];
+                          const bloqueadoDelivery = pc.showDelivery && !pc.recibioDelivery && !pc.justDelivery.trim();
+                          const bloqueadoProducto = pc.showProducto && !pc.recibioProducto && !pc.justProducto.trim();
+                          const bloqueado = !!actionId || bloqueadoDelivery || bloqueadoProducto;
+                          return (
+                            <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 14, padding: '14px 16px', margin: '14px 0 16px' }}>
+                              <p style={{ fontSize: 13, fontWeight: 800, color: '#15803d', margin: '0 0 12px' }}>💰 Confirmar cobro</p>
+
+                              {pc.showDelivery && (
+                                <div style={{ marginBottom: 14 }}>
+                                  <p style={{ fontSize: 13, color: '#374151', fontWeight: 600, margin: '0 0 8px' }}>
+                                    ¿Recibiste {fmt(pc.montoDelivery)} de delivery?
+                                  </p>
+                                  <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                                    <button onClick={() => setPendingConfirm((p) => p ? { ...p, recibioDelivery: true, justDelivery: '' } : p)}
+                                      style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${pc.recibioDelivery ? '#16a34a' : '#e5e7eb'}`, background: pc.recibioDelivery ? '#16a34a' : '#fff', color: pc.recibioDelivery ? '#fff' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                                      ✅ Sí, recibí
+                                    </button>
+                                    <button onClick={() => setPendingConfirm((p) => p ? { ...p, recibioDelivery: false } : p)}
+                                      style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${!pc.recibioDelivery ? '#dc2626' : '#e5e7eb'}`, background: !pc.recibioDelivery ? '#fee2e2' : '#fff', color: !pc.recibioDelivery ? '#dc2626' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                                      ❌ No recibí
+                                    </button>
+                                  </div>
+                                  {!pc.recibioDelivery && (
+                                    <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10, padding: '10px 12px' }}>
+                                      <p style={{ fontSize: 12, fontWeight: 700, color: '#c2410c', margin: '0 0 6px' }}>⚠️ Razón obligatoria</p>
+                                      <select value={pc.justDelivery} onChange={(e) => setPendingConfirm((p) => p ? { ...p, justDelivery: e.target.value } : p)}
+                                        style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid #fed7aa', fontSize: 13, background: '#fff', outline: 'none', marginBottom: pc.justDelivery === 'Otro' ? 8 : 0 }}>
+                                        <option value="">— Seleccionar razón —</option>
+                                        {RAZONES.map((r) => <option key={r} value={r}>{r}</option>)}
+                                      </select>
+                                      {pc.justDelivery === 'Otro' && (
+                                        <textarea placeholder="Describe la situación…" value={pc.justDelivery === 'Otro' ? '' : pc.justDelivery}
+                                          onChange={(e) => setPendingConfirm((p) => p ? { ...p, justDelivery: e.target.value || 'Otro' } : p)}
+                                          style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid #fed7aa', fontSize: 13, resize: 'none' as const, height: 64, outline: 'none', boxSizing: 'border-box' as const }} />
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {pc.showProducto && (
+                                <div style={{ marginBottom: 14 }}>
+                                  <p style={{ fontSize: 13, color: '#374151', fontWeight: 600, margin: '0 0 8px' }}>
+                                    ¿Recibiste {fmt(pc.montoProducto)} del producto?
+                                  </p>
+                                  <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                                    <button onClick={() => setPendingConfirm((p) => p ? { ...p, recibioProducto: true, justProducto: '' } : p)}
+                                      style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${pc.recibioProducto ? '#16a34a' : '#e5e7eb'}`, background: pc.recibioProducto ? '#16a34a' : '#fff', color: pc.recibioProducto ? '#fff' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                                      ✅ Sí, recibí
+                                    </button>
+                                    <button onClick={() => setPendingConfirm((p) => p ? { ...p, recibioProducto: false } : p)}
+                                      style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${!pc.recibioProducto ? '#dc2626' : '#e5e7eb'}`, background: !pc.recibioProducto ? '#fee2e2' : '#fff', color: !pc.recibioProducto ? '#dc2626' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                                      ❌ No recibí
+                                    </button>
+                                  </div>
+                                  {!pc.recibioProducto && (
+                                    <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10, padding: '10px 12px' }}>
+                                      <p style={{ fontSize: 12, fontWeight: 700, color: '#c2410c', margin: '0 0 6px' }}>⚠️ Razón obligatoria</p>
+                                      <select value={pc.justProducto} onChange={(e) => setPendingConfirm((p) => p ? { ...p, justProducto: e.target.value } : p)}
+                                        style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid #fed7aa', fontSize: 13, background: '#fff', outline: 'none', marginBottom: pc.justProducto === 'Otro' ? 8 : 0 }}>
+                                        <option value="">— Seleccionar razón —</option>
+                                        {RAZONES.map((r) => <option key={r} value={r}>{r}</option>)}
+                                      </select>
+                                      {pc.justProducto === 'Otro' && (
+                                        <textarea placeholder="Describe la situación…"
+                                          onChange={(e) => setPendingConfirm((p) => p ? { ...p, justProducto: e.target.value || 'Otro' } : p)}
+                                          style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid #fed7aa', fontSize: 13, resize: 'none' as const, height: 64, outline: 'none', boxSizing: 'border-box' as const }} />
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                                <button onClick={() => setPendingConfirm(null)}
+                                  style={{ flexShrink: 0, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '12px 16px', color: '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                                  Cancelar
                                 </button>
                                 <button
-                                  onClick={() => setPendingConfirm((p) => p ? { ...p, recibioDelivery: false } : p)}
-                                  style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${!pendingConfirm.recibioDelivery ? '#dc2626' : '#e5e7eb'}`, background: !pendingConfirm.recibioDelivery ? '#fee2e2' : '#fff', color: !pendingConfirm.recibioDelivery ? '#dc2626' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
-                                >
-                                  ❌ No recibí
+                                  disabled={bloqueado}
+                                  onClick={() => {
+                                    setPendingConfirm(null);
+                                    executeCambiar(pc.order, pc.nuevo, {
+                                      delivery: pc.showDelivery ? { monto: pc.montoDelivery, recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? pc.justDelivery : undefined } : undefined,
+                                      producto: pc.showProducto ? { monto: pc.montoProducto, recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? pc.justProducto : undefined } : undefined,
+                                    });
+                                  }}
+                                  style={{ flex: 1, background: bloqueado ? '#d1d5db' : '#16a34a', border: 'none', borderRadius: 12, padding: '12px 16px', color: '#fff', fontSize: 14, fontWeight: 800, cursor: bloqueado ? 'not-allowed' : 'pointer', transition: 'background 0.2s' }}>
+                                  {actionId ? 'Guardando…' : bloqueadoDelivery || bloqueadoProducto ? 'Indica la razón para continuar' : 'Confirmar y avanzar →'}
                                 </button>
                               </div>
                             </div>
-                          )}
-                          {pendingConfirm.showProducto && (
-                            <div style={{ marginBottom: 12 }}>
-                              <p style={{ fontSize: 13, color: '#374151', fontWeight: 600, margin: '0 0 8px' }}>
-                                ¿Recibiste {fmt(pendingConfirm.montoProducto)} del producto?
-                              </p>
-                              <div style={{ display: 'flex', gap: 8 }}>
-                                <button
-                                  onClick={() => setPendingConfirm((p) => p ? { ...p, recibioProducto: true } : p)}
-                                  style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${pendingConfirm.recibioProducto ? '#16a34a' : '#e5e7eb'}`, background: pendingConfirm.recibioProducto ? '#16a34a' : '#fff', color: pendingConfirm.recibioProducto ? '#fff' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
-                                >
-                                  ✅ Sí, recibí
-                                </button>
-                                <button
-                                  onClick={() => setPendingConfirm((p) => p ? { ...p, recibioProducto: false } : p)}
-                                  style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${!pendingConfirm.recibioProducto ? '#dc2626' : '#e5e7eb'}`, background: !pendingConfirm.recibioProducto ? '#fee2e2' : '#fff', color: !pendingConfirm.recibioProducto ? '#dc2626' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
-                                >
-                                  ❌ No recibí
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                            <button
-                              onClick={() => setPendingConfirm(null)}
-                              style={{ flexShrink: 0, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '12px 16px', color: '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
-                            >
-                              Cancelar
-                            </button>
-                            <button
-                              disabled={!!actionId}
-                              onClick={() => {
-                                const pc = pendingConfirm;
-                                setPendingConfirm(null);
-                                executeCambiar(pc.order, pc.nuevo, {
-                                  delivery: pc.showDelivery ? { monto: pc.montoDelivery, recibio: pc.recibioDelivery } : undefined,
-                                  producto: pc.showProducto ? { monto: pc.montoProducto, recibio: pc.recibioProducto } : undefined,
-                                });
-                              }}
-                              style={{ flex: 1, background: '#16a34a', border: 'none', borderRadius: 12, padding: '12px 16px', color: '#fff', fontSize: 14, fontWeight: 800, cursor: 'pointer' }}
-                            >
-                              {actionId ? 'Guardando…' : 'Confirmar y avanzar →'}
-                            </button>
-                          </div>
-                        </div>
+                          );
+                        })()
                       ) : (
                         <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8, padding: '14px 0 16px' }}>
                           {actions.map((a) => {
@@ -698,7 +747,7 @@ export default function PanelMotorizadoPage() {
             </div>
 
             {depositosPendientes.length === 0
-              ? <EmptyState icon="✅" title="Sin depósitos pendientes" subtitle="Hoy no hay efectivo por depositar" />
+              ? <EmptyState icon="✅" title="Sin depósitos pendientes" subtitle="No hay efectivo por depositar" />
               : (
                 <>
                   <p style={{ fontSize: 12, color: '#9ca3af', marginBottom: 10, fontWeight: 600 }}>DETALLE POR ORDEN</p>
@@ -771,6 +820,20 @@ export default function PanelMotorizadoPage() {
                           </div>
 
                           <p style={{ fontSize: 11, color: '#9ca3af', margin: '10px 0 0', padding: '8px 0 0', borderTop: '1px solid #f3f4f6' }}>{dep.descripcion}</p>
+
+                          {/* Botón confirmar depósito */}
+                          <button
+                            onClick={async () => {
+                              if (!confirm('¿Confirmás que ya realizaste el depósito de esta orden?')) return;
+                              await updateDoc(doc(db, 'solicitudes_envio', o.id), {
+                                'registro.deposito.confirmadoMotorizado': true,
+                                'registro.deposito.confirmadoAt': serverTimestamp(),
+                              });
+                            }}
+                            style={{ marginTop: 12, width: '100%', background: '#16a34a', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}
+                          >
+                            ✅ Confirmar depósito realizado
+                          </button>
                         </div>
                       </div>
                     );

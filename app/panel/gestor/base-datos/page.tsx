@@ -43,7 +43,7 @@ type Registro = {
   semana?: number
   zona?: string
   pago?: { realizo?: boolean; esCash?: boolean }
-  deposito?: { fecha?: Timestamp | null; monto?: number | null; formaPago?: string | null }
+  deposito?: { fecha?: Timestamp | null; monto?: number | null; formaPago?: string | null; confirmadoMotorizado?: boolean; confirmadoAt?: Timestamp | null }
   csRecaudado?: number
   usdRecaudado?: number
   numEntregas?: number
@@ -112,6 +112,11 @@ type Solicitud = {
   }
   userId?: string
   ownerSnapshot?: { companyName?: string; phone?: string; nombre?: string; uid?: string }
+  cobrosMotorizado?: {
+    delivery?: { monto: number; recibio: boolean; at?: any; justificacion?: string }
+    producto?: { monto: number; recibio: boolean; at?: any; justificacion?: string }
+    resolucion?: { resueltoPor: string; at?: any; nota?: string }
+  }
   registro?: Registro
 }
 
@@ -752,7 +757,7 @@ export default function BaseDatosPage() {
               <tr className="border-b bg-gray-50 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">
                 <Th>#</Th><Th>Estado</Th><Th>Semana</Th><Th>Motorizado</Th><Th>Fecha</Th><Th>Pagó</Th>
                 <Th>Comercio</Th><Th>Teléfono</Th><Th>Retiro</Th><Th>Entrega</Th><Th>Zona</Th><Th>Delivery</Th>
-                <Th>C/E Producto</Th><Th>F. Depósito</Th><Th>Depositado</Th><Th>Forma Pago</Th>
+                <Th>C/E Producto</Th><Th>F. Depósito</Th><Th>Depositado</Th><Th>Forma Pago</Th><Th>Dep. Motor.</Th>
                 <Th>C$</Th><Th>$</Th><Th>Dist.</Th>
               </tr>
             </thead>
@@ -806,6 +811,12 @@ export default function BaseDatosPage() {
                         <option value="credito">Crédito</option>
                       </select>
                     </Td>
+                    <Td>
+                      {s.registro?.deposito?.confirmadoMotorizado
+                        ? <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700" title={s.registro.deposito.confirmadoAt ? formatDateTime(s.registro.deposito.confirmadoAt) : ''}>✓ Confirmado</span>
+                        : <span className="inline-flex items-center rounded-full bg-yellow-50 border border-yellow-200 px-2 py-0.5 text-[11px] font-semibold text-yellow-700">Pendiente</span>
+                      }
+                    </Td>
                     <Td><EditableCell value={s.registro?.csRecaudado ?? ''} type="number" prefix="C$" placeholder="—" onSave={(v) => updateRegistro(s.id, { csRecaudado: v ? Number(v) : undefined })} /></Td>
                     <Td><EditableCell value={s.registro?.usdRecaudado ?? ''} type="number" prefix="$" placeholder="—" onSave={(v) => updateRegistro(s.id, { usdRecaudado: v ? Number(v) : undefined })} /></Td>
                     <Td>{s.cotizacion?.distanciaKm != null ? `${Number(s.cotizacion.distanciaKm).toFixed(1)} km` : <span className="text-gray-300">—</span>}</Td>
@@ -818,7 +829,7 @@ export default function BaseDatosPage() {
                 <Td colSpan={11}><span className="text-[11px] uppercase tracking-wide text-gray-500">Totales</span></Td>
                 <Td><span className="text-[#004aad]">C${totales.precio.toFixed(0)}</span></Td>
                 <Td><span className="text-green-700">C${totales.totalDelivery.toFixed(0)}</span></Td>
-                <Td /><Td><span>C${totales.depositado.toFixed(0)}</span></Td><Td />
+                <Td /><Td><span>C${totales.depositado.toFixed(0)}</span></Td><Td /><Td />
                 <Td><span>C${totales.cs.toFixed(0)}</span></Td>
                 <Td><span>${totales.usd.toFixed(2)}</span></Td>
                 <Td />
