@@ -65,6 +65,10 @@ type Solicitud = {
     deposito?: {
       confirmadoMotorizado?: boolean;
       confirmadoAt?: Timestamp;
+      confirmadoComercio?: boolean;
+      confirmadoComercioAt?: Timestamp;
+      confirmadoStorkhub?: boolean;
+      confirmadoStorkhubAt?: Timestamp;
     };
   };
 };
@@ -379,7 +383,12 @@ export default function PanelMotorizadoPage() {
     entregadas.filter((o) => {
       const dep = calcDeposito(o);
       if (dep.totalAlComercio === 0 && dep.totalAStorkhub === 0) return false;
-      return !o.registro?.deposito?.confirmadoMotorizado;
+      // Compatibilidad con flag viejo
+      if (o.registro?.deposito?.confirmadoMotorizado) return false;
+      // Nuevos flags separados
+      const comercioOk = dep.totalAlComercio === 0 || !!o.registro?.deposito?.confirmadoComercio;
+      const storkhubOk = dep.totalAStorkhub === 0 || !!o.registro?.deposito?.confirmadoStorkhub;
+      return !comercioOk || !storkhubOk;
     }), [entregadas]);
 
   const resumenDepositos = useMemo(() => {
@@ -392,21 +401,59 @@ export default function PanelMotorizadoPage() {
     return { alComercio, aStorkhub, total: alComercio + aStorkhub };
   }, [depositosPendientes]);
 
+  // ── Grupos de depósito ────────────────────────────────────────────────────
+  type GrupoComercio = { uid: string; nombre: string; orders: Solicitud[]; total: number; accounts: BankAccount[] }
+  type GrupoStorkhub = { orders: Solicitud[]; total: number }
+
+  const gruposDeposito = useMemo(() => {
+    const storkhub: GrupoStorkhub = { orders: [], total: 0 }
+    const comerciosMap: Record<string, GrupoComercio> = {}
+
+    depositosPendientes.forEach((o) => {
+      const dep = calcDeposito(o)
+      if (dep.totalAStorkhub > 0 && !o.registro?.deposito?.confirmadoStorkhub) {
+        storkhub.orders.push(o)
+        storkhub.total += dep.totalAStorkhub
+      }
+      if (dep.totalAlComercio > 0 && !o.registro?.deposito?.confirmadoComercio) {
+        const uid = o.userId || '__sin'
+        if (!comerciosMap[uid]) {
+          const nombre = o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre || uid.slice(0, 8)
+          comerciosMap[uid] = { uid, nombre, orders: [], total: 0, accounts: comercioAccounts[uid] || [] }
+        }
+        comerciosMap[uid].orders.push(o)
+        comerciosMap[uid].total += dep.totalAlComercio
+        // Update accounts if loaded
+        if (comercioAccounts[uid]) comerciosMap[uid].accounts = comercioAccounts[uid]
+      }
+    })
+    return { storkhub, comercios: Object.values(comerciosMap) }
+  }, [depositosPendientes, comercioAccounts]);
+
+  const [expandidos, setExpandidos] = useState<Record<string, boolean>>({})
+  const toggleExpandido = (key: string) => setExpandidos((p) => ({ ...p, [key]: !p[key] }))
+
   useEffect(() => { if (pendientes.length > 0) setTab('pendientes'); }, [pendientes.length]);
 
   // Load comercio bank accounts for deposit orders
   const [comercioAccounts, setComercioAccounts] = useState<Record<string, BankAccount[]>>({});
+  const depositoUidsKey = depositosPendientes.map((o) => o.userId || '').join(',');
   useEffect(() => {
     const uids = [...new Set(depositosPendientes.map((o) => o.userId).filter(Boolean))] as string[];
     if (uids.length === 0) return;
-    Promise.all(uids.map((uid) => getDoc(doc(db, 'comercios', uid)))).then((snaps) => {
+    // Only fetch UIDs not yet loaded
+    const missing = uids.filter((uid) => !(uid in comercioAccounts));
+    if (missing.length === 0) return;
+    Promise.all(missing.map((uid) => getDoc(doc(db, 'comercios', uid)))).then((snaps) => {
       const map: Record<string, BankAccount[]> = {};
       snaps.forEach((snap, i) => {
-        if (snap.exists()) map[uids[i]] = (snap.data()?.accounts as BankAccount[]) || [];
+        const data = snap.exists() ? (snap.data() as any) : null;
+        map[missing[i]] = Array.isArray(data?.accounts) ? (data.accounts as BankAccount[]) : [];
       });
-      setComercioAccounts(map);
+      setComercioAccounts((prev) => ({ ...prev, ...map }));
     });
-  }, [depositosPendientes]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depositoUidsKey]);
 
   if (loading) return (
     <div style={{ minHeight: '100vh', background: '#f9fafb', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
@@ -750,89 +797,133 @@ export default function PanelMotorizadoPage() {
               ? <EmptyState icon="✅" title="Sin depósitos pendientes" subtitle="No hay efectivo por depositar" />
               : (
                 <>
-                  <p style={{ fontSize: 12, color: '#9ca3af', marginBottom: 10, fontWeight: 600 }}>DETALLE POR ORDEN</p>
-                  {depositosPendientes.map((o) => {
-                    const dep = calcDeposito(o);
+                  {/* ── Grupo Storkhub ── */}
+                  {gruposDeposito.storkhub.orders.length > 0 && (() => {
+                    const g = gruposDeposito.storkhub;
+                    const key = '__storkhub';
+                    const expanded = !!expandidos[key];
                     return (
-                      <div key={o.id} style={{ background: '#fff', borderRadius: 16, marginBottom: 10, border: '1px solid #e5e7eb', overflow: 'hidden', boxShadow: '0 1px 2px rgba(0,0,0,0.04)' }}>
-                        <div style={{ height: 3, background: '#7c3aed' }} />
-                        <div style={{ padding: '12px 14px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
+                      <div style={{ background: '#fff', borderRadius: 16, marginBottom: 12, border: '1px solid #bfdbfe', overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+                        <div style={{ height: 4, background: '#2563eb' }} />
+                        <div style={{ padding: '14px 16px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
                             <div>
-                              <p style={{ fontSize: 13, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{o.entrega?.nombreApellido || '-'}</p>
-                              <p style={{ fontSize: 11, color: '#9ca3af', margin: 0, fontFamily: 'monospace' }}>#{o.id.slice(0, 10)}</p>
+                              <p style={{ fontSize: 12, fontWeight: 700, color: '#2563eb', textTransform: 'uppercase' as const, margin: '0 0 3px', letterSpacing: 0.5 }}>🏦 Storkhub — Delivery en efectivo</p>
+                              <p style={{ fontSize: 11, color: '#60a5fa', margin: 0 }}>{g.orders.length} orden{g.orders.length !== 1 ? 'es' : ''}</p>
                             </div>
-                            <p style={{ fontSize: 11, color: '#9ca3af', margin: 0 }}>{fmtTime(o.entregadoAt)}</p>
+                            <p style={{ fontSize: 22, fontWeight: 900, color: '#2563eb', margin: 0 }}>{fmt(g.total)}</p>
                           </div>
-
-                          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
-                            {dep.totalAlComercio > 0 && (
-                              <div style={{ background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 10, padding: '10px 14px' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                                  <div>
-                                    <p style={{ fontSize: 11, fontWeight: 700, color: '#7c3aed', textTransform: 'uppercase' as const, margin: '0 0 2px', letterSpacing: 0.5 }}>🏪 Depositar al comercio</p>
-                                    <p style={{ fontSize: 11, color: '#a78bfa', margin: 0 }}>Cobro del producto entregado</p>
-                                  </div>
-                                  <span style={{ fontSize: 18, fontWeight: 900, color: '#7c3aed' }}>{fmt(dep.totalAlComercio)}</span>
-                                </div>
-                                {(comercioAccounts[o.userId || ''] || []).length > 0 ? (
-                                  <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
-                                    <p style={{ fontSize: 10, fontWeight: 700, color: '#6d28d9', textTransform: 'uppercase' as const, margin: 0, letterSpacing: 0.5 }}>Cuentas del comercio:</p>
-                                    {(comercioAccounts[o.userId || ''] || []).map((acc, ai) => (
-                                      <div key={ai} style={{ background: '#ede9fe', border: '1px solid #ddd6fe', borderRadius: 8, padding: '7px 10px' }}>
-                                        <p style={{ fontSize: 12, fontWeight: 700, color: '#5b21b6', margin: '0 0 2px' }}>{acc.bank} · {acc.currency}</p>
-                                        <p style={{ fontSize: 13, fontWeight: 800, color: '#4c1d95', margin: '0 0 2px', fontFamily: 'monospace' }}>{acc.number}</p>
-                                        <p style={{ fontSize: 11, color: '#7c3aed', margin: 0 }}>{acc.holder}</p>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <p style={{ fontSize: 11, color: '#a78bfa', margin: 0, fontStyle: 'italic' }}>El comercio no tiene cuentas registradas. Coordiná el depósito directamente.</p>
-                                )}
-                              </div>
-                            )}
-                            {dep.totalAStorkhub > 0 && (
-                              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '10px 14px' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                                  <div>
-                                    <p style={{ fontSize: 11, fontWeight: 700, color: '#2563eb', textTransform: 'uppercase' as const, margin: '0 0 2px', letterSpacing: 0.5 }}>🏦 Depositar a Storkhub</p>
-                                    <p style={{ fontSize: 11, color: '#60a5fa', margin: 0 }}>Delivery en efectivo</p>
-                                  </div>
-                                  <span style={{ fontSize: 18, fontWeight: 900, color: '#2563eb' }}>{fmt(dep.totalAStorkhub)}</span>
-                                </div>
-                                <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
-                                  <p style={{ fontSize: 10, fontWeight: 700, color: '#1e40af', textTransform: 'uppercase' as const, margin: 0, letterSpacing: 0.5 }}>Cuentas Storkhub:</p>
-                                  {STORKHUB_ACCOUNTS.map((acc, ai) => (
-                                    <div key={ai} style={{ background: '#dbeafe', border: '1px solid #bfdbfe', borderRadius: 8, padding: '7px 10px' }}>
-                                      <p style={{ fontSize: 12, fontWeight: 700, color: '#1e3a8a', margin: '0 0 2px' }}>{acc.bank} · {acc.currency}</p>
-                                      <p style={{ fontSize: 13, fontWeight: 800, color: '#1e40af', margin: '0 0 2px', fontFamily: 'monospace' }}>{acc.number}</p>
-                                      <p style={{ fontSize: 11, color: '#3b82f6', margin: 0 }}>{acc.holder}</p>
+                          <button onClick={() => toggleExpandido(key)}
+                            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12, color: '#60a5fa', fontWeight: 600, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 4 }}>
+                            {expanded ? '▲ Ocultar desglose' : '▼ Ver desglose'}
+                          </button>
+                          {expanded && (
+                            <div style={{ background: '#f0f9ff', borderRadius: 10, padding: '8px 10px', marginBottom: 10 }}>
+                              {g.orders.map((o) => {
+                                const dep = calcDeposito(o);
+                                return (
+                                  <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '1px solid #e0f2fe' }}>
+                                    <div>
+                                      <p style={{ fontSize: 12, fontWeight: 600, color: '#1e40af', margin: 0 }}>{o.entrega?.nombreApellido || '—'}</p>
+                                      <p style={{ fontSize: 10, color: '#93c5fd', margin: 0, fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</p>
                                     </div>
-                                  ))}
-                                </div>
+                                    <p style={{ fontSize: 13, fontWeight: 700, color: '#2563eb', margin: 0 }}>{fmt(dep.totalAStorkhub)}</p>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6, marginBottom: 12 }}>
+                            <p style={{ fontSize: 10, fontWeight: 700, color: '#1e40af', textTransform: 'uppercase' as const, margin: 0, letterSpacing: 0.5 }}>Cuentas Storkhub:</p>
+                            {STORKHUB_ACCOUNTS.map((acc, ai) => (
+                              <div key={ai} style={{ background: '#dbeafe', border: '1px solid #bfdbfe', borderRadius: 8, padding: '7px 10px' }}>
+                                <p style={{ fontSize: 12, fontWeight: 700, color: '#1e3a8a', margin: '0 0 2px' }}>{acc.bank} · {acc.currency}</p>
+                                <p style={{ fontSize: 13, fontWeight: 800, color: '#1e40af', margin: '0 0 2px', fontFamily: 'monospace' }}>{acc.number}</p>
+                                <p style={{ fontSize: 11, color: '#3b82f6', margin: 0 }}>{acc.holder}</p>
                               </div>
-                            )}
-                            {dep.deliveryPorTransferencia && (
-                              <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '10px 14px' }}>
-                                <p style={{ fontSize: 12, color: '#16a34a', fontWeight: 600, margin: 0 }}>✓ Delivery pagado por transferencia — no hay efectivo que depositar por delivery</p>
-                              </div>
-                            )}
+                            ))}
                           </div>
-
-                          <p style={{ fontSize: 11, color: '#9ca3af', margin: '10px 0 0', padding: '8px 0 0', borderTop: '1px solid #f3f4f6' }}>{dep.descripcion}</p>
-
-                          {/* Botón confirmar depósito */}
                           <button
                             onClick={async () => {
-                              if (!confirm('¿Confirmás que ya realizaste el depósito de esta orden?')) return;
-                              await updateDoc(doc(db, 'solicitudes_envio', o.id), {
-                                'registro.deposito.confirmadoMotorizado': true,
-                                'registro.deposito.confirmadoAt': serverTimestamp(),
-                              });
+                              if (!confirm(`¿Confirmás el depósito de ${fmt(g.total)} a Storkhub?`)) return;
+                              const b = writeBatch(db);
+                              g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
+                                'registro.deposito.confirmadoStorkhub': true,
+                                'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
+                              }));
+                              await b.commit();
                             }}
-                            style={{ marginTop: 12, width: '100%', background: '#16a34a', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}
-                          >
-                            ✅ Confirmar depósito realizado
+                            style={{ width: '100%', background: '#2563eb', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>
+                            ✅ Confirmar depósito a Storkhub
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* ── Grupos por Comercio ── */}
+                  {gruposDeposito.comercios.map((g) => {
+                    const key = g.uid;
+                    const expanded = !!expandidos[key];
+                    return (
+                      <div key={key} style={{ background: '#fff', borderRadius: 16, marginBottom: 12, border: '1px solid #e9d5ff', overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+                        <div style={{ height: 4, background: '#7c3aed' }} />
+                        <div style={{ padding: '14px 16px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+                            <div>
+                              <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', textTransform: 'uppercase' as const, margin: '0 0 3px', letterSpacing: 0.5 }}>🏪 {g.nombre}</p>
+                              <p style={{ fontSize: 11, color: '#a78bfa', margin: 0 }}>Cobro producto · {g.orders.length} orden{g.orders.length !== 1 ? 'es' : ''}</p>
+                            </div>
+                            <p style={{ fontSize: 22, fontWeight: 900, color: '#7c3aed', margin: 0 }}>{fmt(g.total)}</p>
+                          </div>
+                          <button onClick={() => toggleExpandido(key)}
+                            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12, color: '#a78bfa', fontWeight: 600, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 4 }}>
+                            {expanded ? '▲ Ocultar desglose' : '▼ Ver desglose'}
+                          </button>
+                          {expanded && (
+                            <div style={{ background: '#faf5ff', borderRadius: 10, padding: '8px 10px', marginBottom: 10 }}>
+                              {g.orders.map((o) => {
+                                const dep = calcDeposito(o);
+                                return (
+                                  <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '1px solid #ede9fe' }}>
+                                    <div>
+                                      <p style={{ fontSize: 12, fontWeight: 600, color: '#5b21b6', margin: 0 }}>{o.entrega?.nombreApellido || '—'}</p>
+                                      <p style={{ fontSize: 10, color: '#c4b5fd', margin: 0, fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</p>
+                                    </div>
+                                    <p style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', margin: 0 }}>{fmt(dep.totalAlComercio)}</p>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          <div style={{ marginBottom: 12 }}>
+                            {g.accounts.length > 0 ? (
+                              <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
+                                <p style={{ fontSize: 10, fontWeight: 700, color: '#6d28d9', textTransform: 'uppercase' as const, margin: '0 0 4px', letterSpacing: 0.5 }}>Cuentas del comercio:</p>
+                                {g.accounts.map((acc, ai) => (
+                                  <div key={ai} style={{ background: '#ede9fe', border: '1px solid #ddd6fe', borderRadius: 8, padding: '7px 10px' }}>
+                                    <p style={{ fontSize: 12, fontWeight: 700, color: '#5b21b6', margin: '0 0 2px' }}>{acc.bank} · {acc.currency}</p>
+                                    <p style={{ fontSize: 13, fontWeight: 800, color: '#4c1d95', margin: '0 0 2px', fontFamily: 'monospace' }}>{acc.number}</p>
+                                    <p style={{ fontSize: 11, color: '#7c3aed', margin: 0 }}>{acc.holder}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p style={{ fontSize: 11, color: '#a78bfa', margin: 0, fontStyle: 'italic' }}>El comercio no tiene cuentas registradas. Coordiná el depósito directamente.</p>
+                            )}
+                          </div>
+                          <button
+                            onClick={async () => {
+                              if (!confirm(`¿Confirmás el depósito de ${fmt(g.total)} al comercio ${g.nombre}?`)) return;
+                              const b = writeBatch(db);
+                              g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
+                                'registro.deposito.confirmadoComercio': true,
+                                'registro.deposito.confirmadoComercioAt': serverTimestamp(),
+                              }));
+                              await b.commit();
+                            }}
+                            style={{ width: '100%', background: '#7c3aed', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>
+                            ✅ Confirmar depósito al comercio
                           </button>
                         </div>
                       </div>
