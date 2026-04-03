@@ -43,7 +43,7 @@ type Registro = {
   semana?: number
   zona?: string
   pago?: { realizo?: boolean; esCash?: boolean }
-  deposito?: { fecha?: Timestamp | null; monto?: number | null; formaPago?: string | null; confirmadoMotorizado?: boolean; confirmadoAt?: Timestamp | null }
+  deposito?: { fecha?: Timestamp | null; monto?: number | null; formaPago?: string | null; confirmadoMotorizado?: boolean; confirmadoAt?: Timestamp | null; confirmadoComercio?: boolean; confirmadoComercioAt?: Timestamp | null; confirmadoStorkhub?: boolean; confirmadoStorkhubAt?: Timestamp | null }
   csRecaudado?: number
   usdRecaudado?: number
   numEntregas?: number
@@ -812,10 +812,23 @@ export default function BaseDatosPage() {
                       </select>
                     </Td>
                     <Td>
-                      {s.registro?.deposito?.confirmadoMotorizado
-                        ? <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700" title={s.registro.deposito.confirmadoAt ? formatDateTime(s.registro.deposito.confirmadoAt) : ''}>✓ Confirmado</span>
-                        : <span className="inline-flex items-center rounded-full bg-yellow-50 border border-yellow-200 px-2 py-0.5 text-[11px] font-semibold text-yellow-700">Pendiente</span>
-                      }
+                      {(() => {
+                        const dep = s.registro?.deposito
+                        // Flag viejo (compatibilidad)
+                        if (dep?.confirmadoMotorizado) {
+                          return <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700" title={dep.confirmadoAt ? formatDateTime(dep.confirmadoAt) : ''}>✓ Todo</span>
+                        }
+                        const okC = dep?.confirmadoComercio
+                        const okS = dep?.confirmadoStorkhub
+                        if (!okC && !okS) return <span className="inline-flex items-center rounded-full bg-yellow-50 border border-yellow-200 px-2 py-0.5 text-[11px] font-semibold text-yellow-700">Pendiente</span>
+                        if (okC && okS) return <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700">✓ Todo</span>
+                        return (
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${okC ? 'bg-green-50 border-green-200 text-green-700' : 'bg-yellow-50 border-yellow-200 text-yellow-700'}`} title={dep?.confirmadoComercioAt ? formatDateTime(dep.confirmadoComercioAt) : ''}>{okC ? '✓ Comercio' : '⏳ Comercio'}</span>
+                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${okS ? 'bg-green-50 border-green-200 text-green-700' : 'bg-yellow-50 border-yellow-200 text-yellow-700'}`} title={dep?.confirmadoStorkhubAt ? formatDateTime(dep.confirmadoStorkhubAt) : ''}>{okS ? '✓ Storkhub' : '⏳ Storkhub'}</span>
+                          </div>
+                        )
+                      })()}
                     </Td>
                     <Td><EditableCell value={s.registro?.csRecaudado ?? ''} type="number" prefix="C$" placeholder="—" onSave={(v) => updateRegistro(s.id, { csRecaudado: v ? Number(v) : undefined })} /></Td>
                     <Td><EditableCell value={s.registro?.usdRecaudado ?? ''} type="number" prefix="$" placeholder="—" onSave={(v) => updateRegistro(s.id, { usdRecaudado: v ? Number(v) : undefined })} /></Td>
