@@ -274,6 +274,10 @@ export default function AjustesPage() {
 
   const guardarFavorito = async () => {
     if (!favLabel.trim()) { setFavError('El nombre del lugar es obligatorio.'); return }
+    const duplicateLabel = puntosFavoritos.some(
+      f => f.key !== editingKey && f.label.trim().toLowerCase() === favLabel.trim().toLowerCase()
+    )
+    if (duplicateLabel) { setFavError('Ya existe un punto favorito con ese nombre. Usá un nombre distinto para identificarlo.'); return }
     setSavingFav(true); setFavError('')
     try {
       const key = editingKey || `punto_${Date.now()}`

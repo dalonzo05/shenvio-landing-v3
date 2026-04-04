@@ -162,6 +162,33 @@ async function guardarClienteEntrega(uid: string, data: Omit<ClienteGuardado, 'i
   await setDoc(doc(db, 'clientes_envio', docId), payload, { merge: true })
 }
 
+async function guardarPuntoFavorito(uid: string, label: string, data: RetiroState, geocode: string) {
+  const key = `punto_${Date.now()}`
+  const payload: Record<string, any> = {
+    label: label.trim(),
+    nombre: data.nombre.trim() || label.trim(),
+    celular: data.celular.trim(),
+    direccion: data.direccion.trim(),
+    tipoUbicacion: data.tipoUbicacion,
+    updatedAt: serverTimestamp(),
+  }
+  if (data.coord) payload.coord = data.coord
+  if (geocode.trim()) payload.geocodeGoogle = geocode.trim()
+  await setDoc(doc(db, 'comercios', uid), { puntosRetiro: { [key]: payload }, updatedAt: serverTimestamp() }, { merge: true })
+}
+
+// ─── Phone helpers ────────────────────────────────────────────────────────────
+
+function formatCelular(v: string): string {
+  const digits = v.replace(/\D/g, '').slice(0, 8)
+  if (digits.length <= 4) return digits
+  return `${digits.slice(0, 4)}-${digits.slice(4)}`
+}
+
+function validarCelular(v: string): boolean {
+  return /^\d{4}-\d{4}$/.test(v.trim())
+}
+
 // ─── Static Mini Map (read-only, for favorites) ───────────────────────────────
 
 function StaticMiniMap({ coord, color = '#004aad', label = 'R' }: {
@@ -643,6 +670,7 @@ const S: Record<string, React.CSSProperties> = {
   dropdown: { position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 50, marginTop: 4, overflow: 'hidden' },
   dropdownItem: { display: 'block', width: '100%', textAlign: 'left' as const, padding: '10px 14px', border: 'none', background: 'none', cursor: 'pointer', borderBottom: '1px solid #f3f4f6', fontSize: 13 },
   btnOutline: { padding: '7px 14px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#fff', fontSize: 12, fontWeight: 600, color: '#374151', cursor: 'pointer' },
+  btnPrimary: { background: '#004aad', border: 'none', borderRadius: 10, padding: '10px 20px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer' },
 }
 
 const blankRetiro = (): RetiroState => ({ favKey: '__otro__', nombre: '', celular: '', direccion: '', coord: null, tipoUbicacion: 'referencial' })
@@ -708,6 +736,16 @@ export default function SolicitarEnvioPage() {
   const [horaRetiro, setHoraRetiro] = useState('')
   const [fechaEntrega, setFechaEntrega] = useState('')
   const [horaEntrega, setHoraEntrega] = useState('')
+
+  // Paquete
+  const [fragil, setFragil] = useState(false)
+  const [grande, setGrande] = useState(false)
+  const [notaPaquete, setNotaPaquete] = useState('')
+
+  // Guardar retiro como favorito
+  const [showGuardarFav, setShowGuardarFav] = useState(false)
+  const [newFavLabel, setNewFavLabel] = useState('')
+  const [savingNewFav, setSavingNewFav] = useState(false)
 
   // ── Manual price calculation ──
   const [calcResult, setCalcResult] = useState<{ km: number; precio: number } | null>(null)
@@ -777,6 +815,22 @@ export default function SolicitarEnvioPage() {
     })
   }
 
+  // ── Guardar retiro como favorito ──
+  const handleGuardarComoFavorito = async () => {
+    if (!newFavLabel.trim() || !uid) return
+    setSavingNewFav(true)
+    try {
+      await guardarPuntoFavorito(uid, newFavLabel, retiro, geocodeRetiro)
+      setShowGuardarFav(false)
+      setNewFavLabel('')
+      setMsg({ type: 'success', text: `⭐ "${newFavLabel}" guardado como favorito. Ya aparecerá en la lista.` })
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setSavingNewFav(false)
+    }
+  }
+
   // ── Inversion ──
   const handleInvertir = () => {
     const r = { ...retiro }
@@ -809,9 +863,11 @@ export default function SolicitarEnvioPage() {
     const f: string[] = []
     if (!retiro.nombre.trim()) f.push('Nombre de retiro')
     if (!retiro.celular.trim()) f.push('Celular de retiro')
+    else if (!validarCelular(retiro.celular)) f.push('Celular de retiro — formato XXXX-XXXX')
     if (!retiro.direccion.trim()) f.push('Dirección de retiro')
     if (!entrega.nombre.trim()) f.push('Nombre de entrega')
     if (!entrega.celular.trim()) f.push('Celular de entrega')
+    else if (!validarCelular(entrega.celular)) f.push('Celular de entrega — formato XXXX-XXXX')
     if (!entrega.direccion.trim()) f.push('Dirección de entrega')
     if (cobroCE && (montoCE === '' || Number(montoCE) <= 0)) f.push('Monto del cobro contra entrega')
     if (tipoCliente === 'contado' && !quienPagaDelivery) f.push('Quién paga el delivery')
@@ -889,6 +945,11 @@ export default function SolicitarEnvioPage() {
         pagoDelivery: tipoCliente === 'credito'
           ? { tipo: 'credito_semanal', quienPaga: 'credito_semanal', montoSugerido: precioEfectivo }
           : { tipo: 'contado', quienPaga: quienPagaDelivery, montoSugerido: precioEfectivo, deducirDelCobroContraEntrega: deducirAplica },
+        paquete: (fragil || grande) ? {
+          fragil,
+          grande,
+          notaPaquete: grande && notaPaquete.trim() ? notaPaquete.trim() : null,
+        } : null,
         detalle: detalle.trim(),
         numeroOrden: numeroOrden.trim() || null,
         programado: esProgramado
@@ -923,6 +984,8 @@ export default function SolicitarEnvioPage() {
       setCobroCE(false); setMontoCE(''); setQuienPagaDelivery(''); setDeducirDelivery('no_deducir'); setDetalle('')
       setCalcResult(null); lastCalcKey.current = null
       setNotaRetiro(''); setNotaEntrega(''); setShowNotaRetiro(false); setShowNotaEntrega(false)
+      setFragil(false); setGrande(false); setNotaPaquete('')
+      setShowGuardarFav(false); setNewFavLabel('')
       setNumeroOrden('')
       setEsProgramado(false); setTipoProgramado('retiro'); setFechaRetiro(''); setHoraRetiro(''); setFechaEntrega(''); setHoraEntrega('')
       setGeoRetiro(''); setGeoEntrega('')
@@ -1012,7 +1075,16 @@ export default function SolicitarEnvioPage() {
         </Field>
 
         <Field label="Celular" required>
-          <input value={retiro.celular} onChange={e => setRetiro(prev => ({ ...prev, celular: e.target.value }))} placeholder="Ej: 8888-8888" style={S.input} />
+          <input
+            value={retiro.celular}
+            onChange={e => setRetiro(prev => ({ ...prev, celular: formatCelular(e.target.value) }))}
+            placeholder="Ej: 8888-8888"
+            maxLength={9}
+            style={{ ...S.input, borderColor: retiro.celular && !validarCelular(retiro.celular) ? '#dc2626' : '#e5e7eb' }}
+          />
+          {retiro.celular && !validarCelular(retiro.celular) && (
+            <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos formato XXXX-XXXX</p>
+          )}
         </Field>
 
         <Field label="Dirección escrita" required hint="Descripción para que el motorizado llegue.">
@@ -1052,6 +1124,48 @@ export default function SolicitarEnvioPage() {
           onChange={setNotaRetiro}
           label="¿Hay instrucciones adicionales para el motorizado en el retiro?"
         />
+
+        {/* Guardar como favorito — solo en "Otro" con nombre */}
+        {esOtro && retiro.nombre.trim() && (
+          <div>
+            {!showGuardarFav ? (
+              <button
+                type="button"
+                onClick={() => { setNewFavLabel(retiro.nombre); setShowGuardarFav(true) }}
+                style={{ ...S.btnOutline, color: '#d46b08', borderColor: '#fed7aa', fontSize: 12 }}
+              >
+                ⭐ Guardar como punto favorito
+              </button>
+            ) : (
+              <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '14px 16px' }}>
+                <p style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', margin: '0 0 10px' }}>⭐ Guardar como punto favorito</p>
+                <label style={S.label}>Nombre del lugar <span style={{ color: '#dc2626' }}>*</span></label>
+                <input
+                  value={newFavLabel}
+                  onChange={e => setNewFavLabel(e.target.value)}
+                  placeholder='Ej: Tienda principal, Bodega norte, Casa mamá...'
+                  style={{ ...S.input, marginBottom: 8 }}
+                />
+                <p style={{ fontSize: 11, color: '#9ca3af', margin: '0 0 10px' }}>
+                  Se guardará con la dirección, celular y punto del mapa actual. Aparecerá en futuros envíos.
+                </p>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={handleGuardarComoFavorito}
+                    disabled={savingNewFav || !newFavLabel.trim()}
+                    style={{ padding: '8px 16px', borderRadius: 10, border: 'none', background: '#d46b08', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
+                  >
+                    {savingNewFav ? 'Guardando...' : '⭐ Guardar'}
+                  </button>
+                  <button type="button" onClick={() => { setShowGuardarFav(false); setNewFavLabel('') }} style={S.btnOutline}>
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </SectionCard>
 
       {/* ── ENTREGA ── */}
@@ -1066,15 +1180,20 @@ export default function SolicitarEnvioPage() {
           required
         />
 
-        <AutocompleteInput
-          label="Celular"
-          value={entrega.celular}
-          onChange={v => setEntrega(prev => ({ ...prev, celular: v }))}
-          onSelect={handleSelectEntrega}
-          placeholder="Ej: 7777-7777"
-          clientes={clientesEntrega}
-          required
-        />
+        <div>
+          <AutocompleteInput
+            label="Celular"
+            value={entrega.celular}
+            onChange={v => setEntrega(prev => ({ ...prev, celular: formatCelular(v) }))}
+            onSelect={handleSelectEntrega}
+            placeholder="Ej: 7777-7777"
+            clientes={clientesEntrega}
+            required
+          />
+          {entrega.celular && !validarCelular(entrega.celular) && (
+            <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos formato XXXX-XXXX</p>
+          )}
+        </div>
 
         <Field label="Dirección escrita" required hint="Descripción detallada para que el motorizado llegue.">
           <input value={entrega.direccion} onChange={e => setEntrega(prev => ({ ...prev, direccion: e.target.value }))} placeholder="Ej: Frente al parque, portón negro, casa esquinera" style={S.input} />
@@ -1198,8 +1317,8 @@ export default function SolicitarEnvioPage() {
             {calcLoading && <span style={{ fontSize: 12, color: '#6b7280' }}>⏳ Calculando...</span>}
           </div>
 
-          {/* Route preview — solo cuando el precio está calculado */}
-          {calcResult && retiro.coord && entrega.coord && (
+          {/* Route preview — visible siempre que haya ambos puntos */}
+          {retiro.coord && entrega.coord && (
             <div style={{ marginBottom: 14 }}>
               <RoutePreviewMap origen={retiro.coord} destino={entrega.coord} />
             </div>
@@ -1258,6 +1377,62 @@ export default function SolicitarEnvioPage() {
           )}
         </div>
       )}
+
+      {/* ── PAQUETE ── */}
+      <SectionCard title="Datos del paquete" icon="📦">
+        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' as const }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button
+              type="button"
+              onClick={() => setFragil(v => !v)}
+              style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${fragil ? '#dc2626' : '#d1d5db'}`, background: fragil ? '#dc2626' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
+            >
+              {fragil && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+            </button>
+            <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', cursor: 'pointer' }} onClick={() => setFragil(v => !v)}>
+              🥚 Paquete frágil
+            </label>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button
+              type="button"
+              onClick={() => setGrande(v => !v)}
+              style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${grande ? '#d46b08' : '#d1d5db'}`, background: grande ? '#d46b08' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
+            >
+              {grande && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+            </button>
+            <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', cursor: 'pointer' }} onClick={() => setGrande(v => !v)}>
+              📦 Paquete grande / voluminoso
+            </label>
+          </div>
+        </div>
+
+        {(fragil || grande) && (
+          <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>
+            {fragil && grande
+              ? '⚠️ Manejo con cuidado y espacio para paquete de gran tamaño.'
+              : fragil
+              ? '⚠️ El motorizado sabrá que debe manejar el paquete con especial cuidado.'
+              : '📦 El motorizado sabrá que es un paquete de gran tamaño.'}
+            {' '}El precio podría ajustarse según confirmación del gestor.
+          </p>
+        )}
+
+        {grande && (
+          <Field label="Descripción / dimensiones" hint="Ayudá al motorizado a entender el tamaño o tipo de paquete.">
+            <input
+              value={notaPaquete}
+              onChange={e => setNotaPaquete(e.target.value)}
+              placeholder='Ej: Caja 60×40cm, televisor 32", mueble desmontado...'
+              style={S.input}
+            />
+          </Field>
+        )}
+
+        {!fragil && !grande && (
+          <p style={{ fontSize: 12, color: '#9ca3af', margin: 0 }}>Marcá si el paquete requiere cuidado especial o es de gran tamaño. El gestor lo tendrá en cuenta al confirmar el precio.</p>
+        )}
+      </SectionCard>
 
       {/* ── PAGOS ── */}
       <SectionCard title="Pagos" icon="💰">
