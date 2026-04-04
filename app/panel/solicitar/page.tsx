@@ -162,29 +162,100 @@ async function guardarClienteEntrega(uid: string, data: Omit<ClienteGuardado, 'i
   await setDoc(doc(db, 'clientes_envio', docId), payload, { merge: true })
 }
 
-// ─── Mini Map ─────────────────────────────────────────────────────────────────
+// ─── Static Mini Map (read-only, for favorites) ───────────────────────────────
 
-function MiniMap({
-  coord,
-  onSelect,
-  color = '#004aad',
-  label = 'R',
-}: {
-  coord: LatLng | null
-  onSelect: (c: LatLng, address: string) => void
+function StaticMiniMap({ coord, color = '#004aad', label = 'R' }: {
+  coord: LatLng
   color?: string
   label?: string
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    let mounted = true
+    getMapsLoader().load().then((google) => {
+      if (!mounted || !containerRef.current) return
+      const map = new google.maps.Map(containerRef.current, {
+        center: coord,
+        zoom: 15,
+        disableDefaultUI: true,
+        gestureHandling: 'none',
+        styles: [
+          { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+          { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+        ],
+      })
+      new google.maps.Marker({
+        map,
+        position: coord,
+        icon: { path: google.maps.SymbolPath.CIRCLE, fillColor: color, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 },
+        label: { text: label, color: '#fff', fontWeight: 'bold', fontSize: '11px' },
+      })
+    })
+    return () => { mounted = false }
+  }, [])
+
+  return (
+    <div ref={containerRef} style={{ width: '100%', height: 180, borderRadius: 12, overflow: 'hidden', border: '1px solid #e5e7eb' }} />
+  )
+}
+
+// ─── Mini Map (interactive, with Places search) ───────────────────────────────
+
+function MiniMap({
+  coord,
+  onSelect,
+  onGeocode,
+  color = '#004aad',
+  label = 'R',
+}: {
+  coord: LatLng | null
+  onSelect: (c: LatLng) => void
+  onGeocode?: (addr: string) => void
+  color?: string
+  label?: string
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
   const mapRef = useRef<google.maps.Map | null>(null)
   const markerRef = useRef<google.maps.Marker | null>(null)
   const geocoderRef = useRef<google.maps.Geocoder | null>(null)
+  const onSelectRef = useRef(onSelect)
+  const onGeocodeRef = useRef(onGeocode)
+  useEffect(() => { onSelectRef.current = onSelect })
+  useEffect(() => { onGeocodeRef.current = onGeocode })
 
-  const handlePick = useCallback((c: LatLng) => {
+  const reverseGeocode = useCallback((c: LatLng) => {
     geocoderRef.current?.geocode({ location: c }, (results, status) => {
-      onSelect(c, status === 'OK' && results?.[0] ? results[0].formatted_address : '')
+      if (status === 'OK' && results?.[0]) {
+        onGeocodeRef.current?.(results[0].formatted_address)
+      }
     })
-  }, [onSelect])
+  }, [])
+
+  const placeMarker = useCallback((c: LatLng, goog: typeof google, geocodedAddr?: string) => {
+    markerRef.current?.setMap(null)
+    markerRef.current = new goog.maps.Marker({
+      map: mapRef.current!,
+      position: c,
+      draggable: true,
+      icon: { path: goog.maps.SymbolPath.CIRCLE, fillColor: color, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 },
+      label: { text: label, color: '#fff', fontWeight: 'bold', fontSize: '11px' },
+    })
+    markerRef.current.addListener('dragend', () => {
+      const pos = markerRef.current?.getPosition()
+      if (!pos) return
+      const dc = { lat: pos.lat(), lng: pos.lng() }
+      onSelectRef.current(dc)
+      reverseGeocode(dc)
+    })
+    onSelectRef.current(c)
+    if (geocodedAddr) {
+      onGeocodeRef.current?.(geocodedAddr)
+    } else {
+      reverseGeocode(c)
+    }
+  }, [color, label, reverseGeocode])
 
   useEffect(() => {
     let mounted = true
@@ -203,6 +274,24 @@ function MiniMap({
       })
       geocoderRef.current = new google.maps.Geocoder()
 
+      // Places Autocomplete on search input
+      if (searchRef.current) {
+        const autocomplete = new google.maps.places.Autocomplete(searchRef.current, {
+          componentRestrictions: { country: 'ni' },
+          fields: ['geometry', 'formatted_address'],
+        })
+        autocomplete.addListener('place_changed', () => {
+          const place = autocomplete.getPlace()
+          if (place?.geometry?.location) {
+            const c = { lat: place.geometry.location.lat(), lng: place.geometry.location.lng() }
+            mapRef.current?.panTo(c)
+            mapRef.current?.setZoom(16)
+            placeMarker(c, google, place.formatted_address || '')
+          }
+        })
+      }
+
+      // Initial marker
       if (coord) {
         markerRef.current = new google.maps.Marker({
           map: mapRef.current,
@@ -214,27 +303,16 @@ function MiniMap({
         markerRef.current.addListener('dragend', () => {
           const pos = markerRef.current?.getPosition()
           if (!pos) return
-          handlePick({ lat: pos.lat(), lng: pos.lng() })
+          const dc = { lat: pos.lat(), lng: pos.lng() }
+          onSelectRef.current(dc)
+          reverseGeocode(dc)
         })
       }
 
       mapRef.current.addListener('click', (e: google.maps.MapMouseEvent) => {
         if (!e.latLng) return
         const c = { lat: e.latLng.lat(), lng: e.latLng.lng() }
-        markerRef.current?.setMap(null)
-        markerRef.current = new google.maps.Marker({
-          map: mapRef.current!,
-          position: c,
-          draggable: true,
-          icon: { path: google.maps.SymbolPath.CIRCLE, fillColor: color, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 },
-          label: { text: label, color: '#fff', fontWeight: 'bold', fontSize: '11px' },
-        })
-        markerRef.current.addListener('dragend', () => {
-          const pos = markerRef.current?.getPosition()
-          if (!pos) return
-          handlePick({ lat: pos.lat(), lng: pos.lng() })
-        })
-        handlePick(c)
+        placeMarker(c, google)
       })
     })
     return () => { mounted = false }
@@ -256,7 +334,9 @@ function MiniMap({
         markerRef.current.addListener('dragend', () => {
           const pos = markerRef.current?.getPosition()
           if (!pos) return
-          handlePick({ lat: pos.lat(), lng: pos.lng() })
+          const dc = { lat: pos.lat(), lng: pos.lng() }
+          onSelectRef.current(dc)
+          reverseGeocode(dc)
         })
       } else {
         markerRef.current.setPosition(coord)
@@ -267,6 +347,12 @@ function MiniMap({
 
   return (
     <div>
+      <input
+        ref={searchRef}
+        type="text"
+        placeholder="🔍 Buscar dirección en Google Maps..."
+        style={{ ...S.input, marginBottom: 8 }}
+      />
       <div ref={containerRef} style={{ width: '100%', height: 220, borderRadius: 12, overflow: 'hidden', border: '1px solid #e5e7eb' }} />
       <p style={{ fontSize: 11, color: '#9ca3af', margin: '5px 0 0' }}>
         Tocá el mapa para marcar el punto exacto. Podés arrastrar el pin para ajustar.
@@ -289,13 +375,62 @@ function RoutePreviewMap({
   const markerORef = useRef<google.maps.Marker | null>(null)
   const markerDRef = useRef<google.maps.Marker | null>(null)
   const polyRef = useRef<google.maps.Polyline | null>(null)
+  const origenRef = useRef(origen)
+  const destinoRef = useRef(destino)
+
+  useEffect(() => { origenRef.current = origen })
+  useEffect(() => { destinoRef.current = destino })
+
+  const drawMarkers = useCallback((goog: typeof google, o: LatLng | null, d: LatLng | null) => {
+    if (o && !markerORef.current) {
+      markerORef.current = new goog.maps.Marker({
+        map: mapRef.current!,
+        position: o,
+        icon: { path: goog.maps.SymbolPath.CIRCLE, fillColor: '#004aad', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 },
+        label: { text: 'R', color: '#fff', fontWeight: 'bold', fontSize: '11px' },
+      })
+    }
+    if (d && !markerDRef.current) {
+      markerDRef.current = new goog.maps.Marker({
+        map: mapRef.current!,
+        position: d,
+        icon: { path: goog.maps.SymbolPath.CIRCLE, fillColor: '#16a34a', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 },
+        label: { text: 'E', color: '#fff', fontWeight: 'bold', fontSize: '11px' },
+      })
+    }
+    polyRef.current?.setMap(null)
+    polyRef.current = null
+    if (o && d) {
+      polyRef.current = new goog.maps.Polyline({
+        path: [o, d],
+        geodesic: true,
+        strokeOpacity: 0,
+        icons: [{
+          icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.8, strokeColor: '#004aad', strokeWeight: 3, scale: 4 },
+          offset: '0',
+          repeat: '20px',
+        }],
+        map: mapRef.current!,
+      })
+      const bounds = new goog.maps.LatLngBounds()
+      bounds.extend(o)
+      bounds.extend(d)
+      mapRef.current!.fitBounds(bounds, { top: 50, right: 30, bottom: 30, left: 30 })
+    } else if (o) {
+      mapRef.current!.panTo(o)
+    } else if (d) {
+      mapRef.current!.panTo(d)
+    }
+  }, [])
 
   useEffect(() => {
     let mounted = true
     getMapsLoader().load().then((google) => {
       if (!mounted || !containerRef.current) return
+      const o = origenRef.current
+      const d = destinoRef.current
       mapRef.current = new google.maps.Map(containerRef.current, {
-        center: origen || destino || { lat: 12.1364, lng: -86.2514 },
+        center: o || d || { lat: 12.1364, lng: -86.2514 },
         zoom: 13,
         disableDefaultUI: true,
         zoomControl: true,
@@ -304,6 +439,8 @@ function RoutePreviewMap({
           { featureType: 'transit', stylers: [{ visibility: 'off' }] },
         ],
       })
+      // Draw markers immediately after map is ready
+      drawMarkers(google, o, d)
     })
     return () => { mounted = false }
   }, [])
@@ -312,7 +449,6 @@ function RoutePreviewMap({
     if (!mapRef.current || !window.google) return
     const google = window.google
 
-    // Origen marker
     if (origen) {
       if (!markerORef.current) {
         markerORef.current = new google.maps.Marker({
@@ -329,7 +465,6 @@ function RoutePreviewMap({
       markerORef.current = null
     }
 
-    // Destino marker
     if (destino) {
       if (!markerDRef.current) {
         markerDRef.current = new google.maps.Marker({
@@ -346,7 +481,6 @@ function RoutePreviewMap({
       markerDRef.current = null
     }
 
-    // Polyline
     polyRef.current?.setMap(null)
     polyRef.current = null
     if (origen && destino) {
@@ -461,6 +595,43 @@ function Field({ label, required, children, hint }: { label: string; required?: 
   )
 }
 
+function NotaMotorizado({ show, onToggle, value, onChange, label }: {
+  show: boolean
+  onToggle: () => void
+  value: string
+  onChange: (v: string) => void
+  label: string
+}) {
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button
+          type="button"
+          onClick={onToggle}
+          style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${show ? '#004aad' : '#d1d5db'}`, background: show ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
+        >
+          {show && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+        </button>
+        <label
+          style={{ fontSize: 13, fontWeight: 600, color: '#374151', cursor: 'pointer' }}
+          onClick={onToggle}
+        >
+          {label}
+        </label>
+      </div>
+      {show && (
+        <textarea
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder="Ej: Tocar timbre, preguntar por el encargado, paquetes en la bodega..."
+          style={{ ...S.input, resize: 'vertical' as const, minHeight: 70, marginTop: 8 }}
+          rows={2}
+        />
+      )}
+    </div>
+  )
+}
+
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const S: Record<string, React.CSSProperties> = {
@@ -517,31 +688,67 @@ export default function SolicitarEnvioPage() {
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
 
-  // ── Auto price calculation ──
+  // Notas motorizado por punto
+  const [showNotaRetiro, setShowNotaRetiro] = useState(false)
+  const [notaRetiro, setNotaRetiro] = useState('')
+  const [showNotaEntrega, setShowNotaEntrega] = useState(false)
+  const [notaEntrega, setNotaEntrega] = useState('')
+
+  // Número de orden
+  const [numeroOrden, setNumeroOrden] = useState('')
+
+  // Geocode addresses from map
+  const [geocodeRetiro, setGeoRetiro] = useState('')
+  const [geocodeEntrega, setGeoEntrega] = useState('')
+
+  // Envío programado
+  const [esProgramado, setEsProgramado] = useState(false)
+  const [tipoProgramado, setTipoProgramado] = useState<'retiro' | 'entrega' | 'ambos'>('retiro')
+  const [fechaRetiro, setFechaRetiro] = useState('')
+  const [horaRetiro, setHoraRetiro] = useState('')
+  const [fechaEntrega, setFechaEntrega] = useState('')
+  const [horaEntrega, setHoraEntrega] = useState('')
+
+  // ── Manual price calculation ──
   const [calcResult, setCalcResult] = useState<{ km: number; precio: number } | null>(null)
   const [calcLoading, setCalcLoading] = useState(false)
   const [calcError, setCalcError] = useState<string | null>(null)
   const lastCalcKey = useRef<string | null>(null)
 
-  // When both coords are available, auto-calculate
+  // Clear calc result when coords change
   useEffect(() => {
+    if (!retiro.coord || !entrega.coord) {
+      setCalcResult(null)
+      return
+    }
     const o = retiro.coord
     const d = entrega.coord
-    if (!o || !d) { setCalcResult(null); return }
-
     const key = `${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${d.lat.toFixed(5)},${d.lng.toFixed(5)}`
-    if (key === lastCalcKey.current) return // same points, no recalculate
-    lastCalcKey.current = key
-
-    setCalcLoading(true)
-    setCalcError(null)
-    calcularDistancia(o, d).then(result => {
-      if (result) setCalcResult(result)
-      else setCalcError('No se pudo calcular la distancia entre estos puntos.')
-    }).catch(() => setCalcError('Error al calcular distancia.')).finally(() => setCalcLoading(false))
+    if (lastCalcKey.current && key !== lastCalcKey.current) {
+      setCalcResult(null)
+      setCalcError(null)
+    }
   }, [retiro.coord, entrega.coord])
 
-  // Effective price: from auto-calc > draft > null
+  const handleCalcular = async () => {
+    const o = retiro.coord
+    const d = entrega.coord
+    if (!o || !d) return
+    const key = `${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${d.lat.toFixed(5)},${d.lng.toFixed(5)}`
+    if (key === lastCalcKey.current && calcResult) return
+    lastCalcKey.current = key
+    setCalcLoading(true)
+    setCalcError(null)
+    calcularDistancia(o, d)
+      .then(result => {
+        if (result) setCalcResult(result)
+        else setCalcError('No se pudo calcular la distancia entre estos puntos.')
+      })
+      .catch(() => setCalcError('Error al calcular distancia.'))
+      .finally(() => setCalcLoading(false))
+  }
+
+  // Effective price: from manual calc > draft > null
   const precioEfectivo = calcResult?.precio ?? precioSugerido
   const distanciaEfectiva = calcResult?.km ?? draft?.distanciaKm ?? null
 
@@ -570,7 +777,7 @@ export default function SolicitarEnvioPage() {
     })
   }
 
-  // ── Inversion (FIX: full swap) ──
+  // ── Inversion ──
   const handleInvertir = () => {
     const r = { ...retiro }
     const e = { ...entrega }
@@ -608,8 +815,10 @@ export default function SolicitarEnvioPage() {
     if (!entrega.direccion.trim()) f.push('Dirección de entrega')
     if (cobroCE && (montoCE === '' || Number(montoCE) <= 0)) f.push('Monto del cobro contra entrega')
     if (tipoCliente === 'contado' && !quienPagaDelivery) f.push('Quién paga el delivery')
+    if (esProgramado && (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && !fechaRetiro) f.push('Fecha de retiro programado')
+    if (esProgramado && (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && !fechaEntrega) f.push('Fecha de entrega programada')
     return f
-  }, [retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery])
+  }, [retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega])
 
   const formularioCompleto = camposFaltantes.length === 0
 
@@ -663,21 +872,37 @@ export default function SolicitarEnvioPage() {
           celular: retiro.celular.trim(),
           direccionEscrita: retiro.direccion.trim(),
           coord: retiro.coord || null,
+          geocodeGoogle: geocodeRetiro.trim() || null,
           puntoGoogleTipo: retiro.tipoUbicacion,
+          notaMotorizado: notaRetiro.trim() || null,
         },
         entrega: {
           nombreApellido: entrega.nombre.trim(),
           celular: entrega.celular.trim(),
           direccionEscrita: entrega.direccion.trim(),
           coord: entrega.coord || null,
+          geocodeGoogle: geocodeEntrega.trim() || null,
           puntoGoogleTipo: entrega.tipoUbicacion,
+          notaMotorizado: notaEntrega.trim() || null,
         },
         cobroContraEntrega: { aplica: cobroCE, monto: cobroCE ? Number(montoCE) : 0 },
         pagoDelivery: tipoCliente === 'credito'
           ? { tipo: 'credito_semanal', quienPaga: 'credito_semanal', montoSugerido: precioEfectivo }
           : { tipo: 'contado', quienPaga: quienPagaDelivery, montoSugerido: precioEfectivo, deducirDelCobroContraEntrega: deducirAplica },
         detalle: detalle.trim(),
-        estado: 'pendiente_confirmacion',
+        numeroOrden: numeroOrden.trim() || null,
+        programado: esProgramado
+          ? {
+              tipo: tipoProgramado,
+              retiro: (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && fechaRetiro
+                ? { fecha: fechaRetiro, hora: horaRetiro || null, fechaHoraISO: horaRetiro ? `${fechaRetiro}T${horaRetiro}` : fechaRetiro }
+                : null,
+              entrega: (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && fechaEntrega
+                ? { fecha: fechaEntrega, hora: horaEntrega || null, fechaHoraISO: horaEntrega ? `${fechaEntrega}T${horaEntrega}` : fechaEntrega }
+                : null,
+            }
+          : null,
+        estado: esProgramado ? 'programada' : 'pendiente_confirmacion',
         createdAt: serverTimestamp(),
       })
 
@@ -697,6 +922,10 @@ export default function SolicitarEnvioPage() {
       setEntrega(blankEntrega())
       setCobroCE(false); setMontoCE(''); setQuienPagaDelivery(''); setDeducirDelivery('no_deducir'); setDetalle('')
       setCalcResult(null); lastCalcKey.current = null
+      setNotaRetiro(''); setNotaEntrega(''); setShowNotaRetiro(false); setShowNotaEntrega(false)
+      setNumeroOrden('')
+      setEsProgramado(false); setTipoProgramado('retiro'); setFechaRetiro(''); setHoraRetiro(''); setFechaEntrega(''); setHoraEntrega('')
+      setGeoRetiro(''); setGeoEntrega('')
       try { sessionStorage.removeItem('draftEnvio') } catch {}
       setDraft(null)
     } catch (err) {
@@ -708,13 +937,14 @@ export default function SolicitarEnvioPage() {
   }
 
   const esOtro = retiro.favKey === '__otro__'
+  const todayISO = new Date().toISOString().split('T')[0]
 
   return (
     <div style={{ maxWidth: 640, margin: '0 auto', padding: '0 0 48px', fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
 
       <div style={{ marginBottom: 24 }}>
         <h1 style={{ fontSize: 26, fontWeight: 800, color: '#111827', margin: '0 0 4px', letterSpacing: -0.5 }}>Solicitar envío</h1>
-        <p style={{ fontSize: 14, color: '#6b7280', margin: 0 }}>Completá los datos y el sistema calculará el precio automáticamente.</p>
+        <p style={{ fontSize: 14, color: '#6b7280', margin: 0 }}>Completá los datos y marcá los puntos en el mapa para calcular el precio.</p>
       </div>
 
       {/* Cotización banner */}
@@ -726,8 +956,8 @@ export default function SolicitarEnvioPage() {
             </p>
             <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>
               {tieneCotizacion
-                ? `Precio base: ${precioSugerido ? `C$ ${precioSugerido}` : '—'} · El sistema recalculará si marcás nuevos puntos`
-                : 'Marcá los puntos en el mapa para calcular el precio automáticamente'}
+                ? `Precio base: ${precioSugerido ? `C$ ${precioSugerido}` : '—'} · Podés recalcular marcando los puntos en el mapa`
+                : 'Marcá ambos puntos en el mapa y presioná "Calcular precio"'}
             </p>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const }}>
@@ -770,7 +1000,7 @@ export default function SolicitarEnvioPage() {
           </div>
         )}
 
-        {/* Show coord info if favorite has it */}
+        {/* Banner verde si hay favorito con coord */}
         {!esOtro && retiro.coord && (
           <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '10px 14px' }}>
             <p style={{ fontSize: 12, fontWeight: 600, color: '#16a34a', margin: 0 }}>🎯 Ubicación guardada en ajustes — se usará para calcular el precio</p>
@@ -789,10 +1019,15 @@ export default function SolicitarEnvioPage() {
           <input value={retiro.direccion} onChange={e => setRetiro(prev => ({ ...prev, direccion: e.target.value }))} placeholder="Ej: Del semáforo 1c al sur, portón azul" style={S.input} />
         </Field>
 
-        <UbicacionTipo value={retiro.tipoUbicacion} onChange={v => setRetiro(prev => ({ ...prev, tipoUbicacion: v }))} />
-
-        {/* Map only if "Otro" is selected */}
-        {esOtro && (
+        {/* Mapa — estático si favorito con coord, interactivo si "Otro" o sin coord */}
+        {!esOtro && retiro.coord ? (
+          <StaticMiniMap
+            key={`${retiro.coord.lat}-${retiro.coord.lng}`}
+            coord={retiro.coord}
+            color="#004aad"
+            label="R"
+          />
+        ) : (
           <div>
             <label style={{ ...S.label, marginBottom: 8 }}>
               Ubicación en el mapa
@@ -802,16 +1037,21 @@ export default function SolicitarEnvioPage() {
               coord={retiro.coord}
               color="#004aad"
               label="R"
-              onSelect={(c, addr) => {
-                setRetiro(prev => ({
-                  ...prev,
-                  coord: c,
-                  direccion: prev.direccion || addr,
-                }))
-              }}
+              onSelect={(c) => setRetiro(prev => ({ ...prev, coord: c }))}
+              onGeocode={(addr) => setGeoRetiro(addr)}
             />
           </div>
         )}
+
+        <UbicacionTipo value={retiro.tipoUbicacion} onChange={v => setRetiro(prev => ({ ...prev, tipoUbicacion: v }))} />
+
+        <NotaMotorizado
+          show={showNotaRetiro}
+          onToggle={() => setShowNotaRetiro(v => !v)}
+          value={notaRetiro}
+          onChange={setNotaRetiro}
+          label="¿Hay instrucciones adicionales para el motorizado en el retiro?"
+        />
       </SectionCard>
 
       {/* ── ENTREGA ── */}
@@ -840,9 +1080,6 @@ export default function SolicitarEnvioPage() {
           <input value={entrega.direccion} onChange={e => setEntrega(prev => ({ ...prev, direccion: e.target.value }))} placeholder="Ej: Frente al parque, portón negro, casa esquinera" style={S.input} />
         </Field>
 
-        <UbicacionTipo value={entrega.tipoUbicacion} onChange={v => setEntrega(prev => ({ ...prev, tipoUbicacion: v }))} />
-
-        {/* Always show map for entrega */}
         <div>
           <label style={{ ...S.label, marginBottom: 8 }}>
             Ubicación en el mapa
@@ -852,27 +1089,117 @@ export default function SolicitarEnvioPage() {
             coord={entrega.coord}
             color="#16a34a"
             label="E"
-            onSelect={(c, addr) => {
-              setEntrega(prev => ({
-                ...prev,
-                coord: c,
-                direccion: prev.direccion || addr,
-              }))
-            }}
+            onSelect={(c) => setEntrega(prev => ({ ...prev, coord: c }))}
+            onGeocode={(addr) => setGeoEntrega(addr)}
           />
+        </div>
+
+        <UbicacionTipo value={entrega.tipoUbicacion} onChange={v => setEntrega(prev => ({ ...prev, tipoUbicacion: v }))} />
+
+        <NotaMotorizado
+          show={showNotaEntrega}
+          onToggle={() => setShowNotaEntrega(v => !v)}
+          value={notaEntrega}
+          onChange={setNotaEntrega}
+          label="¿Hay instrucciones adicionales para el motorizado en la entrega?"
+        />
+      </SectionCard>
+
+      {/* ── ENVÍO PROGRAMADO ── */}
+      <SectionCard title="Programar envío" icon="📅">
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button
+              type="button"
+              onClick={() => setEsProgramado(v => !v)}
+              style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${esProgramado ? '#004aad' : '#d1d5db'}`, background: esProgramado ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
+            >
+              {esProgramado && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+            </button>
+            <label
+              style={{ fontSize: 14, fontWeight: 600, color: '#111827', cursor: 'pointer' }}
+              onClick={() => setEsProgramado(v => !v)}
+            >
+              ¿Es un envío programado?
+            </label>
+          </div>
+
+          {esProgramado && (
+            <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {/* ¿Qué programar? */}
+              <div>
+                <label style={S.label}>¿Qué programar?</label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {([
+                    { value: 'retiro', label: '📦 Retiro', desc: 'Cuándo pasa el motorizado a retirar' },
+                    { value: 'entrega', label: '🏠 Entrega', desc: 'Cuándo debe entregarse' },
+                    { value: 'ambos', label: '↕ Ambos', desc: 'Programar retiro y entrega por separado' },
+                  ] as { value: 'retiro' | 'entrega' | 'ambos'; label: string; desc: string }[]).map(opt => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setTipoProgramado(opt.value)}
+                      title={opt.desc}
+                      style={{ flex: 1, padding: '8px 10px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1px solid ${tipoProgramado === opt.value ? '#004aad' : '#e5e7eb'}`, background: tipoProgramado === opt.value ? '#eff6ff' : '#fff', color: tipoProgramado === opt.value ? '#004aad' : '#374151' }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Fecha/hora de retiro */}
+              {(tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && (
+                <div>
+                  {tipoProgramado === 'ambos' && <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 8px' }}>📦 Fecha de retiro</p>}
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' as const }}>
+                    <div style={{ flex: 1, minWidth: 140 }}>
+                      <label style={S.label}>Fecha <span style={{ color: '#dc2626' }}>*</span></label>
+                      <input type="date" value={fechaRetiro} onChange={e => setFechaRetiro(e.target.value)} min={todayISO} style={S.input} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 140 }}>
+                      <label style={S.label}>Hora (opcional)</label>
+                      <input type="time" value={horaRetiro} onChange={e => setHoraRetiro(e.target.value)} style={S.input} />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Fecha/hora de entrega */}
+              {(tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && (
+                <div>
+                  {tipoProgramado === 'ambos' && <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 8px' }}>🏠 Fecha de entrega</p>}
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' as const }}>
+                    <div style={{ flex: 1, minWidth: 140 }}>
+                      <label style={S.label}>Fecha <span style={{ color: '#dc2626' }}>*</span></label>
+                      <input type="date" value={fechaEntrega} onChange={e => setFechaEntrega(e.target.value)} min={tipoProgramado === 'ambos' && fechaRetiro ? fechaRetiro : todayISO} style={S.input} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 140 }}>
+                      <label style={S.label}>Hora (opcional)</label>
+                      <input type="time" value={horaEntrega} onChange={e => setHoraEntrega(e.target.value)} style={S.input} />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <p style={{ ...S.hint, marginTop: 0 }}>
+                El gestor intentará asignar el motorizado para esa franja horaria. La solicitud quedará como <strong>programada</strong>.
+              </p>
+            </div>
+          )}
         </div>
       </SectionCard>
 
-      {/* ── PRECIO AUTO-CALCULADO ── */}
-      {(retiro.coord || entrega.coord) && (
+      {/* ── PRECIO ESTIMADO ── */}
+      {(retiro.coord || entrega.coord || precioSugerido) && (
         <div style={{ ...S.sectionCard, background: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <h3 style={{ fontSize: 14, fontWeight: 700, color: '#374151', margin: 0, textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Precio estimado</h3>
             {calcLoading && <span style={{ fontSize: 12, color: '#6b7280' }}>⏳ Calculando...</span>}
           </div>
 
-          {/* Route preview map */}
-          {retiro.coord && entrega.coord && (
+          {/* Route preview — solo cuando el precio está calculado */}
+          {calcResult && retiro.coord && entrega.coord && (
             <div style={{ marginBottom: 14 }}>
               <RoutePreviewMap origen={retiro.coord} destino={entrega.coord} />
             </div>
@@ -889,15 +1216,38 @@ export default function SolicitarEnvioPage() {
                 </p>
                 <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{calcResult.km.toFixed(2)} km · sujeto a confirmación del gestor</p>
               </div>
-              <span style={{ fontSize: 32 }}>🧮</span>
+              <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ ...S.btnOutline, fontSize: 11 }}>
+                Recalcular
+              </button>
             </div>
           ) : precioSugerido ? (
-            <div style={{ background: '#fff', border: '1px solid #bbf7d0', borderRadius: 12, padding: '14px 16px' }}>
-              <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>Desde cotización previa</p>
-              <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0 }}>C$ {precioSugerido}</p>
-              {distanciaEfectiva && <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{distanciaEfectiva.toFixed(2)} km</p>}
+            <div>
+              <div style={{ background: '#fff', border: '1px solid #bbf7d0', borderRadius: 12, padding: '14px 16px', marginBottom: 10 }}>
+                <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>Desde cotización previa</p>
+                <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0 }}>C$ {precioSugerido}</p>
+                {distanciaEfectiva && <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{distanciaEfectiva.toFixed(2)} km</p>}
+              </div>
+              {retiro.coord && entrega.coord && (
+                <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ width: '100%', padding: '10px', borderRadius: 10, border: '1px solid #bfdbfe', background: '#eff6ff', color: '#004aad', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                  🧮 Recalcular con los puntos del mapa
+                </button>
+              )}
             </div>
-          ) : !retiro.coord || !entrega.coord ? (
+          ) : retiro.coord && entrega.coord ? (
+            <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '14px 16px', textAlign: 'center' as const }}>
+              <p style={{ fontSize: 13, color: '#d46b08', fontWeight: 600, margin: '0 0 12px' }}>
+                Tenés ambos puntos marcados. Calculá el precio estimado.
+              </p>
+              <button
+                type="button"
+                onClick={handleCalcular}
+                disabled={calcLoading}
+                style={{ padding: '10px 20px', borderRadius: 10, border: 'none', background: '#d46b08', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}
+              >
+                🧮 Calcular precio estimado
+              </button>
+            </div>
+          ) : (
             <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '12px 14px', textAlign: 'center' as const }}>
               <p style={{ fontSize: 13, color: '#d46b08', fontWeight: 600, margin: 0 }}>
                 {!retiro.coord && !entrega.coord ? 'Marcá ambos puntos en el mapa para calcular el precio' :
@@ -905,7 +1255,7 @@ export default function SolicitarEnvioPage() {
                  'Falta marcar el punto de entrega'}
               </p>
             </div>
-          ) : null}
+          )}
         </div>
       )}
 
@@ -969,6 +1319,10 @@ export default function SolicitarEnvioPage() {
             )}
           </div>
         )}
+
+        <Field label="Número de orden / referencia" hint="Código interno para identificar el pedido (opcional).">
+          <input value={numeroOrden} onChange={e => setNumeroOrden(e.target.value)} placeholder="Ej: #ORD-001 o número de pedido de WhatsApp" style={S.input} />
+        </Field>
 
         <div>
           <label style={S.label}>Instrucciones adicionales <span style={{ color: '#9ca3af', fontWeight: 400 }}>(opcional)</span></label>

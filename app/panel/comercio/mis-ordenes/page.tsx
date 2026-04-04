@@ -22,6 +22,13 @@ type Solicitud = {
     delivery?: { monto: number; recibio: boolean }
     producto?: { monto: number; recibio: boolean }
   }
+  registro?: {
+    deposito?: {
+      confirmadoMotorizado?: boolean
+      confirmadoComercio?: boolean
+      confirmadoStorkhub?: boolean
+    }
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -64,6 +71,15 @@ function fmtDate(v: any) {
   const d = tsToDate(v)
   if (!d) return '—'
   return d.toLocaleDateString('es-NI', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
+type DepositoEstado = 'na' | 'pendiente' | 'depositado'
+
+function estadoDeposito(s: Solicitud): DepositoEstado {
+  if (!s.cobroContraEntrega?.aplica) return 'na'
+  const dep = s.registro?.deposito
+  if (dep?.confirmadoMotorizado || dep?.confirmadoComercio || dep?.confirmadoStorkhub) return 'depositado'
+  return 'pendiente'
 }
 
 function debeDelivery(s: Solicitud): boolean | null {
@@ -164,6 +180,7 @@ export default function MisOrdenesPage() {
                 <th className={`${thCls} text-right`}>Delivery</th>
                 <th className={thCls}>Estado</th>
                 <th className={thCls}>Producto</th>
+                <th className={thCls}>Depósito producto</th>
                 <th className={thCls}>Delivery pago</th>
                 <th className={thCls} />
               </tr>
@@ -204,6 +221,14 @@ export default function MisOrdenesPage() {
                       ) : (
                         <span className="text-gray-400 text-xs">{fmt(o.cobroContraEntrega?.monto)}</span>
                       )}
+                    </td>
+                    <td className={tdCls}>
+                      {(() => {
+                        const dep = estadoDeposito(o)
+                        if (dep === 'na') return <span className="text-gray-400 text-xs">N/A</span>
+                        if (dep === 'depositado') return <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">✓ Depositado</span>
+                        return <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 border border-yellow-200">Pendiente</span>
+                      })()}
                     </td>
                     <td className={tdCls}>
                       {debe === null ? (

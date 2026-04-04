@@ -305,34 +305,89 @@ async function guardarClienteEntrega(uid: string, data: Omit<ClienteGuardado, 'i
 
 // ─── Map Components ───────────────────────────────────────────────────────────
 
-function MiniMap({
-  coord,
-  onSelect,
-  color = '#004aad',
-  label = 'R',
-}: {
-  coord: LatLng | null
-  onSelect: (c: LatLng, address: string) => void
+function StaticMiniMap({ coord, color = '#004aad', label = 'R' }: {
+  coord: LatLng
   color?: string
   label?: string
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    let mounted = true
+    getMapsLoader().load().then((google) => {
+      if (!mounted || !containerRef.current) return
+      const map = new google.maps.Map(containerRef.current, {
+        center: coord,
+        zoom: 15,
+        disableDefaultUI: true,
+        gestureHandling: 'none',
+        styles: [
+          { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+          { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+        ],
+      })
+      new google.maps.Marker({
+        map,
+        position: coord,
+        icon: { path: google.maps.SymbolPath.CIRCLE, fillColor: color, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 },
+        label: { text: label, color: '#fff', fontWeight: 'bold', fontSize: '11px' },
+      })
+    })
+    return () => { mounted = false }
+  }, [])
+  return <div ref={containerRef} style={{ width: '100%', height: 180, borderRadius: 12, overflow: 'hidden', border: '1px solid #e5e7eb' }} />
+}
+
+function MiniMap({
+  coord,
+  onSelect,
+  onGeocode,
+  color = '#004aad',
+  label = 'R',
+}: {
+  coord: LatLng | null
+  onSelect: (c: LatLng) => void
+  onGeocode?: (addr: string) => void
+  color?: string
+  label?: string
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
   const mapRef = useRef<google.maps.Map | null>(null)
   const markerRef = useRef<google.maps.Marker | null>(null)
   const geocoderRef = useRef<google.maps.Geocoder | null>(null)
+  const onSelectRef = useRef(onSelect)
+  const onGeocodeRef = useRef(onGeocode)
+  useEffect(() => { onSelectRef.current = onSelect })
+  useEffect(() => { onGeocodeRef.current = onGeocode })
 
-  const handlePick = useCallback(
-    (c: LatLng) => {
-      geocoderRef.current?.geocode({ location: c }, (results, status) => {
-        if (status !== 'OK' || !results?.length) { onSelect(c, ''); return }
-        // Preferir resultado con dirección legible (evitar Plus Codes como "4QG5+FHX")
-        const isPlusCode = (addr: string) => /^[0-9A-Z]{4,8}\+[0-9A-Z]{2,}/.test(addr)
-        const best = results.find(r => !isPlusCode(r.formatted_address)) || results[0]
-        onSelect(c, best.formatted_address)
-      })
-    },
-    [onSelect]
-  )
+  const reverseGeocode = useCallback((c: LatLng) => {
+    geocoderRef.current?.geocode({ location: c }, (results, status) => {
+      if (status !== 'OK' || !results?.length) return
+      const isPlusCode = (addr: string) => /^[0-9A-Z]{4,8}\+[0-9A-Z]{2,}/.test(addr)
+      const best = results.find(r => !isPlusCode(r.formatted_address)) || results[0]
+      onGeocodeRef.current?.(best.formatted_address)
+    })
+  }, [])
+
+  const placeMarker = useCallback((c: LatLng, goog: typeof google, geocodedAddr?: string) => {
+    markerRef.current?.setMap(null)
+    markerRef.current = new goog.maps.Marker({
+      map: mapRef.current!,
+      position: c,
+      draggable: true,
+      icon: { path: goog.maps.SymbolPath.CIRCLE, fillColor: color, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 },
+      label: { text: label, color: '#fff', fontWeight: 'bold', fontSize: '11px' },
+    })
+    markerRef.current.addListener('dragend', () => {
+      const pos = markerRef.current?.getPosition()
+      if (!pos) return
+      const dc = { lat: pos.lat(), lng: pos.lng() }
+      onSelectRef.current(dc)
+      reverseGeocode(dc)
+    })
+    onSelectRef.current(c)
+    if (geocodedAddr) { onGeocodeRef.current?.(geocodedAddr) } else { reverseGeocode(c) }
+  }, [color, label, reverseGeocode])
 
   useEffect(() => {
     let mounted = true
@@ -351,52 +406,47 @@ function MiniMap({
       })
       geocoderRef.current = new google.maps.Geocoder()
 
+      if (searchRef.current) {
+        const managua = new google.maps.LatLngBounds(
+          new google.maps.LatLng(11.94, -86.56),
+          new google.maps.LatLng(12.35, -86.05)
+        )
+        const autocomplete = new google.maps.places.Autocomplete(searchRef.current, {
+          componentRestrictions: { country: 'ni' },
+          bounds: managua,
+          fields: ['geometry', 'formatted_address'],
+        })
+        autocomplete.addListener('place_changed', () => {
+          const place = autocomplete.getPlace()
+          if (place?.geometry?.location) {
+            const c = { lat: place.geometry.location.lat(), lng: place.geometry.location.lng() }
+            mapRef.current?.panTo(c)
+            mapRef.current?.setZoom(16)
+            placeMarker(c, google, place.formatted_address || '')
+          }
+        })
+      }
+
       if (coord) {
         markerRef.current = new google.maps.Marker({
           map: mapRef.current,
           position: coord,
           draggable: true,
-          icon: {
-            path: google.maps.SymbolPath.CIRCLE,
-            fillColor: color,
-            fillOpacity: 1,
-            strokeColor: '#fff',
-            strokeWeight: 2,
-            scale: 10,
-          },
+          icon: { path: google.maps.SymbolPath.CIRCLE, fillColor: color, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 },
           label: { text: label, color: '#fff', fontWeight: 'bold', fontSize: '11px' },
         })
         markerRef.current.addListener('dragend', () => {
           const pos = markerRef.current?.getPosition()
           if (!pos) return
-          handlePick({ lat: pos.lat(), lng: pos.lng() })
+          const dc = { lat: pos.lat(), lng: pos.lng() }
+          onSelectRef.current(dc)
+          reverseGeocode(dc)
         })
       }
 
       mapRef.current.addListener('click', (e: google.maps.MapMouseEvent) => {
         if (!e.latLng) return
-        const c = { lat: e.latLng.lat(), lng: e.latLng.lng() }
-        markerRef.current?.setMap(null)
-        markerRef.current = new google.maps.Marker({
-          map: mapRef.current!,
-          position: c,
-          draggable: true,
-          icon: {
-            path: google.maps.SymbolPath.CIRCLE,
-            fillColor: color,
-            fillOpacity: 1,
-            strokeColor: '#fff',
-            strokeWeight: 2,
-            scale: 10,
-          },
-          label: { text: label, color: '#fff', fontWeight: 'bold', fontSize: '11px' },
-        })
-        markerRef.current.addListener('dragend', () => {
-          const pos = markerRef.current?.getPosition()
-          if (!pos) return
-          handlePick({ lat: pos.lat(), lng: pos.lng() })
-        })
-        handlePick(c)
+        placeMarker({ lat: e.latLng.lat(), lng: e.latLng.lng() }, google)
       })
     })
     return () => { mounted = false }
@@ -411,29 +461,30 @@ function MiniMap({
         map: mapRef.current,
         position: coord,
         draggable: true,
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          fillColor: color,
-          fillOpacity: 1,
-          strokeColor: '#fff',
-          strokeWeight: 2,
-          scale: 10,
-        },
+        icon: { path: google.maps.SymbolPath.CIRCLE, fillColor: color, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 },
         label: { text: label, color: '#fff', fontWeight: 'bold', fontSize: '11px' },
       })
       markerRef.current.addListener('dragend', () => {
         const pos = markerRef.current?.getPosition()
         if (!pos) return
-        handlePick({ lat: pos.lat(), lng: pos.lng() })
+        const dc = { lat: pos.lat(), lng: pos.lng() }
+        onSelectRef.current(dc)
+        reverseGeocode(dc)
       })
     } else {
       markerRef.current.setPosition(coord)
     }
     mapRef.current.panTo(coord)
-  }, [coord, color, label, handlePick])
+  }, [coord])
 
   return (
     <div>
+      <input
+        ref={searchRef}
+        type="text"
+        placeholder="🔍 Buscar dirección en Google Maps..."
+        style={{ ...S.input, marginBottom: 8 }}
+      />
       <div
         ref={containerRef}
         style={{ width: '100%', height: 220, borderRadius: 12, overflow: 'hidden', border: '1px solid #e5e7eb' }}
@@ -451,13 +502,19 @@ function RoutePreviewMap({ origen, destino }: { origen: LatLng | null; destino: 
   const markerORef = useRef<google.maps.Marker | null>(null)
   const markerDRef = useRef<google.maps.Marker | null>(null)
   const polyRef = useRef<google.maps.Polyline | null>(null)
+  const origenRef = useRef(origen)
+  const destinoRef = useRef(destino)
+  useEffect(() => { origenRef.current = origen })
+  useEffect(() => { destinoRef.current = destino })
 
   useEffect(() => {
     let mounted = true
     getMapsLoader().load().then((google) => {
       if (!mounted || !containerRef.current) return
+      const o = origenRef.current
+      const d = destinoRef.current
       mapRef.current = new google.maps.Map(containerRef.current, {
-        center: origen || destino || { lat: 12.1364, lng: -86.2514 },
+        center: o || d || { lat: 12.1364, lng: -86.2514 },
         zoom: 13,
         disableDefaultUI: true,
         zoomControl: true,
@@ -466,6 +523,17 @@ function RoutePreviewMap({ origen, destino }: { origen: LatLng | null; destino: 
           { featureType: 'transit', stylers: [{ visibility: 'off' }] },
         ],
       })
+      if (o) {
+        markerORef.current = new google.maps.Marker({ map: mapRef.current, position: o, icon: { path: google.maps.SymbolPath.CIRCLE, fillColor: '#004aad', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 }, label: { text: 'R', color: '#fff', fontWeight: 'bold', fontSize: '11px' } })
+      }
+      if (d) {
+        markerDRef.current = new google.maps.Marker({ map: mapRef.current, position: d, icon: { path: google.maps.SymbolPath.CIRCLE, fillColor: '#16a34a', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 }, label: { text: 'E', color: '#fff', fontWeight: 'bold', fontSize: '11px' } })
+      }
+      if (o && d) {
+        polyRef.current = new google.maps.Polyline({ path: [o, d], geodesic: true, strokeOpacity: 0, icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.8, strokeColor: '#004aad', strokeWeight: 3, scale: 4 }, offset: '0', repeat: '20px' }], map: mapRef.current })
+        const bounds = new google.maps.LatLngBounds(); bounds.extend(o); bounds.extend(d)
+        mapRef.current.fitBounds(bounds, { top: 50, right: 30, bottom: 30, left: 30 })
+      }
     })
     return () => { mounted = false }
   }, [])
@@ -1116,6 +1184,25 @@ export default function GestorIngresarOrdenPage() {
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
 
+  // Instrucciones adicionales toggles
+  const [showNotaRetiro, setShowNotaRetiro] = useState(false)
+  const [showNotaEntrega, setShowNotaEntrega] = useState(false)
+
+  // Geocode addresses from map
+  const [geocodeRetiro, setGeoRetiro] = useState('')
+  const [geocodeEntrega, setGeoEntrega] = useState('')
+
+  // Número de orden
+  const [numeroOrden, setNumeroOrden] = useState('')
+
+  // Envío programado
+  const [esProgramado, setEsProgramado] = useState(false)
+  const [tipoProgramado, setTipoProgramado] = useState<'retiro' | 'entrega' | 'ambos'>('retiro')
+  const [fechaRetiro, setFechaRetiro] = useState('')
+  const [horaRetiro, setHoraRetiro] = useState('')
+  const [fechaEntrega, setFechaEntrega] = useState('')
+  const [horaEntrega, setHoraEntrega] = useState('')
+
   // ── Manual price calculation ──
   const [calcResult, setCalcResult] = useState<{ km: number; precio: number } | null>(null)
   const [calcLoading, setCalcLoading] = useState(false)
@@ -1256,8 +1343,10 @@ export default function GestorIngresarOrdenPage() {
     if (!entrega.direccion.trim()) f.push('Dirección de entrega')
     if (cobroCE && (montoCE === '' || Number(montoCE) <= 0)) f.push('Monto del cobro contra entrega')
     if (tipoCliente === 'contado' && !quienPagaDelivery) f.push('Quién paga el delivery')
+    if (esProgramado && (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && !fechaRetiro) f.push('Fecha de retiro programado')
+    if (esProgramado && (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && !fechaEntrega) f.push('Fecha de entrega programada')
     return f
-  }, [selectedOwnerUid, retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery])
+  }, [selectedOwnerUid, retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega])
 
   const formularioCompleto = camposFaltantes.length === 0
 
@@ -1330,16 +1419,18 @@ export default function GestorIngresarOrdenPage() {
           nombreApellido: retiro.nombre.trim(),
           celular: retiro.celular.trim(),
           direccionEscrita: retiro.direccion.trim(),
-          nota: retiro.nota.trim() || null,
+          notaMotorizado: retiro.nota.trim() || null,
           coord: retiro.coord || null,
+          geocodeGoogle: geocodeRetiro.trim() || null,
           puntoGoogleTipo: retiro.tipoUbicacion,
         },
         entrega: {
           nombreApellido: entrega.nombre.trim(),
           celular: entrega.celular.trim(),
           direccionEscrita: entrega.direccion.trim(),
-          nota: entrega.nota.trim() || null,
+          notaMotorizado: entrega.nota.trim() || null,
           coord: entrega.coord || null,
+          geocodeGoogle: geocodeEntrega.trim() || null,
           puntoGoogleTipo: entrega.tipoUbicacion,
         },
         cobroContraEntrega: {
@@ -1356,7 +1447,19 @@ export default function GestorIngresarOrdenPage() {
                 deducirDelCobroContraEntrega: deducirAplica,
               },
         detalle: detalle.trim(),
-        estado: 'pendiente_confirmacion',
+        numeroOrden: numeroOrden.trim() || null,
+        programado: esProgramado
+          ? {
+              tipo: tipoProgramado,
+              retiro: (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && fechaRetiro
+                ? { fecha: fechaRetiro, hora: horaRetiro || null, fechaHoraISO: horaRetiro ? `${fechaRetiro}T${horaRetiro}` : fechaRetiro }
+                : null,
+              entrega: (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && fechaEntrega
+                ? { fecha: fechaEntrega, hora: horaEntrega || null, fechaHoraISO: horaEntrega ? `${fechaEntrega}T${horaEntrega}` : fechaEntrega }
+                : null,
+            }
+          : null,
+        estado: esProgramado ? 'programada' : 'pendiente_confirmacion',
         createdAt: serverTimestamp(),
         creadoInternamente: true,
         creadoPorGestorUid: gestorUid,
@@ -1406,6 +1509,10 @@ export default function GestorIngresarOrdenPage() {
       setCalcResult(null)
       setCalcError(null)
       lastCalcKey.current = null
+      setShowNotaRetiro(false); setShowNotaEntrega(false)
+      setGeoRetiro(''); setGeoEntrega('')
+      setNumeroOrden('')
+      setEsProgramado(false); setTipoProgramado('retiro'); setFechaRetiro(''); setHoraRetiro(''); setFechaEntrega(''); setHoraEntrega('')
       try { sessionStorage.removeItem('draftEnvio') } catch {}
       setDraft(null)
     } catch (err) {
@@ -1679,42 +1786,54 @@ export default function GestorIngresarOrdenPage() {
           />
         </Field>
 
-        <Field label="Nota de retiro" hint="Info extra para el motorizado. Ej: Bus 3:30pm Mayoreo, esperar en terminal sur.">
-          <input
-            value={retiro.nota}
-            onChange={(e) => setRetiro((prev) => ({ ...prev, nota: e.target.value }))}
-            placeholder="Ej: Llamar al llegar, preguntar por Juan..."
-            style={S.input}
-          />
-        </Field>
+        {/* Mapa retiro — estático si favorito con coord, interactivo si "Otro" o sin coord */}
+        {!esOtro && retiro.coord ? (
+          <div>
+            <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '10px 14px', marginBottom: 8 }}>
+              <p style={{ fontSize: 12, fontWeight: 600, color: '#16a34a', margin: 0 }}>🎯 Ubicación guardada en ajustes del comercio</p>
+            </div>
+            <StaticMiniMap
+              key={`${retiro.coord.lat}-${retiro.coord.lng}`}
+              coord={retiro.coord}
+              color="#004aad"
+              label="R"
+            />
+          </div>
+        ) : (
+          <div>
+            <label style={{ ...S.label, marginBottom: 8 }}>
+              Ubicación en el mapa
+              {retiro.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
+            </label>
+            <MiniMap
+              coord={retiro.coord}
+              color="#004aad"
+              label="R"
+              onSelect={(c) => setRetiro((prev) => ({ ...prev, coord: c }))}
+              onGeocode={(addr) => setGeoRetiro(addr)}
+            />
+          </div>
+        )}
 
         <UbicacionTipo
           value={retiro.tipoUbicacion}
           onChange={(v) => setRetiro((prev) => ({ ...prev, tipoUbicacion: v }))}
         />
 
-        {/* Mapa retiro — siempre visible si hay coord o si es "Otro" */}
-        {(esOtro || retiro.coord) && (
-          <div>
-            <label style={{ ...S.label, marginBottom: 8 }}>
-              Ubicación en el mapa
-              {retiro.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
+        {/* Instrucciones adicionales retiro */}
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button type="button" onClick={() => setShowNotaRetiro(v => !v)} style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${showNotaRetiro ? '#004aad' : '#d1d5db'}`, background: showNotaRetiro ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
+              {showNotaRetiro && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+            </button>
+            <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', cursor: 'pointer' }} onClick={() => setShowNotaRetiro(v => !v)}>
+              ¿Hay instrucciones adicionales para el motorizado en el retiro?
             </label>
-            <AddressSearchBox
-              placeholder="Buscar dirección de retiro en Managua..."
-              mapAddress={retiro.direccion}
-              onSelect={(c, addr) => setRetiro((prev) => ({ ...prev, coord: c, direccion: addr }))}
-            />
-            <MiniMap
-              coord={retiro.coord}
-              color="#004aad"
-              label="R"
-              onSelect={(c, addr) => {
-                setRetiro((prev) => ({ ...prev, coord: c, direccion: addr }))
-              }}
-            />
           </div>
-        )}
+          {showNotaRetiro && (
+            <textarea value={retiro.nota} onChange={(e) => setRetiro((prev) => ({ ...prev, nota: e.target.value }))} placeholder="Ej: Llamar al llegar, preguntar por Juan, bus 3:30pm Mayoreo..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 70, marginTop: 8 }} rows={2} />
+          )}
+        </div>
       </SectionCard>
 
       {/* ── ENTREGA ── */}
@@ -1751,38 +1870,38 @@ export default function GestorIngresarOrdenPage() {
           />
         </Field>
 
-        <Field label="Nota de entrega" hint="Instrucciones especiales para la entrega. Ej: Solo disponible entre 2-4pm, preguntar por María.">
-          <input
-            value={entrega.nota}
-            onChange={(e) => setEntrega((prev) => ({ ...prev, nota: e.target.value }))}
-            placeholder="Ej: Llamar antes de llegar, portón verde..."
-            style={S.input}
+        <div>
+          <label style={{ ...S.label, marginBottom: 8 }}>
+            Ubicación en el mapa
+            {entrega.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
+          </label>
+          <MiniMap
+            coord={entrega.coord}
+            color="#16a34a"
+            label="E"
+            onSelect={(c) => setEntrega((prev) => ({ ...prev, coord: c }))}
+            onGeocode={(addr) => setGeoEntrega(addr)}
           />
-        </Field>
+        </div>
 
         <UbicacionTipo
           value={entrega.tipoUbicacion}
           onChange={(v) => setEntrega((prev) => ({ ...prev, tipoUbicacion: v }))}
         />
 
+        {/* Instrucciones adicionales entrega */}
         <div>
-          <label style={{ ...S.label, marginBottom: 8 }}>
-            Ubicación en el mapa
-            {entrega.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
-          </label>
-          <AddressSearchBox
-            placeholder="Buscar dirección de entrega en Managua..."
-            mapAddress={entrega.direccion}
-            onSelect={(c, addr) => setEntrega((prev) => ({ ...prev, coord: c, direccion: addr }))}
-          />
-          <MiniMap
-            coord={entrega.coord}
-            color="#16a34a"
-            label="E"
-            onSelect={(c, addr) => {
-              setEntrega((prev) => ({ ...prev, coord: c, direccion: addr }))
-            }}
-          />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button type="button" onClick={() => setShowNotaEntrega(v => !v)} style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${showNotaEntrega ? '#004aad' : '#d1d5db'}`, background: showNotaEntrega ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
+              {showNotaEntrega && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+            </button>
+            <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', cursor: 'pointer' }} onClick={() => setShowNotaEntrega(v => !v)}>
+              ¿Hay instrucciones adicionales para el motorizado en la entrega?
+            </label>
+          </div>
+          {showNotaEntrega && (
+            <textarea value={entrega.nota} onChange={(e) => setEntrega((prev) => ({ ...prev, nota: e.target.value }))} placeholder="Ej: Solo disponible entre 2-4pm, preguntar por María, portón verde..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 70, marginTop: 8 }} rows={2} />
+          )}
         </div>
       </SectionCard>
 
@@ -1851,6 +1970,74 @@ export default function GestorIngresarOrdenPage() {
           ) : null}
         </div>
       )}
+
+      {/* ── ENVÍO PROGRAMADO ── */}
+      {(() => {
+        const todayISO = new Date().toISOString().split('T')[0]
+        return (
+          <SectionCard title="Programar envío" icon="📅">
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <button type="button" onClick={() => setEsProgramado(v => !v)} style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${esProgramado ? '#004aad' : '#d1d5db'}`, background: esProgramado ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
+                  {esProgramado && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+                </button>
+                <label style={{ fontSize: 14, fontWeight: 600, color: '#111827', cursor: 'pointer' }} onClick={() => setEsProgramado(v => !v)}>
+                  ¿Es un envío programado?
+                </label>
+              </div>
+              {esProgramado && (
+                <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  <div>
+                    <label style={S.label}>¿Qué programar?</label>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      {([
+                        { value: 'retiro', label: '📦 Retiro' },
+                        { value: 'entrega', label: '🏠 Entrega' },
+                        { value: 'ambos', label: '↕ Ambos' },
+                      ] as { value: 'retiro' | 'entrega' | 'ambos'; label: string }[]).map(opt => (
+                        <button key={opt.value} type="button" onClick={() => setTipoProgramado(opt.value)} style={{ flex: 1, padding: '8px 10px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1px solid ${tipoProgramado === opt.value ? '#004aad' : '#e5e7eb'}`, background: tipoProgramado === opt.value ? '#eff6ff' : '#fff', color: tipoProgramado === opt.value ? '#004aad' : '#374151' }}>
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {(tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && (
+                    <div>
+                      {tipoProgramado === 'ambos' && <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 8px' }}>📦 Fecha de retiro</p>}
+                      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' as const }}>
+                        <div style={{ flex: 1, minWidth: 140 }}>
+                          <label style={S.label}>Fecha <span style={{ color: '#dc2626' }}>*</span></label>
+                          <input type="date" value={fechaRetiro} onChange={e => setFechaRetiro(e.target.value)} min={todayISO} style={S.input} />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 140 }}>
+                          <label style={S.label}>Hora (opcional)</label>
+                          <input type="time" value={horaRetiro} onChange={e => setHoraRetiro(e.target.value)} style={S.input} />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {(tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && (
+                    <div>
+                      {tipoProgramado === 'ambos' && <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 8px' }}>🏠 Fecha de entrega</p>}
+                      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' as const }}>
+                        <div style={{ flex: 1, minWidth: 140 }}>
+                          <label style={S.label}>Fecha <span style={{ color: '#dc2626' }}>*</span></label>
+                          <input type="date" value={fechaEntrega} onChange={e => setFechaEntrega(e.target.value)} min={tipoProgramado === 'ambos' && fechaRetiro ? fechaRetiro : todayISO} style={S.input} />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 140 }}>
+                          <label style={S.label}>Hora (opcional)</label>
+                          <input type="time" value={horaEntrega} onChange={e => setHoraEntrega(e.target.value)} style={S.input} />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <p style={{ fontSize: 11, color: '#9ca3af', margin: 0 }}>La solicitud quedará como <strong>programada</strong> hasta esa fecha.</p>
+                </div>
+              )}
+            </div>
+          </SectionCard>
+        )
+      })()}
 
       {/* ── PAGOS ── */}
       <SectionCard title="Pagos" icon="💰">
@@ -1974,6 +2161,10 @@ export default function GestorIngresarOrdenPage() {
             )}
           </div>
         )}
+
+        <Field label="Número de orden / referencia" hint="Código interno del comercio para identificar el pedido (opcional).">
+          <input value={numeroOrden} onChange={(e) => setNumeroOrden(e.target.value)} placeholder="Ej: #ORD-001 o número de pedido de WhatsApp" style={S.input} />
+        </Field>
 
         <div>
           <label style={S.label}>
