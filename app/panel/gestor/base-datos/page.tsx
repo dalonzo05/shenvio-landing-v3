@@ -758,7 +758,7 @@ export default function BaseDatosPage() {
                 <Th>#</Th><Th>Estado</Th><Th>Semana</Th><Th>Motorizado</Th><Th>Fecha</Th><Th>Pagó</Th>
                 <Th>Comercio</Th><Th>Teléfono</Th><Th>Retiro</Th><Th>Entrega</Th><Th>Zona</Th><Th>Delivery</Th>
                 <Th>C/E Producto</Th><Th>F. Depósito</Th><Th>Depositado</Th><Th>Forma Pago</Th>
-                <Th>C$</Th><Th>$</Th><Th>Dist.</Th>
+                <Th>Dist.</Th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -790,7 +790,18 @@ export default function BaseDatosPage() {
 
                     <Td><span className="text-gray-700">{s.asignacion?.motorizadoNombre || <span className="text-gray-300">—</span>}</span></Td>
                     <Td>{formatDate(s.createdAt)}</Td>
-                    <Td><BoolCell value={s.registro?.pago?.realizo} onToggle={(v) => updateRegistroNested(s.id, 'pago.realizo', v)} labelTrue="Sí" labelFalse="No" /></Td>
+                    <Td>
+                      {(() => {
+                        const qp = s.pagoDelivery?.quienPaga
+                        if (qp === 'transferencia' || qp === 'credito_semanal') {
+                          return <span className="inline-flex rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700">Sí (ext.)</span>
+                        }
+                        const recibio = s.cobrosMotorizado?.delivery?.recibio
+                        if (recibio === true) return <span className="inline-flex rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700">Sí</span>
+                        if (recibio === false) return <span className="inline-flex rounded-full bg-red-50 border border-red-200 px-2 py-0.5 text-[11px] font-semibold text-red-700">No</span>
+                        return <span className="text-gray-300 text-xs">—</span>
+                      })()}
+                    </Td>
                     <Td><span className="font-medium text-gray-800">{s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : undefined) || '—'}</span></Td>
                     <Td><span className="text-gray-600">{s.ownerSnapshot?.phone || '—'}</span></Td>
                     <Td><span className="max-w-[160px] truncate block text-gray-500" title={s.recoleccion?.direccionEscrita}>{s.recoleccion?.direccionEscrita || '—'}</span></Td>
@@ -836,16 +847,19 @@ export default function BaseDatosPage() {
                       })()}
                     </Td>
                     <Td>
-                      <select value={s.registro?.deposito?.formaPago || ''} onChange={(e) => updateRegistroNested(s.id, 'deposito.formaPago', e.target.value || null)} className="rounded border border-gray-200 bg-transparent px-1 py-0.5 text-xs focus:outline-none">
-                        <option value="">—</option>
-                        <option value="efectivo_retiro">Ef. retiro</option>
-                        <option value="efectivo_entrega">Ef. entrega</option>
-                        <option value="deposito">Depósito</option>
-                        <option value="credito">Crédito</option>
-                      </select>
+                      {(() => {
+                        const map: Record<string, string> = {
+                          recoleccion: 'Ef. retiro',
+                          entrega: 'Ef. entrega',
+                          transferencia: 'Transferencia',
+                          credito_semanal: 'Crédito',
+                        }
+                        const label = s.pagoDelivery?.quienPaga ? map[s.pagoDelivery.quienPaga] : null
+                        return label
+                          ? <span className="text-gray-700 text-xs">{label}</span>
+                          : <span className="text-gray-300 text-xs">—</span>
+                      })()}
                     </Td>
-                    <Td><EditableCell value={s.registro?.csRecaudado ?? ''} type="number" prefix="C$" placeholder="—" onSave={(v) => updateRegistro(s.id, { csRecaudado: v ? Number(v) : undefined })} /></Td>
-                    <Td><EditableCell value={s.registro?.usdRecaudado ?? ''} type="number" prefix="$" placeholder="—" onSave={(v) => updateRegistro(s.id, { usdRecaudado: v ? Number(v) : undefined })} /></Td>
                     <Td>{s.cotizacion?.distanciaKm != null ? `${Number(s.cotizacion.distanciaKm).toFixed(1)} km` : <span className="text-gray-300">—</span>}</Td>
                   </tr>
                 )
@@ -856,10 +870,7 @@ export default function BaseDatosPage() {
                 <Td colSpan={11}><span className="text-[11px] uppercase tracking-wide text-gray-500">Totales</span></Td>
                 <Td><span className="text-[#004aad]">C${totales.precio.toFixed(0)}</span></Td>
                 <Td><span className="text-green-700">C${totales.totalDelivery.toFixed(0)}</span></Td>
-                <Td /><Td><span>C${totales.depositado.toFixed(0)}</span></Td><Td /><Td />
-                <Td><span>C${totales.cs.toFixed(0)}</span></Td>
-                <Td><span>${totales.usd.toFixed(2)}</span></Td>
-                <Td />
+                <Td /><Td /><Td /><Td />
               </tr>
             </tfoot>
           </table>
@@ -878,7 +889,7 @@ function Th({ children }: { children: React.ReactNode }) {
   return <th className="whitespace-nowrap px-3 py-2">{children}</th>
 }
 
-function Td({ children, colSpan }: { children: React.ReactNode; colSpan?: number }) {
+function Td({ children, colSpan }: { children?: React.ReactNode; colSpan?: number }) {
   return <td className="whitespace-nowrap px-3 py-2" colSpan={colSpan}>{children}</td>
 }
 
