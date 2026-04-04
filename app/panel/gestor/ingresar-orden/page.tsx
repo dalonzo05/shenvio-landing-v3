@@ -305,6 +305,20 @@ async function guardarClienteEntrega(uid: string, data: Omit<ClienteGuardado, 'i
 
 // ─── Map Components ───────────────────────────────────────────────────────────
 
+// ─── Phone helpers ────────────────────────────────────────────────────────────
+
+function formatCelular(v: string): string {
+  const digits = v.replace(/\D/g, '').slice(0, 8)
+  if (digits.length <= 4) return digits
+  return `${digits.slice(0, 4)}-${digits.slice(4)}`
+}
+
+function validarCelular(v: string): boolean {
+  return /^\d{4}-\d{4}$/.test(v.trim())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function StaticMiniMap({ coord, color = '#004aad', label = 'R' }: {
   coord: LatLng
   color?: string
@@ -1203,6 +1217,11 @@ export default function GestorIngresarOrdenPage() {
   const [fechaEntrega, setFechaEntrega] = useState('')
   const [horaEntrega, setHoraEntrega] = useState('')
 
+  // Paquete
+  const [fragil, setFragil] = useState(false)
+  const [grande, setGrande] = useState(false)
+  const [notaPaquete, setNotaPaquete] = useState('')
+
   // ── Manual price calculation ──
   const [calcResult, setCalcResult] = useState<{ km: number; precio: number } | null>(null)
   const [calcLoading, setCalcLoading] = useState(false)
@@ -1337,9 +1356,11 @@ export default function GestorIngresarOrdenPage() {
     if (!selectedOwnerUid) f.push('Seleccionar el comercio dueño')
     if (!retiro.nombre.trim()) f.push('Nombre de retiro')
     if (!retiro.celular.trim()) f.push('Celular de retiro')
+    else if (!validarCelular(retiro.celular)) f.push('Celular de retiro — formato XXXX-XXXX')
     if (!retiro.direccion.trim()) f.push('Dirección de retiro')
     if (!entrega.nombre.trim()) f.push('Nombre de entrega')
     if (!entrega.celular.trim()) f.push('Celular de entrega')
+    else if (!validarCelular(entrega.celular)) f.push('Celular de entrega — formato XXXX-XXXX')
     if (!entrega.direccion.trim()) f.push('Dirección de entrega')
     if (cobroCE && (montoCE === '' || Number(montoCE) <= 0)) f.push('Monto del cobro contra entrega')
     if (tipoCliente === 'contado' && !quienPagaDelivery) f.push('Quién paga el delivery')
@@ -1446,6 +1467,11 @@ export default function GestorIngresarOrdenPage() {
                 montoSugerido: precioEfectivo,
                 deducirDelCobroContraEntrega: deducirAplica,
               },
+        paquete: (fragil || grande) ? {
+          fragil,
+          grande,
+          notaPaquete: grande && notaPaquete.trim() ? notaPaquete.trim() : null,
+        } : null,
         detalle: detalle.trim(),
         numeroOrden: numeroOrden.trim() || null,
         programado: esProgramado
@@ -1510,6 +1536,7 @@ export default function GestorIngresarOrdenPage() {
       setCalcError(null)
       lastCalcKey.current = null
       setShowNotaRetiro(false); setShowNotaEntrega(false)
+      setFragil(false); setGrande(false); setNotaPaquete('')
       setGeoRetiro(''); setGeoEntrega('')
       setNumeroOrden('')
       setEsProgramado(false); setTipoProgramado('retiro'); setFechaRetiro(''); setHoraRetiro(''); setFechaEntrega(''); setHoraEntrega('')
@@ -1771,10 +1798,14 @@ export default function GestorIngresarOrdenPage() {
         <Field label="Celular" required>
           <input
             value={retiro.celular}
-            onChange={(e) => setRetiro((prev) => ({ ...prev, celular: e.target.value }))}
+            onChange={(e) => setRetiro((prev) => ({ ...prev, celular: formatCelular(e.target.value) }))}
             placeholder="Ej: 8888-8888"
-            style={S.input}
+            maxLength={9}
+            style={{ ...S.input, borderColor: retiro.celular && !validarCelular(retiro.celular) ? '#dc2626' : '#e5e7eb' }}
           />
+          {retiro.celular && !validarCelular(retiro.celular) && (
+            <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos formato XXXX-XXXX</p>
+          )}
         </Field>
 
         <Field label="Dirección escrita" required hint="Descripción para que el motorizado llegue.">
@@ -1850,16 +1881,21 @@ export default function GestorIngresarOrdenPage() {
           required
         />
 
-        <AutocompleteInput
-          label="Celular"
-          value={entrega.celular}
-          onChange={(v) => setEntrega((prev) => ({ ...prev, celular: v }))}
-          onSelect={handleSelectEntrega}
-          placeholder="Ej: 7777-7777"
-          clientes={poolPuntos}
-          comercioUidActual={selectedOwnerUid || undefined}
-          required
-        />
+        <div>
+          <AutocompleteInput
+            label="Celular"
+            value={entrega.celular}
+            onChange={(v) => setEntrega((prev) => ({ ...prev, celular: formatCelular(v) }))}
+            onSelect={handleSelectEntrega}
+            placeholder="Ej: 7777-7777"
+            clientes={poolPuntos}
+            comercioUidActual={selectedOwnerUid || undefined}
+            required
+          />
+          {entrega.celular && !validarCelular(entrega.celular) && (
+            <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos formato XXXX-XXXX</p>
+          )}
+        </div>
 
         <Field label="Dirección escrita" required hint="Descripción detallada para que el motorizado llegue.">
           <input
@@ -2038,6 +2074,62 @@ export default function GestorIngresarOrdenPage() {
           </SectionCard>
         )
       })()}
+
+      {/* ── PAQUETE ── */}
+      <SectionCard title="Datos del paquete" icon="📦">
+        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' as const }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button
+              type="button"
+              onClick={() => setFragil(v => !v)}
+              style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${fragil ? '#dc2626' : '#d1d5db'}`, background: fragil ? '#dc2626' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
+            >
+              {fragil && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+            </button>
+            <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', cursor: 'pointer' }} onClick={() => setFragil(v => !v)}>
+              🥚 Paquete frágil
+            </label>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button
+              type="button"
+              onClick={() => setGrande(v => !v)}
+              style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${grande ? '#d46b08' : '#d1d5db'}`, background: grande ? '#d46b08' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
+            >
+              {grande && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+            </button>
+            <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', cursor: 'pointer' }} onClick={() => setGrande(v => !v)}>
+              📦 Paquete grande / voluminoso
+            </label>
+          </div>
+        </div>
+
+        {(fragil || grande) && (
+          <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>
+            {fragil && grande
+              ? '⚠️ Manejo con cuidado y espacio para paquete de gran tamaño.'
+              : fragil
+              ? '⚠️ El motorizado sabrá que debe manejar el paquete con especial cuidado.'
+              : '📦 El motorizado sabrá que es un paquete de gran tamaño.'}
+            {' '}Tener en cuenta al asignar motorizado y confirmar precio.
+          </p>
+        )}
+
+        {grande && (
+          <Field label="Descripción / dimensiones" hint="Ayudá al motorizado a entender el tamaño o tipo de paquete.">
+            <input
+              value={notaPaquete}
+              onChange={e => setNotaPaquete(e.target.value)}
+              placeholder='Ej: Caja 60×40cm, televisor 32", mueble desmontado...'
+              style={S.input}
+            />
+          </Field>
+        )}
+
+        {!fragil && !grande && (
+          <p style={{ fontSize: 12, color: '#9ca3af', margin: 0 }}>Marcá si el paquete requiere cuidado especial o es de gran tamaño.</p>
+        )}
+      </SectionCard>
 
       {/* ── PAGOS ── */}
       <SectionCard title="Pagos" icon="💰">
