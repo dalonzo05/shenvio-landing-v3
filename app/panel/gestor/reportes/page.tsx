@@ -21,7 +21,7 @@ type Solicitud = {
   userId?: string
   ownerSnapshot?: { companyName?: string; nombre?: string }
   confirmacion?: { precioFinalCordobas?: number }
-  asignacion?: { motorizadoId?: string; motorizadoNombre?: string } | null
+  asignacion?: { motorizadoId?: string; motorizadoNombre?: string; estadoAceptacion?: string } | null
   cobrosMotorizado?: {
     delivery?: { monto: number; recibio: boolean; at?: any; justificacion?: string }
     producto?: { monto: number; recibio: boolean; at?: any; justificacion?: string }
@@ -30,6 +30,12 @@ type Solicitud = {
 }
 
 type Period = 'hoy' | 'semana' | 'mes' | 'custom'
+
+function getPrevPeriodDates(period: Period, customStart: string, customEnd: string): { start: Date; end: Date } {
+  const { start, end } = getPeriodDates(period, customStart, customEnd)
+  const diff = end.getTime() - start.getTime()
+  return { start: new Date(start.getTime() - diff - 1), end: new Date(start.getTime() - 1) }
+}
 
 function getPeriodDates(period: Period, customStart: string, customEnd: string): { start: Date; end: Date } {
   const now = new Date()
@@ -62,22 +68,24 @@ export default function ReportesPage() {
   const [customEnd, setCustomEnd] = useState('')
 
   const [solicitudes, setSolicitudes] = useState<Solicitud[]>([])
+  const [prevSolicitudes, setPrevSolicitudes] = useState<Solicitud[]>([])
   const [loading, setLoading] = useState(false)
   const [comercioNames, setComercioNames] = useState<Record<string, string>>({})
 
   // ── Fetch solicitudes by period ──────────────────────────────────────────
   const fetchData = useCallback(async () => {
     const { start, end } = getPeriodDates(period, customStart, customEnd)
+    const { start: prevStart, end: prevEnd } = getPrevPeriodDates(period, customStart, customEnd)
     setLoading(true)
     try {
-      const q = query(
+      const makeQ = (s: Date, e: Date) => query(
         collection(db, 'solicitudes_envio'),
-        where('createdAt', '>=', Timestamp.fromDate(start)),
-        where('createdAt', '<=', Timestamp.fromDate(end))
+        where('createdAt', '>=', Timestamp.fromDate(s)),
+        where('createdAt', '<=', Timestamp.fromDate(e))
       )
-      const snap = await getDocs(q)
-      const list: Solicitud[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))
-      setSolicitudes(list)
+      const [snap, prevSnap] = await Promise.all([getDocs(makeQ(start, end)), getDocs(makeQ(prevStart, prevEnd))])
+      setSolicitudes(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
+      setPrevSolicitudes(prevSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
     } finally {
       setLoading(false)
     }
@@ -107,15 +115,25 @@ export default function ReportesPage() {
     })
   }, [solicitudes])
 
-  // ── Computed metrics ─────────────────────────────────────────────────────
-  const { total, entregadas, tasa, ingresos } = useMemo(() => {
-    const total = solicitudes.length
-    const entregadasList = solicitudes.filter((s) => s.estado === 'entregado')
-    const entregadas = entregadasList.length
-    const tasa = total > 0 ? ((entregadas / total) * 100).toFixed(1) : '0.0'
-    const ingresos = entregadasList.reduce((sum, s) => sum + (s.confirmacion?.precioFinalCordobas || 0), 0)
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  function calcMetrics(list: Solicitud[]) {
+    const total = list.length
+    const ent = list.filter((s) => s.estado === 'entregado')
+    const entregadas = ent.length
+    const tasa = total > 0 ? (entregadas / total) * 100 : 0
+    const ingresos = ent.reduce((sum, s) => sum + (s.confirmacion?.precioFinalCordobas || 0), 0)
     return { total, entregadas, tasa, ingresos }
-  }, [solicitudes])
+  }
+
+  function delta(curr: number, prev: number): { pct: number; dir: 'up' | 'down' | 'flat' } | null {
+    if (prev === 0) return null
+    const pct = Math.round(((curr - prev) / prev) * 100)
+    return { pct, dir: pct > 0 ? 'up' : pct < 0 ? 'down' : 'flat' }
+  }
+
+  // ── Computed metrics ─────────────────────────────────────────────────────
+  const { total, entregadas, tasa, ingresos } = useMemo(() => calcMetrics(solicitudes), [solicitudes])
+  const prev = useMemo(() => calcMetrics(prevSolicitudes), [prevSolicitudes])
 
   // ── Per-comercio grouping ────────────────────────────────────────────────
   const comercioRows = useMemo(() => {
@@ -139,17 +157,56 @@ export default function ReportesPage() {
 
   // ── Per-motorizado grouping ──────────────────────────────────────────────
   const motorizadoRows = useMemo(() => {
-    const map: Record<string, { nombre: string; asignadas: number; entregadas: number }> = {}
+    const map: Record<string, { nombre: string; asignadas: number; entregadas: number; rechazadas: number; ingresos: number }> = {}
     for (const s of solicitudes) {
       if (!s.asignacion?.motorizadoId) continue
       const id = s.asignacion.motorizadoId
       const nombre = s.asignacion.motorizadoNombre || id.slice(0, 8)
-      if (!map[id]) map[id] = { nombre, asignadas: 0, entregadas: 0 }
+      if (!map[id]) map[id] = { nombre, asignadas: 0, entregadas: 0, rechazadas: 0, ingresos: 0 }
+      if (s.asignacion?.estadoAceptacion === 'rechazada') { map[id].rechazadas++; continue }
       map[id].asignadas++
-      if (s.estado === 'entregado') map[id].entregadas++
+      if (s.estado === 'entregado') {
+        map[id].entregadas++
+        map[id].ingresos += s.confirmacion?.precioFinalCordobas || 0
+      }
     }
     return Object.values(map).sort((a, b) => b.entregadas - a.entregadas)
   }, [solicitudes])
+
+  // ── Export CSV ───────────────────────────────────────────────────────────
+  function exportCSV() {
+    const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`
+    const { start, end } = getPeriodDates(period, customStart, customEnd)
+    const periodStr = `${start.toLocaleDateString('es-NI')}_${end.toLocaleDateString('es-NI')}`
+
+    // Comercios
+    const comHeaders = ['Comercio','Órdenes','Entregadas','Tasa %','Ingresos C$']
+    const comRows = comercioRows.map((r) => [r.nombre, r.ordenes, r.entregadas, r.ordenes > 0 ? ((r.entregadas/r.ordenes)*100).toFixed(0) : 0, r.ingresos].map(esc).join(','))
+
+    // Motorizados
+    const motHeaders = ['Motorizado','Asignadas','Entregadas','Rechazadas','Tasa acept. %','Ingresos C$']
+    const motRows = motorizadoRows.map((r) => {
+      const tot = r.asignadas + r.rechazadas
+      const tasa = tot > 0 ? ((r.asignadas / tot) * 100).toFixed(0) : 0
+      return [r.nombre, r.asignadas, r.entregadas, r.rechazadas, tasa, r.ingresos].map(esc).join(',')
+    })
+
+    const csv = [
+      '=== REPORTE POR COMERCIO ===',
+      comHeaders.map(esc).join(','),
+      ...comRows,
+      '',
+      '=== REPORTE POR MOTORIZADO ===',
+      motHeaders.map(esc).join(','),
+      ...motRows,
+    ].join('\n')
+
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = `reporte-${periodStr}.csv`; a.click()
+    URL.revokeObjectURL(url)
+  }
 
   // ── Styles ───────────────────────────────────────────────────────────────
   const btnPeriod = (p: Period) =>
@@ -170,13 +227,22 @@ export default function ReportesPage() {
           <h1 className="text-2xl font-black text-gray-900 tracking-tight">Reportes</h1>
           <p className="text-sm text-gray-500 mt-0.5">Métricas operativas del negocio.</p>
         </div>
-        <button
-          onClick={fetchData}
-          disabled={loading}
-          className="text-xs font-semibold text-[#004aad] border border-[#004aad]/30 px-3 py-1.5 rounded-lg hover:bg-[#004aad]/5 transition disabled:opacity-50"
-        >
-          {loading ? 'Cargando…' : '↻ Actualizar'}
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={exportCSV}
+            disabled={loading || solicitudes.length === 0}
+            className="text-xs font-semibold text-gray-700 border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50 transition disabled:opacity-40"
+          >
+            ⬇ Exportar CSV
+          </button>
+          <button
+            onClick={fetchData}
+            disabled={loading}
+            className="text-xs font-semibold text-[#004aad] border border-[#004aad]/30 px-3 py-1.5 rounded-lg hover:bg-[#004aad]/5 transition disabled:opacity-50"
+          >
+            {loading ? 'Cargando…' : '↻ Actualizar'}
+          </button>
+        </div>
       </div>
 
       {/* Period selector */}
@@ -210,19 +276,32 @@ export default function ReportesPage() {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        {[
-          { label: 'Total órdenes', value: loading ? '…' : total, color: 'text-gray-900', bg: 'bg-white' },
-          { label: 'Entregadas', value: loading ? '…' : entregadas, color: 'text-green-700', bg: 'bg-green-50' },
-          { label: 'Tasa de éxito', value: loading ? '…' : `${tasa}%`, color: 'text-blue-700', bg: 'bg-blue-50' },
-          { label: 'Ingresos delivery', value: loading ? '…' : `C$ ${ingresos.toLocaleString('es-NI', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`, color: 'text-[#004aad]', bg: 'bg-[#004aad]/5' },
-        ].map((c) => (
-          <div key={c.label} className={`${c.bg} rounded-xl border border-gray-200 px-4 py-3`}>
-            <p className={`text-2xl font-black ${c.color}`}>{c.value}</p>
-            <p className="text-xs font-semibold text-gray-500 mt-0.5">{c.label}</p>
+      {(() => {
+        const kpis = [
+          { label: 'Total órdenes', curr: total, prev: prev.total, fmt: (v: number) => String(v), color: 'text-gray-900', bg: 'bg-white border-gray-200' },
+          { label: 'Entregadas', curr: entregadas, prev: prev.entregadas, fmt: (v: number) => String(v), color: 'text-green-700', bg: 'bg-green-50 border-green-200' },
+          { label: 'Tasa de éxito', curr: tasa, prev: prev.tasa, fmt: (v: number) => `${v.toFixed(1)}%`, color: 'text-blue-700', bg: 'bg-blue-50 border-blue-200' },
+          { label: 'Ingresos delivery', curr: ingresos, prev: prev.ingresos, fmt: (v: number) => `C$ ${v.toLocaleString('es-NI', { minimumFractionDigits: 0 })}`, color: 'text-[#004aad]', bg: 'bg-[#004aad]/5 border-[#004aad]/20' },
+        ]
+        return (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {kpis.map((k) => {
+              const d = loading ? null : delta(k.curr, k.prev)
+              return (
+                <div key={k.label} className={`${k.bg} rounded-xl border px-4 py-3`}>
+                  <p className={`text-2xl font-black ${k.color}`}>{loading ? '…' : k.fmt(k.curr)}</p>
+                  <p className="text-xs font-semibold text-gray-500 mt-0.5">{k.label}</p>
+                  {d && (
+                    <p className={`text-[10px] font-semibold mt-1 ${d.dir === 'up' ? 'text-green-600' : d.dir === 'down' ? 'text-red-500' : 'text-gray-400'}`}>
+                      {d.dir === 'up' ? '↑' : d.dir === 'down' ? '↓' : '='} {Math.abs(d.pct)}% vs período ant.
+                    </p>
+                  )}
+                </div>
+              )
+            })}
           </div>
-        ))}
-      </div>
+        )
+      })()}
 
       {/* Por comercio */}
       <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -279,11 +358,16 @@ export default function ReportesPage() {
                 <th className={thCls}>Motorizado</th>
                 <th className={`${thCls} text-right`}>Asignadas</th>
                 <th className={`${thCls} text-right`}>Entregadas</th>
-                <th className={`${thCls} text-right`}>Tasa</th>
+                <th className={`${thCls} text-right`}>Rechazadas</th>
+                <th className={`${thCls} text-right`}>Tasa acept.</th>
+                <th className={`${thCls} text-right`}>Ingresos</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {motorizadoRows.map((r) => (
+              {motorizadoRows.map((r) => {
+                const tot = r.asignadas + r.rechazadas
+                const tasaAcept = tot > 0 ? Math.round((r.asignadas / tot) * 100) : null
+                return (
                 <tr key={r.nombre} className="hover:bg-gray-50 transition-colors">
                   <td className={`${tdCls} font-semibold text-gray-900`}>
                     <div className="flex items-center gap-2">
@@ -297,11 +381,16 @@ export default function ReportesPage() {
                   </td>
                   <td className={`${tdCls} text-right`}>{r.asignadas}</td>
                   <td className={`${tdCls} text-right text-green-700 font-semibold`}>{r.entregadas}</td>
-                  <td className={`${tdCls} text-right`}>
-                    {r.asignadas > 0 ? `${((r.entregadas / r.asignadas) * 100).toFixed(0)}%` : '—'}
+                  <td className={`${tdCls} text-right ${r.rechazadas > 0 ? 'text-orange-600 font-semibold' : 'text-gray-400'}`}>{r.rechazadas}</td>
+                  <td className={`${tdCls} text-right font-semibold ${tasaAcept !== null && tasaAcept < 70 ? 'text-red-500' : 'text-gray-700'}`}>
+                    {tasaAcept !== null ? `${tasaAcept}%` : '—'}
+                  </td>
+                  <td className={`${tdCls} text-right font-semibold text-[#004aad]`}>
+                    {r.ingresos > 0 ? `C$ ${r.ingresos.toLocaleString('es-NI', { minimumFractionDigits: 0 })}` : '—'}
                   </td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         )}

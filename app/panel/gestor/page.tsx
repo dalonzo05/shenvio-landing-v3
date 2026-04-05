@@ -22,6 +22,18 @@ import {
 } from 'lucide-react'
 import { collection, onSnapshot, query, where, limit, Timestamp } from 'firebase/firestore'
 import { db } from '@/fb/config'
+import { SolicitudDrawer } from './_components/SolicitudDrawer'
+
+type OrdenActiva = {
+  id: string
+  estado?: string
+  createdAt?: Timestamp
+  updatedAt?: Timestamp
+  ownerSnapshot?: { companyName?: string; nombre?: string }
+  userId?: string
+  asignacion?: { motorizadoNombre?: string; motorizadoId?: string } | null
+  cobroDelivery?: { estado?: string; registradoAt?: Timestamp }
+}
 
 type CobroAlerta = {
   id: string
@@ -115,6 +127,22 @@ export default function PanelGestorPage() {
   const [busqueda, setBusqueda] = useState('')
   const [filtroEstado, setFiltroEstado] = useState<FiltroEstado>('todos')
   const [cobrosAlerta, setCobrosAlerta] = useState<CobroAlerta[]>([])
+  const [ordenesHoy, setOrdenesHoy] = useState<OrdenActiva[]>([])
+  const [ordenesActivas, setOrdenesActivas] = useState<OrdenActiva[]>([])
+  const [selectedOrdenId, setSelectedOrdenId] = useState<string | null>(null)
+
+  // Órdenes de hoy (KPIs del día)
+  useEffect(() => {
+    const hoyStart = new Date(); hoyStart.setHours(0, 0, 0, 0)
+    const q = query(collection(db, 'solicitudes_envio'), where('createdAt', '>=', Timestamp.fromDate(hoyStart)))
+    return onSnapshot(q, (snap) => setOrdenesHoy(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))))
+  }, [])
+
+  // Órdenes activas en curso (independiente del día)
+  useEffect(() => {
+    const q = query(collection(db, 'solicitudes_envio'), where('estado', 'in', ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega']))
+    return onSnapshot(q, (snap) => setOrdenesActivas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))))
+  }, [])
 
   // Cobros pendientes en tiempo real (máx 5 para el widget)
   useEffect(() => {
@@ -192,6 +220,44 @@ export default function PanelGestorPage() {
     return rows
   }, [motorizados, busqueda, filtroEstado])
 
+  // KPIs del día
+  const kpisHoy = useMemo(() => {
+    const now = Date.now()
+    const creadas = ordenesHoy.length
+    const entregadas = ordenesHoy.filter((o) => o.estado === 'entregado').length
+    const enCurso = ordenesActivas.length
+    const sinAsignar = ordenesHoy.filter((o) => o.estado === 'confirmada' && !o.asignacion?.motorizadoId).length
+    const rechazadas = ordenesHoy.filter((o) => o.estado === 'rechazada').length
+    return { creadas, entregadas, enCurso, sinAsignar, rechazadas }
+  }, [ordenesHoy, ordenesActivas])
+
+  // Alertas operacionales
+  const alertas = useMemo(() => {
+    const now = Date.now()
+    const TREINTA_MIN = 30 * 60 * 1000
+    const DOS_HORAS = 2 * 60 * 60 * 1000
+
+    const sinAsignarMucho = ordenesHoy.filter((o) => {
+      if (o.estado !== 'confirmada' || o.asignacion?.motorizadoId) return false
+      const ts = typeof o.createdAt?.toDate === 'function' ? o.createdAt.toDate().getTime() : 0
+      return ts > 0 && (now - ts) > TREINTA_MIN
+    })
+
+    const atascadas = ordenesActivas.filter((o) => {
+      const ts = typeof o.updatedAt?.toDate === 'function' ? o.updatedAt.toDate().getTime() : 0
+      return ts > 0 && (now - ts) > DOS_HORAS
+    })
+
+    return { sinAsignarMucho, atascadas }
+  }, [ordenesHoy, ordenesActivas])
+
+  function tiempoRelativo(ts?: Timestamp): string {
+    if (!ts || typeof ts.toDate !== 'function') return ''
+    const diff = Math.floor((Date.now() - ts.toDate().getTime()) / 60000)
+    if (diff < 60) return `hace ${diff} min`
+    return `hace ${Math.floor(diff / 60)}h ${diff % 60}min`
+  }
+
   const accesos = [
     {
       titulo: 'Solicitudes',
@@ -264,6 +330,123 @@ export default function PanelGestorPage() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 md:py-8 space-y-6">
+
+      {/* ── KPIs del día ── */}
+      <div className="grid grid-cols-5 gap-3">
+        {[
+          { label: 'Creadas hoy', value: kpisHoy.creadas, color: 'text-gray-900', bg: 'bg-white border-gray-200' },
+          { label: 'Entregadas hoy', value: kpisHoy.entregadas, color: 'text-green-700', bg: 'bg-green-50 border-green-200' },
+          { label: 'En curso', value: kpisHoy.enCurso, color: 'text-blue-700', bg: 'bg-blue-50 border-blue-200' },
+          { label: 'Sin asignar', value: kpisHoy.sinAsignar, color: kpisHoy.sinAsignar > 0 ? 'text-orange-600' : 'text-gray-500', bg: kpisHoy.sinAsignar > 0 ? 'bg-orange-50 border-orange-200' : 'bg-white border-gray-200' },
+          { label: 'Rechazadas hoy', value: kpisHoy.rechazadas, color: kpisHoy.rechazadas > 0 ? 'text-red-600' : 'text-gray-500', bg: kpisHoy.rechazadas > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-gray-200' },
+        ].map((k) => (
+          <div key={k.label} className={`${k.bg} border rounded-xl px-4 py-3`}>
+            <p className={`text-2xl font-black ${k.color}`}>{k.value}</p>
+            <p className="text-xs font-semibold text-gray-500 mt-0.5">{k.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Alertas operacionales ── */}
+      {(alertas.sinAsignarMucho.length > 0 || alertas.atascadas.length > 0) && (
+        <section className="rounded-2xl border border-red-200 bg-red-50 p-4 shadow-sm">
+          <div className="flex items-center gap-2 mb-3">
+            <AlertCircle className="h-5 w-5 text-red-500" />
+            <h2 className="text-sm font-black text-red-800">Alertas operacionales</h2>
+          </div>
+          <div className="flex flex-col gap-2">
+            {alertas.sinAsignarMucho.length > 0 && (
+              <div className="bg-white rounded-xl border border-red-100 px-4 py-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-bold text-gray-900">
+                    🔴 {alertas.sinAsignarMucho.length} orden{alertas.sinAsignarMucho.length > 1 ? 'es' : ''} sin asignar +30 min
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {alertas.sinAsignarMucho.slice(0, 2).map((o) => `${o.id.slice(0,8)} (${tiempoRelativo(o.createdAt)})`).join(' · ')}
+                    {alertas.sinAsignarMucho.length > 2 && ` +${alertas.sinAsignarMucho.length - 2} más`}
+                  </p>
+                </div>
+                <Link href="/panel/gestor/solicitudes" className="text-xs font-semibold text-red-600 hover:underline whitespace-nowrap">
+                  Asignar →
+                </Link>
+              </div>
+            )}
+            {alertas.atascadas.length > 0 && (
+              <div className="bg-white rounded-xl border border-orange-100 px-4 py-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-bold text-gray-900">
+                    🟠 {alertas.atascadas.length} orden{alertas.atascadas.length > 1 ? 'es' : ''} en curso +2 horas
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {alertas.atascadas.slice(0, 2).map((o) => `${o.id.slice(0,8)} (${tiempoRelativo(o.updatedAt)})`).join(' · ')}
+                    {alertas.atascadas.length > 2 && ` +${alertas.atascadas.length - 2} más`}
+                  </p>
+                </div>
+                <Link href="/panel/gestor/solicitudes" className="text-xs font-semibold text-orange-600 hover:underline whitespace-nowrap">
+                  Revisar →
+                </Link>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* ── Órdenes activas en tiempo real ── */}
+      {ordenesActivas.length > 0 && (
+        <section className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+            <h2 className="text-sm font-black text-gray-900 flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+              Órdenes en curso ({ordenesActivas.length})
+            </h2>
+            <Link href="/panel/gestor/solicitudes" className="text-xs font-semibold text-[#004aad] hover:underline">
+              Ver todas →
+            </Link>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-gray-50 border-b border-gray-100 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                  <th className="px-4 py-2 text-left">Orden</th>
+                  <th className="px-4 py-2 text-left">Comercio</th>
+                  <th className="px-4 py-2 text-left">Motorizado</th>
+                  <th className="px-4 py-2 text-left">Estado</th>
+                  <th className="px-4 py-2 text-left">Tiempo</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {ordenesActivas.slice(0, 8).map((o) => {
+                  const estadoLabel: Record<string, { label: string; cls: string }> = {
+                    asignada: { label: 'Asignada', cls: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
+                    en_camino_retiro: { label: '→ Retiro', cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+                    retirado: { label: 'Retirado', cls: 'bg-cyan-50 text-cyan-700 border-cyan-200' },
+                    en_camino_entrega: { label: '→ Entrega', cls: 'bg-purple-50 text-purple-700 border-purple-200' },
+                  }
+                  const cfg = estadoLabel[o.estado || ''] || { label: o.estado || '—', cls: 'bg-gray-50 text-gray-600 border-gray-200' }
+                  const comercio = o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre || '—'
+                  return (
+                    <tr key={o.id} className="hover:bg-gray-50 transition-colors">
+                      <td className="px-4 py-2.5">
+                        <button onClick={() => setSelectedOrdenId(o.id)} className="font-mono text-blue-600 hover:underline">
+                          {o.id.slice(0, 8)}
+                        </button>
+                      </td>
+                      <td className="px-4 py-2.5 font-medium text-gray-800">{comercio}</td>
+                      <td className="px-4 py-2.5 text-gray-600">{o.asignacion?.motorizadoNombre || '—'}</td>
+                      <td className="px-4 py-2.5">
+                        <span className={`inline-flex text-[10px] font-semibold px-2 py-0.5 rounded-full border ${cfg.cls}`}>
+                          {cfg.label}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2.5 text-gray-400">{tiempoRelativo(o.updatedAt || o.createdAt)}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       {/* ── Widget: cobros pendientes ── */}
       {cobrosAlerta.length > 0 && (
@@ -721,6 +904,14 @@ export default function PanelGestorPage() {
           </div>
         </div>
       </section>
+
+      {/* Drawer de detalle */}
+      {selectedOrdenId && (
+        <SolicitudDrawer
+          solicitudId={selectedOrdenId}
+          onClose={() => setSelectedOrdenId(null)}
+        />
+      )}
     </div>
   )
 }

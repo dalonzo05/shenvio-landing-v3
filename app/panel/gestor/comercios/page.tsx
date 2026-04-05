@@ -14,7 +14,7 @@ import {
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
 import { upsertCompanyByUid, type BankAccount, type CompanyPayload } from '@/fb/data'
-import { Search, X, ChevronDown, ChevronUp, Building2, Phone, MapPin, CreditCard, Star } from 'lucide-react'
+import { Search, X, ChevronDown, ChevronUp, Building2, Phone, MapPin, CreditCard, Star, Lock } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -39,6 +39,7 @@ type Comercio = {
   address?: string
   accounts?: BankAccount[]
   puntosRetiro?: Record<string, any>
+  notaInterna?: string
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
@@ -73,6 +74,11 @@ export default function ComerciosPage() {
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
 
+  // Nota interna
+  const [eNota, setENota] = useState('')
+  const [savingNota, setSavingNota] = useState(false)
+  const [notaMsg, setNotaMsg] = useState<string | null>(null)
+
   // Punto modal
   const [puntoModal, setPuntoModal] = useState(false)
   const [editingPuntoKey, setEditingPuntoKey] = useState<string | null>(null)
@@ -105,6 +111,7 @@ export default function ComerciosPage() {
           address: comData.address || '',
           accounts: Array.isArray(comData.accounts) ? comData.accounts : [],
           puntosRetiro: comData.puntosRetiro || {},
+          notaInterna: comData.notaInterna || '',
         }
       })
       list.sort((a, b) => (a.name || '').localeCompare(b.name || ''))
@@ -144,6 +151,8 @@ export default function ComerciosPage() {
     }))
     setEPuntos(puntos)
     setMsg(null)
+    setENota(c.notaInterna || '')
+    setNotaMsg(null)
     setDrawerOpen(true)
   }
 
@@ -259,6 +268,20 @@ export default function ComerciosPage() {
       setEPuntos((prev) => prev.filter((p) => p.key !== key))
     } catch (e) {
       console.error(e)
+    }
+  }
+
+  async function saveNota() {
+    if (!selected) return
+    setSavingNota(true); setNotaMsg(null)
+    try {
+      await setDoc(doc(db, 'comercios', selected.uid), { notaInterna: eNota.trim(), updatedAt: serverTimestamp() }, { merge: true })
+      setComerciosList((prev) => prev.map((c) => c.uid === selected.uid ? { ...c, notaInterna: eNota.trim() } : c))
+      setNotaMsg('✅ Nota guardada')
+    } catch {
+      setNotaMsg('❌ No se pudo guardar')
+    } finally {
+      setSavingNota(false)
     }
   }
 
@@ -477,6 +500,36 @@ export default function ComerciosPage() {
                   <span className={`text-sm font-semibold ${msg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>{msg}</span>
                 )}
               </div>
+
+              {/* ── Nota interna ── */}
+              <section className="bg-yellow-50 border border-yellow-200 rounded-xl p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <Lock className="h-4 w-4 text-yellow-600" />
+                  <h3 className="text-sm font-bold text-yellow-800 uppercase tracking-wide">Nota interna</h3>
+                  <span className="text-[10px] font-semibold text-yellow-600 bg-yellow-100 border border-yellow-300 px-2 py-0.5 rounded-full ml-auto">Solo gestores</span>
+                </div>
+                <textarea
+                  value={eNota}
+                  onChange={(e) => setENota(e.target.value)}
+                  placeholder="Ej: Cliente paga siempre tarde los viernes. Preferir efectivo. Contactar a María."
+                  rows={3}
+                  className="w-full border border-yellow-300 bg-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400/40 resize-none"
+                />
+                <div className="flex items-center gap-3 mt-2">
+                  <button
+                    onClick={saveNota}
+                    disabled={savingNota}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-yellow-500 text-white hover:bg-yellow-600 transition disabled:opacity-40"
+                  >
+                    {savingNota ? 'Guardando…' : 'Guardar nota'}
+                  </button>
+                  {notaMsg && (
+                    <span className={`text-xs font-semibold ${notaMsg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>
+                      {notaMsg}
+                    </span>
+                  )}
+                </div>
+              </section>
 
               {/* ── Puntos de retiro ── */}
               <section>

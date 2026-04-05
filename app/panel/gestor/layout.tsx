@@ -15,6 +15,7 @@ import {
   ChevronLeft,
   ChevronRight,
   AlertCircle,
+  Wallet,
 } from 'lucide-react'
 
 export default function GestorLayout({ children }: { children: React.ReactNode }) {
@@ -161,6 +162,14 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               active={pathname.startsWith('/panel/gestor/cobros')}
               collapsed={collapsed}
               badge={cobrosPendientes > 0 ? cobrosPendientes : undefined}
+            />
+
+            <NavItem
+              href="/panel/gestor/depositos"
+              icon={<Wallet size={18} />}
+              label="Depósitos"
+              active={pathname.startsWith('/panel/gestor/depositos')}
+              collapsed={collapsed}
             />
           </nav>
         </div>

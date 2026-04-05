@@ -24,6 +24,23 @@
         { "fieldPath": "estado", "order": "ASCENDING" },
         { "fieldPath": "entregadoAt", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "solicitudes_envio",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "cobroDelivery.tipoCliente", "order": "ASCENDING" },
+        { "fieldPath": "cobroDelivery.estado", "order": "ASCENDING" },
+        { "fieldPath": "entregadoAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "cobros_semanales",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "estado", "order": "ASCENDING" },
+        { "fieldPath": "semanaKey", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

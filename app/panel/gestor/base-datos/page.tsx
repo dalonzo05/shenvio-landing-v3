@@ -117,6 +117,13 @@ type Solicitud = {
     producto?: { monto: number; recibio: boolean; at?: any; justificacion?: string }
     resolucion?: { resueltoPor: string; at?: any; nota?: string }
   }
+  cobroDelivery?: {
+    estado?: 'pendiente' | 'pagado' | 'no_cobrar' | string
+    formaPago?: 'efectivo' | 'transferencia' | string
+    notaPago?: string
+    pagadoAt?: any
+    monto?: number
+  }
   registro?: Registro
 }
 
@@ -716,6 +723,41 @@ export default function BaseDatosPage() {
     { precio: 0, totalDelivery: 0, depositado: 0, cs: 0, usd: 0 }
   )
 
+  function exportCSV() {
+    const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`
+    const headers = ['Orden','Fecha','Motorizado','Comercio','Teléfono','Retiro','Entrega','Zona','C/E Producto','Delivery','Pagó','F.Cobro','Forma Pago']
+    const rows = filtered.map((s) => {
+      const comercio = s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : '') || ''
+      const cd = s.cobroDelivery
+      const pagó = cd?.estado === 'pagado' ? `Sí (${cd.formaPago || ''})` : s.pagoDelivery?.quienPaga === 'transferencia' ? 'Trans. pend.' : s.cobrosMotorizado?.delivery?.recibio === true ? 'Sí' : s.cobrosMotorizado?.delivery?.recibio === false ? 'No' : '—'
+      const fCobro = cd?.pagadoAt ? formatDate(cd.pagadoAt) : s.cobrosMotorizado?.delivery?.at ? formatDate(s.cobrosMotorizado.delivery.at as any) : ''
+      const formaPago = cd?.formaPago || s.pagoDelivery?.quienPaga || ''
+      return [
+        s.id.slice(0, 8),
+        formatDate(s.createdAt),
+        s.asignacion?.motorizadoNombre || '',
+        comercio,
+        s.ownerSnapshot?.phone || '',
+        s.recoleccion?.direccionEscrita || '',
+        s.entrega?.direccionEscrita || '',
+        s.registro?.zona || '',
+        s.cobroContraEntrega?.monto ?? 0,
+        getPrecio(s) ?? 0,
+        pagó,
+        fCobro,
+        formaPago,
+      ].map(esc).join(',')
+    })
+    const csv = [headers.map(esc).join(','), ...rows].join('\n')
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `base-datos-${desde}-${hasta}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div>
@@ -735,6 +777,13 @@ export default function BaseDatosPage() {
         </div>
         <input type="text" placeholder="Buscar comercio, cliente, zona..." value={search} onChange={(e) => setSearch(e.target.value)} className="rounded-lg border bg-white px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-200" />
         <span className="text-xs text-gray-400">{filtered.length} registros</span>
+        <button
+          onClick={exportCSV}
+          disabled={filtered.length === 0}
+          className="ml-auto flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 transition disabled:opacity-40"
+        >
+          ⬇ Exportar CSV
+        </button>
       </div>
 
       {/* Tabs motorizados */}
@@ -755,9 +804,10 @@ export default function BaseDatosPage() {
           <table className="min-w-max w-full text-xs">
             <thead>
               <tr className="border-b bg-gray-50 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                <Th>#</Th><Th>Estado</Th><Th>Semana</Th><Th>Motorizado</Th><Th>Fecha</Th><Th>Pagó</Th>
-                <Th>Comercio</Th><Th>Teléfono</Th><Th>Retiro</Th><Th>Entrega</Th><Th>Zona</Th><Th>Delivery</Th>
-                <Th>C/E Producto</Th><Th>F. Depósito</Th><Th>Depositado</Th><Th>Forma Pago</Th>
+                <Th>#</Th><Th>Estado</Th><Th>Semana</Th><Th>Motorizado</Th><Th>Fecha</Th>
+                <Th>Comercio</Th><Th>Teléfono</Th><Th>Retiro</Th><Th>Entrega</Th><Th>Zona</Th>
+                <Th>C/E Producto</Th><Th>F. Depósito</Th><Th>Depositado</Th>
+                <Th>Delivery</Th><Th>Pagó</Th><Th>F. Cobro</Th><Th>Forma Pago</Th>
                 <Th>Dist.</Th>
               </tr>
             </thead>
@@ -790,24 +840,15 @@ export default function BaseDatosPage() {
 
                     <Td><span className="text-gray-700">{s.asignacion?.motorizadoNombre || <span className="text-gray-300">—</span>}</span></Td>
                     <Td>{formatDate(s.createdAt)}</Td>
-                    <Td>
-                      {(() => {
-                        const qp = s.pagoDelivery?.quienPaga
-                        if (qp === 'transferencia' || qp === 'credito_semanal') {
-                          return <span className="inline-flex rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700">Sí (ext.)</span>
-                        }
-                        const recibio = s.cobrosMotorizado?.delivery?.recibio
-                        if (recibio === true) return <span className="inline-flex rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700">Sí</span>
-                        if (recibio === false) return <span className="inline-flex rounded-full bg-red-50 border border-red-200 px-2 py-0.5 text-[11px] font-semibold text-red-700">No</span>
-                        return <span className="text-gray-300 text-xs">—</span>
-                      })()}
-                    </Td>
+
+                    {/* Comercio, teléfono, retiro, entrega, zona */}
                     <Td><span className="font-medium text-gray-800">{s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : undefined) || '—'}</span></Td>
                     <Td><span className="text-gray-600">{s.ownerSnapshot?.phone || '—'}</span></Td>
                     <Td><span className="max-w-[160px] truncate block text-gray-500" title={s.recoleccion?.direccionEscrita}>{s.recoleccion?.direccionEscrita || '—'}</span></Td>
                     <Td><span className="max-w-[160px] truncate block text-gray-500" title={s.entrega?.direccionEscrita}>{s.entrega?.direccionEscrita || '—'}</span></Td>
                     <Td><EditableCell value={s.registro?.zona} placeholder="zona" onSave={(v) => updateRegistro(s.id, { zona: v || undefined })} /></Td>
-                    <Td>{precio != null ? <span className="font-medium text-[#004aad]">C${precio}</span> : <span className="text-gray-300">—</span>}</Td>
+
+                    {/* C/E Producto | F. Depósito (producto) | Depositado */}
                     <Td>{s.cobroContraEntrega?.aplica && s.cobroContraEntrega.monto ? <span className="font-medium text-green-700">C${s.cobroContraEntrega.monto}</span> : <span className="text-gray-300">C$0</span>}</Td>
                     <Td>
                       {(() => {
@@ -846,8 +887,63 @@ export default function BaseDatosPage() {
                         )
                       })()}
                     </Td>
+
+                    {/* Delivery | Pagó | F. Cobro | Forma Pago */}
+                    <Td>{precio != null ? <span className="font-medium text-[#004aad]">C${precio}</span> : <span className="text-gray-300">—</span>}</Td>
                     <Td>
                       {(() => {
+                        const qp = s.pagoDelivery?.quienPaga
+                        const recibio = s.cobrosMotorizado?.delivery?.recibio
+                        const cd = s.cobroDelivery
+                        if (qp === 'credito_semanal') {
+                          return <span className="inline-flex rounded-full bg-purple-50 border border-purple-200 px-2 py-0.5 text-[11px] font-semibold text-purple-700">Crédito</span>
+                        }
+                        if (cd?.estado === 'pagado') {
+                          const label = cd.formaPago === 'transferencia' ? 'Trans.' : cd.formaPago === 'efectivo' ? 'Ef.' : '✓'
+                          return (
+                            <span className="inline-flex rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700" title={cd.notaPago || undefined}>
+                              Sí ({label})
+                            </span>
+                          )
+                        }
+                        if (qp === 'transferencia') {
+                          return <span className="inline-flex rounded-full bg-yellow-50 border border-yellow-200 px-2 py-0.5 text-[11px] font-semibold text-yellow-700">Trans. pend.</span>
+                        }
+                        if (recibio === true) return <span className="inline-flex rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700">Sí</span>
+                        if (recibio === false) {
+                          const pendienteCobro = cd?.estado === 'pendiente'
+                          return (
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold border ${pendienteCobro ? 'bg-orange-50 border-orange-200 text-orange-700' : 'bg-red-50 border-red-200 text-red-700'}`}>
+                              {pendienteCobro ? 'Pend.' : 'No'}
+                            </span>
+                          )
+                        }
+                        return <span className="text-gray-300 text-xs">—</span>
+                      })()}
+                    </Td>
+                    {/* F. Cobro — fecha en que se confirmó el cobro del delivery */}
+                    <Td>
+                      {(() => {
+                        const cd = s.cobroDelivery
+                        // Confirmado desde módulo Cobros
+                        if (cd?.pagadoAt) return <span className="text-xs text-gray-700">{formatDateTime(cd.pagadoAt)}</span>
+                        // Motorizado cobró directo
+                        const at = s.cobrosMotorizado?.delivery?.at
+                        if (at && s.cobrosMotorizado?.delivery?.recibio === true)
+                          return <span className="text-xs text-gray-500">{formatDateTime(at)}</span>
+                        return <span className="text-gray-300 text-xs">—</span>
+                      })()}
+                    </Td>
+                    {/* Forma Pago — muestra el método REAL si fue confirmado desde Cobros, si no el acordado */}
+                    <Td>
+                      {(() => {
+                        const cd = s.cobroDelivery
+                        // Prioridad: forma confirmada en Cobros
+                        if (cd?.formaPago) {
+                          const labels: Record<string, string> = { efectivo: 'Efectivo', transferencia: 'Transferencia' }
+                          return <span className="text-gray-900 text-xs font-medium">{labels[cd.formaPago] ?? cd.formaPago}</span>
+                        }
+                        // Fallback: forma acordada originalmente
                         const map: Record<string, string> = {
                           recoleccion: 'Ef. retiro',
                           entrega: 'Ef. entrega',
@@ -856,7 +952,7 @@ export default function BaseDatosPage() {
                         }
                         const label = s.pagoDelivery?.quienPaga ? map[s.pagoDelivery.quienPaga] : null
                         return label
-                          ? <span className="text-gray-700 text-xs">{label}</span>
+                          ? <span className="text-gray-500 text-xs">{label}</span>
                           : <span className="text-gray-300 text-xs">—</span>
                       })()}
                     </Td>
@@ -867,9 +963,15 @@ export default function BaseDatosPage() {
             </tbody>
             <tfoot>
               <tr className="border-t-2 border-gray-200 bg-gray-50 font-semibold text-gray-700">
-                <Td colSpan={11}><span className="text-[11px] uppercase tracking-wide text-gray-500">Totales</span></Td>
-                <Td><span className="text-[#004aad]">C${totales.precio.toFixed(0)}</span></Td>
+                {/* cols 1-10: # Estado Semana Motorizado Fecha Comercio Teléfono Retiro Entrega Zona */}
+                <Td colSpan={10}><span className="text-[11px] uppercase tracking-wide text-gray-500">Totales</span></Td>
+                {/* col 11: C/E Producto */}
                 <Td><span className="text-green-700">C${totales.totalDelivery.toFixed(0)}</span></Td>
+                {/* cols 12-13: F.Depósito, Depositado */}
+                <Td /><Td />
+                {/* col 14: Delivery */}
+                <Td><span className="text-[#004aad]">C${totales.precio.toFixed(0)}</span></Td>
+                {/* cols 15-18: Pagó, F.Cobro, Forma Pago, Dist */}
                 <Td /><Td /><Td /><Td />
               </tr>
             </tfoot>

@@ -5,6 +5,7 @@ import { onAuthStateChanged, User } from 'firebase/auth';
 import {
   collection, onSnapshot, query, where,
   doc, getDoc, updateDoc, serverTimestamp, Timestamp, writeBatch,
+  runTransaction, increment, arrayUnion,
 } from 'firebase/firestore';
 import { auth, db } from '@/fb/config';
 
@@ -170,6 +171,32 @@ function sortDesc(arr: Solicitud[], field: keyof Solicitud = 'createdAt') {
   return [...arr].sort((a, b) => (tsToDate(b[field])?.getTime() || 0) - (tsToDate(a[field])?.getTime() || 0));
 }
 
+// ─── Semana helpers (ISO 8601) ────────────────────────────────────────────────
+
+function getSemanaKey(date: Date): string {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+  const day = d.getUTCDay() || 7
+  d.setUTCDate(d.getUTCDate() + 4 - day)
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+  const week = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7)
+  return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`
+}
+
+function getSemanaRange(semanaKey: string): { inicio: Date; fin: Date } {
+  const [yearStr, weekStr] = semanaKey.split('-W')
+  const year = parseInt(yearStr)
+  const week = parseInt(weekStr)
+  const jan4 = new Date(year, 0, 4)
+  const jan4Day = jan4.getDay() || 7
+  const monday = new Date(jan4)
+  monday.setDate(jan4.getDate() - jan4Day + 1 + (week - 1) * 7)
+  monday.setHours(0, 0, 0, 0)
+  const sunday = new Date(monday)
+  sunday.setDate(monday.getDate() + 6)
+  sunday.setHours(23, 59, 59, 999)
+  return { inicio: monday, fin: sunday }
+}
+
 // ─── Deposit calculation ──────────────────────────────────────────────────────
 // Returns what the motorizado collected and where it should go.
 type DepositoInfo = {
@@ -296,7 +323,6 @@ export default function PanelMotorizadoPage() {
     if (!o.id) return;
     setErr(null); setActionId(`${o.id}:${nuevo}`);
     try {
-      const b = writeBatch(db);
       const p: any = { estado: nuevo, updatedAt: serverTimestamp(), [`historial.${nuevo}At`]: serverTimestamp() };
       if (nuevo === 'entregado') p.entregadoAt = serverTimestamp();
       let hayPendiente = false;
@@ -313,6 +339,66 @@ export default function PanelMotorizadoPage() {
         }
       }
       if (hayPendiente) p.cobroPendiente = true;
+
+      // ── Al entregar: registrar cobroDelivery ──────────────────────────────
+      if (nuevo === 'entregado') {
+        const precioDelivery = o.confirmacion?.precioFinalCordobas ?? 0
+        const quienPaga = o.pagoDelivery?.quienPaga ?? ''
+        const esCredito = o.tipoCliente === 'credito' || quienPaga === 'credito_semanal'
+        const semanaKey = esCredito ? getSemanaKey(new Date()) : undefined
+
+        p['cobroDelivery'] = {
+          monto: precioDelivery,
+          tipoCliente: esCredito ? 'credito' : 'contado',
+          quienPaga,
+          estado: precioDelivery === 0 ? 'no_cobrar' : 'pendiente',
+          registradoAt: serverTimestamp(),
+          ...(semanaKey ? { semanaKey } : {}),
+        }
+
+        // Para crédito con monto > 0: upsert atómico en cobros_semanales
+        if (esCredito && precioDelivery > 0) {
+          const uid = (o.ownerSnapshot as any)?.uid || o.userId || ''
+          const clienteNombre = o.ownerSnapshot?.nombre ?? ''
+          const clienteCompany = o.ownerSnapshot?.companyName ?? ''
+          const motorizadoId = o.asignacion?.motorizadoId
+          const semanaRef = doc(db, 'cobros_semanales', `${uid}_${semanaKey}`)
+
+          await runTransaction(db, async (tx) => {
+            const semanaSnap = await tx.get(semanaRef)
+            tx.update(doc(db, 'solicitudes_envio', o.id), p)
+            if (motorizadoId) tx.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
+            if (!semanaSnap.exists()) {
+              const { inicio, fin } = getSemanaRange(semanaKey!)
+              tx.set(semanaRef, {
+                clienteUid: uid,
+                clienteNombre,
+                clienteCompany,
+                semanaKey: semanaKey!,
+                semanaInicio: Timestamp.fromDate(inicio),
+                semanaFin: Timestamp.fromDate(fin),
+                totalMonto: precioDelivery,
+                totalPagado: 0,
+                estado: 'pendiente',
+                pagos: [],
+                ordenesIds: [o.id],
+                creadoAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              })
+            } else {
+              tx.update(semanaRef, {
+                totalMonto: increment(precioDelivery),
+                ordenesIds: arrayUnion(o.id),
+                updatedAt: serverTimestamp(),
+              })
+            }
+          })
+          return
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────
+
+      const b = writeBatch(db);
       b.update(doc(db, 'solicitudes_envio', o.id), p);
       if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: nuevo === 'entregado' ? 'disponible' : 'ocupado', updatedAt: serverTimestamp() });
       await b.commit();

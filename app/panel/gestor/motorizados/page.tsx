@@ -9,11 +9,15 @@ import {
   updateDoc,
   query,
   where,
+  orderBy,
+  limit,
   getCountFromServer,
+  getDocs,
   serverTimestamp,
+  Timestamp,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
-import { X, Bike, Plus } from 'lucide-react'
+import { X, Bike, Plus, TrendingUp, AlertCircle } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -29,7 +33,15 @@ type Motorizado = {
   createdAt?: any
 }
 
-type Stats = { total: number; hoy: number }
+type Stats = {
+  total: number
+  hoy: number
+  semana: number
+  tasaAceptacion: number | null  // 0-100, null si sin datos
+  rechazos: number
+  ultimosRechazos: { id: string; fecha?: Timestamp }[]
+  depositosPendientes: number
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -39,24 +51,58 @@ const estadoConfig = {
 }
 
 async function fetchStats(motorizadoId: string): Promise<Stats> {
-  const base = query(
-    collection(db, 'solicitudes_envio'),
-    where('asignacion.motorizadoId', '==', motorizadoId),
-    where('estado', '==', 'entregado')
-  )
-  const totalSnap = await getCountFromServer(base)
+  const col = collection(db, 'solicitudes_envio')
+  const hoyStart = new Date(); hoyStart.setHours(0, 0, 0, 0)
+  const semanaStart = new Date(); semanaStart.setDate(semanaStart.getDate() - semanaStart.getDay() + (semanaStart.getDay() === 0 ? -6 : 1)); semanaStart.setHours(0, 0, 0, 0)
 
-  const hoyStart = new Date()
-  hoyStart.setHours(0, 0, 0, 0)
-  const hoyQuery = query(
-    collection(db, 'solicitudes_envio'),
-    where('asignacion.motorizadoId', '==', motorizadoId),
-    where('estado', '==', 'entregado'),
-    where('entregadoAt', '>=', hoyStart)
-  )
-  const hoySnap = await getCountFromServer(hoyQuery)
+  const [totalSnap, hoySnap, semanaSnap, aceptadasSnap, rechazadasSnap, depositosSnap] = await Promise.all([
+    getCountFromServer(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('estado', '==', 'entregado'))),
+    getCountFromServer(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('estado', '==', 'entregado'), where('entregadoAt', '>=', hoyStart))),
+    getCountFromServer(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('estado', '==', 'entregado'), where('entregadoAt', '>=', semanaStart))),
+    getCountFromServer(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('asignacion.estadoAceptacion', '==', 'aceptada'))),
+    getDocs(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('asignacion.estadoAceptacion', '==', 'rechazada'), orderBy('updatedAt', 'desc'), limit(3))),
+    getDocs(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('estado', '==', 'entregado'))),
+  ])
 
-  return { total: totalSnap.data().count, hoy: hoySnap.data().count }
+  const aceptadas = aceptadasSnap.data().count
+  const rechazadas = rechazadasSnap.size
+  const tasaAceptacion = (aceptadas + rechazadas) > 0
+    ? Math.round((aceptadas / (aceptadas + rechazadas)) * 100)
+    : null
+
+  const ultimosRechazos = rechazadasSnap.docs.map((d) => ({
+    id: d.id,
+    fecha: (d.data() as any).updatedAt as Timestamp | undefined,
+  }))
+
+  // Depósitos pendientes: órdenes sin confirmar que requieren depósito
+  let depositosPendientes = 0
+  depositosSnap.docs.forEach((d) => {
+    const data = d.data() as any
+    const dep = data?.registro?.deposito
+    if (dep?.confirmadoMotorizado) return // legacy: ya ok
+    const ceAplica = !!data?.cobroContraEntrega?.aplica
+    const quienPaga = data?.pagoDelivery?.quienPaga || ''
+    const esCredito = data?.tipoCliente === 'credito' || quienPaga === 'credito_semanal'
+    const esTransferencia = quienPaga === 'transferencia'
+    const precio = data?.confirmacion?.precioFinalCordobas || 0
+    const needsStorkhub = !esTransferencia && !esCredito && precio > 0
+    const needsComercio = ceAplica && (data?.cobroContraEntrega?.monto || 0) > 0
+    if (!needsStorkhub && !needsComercio) return
+    const storkhubOk = !needsStorkhub || !!dep?.confirmadoStorkhub
+    const comercioOk = !needsComercio || !!dep?.confirmadoComercio
+    if (!storkhubOk || !comercioOk) depositosPendientes++
+  })
+
+  return {
+    total: totalSnap.data().count,
+    hoy: hoySnap.data().count,
+    semana: semanaSnap.data().count,
+    tasaAceptacion,
+    rechazos: rechazadas,
+    ultimosRechazos,
+    depositosPendientes,
+  }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -298,19 +344,76 @@ export default function MotorizadosPage() {
 
           {/* Stats rápidas (solo en edición) */}
           {!isNew && (
-            <section className="grid grid-cols-2 gap-3">
-              <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-center">
-                <p className="text-2xl font-black text-blue-700">
-                  {loadingStats ? '…' : (stats?.hoy ?? '—')}
-                </p>
-                <p className="text-xs font-semibold text-blue-500 mt-0.5">Entregas hoy</p>
+            <section className="space-y-3">
+              <div className="flex items-center gap-2">
+                <TrendingUp className="h-4 w-4 text-[#004aad]" />
+                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wide">Rendimiento</h3>
               </div>
-              <div className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-center">
-                <p className="text-2xl font-black text-gray-800">
-                  {loadingStats ? '…' : (stats?.total ?? '—')}
-                </p>
-                <p className="text-xs font-semibold text-gray-500 mt-0.5">Total entregas</p>
+
+              {/* Grid KPIs */}
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { label: 'Hoy', value: stats?.hoy, color: 'text-blue-700', bg: 'bg-blue-50 border-blue-200' },
+                  { label: 'Esta semana', value: stats?.semana, color: 'text-indigo-700', bg: 'bg-indigo-50 border-indigo-200' },
+                  { label: 'Total', value: stats?.total, color: 'text-gray-800', bg: 'bg-gray-50 border-gray-200' },
+                ].map((k) => (
+                  <div key={k.label} className={`${k.bg} border rounded-xl px-3 py-2.5 text-center`}>
+                    <p className={`text-xl font-black ${k.color}`}>
+                      {loadingStats ? '…' : (k.value ?? '—')}
+                    </p>
+                    <p className="text-[10px] font-semibold text-gray-500 mt-0.5">{k.label}</p>
+                  </div>
+                ))}
               </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div className={`border rounded-xl px-3 py-2.5 text-center ${
+                  !loadingStats && stats?.tasaAceptacion !== null && (stats?.tasaAceptacion ?? 0) < 70
+                    ? 'bg-red-50 border-red-200'
+                    : 'bg-green-50 border-green-200'
+                }`}>
+                  <p className={`text-xl font-black ${
+                    !loadingStats && stats?.tasaAceptacion !== null && (stats?.tasaAceptacion ?? 0) < 70
+                      ? 'text-red-600'
+                      : 'text-green-700'
+                  }`}>
+                    {loadingStats ? '…' : stats?.tasaAceptacion !== null ? `${stats?.tasaAceptacion}%` : '—'}
+                  </p>
+                  <p className="text-[10px] font-semibold text-gray-500 mt-0.5">Tasa acept.</p>
+                </div>
+                <div className={`border rounded-xl px-3 py-2.5 text-center ${(stats?.rechazos ?? 0) > 0 ? 'bg-orange-50 border-orange-200' : 'bg-gray-50 border-gray-200'}`}>
+                  <p className={`text-xl font-black ${(stats?.rechazos ?? 0) > 0 ? 'text-orange-600' : 'text-gray-700'}`}>
+                    {loadingStats ? '…' : (stats?.rechazos ?? '—')}
+                  </p>
+                  <p className="text-[10px] font-semibold text-gray-500 mt-0.5">Rechazos</p>
+                </div>
+                <div className={`border rounded-xl px-3 py-2.5 text-center ${(stats?.depositosPendientes ?? 0) > 0 ? 'bg-yellow-50 border-yellow-200' : 'bg-gray-50 border-gray-200'}`}>
+                  <p className={`text-xl font-black ${(stats?.depositosPendientes ?? 0) > 0 ? 'text-yellow-600' : 'text-gray-700'}`}>
+                    {loadingStats ? '…' : (stats?.depositosPendientes ?? '—')}
+                  </p>
+                  <p className="text-[10px] font-semibold text-gray-500 mt-0.5">Dep. pend.</p>
+                </div>
+              </div>
+
+              {/* Últimos rechazos */}
+              {!loadingStats && (stats?.ultimosRechazos?.length ?? 0) > 0 && (
+                <div className="bg-orange-50 border border-orange-200 rounded-xl p-3">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <AlertCircle className="h-3.5 w-3.5 text-orange-500" />
+                    <p className="text-xs font-bold text-orange-700">Últimos rechazos</p>
+                  </div>
+                  <ul className="space-y-1">
+                    {stats!.ultimosRechazos.map((r) => (
+                      <li key={r.id} className="flex items-center justify-between text-xs">
+                        <span className="font-mono text-gray-500">{r.id.slice(0, 8)}</span>
+                        <span className="text-gray-400">
+                          {r.fecha ? (typeof r.fecha.toDate === 'function' ? r.fecha.toDate() : new Date(r.fecha as any)).toLocaleDateString('es-NI', { day: '2-digit', month: 'short' }) : '—'}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </section>
           )}
 
