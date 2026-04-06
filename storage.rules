@@ -1,0 +1,27 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Evidencias fotográficas de órdenes
+    match /evidencias/{solicitudId}/{filename} {
+
+      // Cualquier usuario autenticado puede leer (gestor, motorizado, comercio)
+      allow read: if request.auth != null;
+
+      // Solo motorizados, admin y gestores activos pueden escribir
+      allow write: if request.auth != null
+        && firestore.get(
+             /databases/(default)/documents/usuarios/$(request.auth.uid)
+           ).data.activo == true
+        && firestore.get(
+             /databases/(default)/documents/usuarios/$(request.auth.uid)
+           ).data.rol in ['motorizado', 'admin', 'gestor'];
+    }
+
+    // Denegar todo lo demás
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+  }
+}

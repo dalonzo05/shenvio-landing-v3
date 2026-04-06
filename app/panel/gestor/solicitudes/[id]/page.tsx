@@ -115,6 +115,12 @@ type Solicitud = {
     rechazadoAt?: any
     motivoRechazo?: string
   } | null
+
+  evidencias?: {
+    retiro?: { url: string; pathStorage: string; uploadedAt?: any; motorizadoUid?: string }
+    entrega?: { url: string; pathStorage: string; uploadedAt?: any; motorizadoUid?: string }
+    deposito?: { url: string; pathStorage: string; uploadedAt?: any; motorizadoUid?: string }
+  }
 }
 
 type Motorizado = {
@@ -1199,6 +1205,38 @@ export default function GestorSolicitudDetallePage() {
               <div className="text-sm text-gray-500">Todavía no hay motorizado asignado.</div>
             )}
           </div>
+
+          {solicitud.evidencias && (Object.keys(solicitud.evidencias).length > 0) && (
+            <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+              <h2 className="font-semibold text-gray-900 mb-4">Evidencias fotográficas</h2>
+              <div className="grid grid-cols-3 gap-3">
+                {([
+                  { key: 'retiro', label: '📦 Retiro' },
+                  { key: 'entrega', label: '✅ Entrega' },
+                  { key: 'deposito', label: '🏦 Boucher' },
+                ] as const).map(({ key, label }) => {
+                  const ev = solicitud.evidencias?.[key]
+                  if (!ev) return null
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => window.open(ev.url, '_blank')}
+                      className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-2 hover:bg-gray-100 transition-colors cursor-pointer"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={ev.url}
+                        alt={label}
+                        className="w-full aspect-square object-cover rounded-lg"
+                        loading="lazy"
+                      />
+                      <span className="text-xs text-gray-500 font-medium">{label}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
 
           <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
             <h2 className="font-semibold text-gray-900 mb-4">Atajos</h2>

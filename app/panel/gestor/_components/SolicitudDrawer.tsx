@@ -93,6 +93,11 @@ export type SolicitudDetalle = {
       confirmadoStorkhub?: boolean; confirmadoStorkhubAt?: Timestamp | null
     }
   }
+  evidencias?: {
+    retiro?: { url: string; pathStorage: string; uploadedAt?: any; motorizadoUid?: string }
+    entrega?: { url: string; pathStorage: string; uploadedAt?: any; motorizadoUid?: string }
+    deposito?: { url: string; pathStorage: string; uploadedAt?: any; motorizadoUid?: string }
+  }
 }
 
 type Motorizado = { id: string; nombre: string; telefono?: string; estado?: string; authUid?: string }
@@ -509,6 +514,33 @@ export function SolicitudDrawer({
                   </Section>
                 )
               })()}
+
+              {/* Evidencias fotográficas */}
+              {solicitud.evidencias && (['retiro', 'entrega', 'deposito'] as const).some((k) => solicitud.evidencias?.[k]) && (
+                <Section title="📸 Evidencias fotográficas">
+                  <div className="grid grid-cols-3 gap-2">
+                    {([
+                      { key: 'retiro', label: '📦 Retiro' },
+                      { key: 'entrega', label: '✅ Entrega' },
+                      { key: 'deposito', label: '🏦 Boucher' },
+                    ] as const).map(({ key, label }) => {
+                      const ev = solicitud.evidencias?.[key]
+                      if (!ev) return null
+                      return (
+                        <button
+                          key={key}
+                          onClick={() => window.open(ev.url, '_blank')}
+                          className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 cursor-pointer"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={ev.url} alt={label} className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
+                          <span className="text-xs text-gray-500">{label}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </Section>
+              )}
 
               {/* Decisión rápida */}
               <Section title="⚡ Decisión rápida">

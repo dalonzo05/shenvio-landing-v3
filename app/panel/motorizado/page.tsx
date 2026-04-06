@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import {
   collection, onSnapshot, query, where,
@@ -8,6 +8,7 @@ import {
   runTransaction, increment, arrayUnion,
 } from 'firebase/firestore';
 import { auth, db } from '@/fb/config';
+import { compressImage, uploadEvidencia, type TipoEvidencia } from '@/fb/storage';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -72,7 +73,14 @@ type Solicitud = {
       confirmadoStorkhubAt?: Timestamp;
     };
   };
+  evidencias?: {
+    retiro?: EvidenciaFoto;
+    entrega?: EvidenciaFoto;
+    deposito?: EvidenciaFoto;
+  };
 };
+
+type EvidenciaFoto = { url: string; pathStorage: string; uploadedAt?: Timestamp; motorizadoUid?: string };
 
 type PendingConfirm = {
   order: Solicitud;
@@ -264,6 +272,10 @@ export default function PanelMotorizadoPage() {
   const [tick, setTick] = useState(Date.now());
   const [tab, setTab] = useState<'pendientes' | 'en_curso' | 'historial' | 'depositos'>('pendientes');
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
+  const [photoGate, setPhotoGate] = useState<{ solicitudId: string; tipo: TipoEvidencia; onComplete: () => void } | null>(null);
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoUploading, setPhotoUploading] = useState(false);
+  const [photoErr, setPhotoErr] = useState<string | null>(null);
 
   // Historial filters
   const [histFecha, setHistFecha] = useState<'hoy' | 'ayer' | 'personalizado'>('hoy');
@@ -407,6 +419,16 @@ export default function PanelMotorizadoPage() {
   }
 
   function cambiar(o: Solicitud, nuevo: EstadoSolicitud) {
+    if (nuevo === 'retirado' && !o.evidencias?.retiro) {
+      setPhotoFile(null); setPhotoErr(null);
+      setPhotoGate({ solicitudId: o.id, tipo: 'retiro', onComplete: () => cambiar(o, nuevo) });
+      return;
+    }
+    if (nuevo === 'entregado' && !o.evidencias?.entrega) {
+      setPhotoFile(null); setPhotoErr(null);
+      setPhotoGate({ solicitudId: o.id, tipo: 'entrega', onComplete: () => cambiar(o, nuevo) });
+      return;
+    }
     const dep = calcDeposito(o);
     const tipo = o.pagoDelivery?.tipo || '';
     const quienPaga = o.pagoDelivery?.quienPaga || '';
@@ -907,12 +929,21 @@ export default function PanelMotorizadoPage() {
                               {g.orders.map((o) => {
                                 const dep = calcDeposito(o);
                                 return (
-                                  <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '1px solid #e0f2fe' }}>
-                                    <div>
+                                  <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '6px 0', borderBottom: '1px solid #e0f2fe', gap: 8 }}>
+                                    <div style={{ flex: 1 }}>
                                       <p style={{ fontSize: 12, fontWeight: 600, color: '#1e40af', margin: 0 }}>{o.entrega?.nombreApellido || '—'}</p>
                                       <p style={{ fontSize: 10, color: '#93c5fd', margin: 0, fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</p>
+                                      <button
+                                        onClick={() => {
+                                          if (o.evidencias?.deposito) { window.open(o.evidencias.deposito.url, '_blank'); return; }
+                                          setPhotoFile(null); setPhotoErr(null);
+                                          setPhotoGate({ solicitudId: o.id, tipo: 'deposito', onComplete: () => {} });
+                                        }}
+                                        style={{ marginTop: 4, fontSize: 10, fontWeight: 700, color: o.evidencias?.deposito ? '#16a34a' : '#2563eb', background: o.evidencias?.deposito ? '#f0fdf4' : '#eff6ff', border: `1px solid ${o.evidencias?.deposito ? '#bbf7d0' : '#bfdbfe'}`, borderRadius: 6, padding: '3px 7px', cursor: 'pointer' }}>
+                                        {o.evidencias?.deposito ? '✅ Ver boucher' : '📸 Subir boucher'}
+                                      </button>
                                     </div>
-                                    <p style={{ fontSize: 13, fontWeight: 700, color: '#2563eb', margin: 0 }}>{fmt(dep.totalAStorkhub)}</p>
+                                    <p style={{ fontSize: 13, fontWeight: 700, color: '#2563eb', margin: 0, flexShrink: 0 }}>{fmt(dep.totalAStorkhub)}</p>
                                   </div>
                                 );
                               })}
@@ -970,12 +1001,21 @@ export default function PanelMotorizadoPage() {
                               {g.orders.map((o) => {
                                 const dep = calcDeposito(o);
                                 return (
-                                  <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '1px solid #ede9fe' }}>
-                                    <div>
+                                  <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '6px 0', borderBottom: '1px solid #ede9fe', gap: 8 }}>
+                                    <div style={{ flex: 1 }}>
                                       <p style={{ fontSize: 12, fontWeight: 600, color: '#5b21b6', margin: 0 }}>{o.entrega?.nombreApellido || '—'}</p>
                                       <p style={{ fontSize: 10, color: '#c4b5fd', margin: 0, fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</p>
+                                      <button
+                                        onClick={() => {
+                                          if (o.evidencias?.deposito) { window.open(o.evidencias.deposito.url, '_blank'); return; }
+                                          setPhotoFile(null); setPhotoErr(null);
+                                          setPhotoGate({ solicitudId: o.id, tipo: 'deposito', onComplete: () => {} });
+                                        }}
+                                        style={{ marginTop: 4, fontSize: 10, fontWeight: 700, color: o.evidencias?.deposito ? '#16a34a' : '#7c3aed', background: o.evidencias?.deposito ? '#f0fdf4' : '#faf5ff', border: `1px solid ${o.evidencias?.deposito ? '#bbf7d0' : '#ddd6fe'}`, borderRadius: 6, padding: '3px 7px', cursor: 'pointer' }}>
+                                        {o.evidencias?.deposito ? '✅ Ver boucher' : '📸 Subir boucher'}
+                                      </button>
                                     </div>
-                                    <p style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', margin: 0 }}>{fmt(dep.totalAlComercio)}</p>
+                                    <p style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', margin: 0, flexShrink: 0 }}>{fmt(dep.totalAlComercio)}</p>
                                   </div>
                                 );
                               })}
@@ -1019,6 +1059,42 @@ export default function PanelMotorizadoPage() {
           </>
         )}
       </div>
+
+      {/* ── Photo Upload Modal Overlay ── */}
+      {photoGate && (
+        <PhotoUploadModal
+          tipo={photoGate.tipo}
+          file={photoFile}
+          uploading={photoUploading}
+          err={photoErr}
+          onFile={(f) => setPhotoFile(f)}
+          onSubmit={async () => {
+            if (!photoFile) return;
+            setPhotoUploading(true); setPhotoErr(null);
+            try {
+              const blob = await compressImage(photoFile);
+              const { url, pathStorage } = await uploadEvidencia(photoGate.solicitudId, photoGate.tipo, blob);
+              await updateDoc(doc(db, 'solicitudes_envio', photoGate.solicitudId), {
+                [`evidencias.${photoGate.tipo}`]: {
+                  url,
+                  pathStorage,
+                  uploadedAt: serverTimestamp(),
+                  motorizadoUid: auth.currentUser?.uid || '',
+                },
+              });
+              const cb = photoGate.onComplete;
+              setPhotoGate(null); setPhotoFile(null);
+              cb();
+            } catch (e) {
+              console.error(e);
+              setPhotoErr('No se pudo subir la foto. Intentá de nuevo.');
+            } finally {
+              setPhotoUploading(false);
+            }
+          }}
+          onCancel={() => { setPhotoGate(null); setPhotoFile(null); setPhotoErr(null); }}
+        />
+      )}
     </div>
   );
 }
@@ -1124,6 +1200,100 @@ function EmptyState({ icon, title, subtitle }: { icon: string; title: string; su
       <span style={{ fontSize: 44 }}>{icon}</span>
       <p style={{ fontSize: 17, fontWeight: 700, color: '#111827', margin: '6px 0 0' }}>{title}</p>
       <p style={{ fontSize: 14, color: '#9ca3af', textAlign: 'center', margin: 0, lineHeight: 1.5 }}>{subtitle}</p>
+    </div>
+  );
+}
+
+function PhotoUploadModal({
+  tipo, file, uploading, err, onFile, onSubmit, onCancel,
+}: {
+  tipo: TipoEvidencia;
+  file: File | null;
+  uploading: boolean;
+  err: string | null;
+  onFile: (f: File) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const previewUrl = file ? URL.createObjectURL(file) : null;
+
+  const tipoLabel: Record<TipoEvidencia, string> = {
+    retiro: 'retiro del paquete',
+    entrega: 'entrega al destinatario',
+    deposito: 'boucher de depósito',
+  };
+  const tipoEmoji: Record<TipoEvidencia, string> = {
+    retiro: '📦',
+    entrega: '✅',
+    deposito: '🏦',
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+      <div style={{ background: '#fff', borderRadius: 24, padding: 24, maxWidth: 360, width: '100%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+        <p style={{ fontSize: 18, fontWeight: 800, color: '#111827', margin: '0 0 4px' }}>
+          {tipoEmoji[tipo]} Foto de {tipoLabel[tipo]}
+        </p>
+        <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 20px', lineHeight: 1.5 }}>
+          {tipo !== 'deposito'
+            ? 'Esta foto es obligatoria para continuar. Tomá una foto clara antes de avanzar.'
+            : 'Subí la foto del boucher como comprobante del depósito realizado.'}
+        </p>
+
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          style={{ display: 'none' }}
+          onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }}
+        />
+
+        {previewUrl ? (
+          <div style={{ marginBottom: 16 }}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={previewUrl}
+              alt="preview"
+              style={{ width: '100%', maxHeight: 200, objectFit: 'cover', borderRadius: 14, border: '2px solid #e5e7eb' }}
+            />
+            <button
+              onClick={() => inputRef.current?.click()}
+              style={{ marginTop: 8, width: '100%', background: '#f3f4f6', border: '1px solid #e5e7eb', borderRadius: 10, padding: '9px', fontSize: 13, color: '#374151', fontWeight: 600, cursor: 'pointer' }}>
+              🔄 Cambiar foto
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => inputRef.current?.click()}
+            style={{ width: '100%', background: '#eff6ff', border: '2px dashed #93c5fd', borderRadius: 14, padding: '24px 16px', fontSize: 15, color: '#2563eb', fontWeight: 700, cursor: 'pointer', marginBottom: 16, display: 'flex', flexDirection: 'column' as const, alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 36 }}>📷</span>
+            Tomar o seleccionar foto
+          </button>
+        )}
+
+        {err && (
+          <p style={{ fontSize: 12, color: '#dc2626', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '8px 12px', margin: '0 0 12px' }}>
+            ⚠️ {err}
+          </p>
+        )}
+
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button
+            onClick={onCancel}
+            disabled={uploading}
+            style={{ flex: 1, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: '13px', color: '#6b7280', fontSize: 14, fontWeight: 700, cursor: uploading ? 'not-allowed' : 'pointer' }}>
+            {tipo === 'deposito' ? 'Cerrar' : 'Cancelar'}
+          </button>
+          <button
+            onClick={onSubmit}
+            disabled={!file || uploading}
+            style={{ flex: 2, background: !file || uploading ? '#d1d5db' : '#004aad', border: 'none', borderRadius: 14, padding: '13px', color: '#fff', fontSize: 14, fontWeight: 800, cursor: !file || uploading ? 'not-allowed' : 'pointer' }}>
+            {uploading ? 'Subiendo…' : file ? 'Subir y continuar →' : 'Seleccioná una foto'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

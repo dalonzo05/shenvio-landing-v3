@@ -31,6 +31,10 @@ type Solicitud = {
     producto?: { monto: number; recibio: boolean; at?: any }
   }
   detalle?: string
+  evidencias?: {
+    retiro?: { url: string; pathStorage: string }
+    entrega?: { url: string; pathStorage: string }
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -235,6 +239,45 @@ export default function OrdenDetallePage() {
               </span>
             </div>
             <p className="text-sm font-semibold text-gray-900">{orden.asignacion.motorizadoNombre}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Evidencias fotográficas */}
+      {orden.estado === 'entregado' && (orden.evidencias?.retiro || orden.evidencias?.entrega) && (
+        <div className="rounded-xl border border-green-200 bg-green-50 p-4">
+          <h2 className="text-xs font-bold text-green-700 uppercase tracking-wide mb-3">📸 Fotos de tu entrega</h2>
+          <div className="flex gap-3">
+            {orden.evidencias?.retiro && (
+              <button
+                onClick={() => window.open(orden.evidencias!.retiro!.url, '_blank')}
+                className="flex flex-col items-center gap-1 flex-1"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={orden.evidencias.retiro.url}
+                  alt="Foto de retiro"
+                  className="w-full aspect-square object-cover rounded-xl border border-green-200"
+                  loading="lazy"
+                />
+                <span className="text-xs text-green-700 font-medium">📦 Retiro</span>
+              </button>
+            )}
+            {orden.evidencias?.entrega && (
+              <button
+                onClick={() => window.open(orden.evidencias!.entrega!.url, '_blank')}
+                className="flex flex-col items-center gap-1 flex-1"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={orden.evidencias.entrega.url}
+                  alt="Foto de entrega"
+                  className="w-full aspect-square object-cover rounded-xl border border-green-200"
+                  loading="lazy"
+                />
+                <span className="text-xs text-green-700 font-medium">✅ Entrega</span>
+              </button>
+            )}
           </div>
         </div>
       )}
