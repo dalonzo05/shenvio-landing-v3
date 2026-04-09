@@ -1,1 +1,1 @@
-export { default } from '@/app/panel/solicitar/page'
+export { default } from './_page'

@@ -1,0 +1,227 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/usuarios/$(request.auth.uid));
+    }
+
+    function isActiveUser() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/usuarios/$(request.auth.uid))
+        && userDoc().data.activo == true;
+    }
+
+    function isAdminOrGestor() {
+      return isActiveUser()
+        && (userDoc().data.rol == 'admin' || userDoc().data.rol == 'gestor');
+    }
+
+    function isMotorizadoRole() {
+      return isActiveUser()
+        && userDoc().data.rol == 'motorizado';
+    }
+
+    function isClienteRole() {
+      return isActiveUser()
+        && userDoc().data.rol == 'cliente';
+    }
+
+    function isComercioRole() {
+      return isActiveUser()
+        && userDoc().data.rol == 'Comercio';
+    }
+
+    function isAssignedMotorizado() {
+      return signedIn()
+        && resource.data.asignacion is map
+        && resource.data.asignacion.motorizadoAuthUid is string
+        && resource.data.asignacion.motorizadoAuthUid == request.auth.uid;
+    }
+
+    function isOwnSolicitudCliente() {
+      return signedIn()
+        && resource.data.userId is string
+        && resource.data.userId == request.auth.uid;
+    }
+
+    function isOwnMotorizadoDoc() {
+      return signedIn()
+        && resource.data.authUid is string
+        && resource.data.authUid == request.auth.uid;
+    }
+
+    match /usuarios/{userId} {
+      allow read: if isOwner(userId) || isAdminOrGestor();
+
+      allow create: if isOwner(userId) || isAdminOrGestor();
+
+      allow update: if (isOwner(userId)
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['rol', 'activo']))
+        || isAdminOrGestor();
+
+      allow delete: if false;
+    }
+
+    match /comercios/{userId} {
+      allow read: if (
+          isOwner(userId)
+          && request.auth.token.email_verified == true
+        ) || isAdminOrGestor() || isMotorizadoRole();
+
+      allow write: if (isOwner(userId)
+        && request.auth.token.email_verified == true)
+        || isAdminOrGestor();
+
+      allow delete: if false;
+    }
+
+    match /motorizado/{docId} {
+      allow read: if signedIn();
+
+      allow create: if isAdminOrGestor();
+
+      allow update: if isAdminOrGestor()
+        || (
+          isMotorizadoRole()
+          && isOwnMotorizadoDoc()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'estado',
+            'updatedAt',
+            'ubicacion'
+          ])
+        );
+
+      allow delete: if false;
+    }
+
+    match /cotizaciones/{docId} {
+
+      function isMeCreating() {
+        return signedIn() && request.resource.data.userId == request.auth.uid;
+      }
+
+      function onlyAllowedKeys() {
+        return request.resource.data.keys().hasOnly([
+          'userId',
+          'origen',
+          'destino',
+          'distanciaKm',
+          'precioCordobas',
+          'origenCoord',
+          'destinoCoord',
+          'fuente',
+          'createdAt'
+        ]);
+      }
+
+      function validCoords(field) {
+        return field is map
+          && field.lat is number
+          && field.lng is number
+          && field.lat >= -90 && field.lat <= 90
+          && field.lng >= -180 && field.lng <= 180;
+      }
+
+      function validData() {
+        return
+          (request.resource.data.userId is string) &&
+          (request.resource.data.origen is string) &&
+          (request.resource.data.destino is string) &&
+          (request.resource.data.fuente is string) &&
+          (request.resource.data.fuente in ['api', 'cache']) &&
+          (request.resource.data.origen.size() > 0) &&
+          (request.resource.data.origen.size() <= 200) &&
+          (request.resource.data.destino.size() > 0) &&
+          (request.resource.data.destino.size() <= 200) &&
+          (request.resource.data.distanciaKm is number) &&
+          (request.resource.data.distanciaKm >= 0) &&
+          (request.resource.data.distanciaKm <= 200) &&
+          (request.resource.data.precioCordobas is number) &&
+          (request.resource.data.precioCordobas >= 0) &&
+          (request.resource.data.precioCordobas <= 10000) &&
+          validCoords(request.resource.data.origenCoord) &&
+          validCoords(request.resource.data.destinoCoord) &&
+          (request.resource.data.createdAt is timestamp);
+      }
+
+      allow create: if isMeCreating() && onlyAllowedKeys() && validData();
+      allow read: if signedIn() && resource.data.userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /solicitudes_envio/{id} {
+      allow create: if signedIn()
+        && (
+          request.resource.data.userId == request.auth.uid
+          || isAdminOrGestor()
+        );
+
+      allow read: if isAdminOrGestor()
+        || isOwnSolicitudCliente()
+        || isAssignedMotorizado();
+
+      allow update: if isAdminOrGestor()
+        || isAssignedMotorizado();
+
+      allow delete: if false;
+    }
+
+    match /clientes_envio/{clienteId} {
+      allow read: if isAdminOrGestor()
+        || (
+          signedIn()
+          && resource.data.comercioUid is string
+          && resource.data.comercioUid == request.auth.uid
+        );
+
+      allow create: if isAdminOrGestor()
+        || (
+          signedIn()
+          && request.resource.data.comercioUid is string
+          && request.resource.data.comercioUid == request.auth.uid
+        );
+
+      allow update: if isAdminOrGestor()
+        || (
+          signedIn()
+          && resource.data.comercioUid is string
+          && resource.data.comercioUid == request.auth.uid
+          && request.resource.data.comercioUid == resource.data.comercioUid
+        );
+
+      allow delete: if isAdminOrGestor()
+        || (
+          signedIn()
+          && resource.data.comercioUid is string
+          && resource.data.comercioUid == request.auth.uid
+        );
+    }
+
+    match /cobros_semanales/{docId} {
+      allow read, write: if isAdminOrGestor();
+    }
+
+    // Órdenes de depósito: agrupan viajes por motorizado + destino, almacenan boucher único
+    match /ordenes_deposito/{depositoId} {
+      allow create: if isMotorizadoRole() || isAdminOrGestor();
+      allow read: if isAdminOrGestor()
+        || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid)
+        || (isComercioRole()
+            && resource.data.destinatario == 'comercio'
+            && resource.data.destinatarioId == request.auth.uid);
+      allow update: if isAdminOrGestor()
+        || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid);
+      allow delete: if false;
+    }
+
+  }
+}

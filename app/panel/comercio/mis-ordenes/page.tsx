@@ -73,12 +73,15 @@ function fmtDate(v: any) {
   return d.toLocaleDateString('es-NI', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
-type DepositoEstado = 'na' | 'pendiente' | 'depositado'
+type DepositoEstado = 'na' | 'pendiente' | 'en_revision' | 'depositado'
 
 function estadoDeposito(s: Solicitud): DepositoEstado {
   if (!s.cobroContraEntrega?.aplica) return 'na'
   const dep = s.registro?.deposito
-  if (dep?.confirmadoMotorizado || dep?.confirmadoComercio || dep?.confirmadoStorkhub) return 'depositado'
+  // Gestor confirmed → fully deposited
+  if (dep?.confirmadoComercio) return 'depositado'
+  // Motorizado uploaded boucher and flagged the order → under review by gestor
+  if (dep?.confirmadoMotorizado) return 'en_revision'
   return 'pendiente'
 }
 
@@ -226,7 +229,12 @@ export default function MisOrdenesPage() {
                       {(() => {
                         const dep = estadoDeposito(o)
                         if (dep === 'na') return <span className="text-gray-400 text-xs">N/A</span>
-                        if (dep === 'depositado') return <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">✓ Depositado</span>
+                        if (dep === 'depositado') return (
+                          <Link href="/panel/comercio/depositos" className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 transition">✓ Depositado →</Link>
+                        )
+                        if (dep === 'en_revision') return (
+                          <Link href="/panel/comercio/depositos" className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition">🔍 En revisión →</Link>
+                        )
                         return <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 border border-yellow-200">Pendiente</span>
                       })()}
                     </td>

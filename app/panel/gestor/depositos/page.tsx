@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   collection,
   onSnapshot,
@@ -8,11 +8,13 @@ import {
   where,
   doc,
   getDoc,
+  setDoc,
   writeBatch,
   serverTimestamp,
   Timestamp,
 } from 'firebase/firestore'
-import { db } from '@/fb/config'
+import { auth, db } from '@/fb/config'
+import { compressImage, uploadDepositoBoucher } from '@/fb/storage'
 import {
   Wallet,
   CheckCircle2,
@@ -55,6 +57,8 @@ type Solicitud = {
       confirmadoComercioAt?: Timestamp
       confirmadoStorkhub?: boolean
       confirmadoStorkhubAt?: Timestamp
+      storkhubDepositoId?: string
+      comercioDepositoId?: string
     }
   }
 }
@@ -83,17 +87,51 @@ type GrupoMotorizado = {
   comercios: GrupoComercio[]
 }
 
-type MainTab = 'pendientes' | 'historial'
+type MainTab = 'pendientes' | 'por_revisar' | 'historial'
 
-// Entrada de historial: una confirmación individual (storkhub o comercio) por orden
+// Documento de ordenes_deposito (una transferencia bancaria completa)
+type DepositoOrderDoc = {
+  id: string
+  creadoAt?: Timestamp
+  destinatario: 'storkhub' | 'comercio'
+  destinatarioNombre: string
+  motorizadoUid: string
+  motorizadoNombre: string
+  solicitudIds: string[]
+  montoTotal: number
+  boucher?: { url: string; pathStorage: string } | null
+  confirmadoMotorizado: boolean
+  confirmadoMotorizadoAt?: Timestamp
+  confirmadoGestor?: boolean
+  confirmadoGestorAt?: Timestamp
+}
+
+// Versión reducida cargada en runtime (solo lo que necesitamos mostrar)
+type DepositoOrder = {
+  boucher?: { url: string; pathStorage: string } | null
+}
+
+// Entrada del historial de depósitos
 type HistorialEntry = {
   ordenId: string
   motorizadoNombre: string
-  destino: string       // 'Storkhub' o nombre del comercio
+  destino: string
   tipo: 'delivery' | 'producto'
   monto: number
   fechaConfirmacion: Timestamp
-  ordenCompleta: boolean // ambos destinos confirmados
+  ordenCompleta: boolean
+  depositoId?: string
+}
+
+// Detalle mínimo de una solicitud para mostrar en el desglose
+type SolicitudDetail = {
+  id: string
+  entrega?: { nombreApellido?: string; direccionEscrita?: string }
+  ownerSnapshot?: { companyName?: string; nombre?: string }
+  cobroContraEntrega?: { aplica?: boolean; monto?: number }
+  confirmacion?: { precioFinalCordobas?: number }
+  pagoDelivery?: { quienPaga?: string; deducirDelCobroContraEntrega?: boolean }
+  tipoCliente?: string
 }
 
 // ─── calcDeposito ─────────────────────────────────────────────────────────────
@@ -124,6 +162,13 @@ function tieneDepositoPendiente(s: Solicitud): boolean {
 }
 
 // ─── Helpers visuales ─────────────────────────────────────────────────────────
+
+function tsToDate(v: any): Date | null {
+  if (!v) return null
+  if (typeof v?.toDate === 'function') return v.toDate()
+  if (v instanceof Date) return v
+  return null
+}
 
 function fmt(n: number) {
   return `C$ ${n.toLocaleString('es-NI')}`
@@ -171,6 +216,19 @@ export default function DepositosPage() {
   const [loading, setLoading] = useState(true)
   const [selectedOrdenId, setSelectedOrdenId] = useState<string | null>(null)
   const [comercioNames, setComercioNames] = useState<Record<string, string>>({})
+  const [depositoOrders, setDepositoOrders] = useState<Record<string, DepositoOrder>>({})
+  const loadedDepositoIds = useRef<Set<string>>(new Set())
+
+  // Por revisar: ordenes_deposito pendientes de confirmación del gestor
+  const [porRevisar, setPorRevisar] = useState<DepositoOrderDoc[]>([])
+  const [confirmandoId, setConfirmandoId] = useState<string | null>(null)
+  const [boucherModalUrl, setBoucherModalUrl] = useState<string | null>(null)
+  const [expandedPorRevisar, setExpandedPorRevisar] = useState<Set<string>>(new Set())
+  const toggleExpandPorRevisar = (id: string) =>
+    setExpandedPorRevisar((prev) => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s })
+
+  // Historial: ordenes_deposito confirmados por gestor
+  const [historialDepositos, setHistorialDepositos] = useState<DepositoOrderDoc[]>([])
 
   // Filtros historial
   const [filtroMotorizado, setFiltroMotorizado] = useState<string>('todos')
@@ -197,6 +255,28 @@ export default function DepositosPage() {
     return onSnapshot(q, (snap) => {
       setOrdenes(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Solicitud)))
       setLoading(false)
+    })
+  }, [])
+
+  // Query: ordenes_deposito pendientes de revisión gestora (motorizado las creó, gestor aún no confirmó)
+  useEffect(() => {
+    const q = query(collection(db, 'ordenes_deposito'), where('confirmadoGestor', '==', false))
+    return onSnapshot(q, (snap) => {
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() as any) } as DepositoOrderDoc))
+        .sort((a, b) => (tsToDate(b.creadoAt)?.getTime() ?? 0) - (tsToDate(a.creadoAt)?.getTime() ?? 0))
+      setPorRevisar(list)
+    })
+  }, [])
+
+  // Query: ordenes_deposito confirmados por gestor (para historial limpio 1-fila-por-depósito)
+  useEffect(() => {
+    const q = query(collection(db, 'ordenes_deposito'), where('confirmadoGestor', '==', true))
+    return onSnapshot(q, (snap) => {
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() as any) } as DepositoOrderDoc))
+        .sort((a, b) => (tsToDate(b.confirmadoGestorAt)?.getTime() ?? 0) - (tsToDate(a.confirmadoGestorAt)?.getTime() ?? 0))
+      setHistorialDepositos(list)
     })
   }, [])
 
@@ -343,6 +423,7 @@ export default function DepositosPage() {
               monto: dep.totalAStorkhub,
               fechaConfirmacion: storkhubAt,
               ordenCompleta,
+              depositoId: depoR?.storkhubDepositoId,
             })
           }
         }
@@ -361,6 +442,7 @@ export default function DepositosPage() {
               monto: dep.totalAlComercio,
               fechaConfirmacion: comercioAt,
               ordenCompleta,
+              depositoId: depoR?.comercioDepositoId,
             })
           }
         }
@@ -369,6 +451,28 @@ export default function DepositosPage() {
 
     return entries.sort((a, b) => b.fechaConfirmacion.toMillis() - a.fechaConfirmacion.toMillis())
   }, [ordenesConDeposito, desde, hasta, filtroMotorizado, comercioNames])
+
+  // ── Cargar ordenes_deposito para mostrar boucher en historial ─────────────
+
+  useEffect(() => {
+    const ids = [...new Set(
+      historialEntries
+        .map((e) => e.depositoId)
+        .filter((id): id is string => !!id && !loadedDepositoIds.current.has(id))
+    )]
+    if (ids.length === 0) return
+    ids.forEach((id) => loadedDepositoIds.current.add(id))
+    Promise.all(ids.map((id) => getDoc(doc(db, 'ordenes_deposito', id)))).then((snaps) => {
+      const updates: Record<string, DepositoOrder> = {}
+      snaps.forEach((snap, i) => {
+        if (snap.exists()) {
+          const data = snap.data() as any
+          updates[ids[i]] = { boucher: data.boucher ?? null }
+        }
+      })
+      setDepositoOrders((prev) => ({ ...prev, ...updates }))
+    })
+  }, [historialEntries])
 
   // Lista de motorizados únicos para filtro
   const motorizados = useMemo(() => {
@@ -383,26 +487,107 @@ export default function DepositosPage() {
 
   // ── Confirmar depósito ─────────────────────────────────────────────────────
 
-  async function confirmarStorkhub(ordenes: Solicitud[]) {
+  async function confirmarStorkhub(ordenes: Solicitud[], motId: string, motNombre: string, boucherFile: File) {
+    const depositoRef = doc(collection(db, 'ordenes_deposito'))
+    const depositoId = depositoRef.id
+    const blob = await compressImage(boucherFile)
+    const { url, pathStorage } = await uploadDepositoBoucher(depositoId, blob)
+    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motId }
+    const montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
+    await setDoc(depositoRef, {
+      creadoAt: serverTimestamp(),
+      destinatario: 'storkhub',
+      destinatarioId: 'storkhub',
+      destinatarioNombre: 'Storkhub',
+      cuentasDestino: [],
+      motorizadoUid: motId,
+      motorizadoNombre: motNombre,
+      solicitudIds: ordenes.map((o) => o.id),
+      montoTotal,
+      boucher: boucherData,
+      confirmadoMotorizado: false,
+      confirmadoGestor: true,
+      confirmadoGestorAt: serverTimestamp(),
+      confirmadoGestorUid: auth.currentUser?.uid ?? '',
+    })
     const b = writeBatch(db)
     ordenes.forEach((o) =>
       b.update(doc(db, 'solicitudes_envio', o.id), {
         'registro.deposito.confirmadoStorkhub': true,
         'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
+        'registro.deposito.storkhubDepositoId': depositoId,
       })
     )
     await b.commit()
   }
 
-  async function confirmarComercio(ordenes: Solicitud[]) {
+  async function confirmarComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File) {
+    const depositoRef = doc(collection(db, 'ordenes_deposito'))
+    const depositoId = depositoRef.id
+    const blob = await compressImage(boucherFile)
+    const { url, pathStorage } = await uploadDepositoBoucher(depositoId, blob)
+    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motId }
+    const montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAlComercio, 0)
+    await setDoc(depositoRef, {
+      creadoAt: serverTimestamp(),
+      destinatario: 'comercio',
+      destinatarioId: comercioUid,
+      destinatarioNombre: comercioNombre,
+      cuentasDestino: [],
+      motorizadoUid: motId,
+      motorizadoNombre: motNombre,
+      solicitudIds: ordenes.map((o) => o.id),
+      montoTotal,
+      boucher: boucherData,
+      confirmadoMotorizado: false,
+      confirmadoGestor: true,
+      confirmadoGestorAt: serverTimestamp(),
+      confirmadoGestorUid: auth.currentUser?.uid ?? '',
+    })
     const b = writeBatch(db)
     ordenes.forEach((o) =>
       b.update(doc(db, 'solicitudes_envio', o.id), {
         'registro.deposito.confirmadoComercio': true,
         'registro.deposito.confirmadoComercioAt': serverTimestamp(),
+        'registro.deposito.comercioDepositoId': depositoId,
       })
     )
     await b.commit()
+  }
+
+  // ── Confirmar depósito existente (creado por motorizado) ──────────────────
+
+  async function confirmarDepositoExistente(dep: DepositoOrderDoc) {
+    setConfirmandoId(dep.id)
+    try {
+      const { updateDoc: upd, doc: docRef } = await import('firebase/firestore')
+      const ref = docRef(db, 'ordenes_deposito', dep.id)
+      const b = writeBatch(db)
+      b.update(ref, {
+        confirmadoGestor: true,
+        confirmadoGestorAt: serverTimestamp(),
+        confirmadoGestorUid: auth.currentUser?.uid ?? '',
+      })
+      const fieldKey = dep.destinatario === 'storkhub'
+        ? 'registro.deposito.confirmadoStorkhub'
+        : 'registro.deposito.confirmadoComercio'
+      const atKey = dep.destinatario === 'storkhub'
+        ? 'registro.deposito.confirmadoStorkhubAt'
+        : 'registro.deposito.confirmadoComercioAt'
+      const idKey = dep.destinatario === 'storkhub'
+        ? 'registro.deposito.storkhubDepositoId'
+        : 'registro.deposito.comercioDepositoId'
+      dep.solicitudIds.forEach((sid) => {
+        b.update(docRef(db, 'solicitudes_envio', sid), {
+          [fieldKey]: true,
+          [atKey]: serverTimestamp(),
+          [idKey]: dep.id,
+        })
+      })
+      await b.commit()
+    } finally {
+      setConfirmandoId(null)
+    }
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -449,8 +634,8 @@ export default function DepositosPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2">
-        {(['pendientes', 'historial'] as MainTab[]).map((t) => (
+      <div className="flex gap-2 flex-wrap">
+        {(['pendientes', 'por_revisar', 'historial'] as MainTab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -460,10 +645,15 @@ export default function DepositosPage() {
                 : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
             }`}
           >
-            {t === 'pendientes' ? 'Pendientes' : 'Historial'}
+            {t === 'pendientes' ? 'Pendientes' : t === 'por_revisar' ? 'Por revisar' : 'Historial'}
             {t === 'pendientes' && !loading && gruposMotorizado.length > 0 && (
               <span className="ml-1.5 inline-flex items-center justify-center w-5 h-5 rounded-full bg-orange-500 text-white text-[10px] font-black">
                 {gruposMotorizado.length}
+              </span>
+            )}
+            {t === 'por_revisar' && porRevisar.length > 0 && (
+              <span className="ml-1.5 inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-500 text-white text-[10px] font-black">
+                {porRevisar.length}
               </span>
             )}
           </button>
@@ -516,7 +706,7 @@ export default function DepositosPage() {
                       expandKey={`${gm.motorizadoId}-storkhub`}
                       expanded={expandedGroups.has(`${gm.motorizadoId}-storkhub`)}
                       onToggle={() => toggleExpand(`${gm.motorizadoId}-storkhub`)}
-                      onConfirmar={() => confirmarStorkhub(gm.storkhub.ordenes)}
+                      onConfirmar={(f) => confirmarStorkhub(gm.storkhub.ordenes, gm.motorizadoId, gm.motorizadoNombre, f)}
                       tipoDeposito="storkhub"
                       onSelectOrden={setSelectedOrdenId}
                       comercioNames={comercioNames}
@@ -537,7 +727,7 @@ export default function DepositosPage() {
                       expandKey={`${gm.motorizadoId}-${gc.uid}`}
                       expanded={expandedGroups.has(`${gm.motorizadoId}-${gc.uid}`)}
                       onToggle={() => toggleExpand(`${gm.motorizadoId}-${gc.uid}`)}
-                      onConfirmar={() => confirmarComercio(gc.ordenes)}
+                      onConfirmar={(f) => confirmarComercio(gc.ordenes, gc.uid, gc.nombre, gm.motorizadoId, gm.motorizadoNombre, f)}
                       tipoDeposito="comercio"
                       onSelectOrden={setSelectedOrdenId}
                       comercioNames={comercioNames}
@@ -550,137 +740,218 @@ export default function DepositosPage() {
         </div>
       )}
 
-      {/* ── TAB: HISTORIAL ─────────────────────────────────────────────────── */}
-      {tab === 'historial' && (
-        <div className="flex flex-col gap-3">
-          {/* Filtros */}
-          <div className="flex flex-wrap gap-3 items-center">
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-semibold text-gray-500">Desde</label>
-              <input
-                type="date"
-                value={desde}
-                onChange={(e) => setDesde(e.target.value)}
-                className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#004aad]/30"
-              />
+      {/* ── TAB: POR REVISAR ──────────────────────────────────────────────── */}
+      {tab === 'por_revisar' && (
+        <div className="flex flex-col gap-4">
+          {porRevisar.length === 0 ? (
+            <div className="bg-white rounded-xl border flex flex-col items-center justify-center py-16 gap-2 text-gray-400">
+              <CheckCircle2 className="h-12 w-12 opacity-25" />
+              <p className="text-sm font-semibold">Sin depósitos por revisar</p>
+              <p className="text-xs">Los depósitos subidos por motorizados aparecerán aquí.</p>
             </div>
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-semibold text-gray-500">Hasta</label>
-              <input
-                type="date"
-                value={hasta}
-                onChange={(e) => setHasta(e.target.value)}
-                className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#004aad]/30"
-              />
-            </div>
-            <span className="text-xs text-gray-400">{historialEntries.length} registros</span>
-          </div>
+          ) : (
+            porRevisar.map((dep) => {
+              const isExp = expandedPorRevisar.has(dep.id)
+              const esStorkhub = dep.destinatario === 'storkhub'
+              return (
+                <div key={dep.id} className={`bg-white rounded-xl border-2 overflow-hidden ${esStorkhub ? 'border-blue-200' : 'border-purple-200'}`}>
+                  {/* Header */}
+                  <div className={`px-4 py-3 flex items-center gap-3 ${esStorkhub ? 'bg-blue-50' : 'bg-purple-50'}`}>
+                    <span>{esStorkhub ? <Landmark className="h-4 w-4 text-blue-600" /> : <Store className="h-4 w-4 text-purple-600" />}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-bold text-gray-900 truncate">{dep.destinatarioNombre}</p>
+                      <p className="text-xs text-gray-500">
+                        Motorizado: {dep.motorizadoNombre} · {fmtDate(dep.creadoAt)} · {dep.solicitudIds?.length ?? 0} órdenes
+                      </p>
+                    </div>
+                    <span className="text-sm font-black text-gray-900 whitespace-nowrap">{fmt(dep.montoTotal)}</span>
+                    <button onClick={() => toggleExpandPorRevisar(dep.id)} className="text-gray-500 hover:text-gray-700 transition p-1">
+                      {isExp ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                    </button>
+                  </div>
 
-          {/* Pills de motorizado */}
-          {motorizados.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() => setFiltroMotorizado('todos')}
-                className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${
-                  filtroMotorizado === 'todos'
-                    ? 'bg-gray-900 text-white border-gray-900'
-                    : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
-                }`}
-              >
-                Todos
-              </button>
-              {motorizados.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => setFiltroMotorizado(m.id)}
-                  className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${
-                    filtroMotorizado === m.id
-                      ? 'bg-[#004aad] text-white border-[#004aad]'
-                      : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
-                  }`}
-                >
-                  {m.nombre}
-                </button>
-              ))}
-            </div>
-          )}
+                  {/* Expanded order IDs */}
+                  {isExp && (dep.solicitudIds?.length ?? 0) > 0 && (
+                    <div className="border-t border-gray-100 px-4 py-3 bg-gray-50">
+                      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-400">Órdenes incluidas</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {dep.solicitudIds.map((sid) => (
+                          <button
+                            key={sid}
+                            onClick={() => setSelectedOrdenId(sid)}
+                            className="rounded bg-white border border-gray-200 px-2 py-0.5 font-mono text-xs text-blue-600 hover:bg-blue-50 transition"
+                          >
+                            {sid.slice(0, 8)}…
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
-          {/* Tabla */}
-          <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
-            {loading ? (
-              <div className="py-16 text-center text-sm text-gray-400">Cargando…</div>
-            ) : historialEntries.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16 gap-2 text-gray-400">
-                <CheckCircle2 className="h-10 w-10 opacity-30" />
-                <p className="text-sm font-medium">Sin depósitos confirmados en este período</p>
-              </div>
-            ) : (
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b bg-gray-50">
-                    <th className={thCls}>Fecha confirmación</th>
-                    <th className={thCls}>Motorizado</th>
-                    <th className={thCls}>Destino</th>
-                    <th className={thCls}>Tipo</th>
-                    <th className={`${thCls} text-right`}>Monto</th>
-                    <th className={thCls}>Orden</th>
-                    <th className={thCls}>Estado</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {historialEntries.map((entry, i) => (
-                    <tr key={`${entry.ordenId}-${entry.tipo}-${i}`} className="hover:bg-gray-50 transition-colors">
-                      <td className={tdCls}>{fmtDateTime(entry.fechaConfirmacion)}</td>
-                      <td className={`${tdCls} font-semibold text-gray-800`}>{entry.motorizadoNombre}</td>
-                      <td className={tdCls}>
-                        <span className="flex items-center gap-1.5">
-                          {entry.destino === 'Storkhub'
-                            ? <Landmark className="h-3.5 w-3.5 text-blue-500 flex-shrink-0" />
-                            : <Store className="h-3.5 w-3.5 text-purple-500 flex-shrink-0" />
-                          }
-                          {entry.destino}
-                        </span>
-                      </td>
-                      <td className={tdCls}>
-                        {entry.tipo === 'delivery' ? (
-                          <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-                            Delivery
-                          </span>
-                        ) : (
-                          <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200">
-                            Producto
-                          </span>
-                        )}
-                      </td>
-                      <td className={`${tdCls} text-right font-semibold text-gray-900`}>{fmt(entry.monto)}</td>
-                      <td className={tdCls}>
+                  {/* Boucher + confirm */}
+                  <div className="px-4 py-3 border-t border-gray-100 flex flex-col gap-2">
+                    {dep.boucher?.url ? (
+                      <div className="flex items-center gap-3">
                         <button
-                          onClick={() => setSelectedOrdenId(entry.ordenId)}
-                          className="font-mono text-xs text-blue-600 hover:text-blue-800 hover:underline transition"
-                          title="Ver detalles de la orden"
+                          onClick={() => setBoucherModalUrl(dep.boucher!.url)}
+                          className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-100 transition"
                         >
-                          {entry.ordenId.slice(0, 8)}
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={dep.boucher.url} alt="boucher" className="h-8 w-8 rounded object-cover border border-gray-200" />
+                          Ver comprobante del motorizado
                         </button>
-                      </td>
-                      <td className={tdCls}>
-                        {entry.ordenCompleta ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">
-                            <CheckCircle2 className="h-3 w-3" /> Completo
-                          </span>
-                        ) : (
-                          <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 border border-yellow-200">
-                            Parcial
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-gray-400 italic">Sin comprobante adjunto</p>
+                    )}
+                    <button
+                      onClick={() => confirmarDepositoExistente(dep)}
+                      disabled={confirmandoId === dep.id}
+                      className={`w-full text-xs font-semibold px-3 py-2.5 rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed ${esStorkhub ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-purple-600 text-white hover:bg-purple-700'}`}
+                    >
+                      {confirmandoId === dep.id ? 'Confirmando…' : '✓ Confirmar depósito'}
+                    </button>
+                  </div>
+                </div>
+              )
+            })
+          )}
+        </div>
+      )}
+
+      {/* Boucher modal */}
+      {boucherModalUrl && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={() => setBoucherModalUrl(null)}>
+          <div className="relative" onClick={(e) => e.stopPropagation()}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={boucherModalUrl} alt="Comprobante" className="max-h-[85vh] max-w-full rounded-xl object-contain shadow-2xl" />
+            <button onClick={() => setBoucherModalUrl(null)} className="absolute -right-3 -top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white shadow text-gray-700 hover:bg-gray-100">✕</button>
           </div>
         </div>
       )}
+
+      {/* ── TAB: HISTORIAL ─────────────────────────────────────────────────── */}
+      {tab === 'historial' && (() => {
+        // Build motorizado list from historialDepositos
+        const motorizadosHist = (() => {
+          const map = new Map<string, string>()
+          historialDepositos.forEach((d) => {
+            if (d.motorizadoUid && d.motorizadoNombre) map.set(d.motorizadoUid, d.motorizadoNombre)
+          })
+          return [...map.entries()].map(([id, nombre]) => ({ id, nombre }))
+        })()
+
+        const desdeMs = new Date(desde + 'T00:00:00').getTime()
+        const hastaMs = new Date(hasta + 'T23:59:59').getTime()
+
+        const filtered = historialDepositos.filter((d) => {
+          const ts = tsToDate(d.confirmadoGestorAt)?.getTime() ?? tsToDate(d.creadoAt)?.getTime() ?? 0
+          if (ts < desdeMs || ts > hastaMs) return false
+          if (filtroMotorizado !== 'todos' && d.motorizadoUid !== filtroMotorizado) return false
+          return true
+        })
+
+        return (
+          <div className="flex flex-col gap-3">
+            {/* Filtros fecha */}
+            <div className="flex flex-wrap gap-3 items-center">
+              <div className="flex items-center gap-2">
+                <label className="text-xs font-semibold text-gray-500">Desde</label>
+                <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)}
+                  className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#004aad]/30" />
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-xs font-semibold text-gray-500">Hasta</label>
+                <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)}
+                  className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#004aad]/30" />
+              </div>
+              <span className="text-xs text-gray-400">{filtered.length} depósito{filtered.length !== 1 ? 's' : ''}</span>
+            </div>
+
+            {/* Pills motorizado */}
+            {motorizadosHist.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                <button onClick={() => setFiltroMotorizado('todos')}
+                  className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${filtroMotorizado === 'todos' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
+                  Todos
+                </button>
+                {motorizadosHist.map((m) => (
+                  <button key={m.id} onClick={() => setFiltroMotorizado(m.id)}
+                    className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${filtroMotorizado === m.id ? 'bg-[#004aad] text-white border-[#004aad]' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
+                    {m.nombre}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Tabla: 1 fila por depósito */}
+            <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
+              {filtered.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 gap-2 text-gray-400">
+                  <CheckCircle2 className="h-10 w-10 opacity-30" />
+                  <p className="text-sm font-medium">Sin depósitos confirmados en este período</p>
+                </div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b bg-gray-50">
+                      <th className={thCls}>Fecha confirmación</th>
+                      <th className={thCls}>Motorizado</th>
+                      <th className={thCls}>Comercio</th>
+                      <th className={thCls}>Tipo</th>
+                      <th className={`${thCls} text-right`}>Monto</th>
+                      <th className={thCls}>Órdenes</th>
+                      <th className={thCls}>Comprobante</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {filtered.map((dep) => (
+                      <tr key={dep.id} className="hover:bg-gray-50 transition-colors">
+                        <td className={tdCls}>{fmtDateTime(dep.confirmadoGestorAt ?? dep.creadoAt)}</td>
+                        <td className={`${tdCls} font-semibold text-gray-800`}>{dep.motorizadoNombre}</td>
+                        <td className={tdCls}>
+                          <span className="flex items-center gap-1.5">
+                            {dep.destinatario === 'storkhub'
+                              ? <Landmark className="h-3.5 w-3.5 text-blue-500 flex-shrink-0" />
+                              : <Store className="h-3.5 w-3.5 text-purple-500 flex-shrink-0" />}
+                            {dep.destinatarioNombre}
+                          </span>
+                        </td>
+                        <td className={tdCls}>
+                          {dep.destinatario === 'storkhub' ? (
+                            <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">Delivery</span>
+                          ) : (
+                            <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200">Producto</span>
+                          )}
+                        </td>
+                        <td className={`${tdCls} text-right font-semibold text-gray-900`}>{fmt(dep.montoTotal)}</td>
+                        <td className={tdCls}>
+                          <div className="flex flex-wrap gap-1">
+                            {(dep.solicitudIds ?? []).map((sid) => (
+                              <button key={sid} onClick={() => setSelectedOrdenId(sid)}
+                                className="font-mono text-[11px] text-blue-600 bg-blue-50 hover:bg-blue-100 px-1.5 py-0.5 rounded transition" title={sid}>
+                                {sid.slice(0, 6)}…
+                              </button>
+                            ))}
+                          </div>
+                        </td>
+                        <td className={tdCls}>
+                          {dep.boucher?.url ? (
+                            <button onClick={() => window.open(dep.boucher!.url, '_blank')} title="Ver comprobante">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img src={dep.boucher.url} alt="boucher" className="w-8 h-8 rounded object-cover border border-green-200 hover:opacity-80 transition" />
+                            </button>
+                          ) : <span className="text-[11px] text-gray-400">—</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Drawer de detalle */}
       {selectedOrdenId && (
@@ -721,16 +992,19 @@ function DepositoGrupo({
   expandKey: string
   expanded: boolean
   onToggle: () => void
-  onConfirmar: () => Promise<void>
+  onConfirmar: (boucherFile: File) => Promise<void>
   tipoDeposito: 'storkhub' | 'comercio'
   onSelectOrden: (id: string) => void
   comercioNames: Record<string, string>
 }) {
   const [saving, setSaving] = useState(false)
+  const [boucherFile, setBoucherFile] = useState<File | null>(null)
+  const boucherRef = useRef<HTMLInputElement>(null)
 
   async function handleConfirmar() {
+    if (!boucherFile) return
     setSaving(true)
-    try { await onConfirmar() } finally { setSaving(false) }
+    try { await onConfirmar(boucherFile) } finally { setSaving(false) }
   }
 
   return (
@@ -748,17 +1022,6 @@ function DepositoGrupo({
           title="Ver órdenes"
         >
           {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-        </button>
-        <button
-          onClick={handleConfirmar}
-          disabled={saving}
-          className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition whitespace-nowrap disabled:opacity-40 ${
-            tipoDeposito === 'storkhub'
-              ? 'bg-blue-600 text-white hover:bg-blue-700'
-              : 'bg-purple-600 text-white hover:bg-purple-700'
-          }`}
-        >
-          {saving ? 'Guardando…' : '✓ Confirmar depósito'}
         </button>
       </div>
 
@@ -810,6 +1073,47 @@ function DepositoGrupo({
           </table>
         </div>
       )}
+
+      {/* Boucher obligatorio + botón confirmar */}
+      <div className="px-4 py-3 border-t border-gray-100 flex flex-col gap-2">
+        <input
+          ref={boucherRef}
+          type="file"
+          accept="image/*"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (f) setBoucherFile(f)
+            if (boucherRef.current) boucherRef.current.value = ''
+          }}
+        />
+        <button
+          onClick={() => boucherRef.current?.click()}
+          className={`w-full text-xs font-semibold py-2 px-3 rounded-lg border transition ${
+            boucherFile
+              ? 'bg-green-50 border-green-200 text-green-700'
+              : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+          }`}
+        >
+          {boucherFile
+            ? `✅ Boucher: ${boucherFile.name.slice(0, 30)} · Cambiar`
+            : '📸 Adjuntar boucher del depósito (obligatorio)'}
+        </button>
+        {!boucherFile && (
+          <p className="text-[11px] text-red-500 text-center">Se requiere boucher para confirmar</p>
+        )}
+        <button
+          onClick={handleConfirmar}
+          disabled={saving || !boucherFile}
+          className={`w-full text-xs font-semibold px-3 py-2 rounded-lg transition whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed ${
+            tipoDeposito === 'storkhub'
+              ? 'bg-blue-600 text-white hover:bg-blue-700'
+              : 'bg-purple-600 text-white hover:bg-purple-700'
+          }`}
+        >
+          {saving ? 'Subiendo boucher y confirmando…' : '✓ Confirmar depósito'}
+        </button>
+      </div>
     </div>
   )
 }

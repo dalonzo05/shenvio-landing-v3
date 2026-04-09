@@ -30,19 +30,19 @@ const servicios: Servicio[] = [
   {
     titulo: 'Atención personalizada',
     descripcion:
-      'No somos una app automatizada. Te respondemos personas reales, con soluciones reales.',
+      'No somos un bot. Te respondemos personas reales con soluciones reales, en minutos.',
     icono: '/icons/a_personalizada.svg',
   },
   {
-    titulo: 'Cobertura Managua y más',
+    titulo: 'Cobertura Managua y municipios',
     descripcion:
-      'Llegamos a toda Managua y zonas cercanas como Tipitapa, Ticuantepe, Ciudad Sandino y más.',
+      'Cubrimos Managua y municipios aledaños: Tipitapa, Ticuantepe, Ciudad Sandino y más zonas en expansión.',
     icono: '/icons/cobertura.svg',
   },
   {
-    titulo: 'Seguimiento en línea',
+    titulo: 'Plataforma de seguimiento',
     descripcion:
-      'Podés preguntar por tu envío en cualquier momento. Siempre sabrás dónde está tu paquete.',
+      'Gestioná tus órdenes y seguí cada envío en tiempo real desde tu panel de comercio, sin llamadas.',
     icono: '/icons/seguimiento.svg',
   },
 ]
@@ -55,27 +55,37 @@ const ServiciosYNosotros = ({ id }: { id: string }) => {
       id={id}
       className="relative py-24 px-6 bg-[#e5e5e5] text-gray-800 overflow-hidden"
     >
-      {/* Decorado: nubes (sin ciudad.png) */}
-      <div className="absolute inset-0 z-0 pointer-events-none">
+      {/* Nubes decorativas — más grandes y visibles */}
+      <div className="absolute inset-0 z-0 pointer-events-none select-none">
         <img
           src="/backgrounds/nube1.png"
-          alt="Nube"
-          className="absolute top-8 left-6 w-20 opacity-80 animate-float hidden sm:block"
+          alt=""
+          className="absolute -top-2 left-4 w-40 md:w-52 opacity-90 animate-float"
         />
         <img
           src="/backgrounds/nube2.png"
-          alt="Nube"
-          className="absolute top-12 right-8 w-24 opacity-80 animate-float hidden sm:block"
+          alt=""
+          className="absolute top-4 right-6 w-44 md:w-56 opacity-90 animate-float-slow"
+        />
+        <img
+          src="/backgrounds/nube3.png"
+          alt=""
+          className="absolute top-28 left-1/4 w-36 md:w-44 opacity-80 animate-float hidden md:block"
         />
         <img
           src="/backgrounds/nube1.png"
-          alt="Nube"
-          className="absolute top-32 left-1/3 w-20 opacity-80 animate-float hidden sm:block"
+          alt=""
+          className="absolute top-36 right-1/3 w-32 md:w-40 opacity-70 animate-float-slow hidden md:block"
         />
         <img
           src="/backgrounds/nube2.png"
-          alt="Nube"
-          className="absolute top-40 right-1/4 w-20 opacity-80 animate-float hidden sm:block"
+          alt=""
+          className="absolute bottom-20 left-8 w-36 md:w-48 opacity-75 animate-float hidden lg:block"
+        />
+        <img
+          src="/backgrounds/nube3.png"
+          alt=""
+          className="absolute bottom-10 right-10 w-40 md:w-52 opacity-80 animate-float-slow hidden lg:block"
         />
       </div>
 
@@ -86,9 +96,9 @@ const ServiciosYNosotros = ({ id }: { id: string }) => {
         </h2>
 
         <p className="text-center max-w-3xl mx-auto mb-12 text-gray-700 text-base md:text-lg">
-          En <strong>Storkhub</strong> conectamos negocios y personas a través de un servicio de
-          entregas ágil, transparente y humano. Nos adaptamos a tu estilo, con comunicación clara
-          y atención real.
+          En <strong>StorkHub</strong> conectamos negocios y personas a través de un servicio de
+          entregas ágil, transparente y humano. Con plataforma propia para gestionar y rastrear
+          cada envío en tiempo real.
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8 max-w-6xl mx-auto">

@@ -1,11 +1,9 @@
 @import "tailwindcss";
 
+/* ─── Variables ──────────────────────────────────────────────────────────── */
 :root {
   --background: #ffffff;
-  --foreground: #171717;
-}
-
-:root {
+  --foreground: #0f172a;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
@@ -14,8 +12,8 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #ffffff;
+    --foreground: #0f172a;
   }
 }
 
@@ -25,71 +23,37 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
-/* Animaciones para nubes */
+/* ─── Animaciones flotantes (nubes, cigüeñas) ───────────────────────────── */
 @keyframes float {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-8px);
-  }
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-8px); }
 }
 
 @keyframes float-slow {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-12px);
-  }
-}
-
-.animate-float {
-  animation: float 6s ease-in-out infinite;
-}
-
-.animate-float-slow {
-  animation: float-slow 10s ease-in-out infinite;
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-12px); }
 }
 
 @keyframes float-x {
-  0% { transform: translateX(0); }
-  50% { transform: translateX(20px); }
+  0%   { transform: translateX(0); }
+  50%  { transform: translateX(20px); }
   100% { transform: translateX(0); }
 }
 
-.animate-float-x {
-  animation: float-x 5s ease-in-out infinite;
+.animate-float      { animation: float      6s  ease-in-out infinite; }
+.animate-float-slow { animation: float-slow 10s ease-in-out infinite; }
+.animate-float-x    { animation: float-x    5s  ease-in-out infinite; }
+
+/* ─── Fade-in-up (scroll reveal para nuevas secciones) ─────────────────── */
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
-/* global.css – agrega al final o cerca de tus variables existentes */
-:root {
-  --background: #ffffff;
-  --foreground: #0f172a; /* slate-900 */
-}
+.animate-fade-in-up { animation: fade-in-up 0.6s ease-out forwards; }
 
-html[data-theme="dark"] {
-  --background: #0a0a0a;
-  --foreground: #ededed;
-}
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-}
-
-/* global.css – agrega al final o cerca de tus variables existentes */
-:root {
-  --background: #ffffff;
-  --foreground: #0f172a; /* slate-900 */
-}
-
-html[data-theme="dark"] {
-  --background: #0a0a0a;
-  --foreground: #ededed;
-}
-
-body {
-  background: var(--background);
-  color: var(--foreground);
+/* ─── Progress bar (panel interno) ─────────────────────────────────────── */
+@keyframes progress2s {
+  from { width: 0%; }
+  to   { width: 100%; }
 }

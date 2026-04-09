@@ -113,6 +113,36 @@ export function UserProvider({ children }: { children: ReactNode }) {
     }
   }, [authUser?.uid])
 
+  useEffect(() => {
+    if (!authUser) return
+    let remember = false
+    try { remember = localStorage.getItem('storkhub:remember') === 'true' } catch {}
+    if (remember) return
+
+    const TIMEOUT_MS = 30 * 60 * 1000
+    let timer: ReturnType<typeof setTimeout>
+
+    const reset = () => {
+      clearTimeout(timer)
+      timer = setTimeout(async () => {
+        await fbSignOut(auth)
+        try {
+          localStorage.removeItem('storkhub:user')
+          localStorage.removeItem('storkhub:remember')
+        } catch {}
+      }, TIMEOUT_MS)
+    }
+
+    const events = ['mousemove', 'keydown', 'click', 'touchstart'] as const
+    events.forEach((e) => window.addEventListener(e, reset))
+    reset()
+
+    return () => {
+      clearTimeout(timer)
+      events.forEach((e) => window.removeEventListener(e, reset))
+    }
+  }, [authUser?.uid])
+
   const signIn = async (email: string, password: string) => {
     setLoading(true)
     try {
@@ -188,6 +218,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
     await fbSignOut(auth)
     try {
       localStorage.removeItem('storkhub:user')
+      localStorage.removeItem('storkhub:remember')
     } catch {}
   }
 

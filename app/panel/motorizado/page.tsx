@@ -4,11 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import {
   collection, onSnapshot, query, where,
-  doc, getDoc, updateDoc, serverTimestamp, Timestamp, writeBatch,
-  runTransaction, increment, arrayUnion,
+  doc, getDoc, setDoc, updateDoc, serverTimestamp, Timestamp, writeBatch,
+  runTransaction, increment, arrayUnion, limit,
 } from 'firebase/firestore';
 import { auth, db } from '@/fb/config';
-import { compressImage, uploadEvidencia, type TipoEvidencia } from '@/fb/storage';
+import { compressImage, uploadEvidencia, uploadDepositoBoucher, type TipoEvidencia } from '@/fb/storage';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -37,8 +37,9 @@ type Solicitud = {
   tipoCliente?: 'contado' | 'credito';
   cliente?: { nombre?: string; telefono?: string };
   comercio?: { nombre?: string; direccionTexto?: string };
-  recoleccion?: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null; coord?: { lat: number; lng: number } | null; puntoGoogleLink?: string | null; puntoGoogleTexto?: string | null };
-  entrega?: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null; coord?: { lat: number; lng: number } | null; puntoGoogleLink?: string | null; puntoGoogleTexto?: string | null };
+  recoleccion?: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null; notaMotorizado?: string | null; coord?: { lat: number; lng: number } | null; puntoGoogleLink?: string | null; puntoGoogleTexto?: string | null };
+  entrega?: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null; notaMotorizado?: string | null; coord?: { lat: number; lng: number } | null; puntoGoogleLink?: string | null; puntoGoogleTexto?: string | null };
+  paquete?: { fragil?: boolean; grande?: boolean; notaPaquete?: string | null } | null;
   cotizacion?: { origenCoord?: { lat: number; lng: number } | null; destinoCoord?: { lat: number; lng: number } | null };
   confirmacion?: { precioFinalCordobas?: number };
   cobroContraEntrega?: { aplica?: boolean; monto?: number };
@@ -71,6 +72,8 @@ type Solicitud = {
       confirmadoComercioAt?: Timestamp;
       confirmadoStorkhub?: boolean;
       confirmadoStorkhubAt?: Timestamp;
+      storkhubDepositoId?: string;
+      comercioDepositoId?: string;
     };
   };
   evidencias?: {
@@ -85,6 +88,7 @@ type EvidenciaFoto = { url: string; pathStorage: string; uploadedAt?: Timestamp;
 type PendingConfirm = {
   order: Solicitud;
   nuevo: EstadoSolicitud;
+  esRetiro: boolean;
   showDelivery: boolean;
   showProducto: boolean;
   montoDelivery: number;
@@ -227,8 +231,14 @@ function calcDeposito(s: Solicitud): DepositoInfo {
   const esPorTransferencia = quienPaga === 'transferencia';
   const esCredito = s.tipoCliente === 'credito' || quienPaga === 'credito_semanal';
 
+  // Si el motorizado declaró no haber recibido (y no es un defer), excluir del depósito
+  const deliveryNoRecibido =
+    s.cobrosMotorizado?.delivery?.recibio === false &&
+    s.cobrosMotorizado?.delivery?.justificacion !== 'Se acordó cobrar en la entrega';
+  const productoNoRecibido = s.cobrosMotorizado?.producto?.recibio === false;
+
   // Delivery: el motorizado lo recauda en efectivo solo si quienPaga es recoleccion o entrega
-  const motorizadoRecaudeDelivery = !esPorTransferencia && !esCredito && precioDelivery > 0;
+  const motorizadoRecaudeDelivery = !esPorTransferencia && !esCredito && precioDelivery > 0 && !deliveryNoRecibido;
   const montoDelivery = motorizadoRecaudeDelivery ? precioDelivery : 0;
 
   // Si el delivery se deduce del cobro CE: el motorizado entrega al comercio (producto - delivery)
@@ -250,7 +260,7 @@ function calcDeposito(s: Solicitud): DepositoInfo {
   if (!ceAplica && !motorizadoRecaudeDelivery) partes.push(`No recaudó efectivo`);
 
   return {
-    tieneProducto: ceAplica,
+    tieneProducto: ceAplica && !productoNoRecibido,
     montoProducto,
     tieneDelivery: motorizadoRecaudeDelivery,
     montoDelivery,
@@ -272,10 +282,16 @@ export default function PanelMotorizadoPage() {
   const [tick, setTick] = useState(Date.now());
   const [tab, setTab] = useState<'pendientes' | 'en_curso' | 'historial' | 'depositos'>('pendientes');
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
-  const [photoGate, setPhotoGate] = useState<{ solicitudId: string; tipo: TipoEvidencia; onComplete: () => void } | null>(null);
+  const [photoGate, setPhotoGate] = useState<{ solicitudId: string; tipo: TipoEvidencia; order: Solicitud; nextEstado: EstadoSolicitud | null } | null>(null);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoUploading, setPhotoUploading] = useState(false);
+  const [photoSuccess, setPhotoSuccess] = useState(false);
   const [photoErr, setPhotoErr] = useState<string | null>(null);
+
+  // Motorizado doc (estado propio)
+  const [motorizadoDocId, setMotorizadoDocId] = useState<string | null>(null);
+  const [motorizadoEstado, setMotorizadoEstado] = useState<'disponible' | 'ocupado' | 'inactivo' | null>(null);
+  const [toggling, setToggling] = useState(false);
 
   // Historial filters
   const [histFecha, setHistFecha] = useState<'hoy' | 'ayer' | 'personalizado'>('hoy');
@@ -296,6 +312,23 @@ export default function PanelMotorizadoPage() {
       (e) => { console.error(e); setErr('Error cargando órdenes.'); }
     );
   }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setMotorizadoDocId(null);
+      setMotorizadoEstado(null);
+      return;
+    }
+    const q = query(collection(db, 'motorizado'), where('authUid', '==', user.uid), limit(1));
+    const unsub = onSnapshot(q, (s) => {
+      if (!s.empty) {
+        const d = s.docs[0];
+        setMotorizadoDocId(d.id);
+        setMotorizadoEstado((d.data() as any).estado ?? 'inactivo');
+      }
+    });
+    return () => unsub();
+  }, [user?.uid]);
 
   useEffect(() => {
     if (!user) { setOrdenes([]); return; }
@@ -327,6 +360,17 @@ export default function PanelMotorizadoPage() {
     finally { setActionId(null); }
   }
 
+  async function toggleActivarse() {
+    if (!motorizadoDocId || toggling) return;
+    if (motorizadoEstado === 'ocupado') return;
+    setToggling(true);
+    try {
+      const nuevoEstado = motorizadoEstado === 'disponible' ? 'inactivo' : 'disponible';
+      await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: nuevoEstado, updatedAt: serverTimestamp() });
+    } catch (e) { console.error(e); }
+    finally { setToggling(false); }
+  }
+
   async function executeCambiar(
     o: Solicitud,
     nuevo: EstadoSolicitud,
@@ -351,6 +395,11 @@ export default function PanelMotorizadoPage() {
         }
       }
       if (hayPendiente) p.cobroPendiente = true;
+
+      // ── Defer delivery a entrega ──────────────────────────────────────────
+      if (cobros?.delivery?.justificacion === 'Se acordó cobrar en la entrega') {
+        p['pagoDelivery.quienPaga'] = 'entrega';
+      }
 
       // ── Al entregar: registrar cobroDelivery ──────────────────────────────
       if (nuevo === 'entregado') {
@@ -421,12 +470,12 @@ export default function PanelMotorizadoPage() {
   function cambiar(o: Solicitud, nuevo: EstadoSolicitud) {
     if (nuevo === 'retirado' && !o.evidencias?.retiro) {
       setPhotoFile(null); setPhotoErr(null);
-      setPhotoGate({ solicitudId: o.id, tipo: 'retiro', onComplete: () => cambiar(o, nuevo) });
+      setPhotoGate({ solicitudId: o.id, tipo: 'retiro', order: o, nextEstado: nuevo });
       return;
     }
     if (nuevo === 'entregado' && !o.evidencias?.entrega) {
       setPhotoFile(null); setPhotoErr(null);
-      setPhotoGate({ solicitudId: o.id, tipo: 'entrega', onComplete: () => cambiar(o, nuevo) });
+      setPhotoGate({ solicitudId: o.id, tipo: 'entrega', order: o, nextEstado: nuevo });
       return;
     }
     const dep = calcDeposito(o);
@@ -447,6 +496,7 @@ export default function PanelMotorizadoPage() {
     setPendingConfirm({
       order: o,
       nuevo,
+      esRetiro,
       showDelivery,
       showProducto,
       montoDelivery: dep.montoDelivery,
@@ -467,9 +517,17 @@ export default function PanelMotorizadoPage() {
         return { ...o, ms: dl ? dl.getTime() - tick : 0 };
       }), [todas, tick]);
 
-  const enCurso = useMemo(() =>
-    todas.filter((o) => o.asignacion?.estadoAceptacion === 'aceptada' && ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'].includes(o.estado || '')),
-    [todas]);
+  const enCurso = useMemo(() => {
+    const urgencyRank = (e?: string) => {
+      if (e === 'en_camino_entrega') return 1;
+      if (e === 'retirado') return 2;
+      if (e === 'en_camino_retiro') return 3;
+      return 4;
+    };
+    return todas
+      .filter((o) => o.asignacion?.estadoAceptacion === 'aceptada' && ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'].includes(o.estado || ''))
+      .sort((a, b) => urgencyRank(a.estado) - urgencyRank(b.estado));
+  }, [todas]);
 
   const entregadas = useMemo(() => sortDesc(todas.filter((o) => o.estado === 'entregado'), 'entregadoAt'), [todas]);
 
@@ -509,8 +567,13 @@ export default function PanelMotorizadoPage() {
     return { alComercio, aStorkhub, total: alComercio + aStorkhub };
   }, [depositosPendientes]);
 
-  // Load comercio bank accounts for deposit orders
+  // Load comercio bank accounts and names for deposit orders
   const [comercioAccounts, setComercioAccounts] = useState<Record<string, BankAccount[]>>({});
+  const [comercioNames, setComercioNames] = useState<Record<string, string>>({});
+  // Group-level boucher state: key = '__storkhub' | comercio userId
+  const [groupBoucher, setGroupBoucher] = useState<Record<string, File | null>>({});
+  const [activeGroupKey, setActiveGroupKey] = useState<string | null>(null);
+  const groupBoucherRef = useRef<HTMLInputElement>(null);
   const depositoUidsKey = depositosPendientes.map((o) => o.userId || '').join(',');
 
   // ── Grupos de depósito ────────────────────────────────────────────────────
@@ -530,7 +593,7 @@ export default function PanelMotorizadoPage() {
       if (dep.totalAlComercio > 0 && !o.registro?.deposito?.confirmadoComercio) {
         const uid = o.userId || '__sin'
         if (!comerciosMap[uid]) {
-          const nombre = o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre || uid.slice(0, 8)
+          const nombre = o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre || comercioNames[uid] || uid.slice(0, 8)
           comerciosMap[uid] = { uid, nombre, orders: [], total: 0, accounts: comercioAccounts[uid] || [] }
         }
         comerciosMap[uid].orders.push(o)
@@ -539,7 +602,7 @@ export default function PanelMotorizadoPage() {
       }
     })
     return { storkhub, comercios: Object.values(comerciosMap) }
-  }, [depositosPendientes, comercioAccounts]);
+  }, [depositosPendientes, comercioAccounts, comercioNames]);
 
   const [expandidos, setExpandidos] = useState<Record<string, boolean>>({})
   const toggleExpandido = (key: string) => setExpandidos((p) => ({ ...p, [key]: !p[key] }))
@@ -552,12 +615,15 @@ export default function PanelMotorizadoPage() {
     const missing = uids.filter((uid) => !(uid in comercioAccounts));
     if (missing.length === 0) return;
     Promise.all(missing.map((uid) => getDoc(doc(db, 'comercios', uid)))).then((snaps) => {
-      const map: Record<string, BankAccount[]> = {};
+      const accountMap: Record<string, BankAccount[]> = {};
+      const nameMap: Record<string, string> = {};
       snaps.forEach((snap, i) => {
         const data = snap.exists() ? (snap.data() as any) : null;
-        map[missing[i]] = Array.isArray(data?.accounts) ? (data.accounts as BankAccount[]) : [];
+        accountMap[missing[i]] = Array.isArray(data?.accounts) ? (data.accounts as BankAccount[]) : [];
+        nameMap[missing[i]] = data?.name || data?.nombre || '';
       });
-      setComercioAccounts((prev) => ({ ...prev, ...map }));
+      setComercioAccounts((prev) => ({ ...prev, ...accountMap }));
+      setComercioNames((prev) => ({ ...prev, ...nameMap }));
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [depositoUidsKey]);
@@ -575,29 +641,53 @@ export default function PanelMotorizadoPage() {
     </div>
   );
 
-  const tabs = [
-    { key: 'pendientes' as const, label: '🔔 Nuevas', count: pendientes.length },
-    { key: 'en_curso' as const, label: '🛵 En curso', count: enCurso.length },
-    { key: 'historial' as const, label: '📋 Historial', count: historialFiltrado.length },
-    { key: 'depositos' as const, label: '💰 Depósitos', count: depositosPendientes.length },
-  ];
-
   return (
-    <div style={{ minHeight: '100vh', background: '#f9fafb', fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", maxWidth: 520, margin: '0 auto', paddingBottom: 48 }}>
+    <div style={{ minHeight: '100vh', background: '#f9fafb', fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", maxWidth: 520, margin: '0 auto', paddingBottom: 80 }}>
 
       {/* Header */}
-      <div style={{ background: '#fff', borderBottom: '1px solid #e5e7eb', padding: '20px 20px 16px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <h1 style={{ fontSize: 22, fontWeight: 800, color: '#111827', margin: 0, letterSpacing: -0.5 }}>Motorizado</h1>
-            <p style={{ fontSize: 12, color: '#9ca3af', margin: '3px 0 0' }}>{user.email}</p>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 20, padding: '6px 12px' }}>
-            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#16a34a', display: 'inline-block' }} />
-            <span style={{ fontSize: 12, color: '#16a34a', fontWeight: 600 }}>En línea</span>
+      <div style={{ background: '#fff', borderBottom: '1px solid #e5e7eb', padding: '12px 16px 12px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <span style={{ fontSize: 15, fontWeight: 700, color: '#374151' }}>Motorizado</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {/* Badge de estado */}
+            {motorizadoEstado === 'disponible' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 20, padding: '5px 10px' }}>
+                <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#16a34a', display: 'inline-block' }} />
+                <span style={{ fontSize: 12, color: '#16a34a', fontWeight: 600 }}>En línea</span>
+              </div>
+            )}
+            {motorizadoEstado === 'ocupado' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 20, padding: '5px 10px' }}>
+                <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#d97706', display: 'inline-block' }} />
+                <span style={{ fontSize: 12, color: '#d97706', fontWeight: 600 }}>En turno</span>
+              </div>
+            )}
+            {(motorizadoEstado === 'inactivo' || motorizadoEstado === null) && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 20, padding: '5px 10px' }}>
+                <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#9ca3af', display: 'inline-block' }} />
+                <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600 }}>Fuera de línea</span>
+              </div>
+            )}
+            {/* Botón toggle */}
+            {motorizadoEstado !== 'ocupado' && (
+              <button
+                onClick={toggleActivarse}
+                disabled={toggling || !motorizadoDocId}
+                style={{
+                  fontSize: 12, fontWeight: 600, borderRadius: 20, padding: '5px 12px', border: 'none',
+                  cursor: toggling || !motorizadoDocId ? 'not-allowed' : 'pointer',
+                  opacity: toggling || !motorizadoDocId ? 0.6 : 1,
+                  background: motorizadoEstado === 'disponible' ? '#e5e7eb' : '#004aad',
+                  color: motorizadoEstado === 'disponible' ? '#374151' : '#fff',
+                  transition: 'opacity 0.15s',
+                }}
+              >
+                {motorizadoEstado === 'disponible' ? 'Desactivarme' : 'Activarme'}
+              </button>
+            )}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+        <div style={{ display: 'flex', gap: 10 }}>
           <StatCard label="Nuevas" value={pendientes.length} color={pendientes.length > 0 ? '#d97706' : '#6b7280'} bg={pendientes.length > 0 ? '#fffbeb' : '#f9fafb'} border={pendientes.length > 0 ? '#fde68a' : '#e5e7eb'} />
           <StatCard label="En curso" value={enCurso.length} color={enCurso.length > 0 ? '#2563eb' : '#6b7280'} bg={enCurso.length > 0 ? '#eff6ff' : '#f9fafb'} border={enCurso.length > 0 ? '#bfdbfe' : '#e5e7eb'} />
           <StatCard label="Hoy" value={historialFiltrado.length} color="#16a34a" bg="#f0fdf4" border="#bbf7d0" />
@@ -606,16 +696,6 @@ export default function PanelMotorizadoPage() {
       </div>
 
       {err && <div style={{ margin: '12px 16px 0', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12, padding: '10px 14px', color: '#dc2626', fontSize: 13 }}>⚠️ {err}</div>}
-
-      {/* Tabs */}
-      <div style={{ display: 'flex', margin: '16px 16px 0', background: '#fff', borderRadius: 14, padding: 4, gap: 3, border: '1px solid #e5e7eb', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
-        {tabs.map((t) => (
-          <button key={t.key} onClick={() => setTab(t.key)} style={{ flex: 1, padding: '9px 2px', border: 'none', cursor: 'pointer', background: tab === t.key ? '#004aad' : 'transparent', color: tab === t.key ? '#fff' : '#6b7280', fontSize: 11, fontWeight: 700, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, transition: 'all 0.15s' }}>
-            {t.label}
-            {t.count > 0 && <span style={{ background: tab === t.key ? 'rgba(255,255,255,0.25)' : '#004aad', color: '#fff', borderRadius: 10, padding: '1px 5px', fontSize: 10, fontWeight: 800 }}>{t.count}</span>}
-          </button>
-        ))}
-      </div>
 
       <div style={{ padding: '16px 16px 0' }}>
 
@@ -644,6 +724,7 @@ export default function PanelMotorizadoPage() {
                       {/* Price + deposit preview */}
                       <CobroBox o={o} dep={dep} />
 
+                      <PaqueteBadge paquete={o.paquete} />
                       <RoutePoint type="pickup" point={o.recoleccion} fallbackName={o.cliente?.nombre} retiroCoord={o.cotizacion?.origenCoord} />
                       <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
                       <RoutePoint type="dropoff" point={o.entrega} entregaCoord={o.cotizacion?.destinoCoord} />
@@ -663,23 +744,42 @@ export default function PanelMotorizadoPage() {
           <>
             {enCurso.length === 0
               ? <EmptyState icon="🛵" title="Sin órdenes en curso" subtitle="Acepta una nueva orden para verla aquí" />
-              : enCurso.map((o) => {
+              : <>
+                {enCurso.length >= 2 && (
+                  <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 14, padding: '10px 14px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 16 }}>⚠️</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: '#92400e' }}>{enCurso.length} órdenes activas — atendé la primera primero</span>
+                  </div>
+                )}
+                {enCurso.map((o, idx) => {
                 const actions = nextActions(o.estado);
                 const est = estadoStyle(o.estado);
                 const dep = calcDeposito(o);
+                const isPriority = idx === 0 && enCurso.length >= 2;
                 return (
-                  <div key={o.id} style={card}>
+                  <div key={o.id} style={{ ...card, ...(isPriority ? { borderLeft: '4px solid #004aad', borderRadius: '0 20px 20px 0' } : {}) }}>
                     <div style={{ height: 4, background: est.accent }} />
                     <div style={{ padding: '14px 16px 0' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                        <div style={{ background: est.bg, border: `1px solid ${est.border}`, borderRadius: 10, padding: '8px 14px' }}>
-                          <span style={{ color: est.text, fontWeight: 700, fontSize: 13 }}>{estadoTexto(o.estado)}</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <div style={{ background: est.bg, border: `1px solid ${est.border}`, borderRadius: 10, padding: '8px 14px' }}>
+                            <span style={{ color: est.text, fontWeight: 700, fontSize: 13 }}>{estadoTexto(o.estado)}</span>
+                          </div>
+                          {isPriority && (
+                            <span style={{ fontSize: 10, fontWeight: 800, color: '#fff', background: '#004aad', borderRadius: 6, padding: '3px 7px', textTransform: 'uppercase', letterSpacing: 0.5 }}>Prioritaria</span>
+                          )}
                         </div>
-                        <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</span>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+                          {enCurso.length >= 2 && (
+                            <span style={{ fontSize: 10, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: 0.5 }}>Orden {idx + 1} de {enCurso.length}</span>
+                          )}
+                          <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</span>
+                        </div>
                       </div>
 
                       <CobroBox o={o} dep={dep} />
 
+                      <PaqueteBadge paquete={o.paquete} />
                       <RoutePoint type="pickup" point={o.recoleccion} fallbackName={o.cliente?.nombre} retiroCoord={o.cotizacion?.origenCoord} />
                       <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
                       <RoutePoint type="dropoff" point={o.entrega} entregaCoord={o.cotizacion?.destinoCoord} />
@@ -688,7 +788,10 @@ export default function PanelMotorizadoPage() {
                         /* ── Confirmación de cobro ── */
                         (() => {
                           const pc = pendingConfirm;
-                          const RAZONES = ['El comercio indicó que cobrará luego', 'El cliente no tenía efectivo', 'Error en el monto acordado', 'Se acordó cobrar en la entrega', 'Otro'];
+                          const RAZONES_DELIVERY_RETIRO = ['Se acordó cobrar en la entrega', 'Comercio ya pagó por transferencia', 'El comercio tiene crédito / cobrará luego', 'Error en el monto acordado', 'Otro'];
+                          const RAZONES_DELIVERY_ENTREGA = ['El cliente no estaba / no atendió', 'El cliente no tenía efectivo', 'El cliente rechazó el producto', 'Error en el monto acordado', 'Otro'];
+                          const RAZONES_PRODUCTO = ['El cliente no estaba / no atendió', 'El cliente no tenía efectivo', 'El cliente rechazó el producto', 'Error en el monto acordado', 'Otro'];
+                          const razonesList = pc.esRetiro ? RAZONES_DELIVERY_RETIRO : RAZONES_DELIVERY_ENTREGA;
                           const bloqueadoDelivery = pc.showDelivery && !pc.recibioDelivery && !pc.justDelivery.trim();
                           const bloqueadoProducto = pc.showProducto && !pc.recibioProducto && !pc.justProducto.trim();
                           const bloqueado = !!actionId || bloqueadoDelivery || bloqueadoProducto;
@@ -717,7 +820,7 @@ export default function PanelMotorizadoPage() {
                                       <select value={pc.justDelivery} onChange={(e) => setPendingConfirm((p) => p ? { ...p, justDelivery: e.target.value } : p)}
                                         style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid #fed7aa', fontSize: 13, background: '#fff', outline: 'none', marginBottom: pc.justDelivery === 'Otro' ? 8 : 0 }}>
                                         <option value="">— Seleccionar razón —</option>
-                                        {RAZONES.map((r) => <option key={r} value={r}>{r}</option>)}
+                                        {razonesList.map((r) => <option key={r} value={r}>{r}</option>)}
                                       </select>
                                       {pc.justDelivery === 'Otro' && (
                                         <textarea placeholder="Describe la situación…" value={pc.justDelivery === 'Otro' ? '' : pc.justDelivery}
@@ -750,7 +853,7 @@ export default function PanelMotorizadoPage() {
                                       <select value={pc.justProducto} onChange={(e) => setPendingConfirm((p) => p ? { ...p, justProducto: e.target.value } : p)}
                                         style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid #fed7aa', fontSize: 13, background: '#fff', outline: 'none', marginBottom: pc.justProducto === 'Otro' ? 8 : 0 }}>
                                         <option value="">— Seleccionar razón —</option>
-                                        {RAZONES.map((r) => <option key={r} value={r}>{r}</option>)}
+                                        {RAZONES_PRODUCTO.map((r) => <option key={r} value={r}>{r}</option>)}
                                       </select>
                                       {pc.justProducto === 'Otro' && (
                                         <textarea placeholder="Describe la situación…"
@@ -799,6 +902,8 @@ export default function PanelMotorizadoPage() {
                   </div>
                 );
               })}
+              </>
+            }
           </>
         )}
 
@@ -929,19 +1034,10 @@ export default function PanelMotorizadoPage() {
                               {g.orders.map((o) => {
                                 const dep = calcDeposito(o);
                                 return (
-                                  <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '6px 0', borderBottom: '1px solid #e0f2fe', gap: 8 }}>
+                                  <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #e0f2fe', gap: 8 }}>
                                     <div style={{ flex: 1 }}>
                                       <p style={{ fontSize: 12, fontWeight: 600, color: '#1e40af', margin: 0 }}>{o.entrega?.nombreApellido || '—'}</p>
                                       <p style={{ fontSize: 10, color: '#93c5fd', margin: 0, fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</p>
-                                      <button
-                                        onClick={() => {
-                                          if (o.evidencias?.deposito) { window.open(o.evidencias.deposito.url, '_blank'); return; }
-                                          setPhotoFile(null); setPhotoErr(null);
-                                          setPhotoGate({ solicitudId: o.id, tipo: 'deposito', onComplete: () => {} });
-                                        }}
-                                        style={{ marginTop: 4, fontSize: 10, fontWeight: 700, color: o.evidencias?.deposito ? '#16a34a' : '#2563eb', background: o.evidencias?.deposito ? '#f0fdf4' : '#eff6ff', border: `1px solid ${o.evidencias?.deposito ? '#bbf7d0' : '#bfdbfe'}`, borderRadius: 6, padding: '3px 7px', cursor: 'pointer' }}>
-                                        {o.evidencias?.deposito ? '✅ Ver boucher' : '📸 Subir boucher'}
-                                      </button>
                                     </div>
                                     <p style={{ fontSize: 13, fontWeight: 700, color: '#2563eb', margin: 0, flexShrink: 0 }}>{fmt(dep.totalAStorkhub)}</p>
                                   </div>
@@ -959,17 +1055,60 @@ export default function PanelMotorizadoPage() {
                               </div>
                             ))}
                           </div>
+                          {/* Boucher de grupo — obligatorio */}
                           <button
+                            onClick={() => { setActiveGroupKey(key); groupBoucherRef.current?.click(); }}
+                            style={{ width: '100%', background: groupBoucher[key] ? '#f0fdf4' : '#eff6ff', border: `1px solid ${groupBoucher[key] ? '#bbf7d0' : '#bfdbfe'}`, borderRadius: 10, padding: '9px', color: groupBoucher[key] ? '#16a34a' : '#2563eb', fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 4 }}>
+                            {groupBoucher[key] ? `✅ Boucher adjunto · Cambiar` : '📸 Adjuntar boucher del depósito'}
+                          </button>
+                          {!groupBoucher[key] && (
+                            <p style={{ fontSize: 11, color: '#dc2626', margin: '0 0 8px', textAlign: 'center' as const }}>
+                              El boucher es obligatorio para confirmar
+                            </p>
+                          )}
+                          <button
+                            disabled={!groupBoucher[key]}
                             onClick={async () => {
+                              if (!groupBoucher[key]) return;
                               if (!confirm(`¿Confirmás el depósito de ${fmt(g.total)} a Storkhub?`)) return;
-                              const b = writeBatch(db);
-                              g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
-                                'registro.deposito.confirmadoStorkhub': true,
-                                'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
-                              }));
-                              await b.commit();
+                              try {
+                                const depositoRef = doc(collection(db, 'ordenes_deposito'));
+                                const depositoId = depositoRef.id;
+                                let boucherData: { url: string; pathStorage: string; uploadedAt: ReturnType<typeof serverTimestamp>; motorizadoUid: string } | null = null;
+                                const bFile = groupBoucher[key];
+                                if (bFile) {
+                                  const blob = await compressImage(bFile);
+                                  const { url, pathStorage } = await uploadDepositoBoucher(depositoId, blob);
+                                  boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: auth.currentUser?.uid ?? '' };
+                                }
+                                await setDoc(depositoRef, {
+                                  creadoAt: serverTimestamp(),
+                                  destinatario: 'storkhub',
+                                  destinatarioId: 'storkhub',
+                                  destinatarioNombre: 'Storkhub',
+                                  cuentasDestino: STORKHUB_ACCOUNTS.map((a) => ({ banco: a.bank, numero: a.number, titular: a.holder, moneda: a.currency })),
+                                  motorizadoUid: auth.currentUser?.uid ?? '',
+                                  motorizadoNombre: user?.displayName ?? user?.email ?? '',
+                                  solicitudIds: g.orders.map((o) => o.id),
+                                  montoTotal: g.total,
+                                  boucher: boucherData,
+                                  confirmadoMotorizado: true,
+                                  confirmadoMotorizadoAt: serverTimestamp(),
+                                });
+                                const b = writeBatch(db);
+                                g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
+                                  'registro.deposito.confirmadoStorkhub': true,
+                                  'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
+                                  'registro.deposito.storkhubDepositoId': depositoId,
+                                }));
+                                await b.commit();
+                                setGroupBoucher((prev) => ({ ...prev, [key]: null }));
+                              } catch (e) {
+                                console.error(e);
+                                alert('Error al confirmar el depósito. Intentá de nuevo.');
+                              }
                             }}
-                            style={{ width: '100%', background: '#2563eb', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>
+                            style={{ width: '100%', background: groupBoucher[key] ? '#2563eb' : '#d1d5db', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: groupBoucher[key] ? 'pointer' : 'not-allowed' }}>
                             ✅ Confirmar depósito a Storkhub
                           </button>
                         </div>
@@ -1001,19 +1140,10 @@ export default function PanelMotorizadoPage() {
                               {g.orders.map((o) => {
                                 const dep = calcDeposito(o);
                                 return (
-                                  <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '6px 0', borderBottom: '1px solid #ede9fe', gap: 8 }}>
+                                  <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #ede9fe', gap: 8 }}>
                                     <div style={{ flex: 1 }}>
                                       <p style={{ fontSize: 12, fontWeight: 600, color: '#5b21b6', margin: 0 }}>{o.entrega?.nombreApellido || '—'}</p>
                                       <p style={{ fontSize: 10, color: '#c4b5fd', margin: 0, fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</p>
-                                      <button
-                                        onClick={() => {
-                                          if (o.evidencias?.deposito) { window.open(o.evidencias.deposito.url, '_blank'); return; }
-                                          setPhotoFile(null); setPhotoErr(null);
-                                          setPhotoGate({ solicitudId: o.id, tipo: 'deposito', onComplete: () => {} });
-                                        }}
-                                        style={{ marginTop: 4, fontSize: 10, fontWeight: 700, color: o.evidencias?.deposito ? '#16a34a' : '#7c3aed', background: o.evidencias?.deposito ? '#f0fdf4' : '#faf5ff', border: `1px solid ${o.evidencias?.deposito ? '#bbf7d0' : '#ddd6fe'}`, borderRadius: 6, padding: '3px 7px', cursor: 'pointer' }}>
-                                        {o.evidencias?.deposito ? '✅ Ver boucher' : '📸 Subir boucher'}
-                                      </button>
                                     </div>
                                     <p style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', margin: 0, flexShrink: 0 }}>{fmt(dep.totalAlComercio)}</p>
                                   </div>
@@ -1037,17 +1167,61 @@ export default function PanelMotorizadoPage() {
                               <p style={{ fontSize: 11, color: '#a78bfa', margin: 0, fontStyle: 'italic' }}>El comercio no tiene cuentas registradas. Coordiná el depósito directamente.</p>
                             )}
                           </div>
+                          {/* Boucher de grupo */}
+                          {/* Boucher de grupo — obligatorio */}
                           <button
+                            onClick={() => { setActiveGroupKey(key); groupBoucherRef.current?.click(); }}
+                            style={{ width: '100%', background: groupBoucher[key] ? '#f0fdf4' : '#faf5ff', border: `1px solid ${groupBoucher[key] ? '#bbf7d0' : '#ddd6fe'}`, borderRadius: 10, padding: '9px', color: groupBoucher[key] ? '#16a34a' : '#7c3aed', fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 4 }}>
+                            {groupBoucher[key] ? `✅ Boucher adjunto · Cambiar` : '📸 Adjuntar boucher del depósito'}
+                          </button>
+                          {!groupBoucher[key] && (
+                            <p style={{ fontSize: 11, color: '#dc2626', margin: '0 0 8px', textAlign: 'center' as const }}>
+                              El boucher es obligatorio para confirmar
+                            </p>
+                          )}
+                          <button
+                            disabled={!groupBoucher[key]}
                             onClick={async () => {
+                              if (!groupBoucher[key]) return;
                               if (!confirm(`¿Confirmás el depósito de ${fmt(g.total)} al comercio ${g.nombre}?`)) return;
-                              const b = writeBatch(db);
-                              g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
-                                'registro.deposito.confirmadoComercio': true,
-                                'registro.deposito.confirmadoComercioAt': serverTimestamp(),
-                              }));
-                              await b.commit();
+                              try {
+                                const depositoRef = doc(collection(db, 'ordenes_deposito'));
+                                const depositoId = depositoRef.id;
+                                let boucherData: { url: string; pathStorage: string; uploadedAt: ReturnType<typeof serverTimestamp>; motorizadoUid: string } | null = null;
+                                const bFile = groupBoucher[key];
+                                if (bFile) {
+                                  const blob = await compressImage(bFile);
+                                  const { url, pathStorage } = await uploadDepositoBoucher(depositoId, blob);
+                                  boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: auth.currentUser?.uid ?? '' };
+                                }
+                                await setDoc(depositoRef, {
+                                  creadoAt: serverTimestamp(),
+                                  destinatario: 'comercio',
+                                  destinatarioId: g.uid,
+                                  destinatarioNombre: g.nombre,
+                                  cuentasDestino: g.accounts.map((a) => ({ banco: a.bank, numero: a.number, titular: a.holder, moneda: a.currency })),
+                                  motorizadoUid: auth.currentUser?.uid ?? '',
+                                  motorizadoNombre: user?.displayName ?? user?.email ?? '',
+                                  solicitudIds: g.orders.map((o) => o.id),
+                                  montoTotal: g.total,
+                                  boucher: boucherData,
+                                  confirmadoMotorizado: true,
+                                  confirmadoMotorizadoAt: serverTimestamp(),
+                                });
+                                const b = writeBatch(db);
+                                g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
+                                  'registro.deposito.confirmadoComercio': true,
+                                  'registro.deposito.confirmadoComercioAt': serverTimestamp(),
+                                  'registro.deposito.comercioDepositoId': depositoId,
+                                }));
+                                await b.commit();
+                                setGroupBoucher((prev) => ({ ...prev, [key]: null }));
+                              } catch (e) {
+                                console.error(e);
+                                alert('Error al confirmar el depósito. Intentá de nuevo.');
+                              }
                             }}
-                            style={{ width: '100%', background: '#7c3aed', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>
+                            style={{ width: '100%', background: groupBoucher[key] ? '#7c3aed' : '#d1d5db', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: groupBoucher[key] ? 'pointer' : 'not-allowed' }}>
                             ✅ Confirmar depósito al comercio
                           </button>
                         </div>
@@ -1060,12 +1234,27 @@ export default function PanelMotorizadoPage() {
         )}
       </div>
 
+      {/* ── Hidden file input for group bouchers ── */}
+      <input
+        ref={groupBoucherRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f && activeGroupKey) setGroupBoucher((prev) => ({ ...prev, [activeGroupKey]: f }));
+          if (groupBoucherRef.current) groupBoucherRef.current.value = '';
+        }}
+      />
+
       {/* ── Photo Upload Modal Overlay ── */}
       {photoGate && (
         <PhotoUploadModal
           tipo={photoGate.tipo}
           file={photoFile}
           uploading={photoUploading}
+          success={photoSuccess}
           err={photoErr}
           onFile={(f) => setPhotoFile(f)}
           onSubmit={async () => {
@@ -1082,19 +1271,41 @@ export default function PanelMotorizadoPage() {
                   motorizadoUid: auth.currentUser?.uid || '',
                 },
               });
-              const cb = photoGate.onComplete;
-              setPhotoGate(null); setPhotoFile(null);
-              cb();
+              // Mostrar éxito 2s antes de cerrar y continuar
+              setPhotoUploading(false);
+              setPhotoSuccess(true);
+              const gate = photoGate;
+              // Build updated order so cambiar() bypasses the photo gate check
+              const updatedOrder: Solicitud = {
+                ...gate.order,
+                evidencias: {
+                  ...(gate.order.evidencias ?? {}),
+                  [gate.tipo]: { url, pathStorage, uploadedAt: new Date() as unknown as import('firebase/firestore').Timestamp, motorizadoUid: auth.currentUser?.uid ?? '' },
+                },
+              };
+              setTimeout(() => {
+                setPhotoGate(null); setPhotoFile(null); setPhotoSuccess(false);
+                if (gate.nextEstado) {
+                  cambiar(updatedOrder, gate.nextEstado);
+                }
+              }, 2000);
             } catch (e) {
               console.error(e);
               setPhotoErr('No se pudo subir la foto. Intentá de nuevo.');
-            } finally {
               setPhotoUploading(false);
             }
           }}
-          onCancel={() => { setPhotoGate(null); setPhotoFile(null); setPhotoErr(null); }}
+          onCancel={() => { setPhotoGate(null); setPhotoFile(null); setPhotoErr(null); setPhotoSuccess(false); }}
         />
       )}
+
+      <BottomNav
+        tab={tab}
+        setTab={setTab}
+        pendientesCount={pendientes.length}
+        enCursoCount={enCurso.length}
+        depositosCount={depositosPendientes.length}
+      />
     </div>
   );
 }
@@ -1109,14 +1320,105 @@ const btnGreen: React.CSSProperties = { background: '#16a34a', border: 'none', b
 
 function StatCard({ label, value, color, bg, border }: { label: string; value: number; color: string; bg: string; border: string }) {
   return (
-    <div style={{ flex: 1, background: bg, border: `1px solid ${border}`, borderRadius: 12, padding: '10px 10px' }}>
-      <p style={{ fontSize: 22, fontWeight: 900, color, margin: '0 0 2px', letterSpacing: -1 }}>{value}</p>
+    <div style={{ flex: 1, background: bg, border: `1px solid ${border}`, borderRadius: 12, padding: '8px 10px' }}>
+      <p style={{ fontSize: 20, fontWeight: 900, color, margin: '0 0 2px', letterSpacing: -1 }}>{value}</p>
       <p style={{ fontSize: 10, fontWeight: 600, color: '#9ca3af', margin: 0, textTransform: 'uppercase', letterSpacing: 0.3 }}>{label}</p>
     </div>
   );
 }
 
-type PointData = { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null; coord?: { lat: number; lng: number } | null; puntoGoogleLink?: string | null; puntoGoogleTexto?: string | null } | undefined;
+type TabKey = 'pendientes' | 'en_curso' | 'historial' | 'depositos';
+
+function BottomNav({ tab, setTab, pendientesCount, enCursoCount, depositosCount }: {
+  tab: TabKey; setTab: (t: TabKey) => void;
+  pendientesCount: number; enCursoCount: number; depositosCount: number;
+}) {
+  const items: { key: TabKey; label: string; icon: React.ReactNode; count: number }[] = [
+    {
+      key: 'pendientes', label: 'Nuevas', count: pendientesCount,
+      icon: (
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+      ),
+    },
+    {
+      key: 'en_curso', label: 'En curso', count: enCursoCount,
+      icon: (
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="5.5" cy="17.5" r="2.5" />
+          <circle cx="18.5" cy="17.5" r="2.5" />
+          <path d="M15 6h2l3 6.5v5h-3" />
+          <path d="M3 17.5V9a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8.5" />
+          <path d="M3 12h12" />
+        </svg>
+      ),
+    },
+    {
+      key: 'historial', label: 'Historial', count: 0,
+      icon: (
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="12 6 12 12 16 14" />
+        </svg>
+      ),
+    },
+    {
+      key: 'depositos', label: 'Depósitos', count: depositosCount,
+      icon: (
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="2" y="7" width="20" height="15" rx="2" />
+          <path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2" />
+          <line x1="12" y1="12" x2="12" y2="16" />
+          <line x1="10" y1="14" x2="14" y2="14" />
+        </svg>
+      ),
+    },
+  ];
+
+  return (
+    <div style={{
+      position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 100,
+      maxWidth: 520, margin: '0 auto',
+      height: 60, display: 'flex',
+      background: '#fff', borderTop: '1px solid #e5e7eb',
+      boxShadow: '0 -2px 12px rgba(0,0,0,0.06)',
+    }}>
+      {items.map((item) => {
+        const active = tab === item.key;
+        return (
+          <button
+            key={item.key}
+            onClick={() => setTab(item.key)}
+            style={{
+              flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              gap: 3, border: 'none', background: 'transparent', cursor: 'pointer',
+              color: active ? '#004aad' : '#9ca3af', position: 'relative',
+            }}
+          >
+            {/* Badge */}
+            {item.count > 0 && (
+              <span style={{
+                position: 'absolute', top: 6, left: '50%', transform: 'translateX(4px)',
+                background: '#ef4444', color: '#fff', borderRadius: 9999,
+                minWidth: 18, height: 18, fontSize: 10, fontWeight: 800,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                padding: '0 4px', lineHeight: 1,
+              }}>
+                {item.count}
+              </span>
+            )}
+            {item.icon}
+            <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing: 0.3 }}>{item.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+type PointData = { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null; notaMotorizado?: string | null; coord?: { lat: number; lng: number } | null; puntoGoogleLink?: string | null; puntoGoogleTexto?: string | null } | undefined;
 
 function getMapsLink(point: PointData, coordOverride?: { lat: number; lng: number } | null): string | null {
   const coord = coordOverride ?? point?.coord;
@@ -1125,6 +1427,27 @@ function getMapsLink(point: PointData, coordOverride?: { lat: number; lng: numbe
   if (point?.puntoGoogleTexto?.trim()) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(point.puntoGoogleTexto.trim())}`;
   if (point?.direccionEscrita?.trim()) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(point.direccionEscrita.trim())}`;
   return null;
+}
+
+function PaqueteBadge({ paquete }: { paquete?: Solicitud['paquete'] }) {
+  if (!paquete || (!paquete.fragil && !paquete.grande)) return null;
+  return (
+    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+      {paquete.fragil && (
+        <span style={{ fontSize: 11, fontWeight: 700, color: '#b45309', background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 6, padding: '3px 8px' }}>
+          ⚠️ Paquete frágil
+        </span>
+      )}
+      {paquete.grande && (
+        <span style={{ fontSize: 11, fontWeight: 700, color: '#1d4ed8', background: '#dbeafe', border: '1px solid #bfdbfe', borderRadius: 6, padding: '3px 8px' }}>
+          📦 Paquete grande
+        </span>
+      )}
+      {paquete.notaPaquete && (
+        <p style={{ fontSize: 11, color: '#6b7280', margin: '4px 0 0', width: '100%' }}>{paquete.notaPaquete}</p>
+      )}
+    </div>
+  );
 }
 
 function RoutePoint({ type, point, fallbackName, retiroCoord, entregaCoord }: {
@@ -1140,7 +1463,7 @@ function RoutePoint({ type, point, fallbackName, retiroCoord, entregaCoord }: {
   const name = point?.nombreApellido || fallbackName || '-';
   const phone = point?.celular || '-';
   const address = point?.direccionEscrita || '-';
-  const nota = point?.nota?.trim();
+  const nota = (point?.notaMotorizado || point?.nota)?.trim();
 
   return (
     <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
@@ -1205,11 +1528,12 @@ function EmptyState({ icon, title, subtitle }: { icon: string; title: string; su
 }
 
 function PhotoUploadModal({
-  tipo, file, uploading, err, onFile, onSubmit, onCancel,
+  tipo, file, uploading, success, err, onFile, onSubmit, onCancel,
 }: {
   tipo: TipoEvidencia;
   file: File | null;
   uploading: boolean;
+  success: boolean;
   err: string | null;
   onFile: (f: File) => void;
   onSubmit: () => void;
@@ -1228,6 +1552,26 @@ function PhotoUploadModal({
     entrega: '✅',
     deposito: '🏦',
   };
+
+  // Pantalla de éxito
+  if (success) {
+    return (
+      <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+        <div style={{ background: '#fff', borderRadius: 24, padding: 36, maxWidth: 360, width: '100%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)', display: 'flex', flexDirection: 'column' as const, alignItems: 'center', gap: 12 }}>
+          <div style={{ width: 72, height: 72, borderRadius: '50%', background: '#f0fdf4', border: '3px solid #16a34a', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <span style={{ fontSize: 36 }}>✅</span>
+          </div>
+          <p style={{ fontSize: 20, fontWeight: 900, color: '#15803d', margin: 0, textAlign: 'center' as const }}>¡Foto cargada!</p>
+          <p style={{ fontSize: 14, color: '#6b7280', margin: 0, textAlign: 'center' as const, lineHeight: 1.5 }}>
+            La imagen se guardó correctamente.<br />Continuando con el siguiente paso…
+          </p>
+          <div style={{ width: '100%', height: 4, background: '#f3f4f6', borderRadius: 4, overflow: 'hidden', marginTop: 8 }}>
+            <div style={{ height: '100%', background: '#16a34a', borderRadius: 4, animation: 'progress2s 2s linear forwards' }} />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>

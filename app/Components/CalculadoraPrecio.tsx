@@ -251,6 +251,7 @@ const CalculadoraPrecio: React.FC = () => {
 
   // Favoritos del comercio (sincronizados con ajustes/solicitar)
   const [puntosFavoritos, setPuntosFavoritos] = useState<PuntoFavorito[]>([])
+  const [origenFavData, setOrigenFavData] = useState<PuntoFavorito | null>(null)
 
   useEffect(() => {
     const u = auth.currentUser
@@ -346,6 +347,7 @@ const CalculadoraPrecio: React.FC = () => {
           if (loc) {
             const coord = { lat: loc.lat(), lng: loc.lng() }
             setOrigenCoord(coord)
+            setOrigenFavData(null)
             const label = origenInputRef.current?.value || 'Origen'
             saveRecent('origen', { label, ...coord })
             setRecOrigen(loadRecents('origen'))
@@ -498,6 +500,10 @@ const CalculadoraPrecio: React.FC = () => {
         destino: destinoInputRef.current?.value || '',
         origenCoord, destinoCoord, distanciaKm: distancia, precioCordobas: precio,
         origenTipo: 'referencial', destinoTipo: 'referencial',
+        origenFavKey: origenFavData?.key || '',
+        origenNombre: origenFavData?.nombre || '',
+        origenCelular: origenFavData?.celular || '',
+        origenDireccion: origenFavData?.direccion || '',
       }))
     } catch {}
     window.location.href = '/panel/solicitar'
@@ -512,6 +518,8 @@ const CalculadoraPrecio: React.FC = () => {
   const handleSelectFavoritoMapa = useCallback((fav: FavoritoMapa, tipo: 'origen' | 'destino') => {
     if (tipo === 'origen') {
       setOrigenCoord(fav.coord)
+      const fullFav = puntosFavoritos.find(f => f.key === fav.key) || null
+      setOrigenFavData(fullFav)
       if (origenInputRef.current) origenInputRef.current.value = fav.label
       saveRecent('origen', { label: fav.label, ...fav.coord })
       setRecOrigen(loadRecents('origen'))
@@ -611,6 +619,7 @@ const CalculadoraPrecio: React.FC = () => {
                     type="button"
                     onClick={() => {
                       setOrigenCoord(fav.coord || null)
+                      setOrigenFavData(fav)
                       if (origenInputRef.current) origenInputRef.current.value = fav.nombre || fav.label
                       if (fav.coord) saveRecent('origen', { label: fav.nombre || fav.label, ...fav.coord })
                       setRecOrigen(loadRecents('origen'))

@@ -15,6 +15,7 @@ import {
   ChevronLeft,
   ChevronRight,
   LogOut,
+  Wallet,
 } from 'lucide-react'
 
 export default function ComercioLayout({ children }: { children: React.ReactNode }) {
@@ -75,6 +76,8 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
               active={pathname === '/panel/comercio'} collapsed={collapsed} />
             <NavItem href="/panel/comercio/mis-ordenes" icon={<Package size={18} />} label="Mis órdenes"
               active={pathname.startsWith('/panel/comercio/mis-ordenes')} collapsed={collapsed} />
+            <NavItem href="/panel/comercio/depositos" icon={<Wallet size={18} />} label="Depósitos"
+              active={pathname.startsWith('/panel/comercio/depositos')} collapsed={collapsed} />
             <NavItem href="/panel/comercio/solicitar" icon={<Send size={18} />} label="Solicitar envío"
               active={pathname.startsWith('/panel/comercio/solicitar')} collapsed={collapsed} />
             <NavItem href="/panel/comercio/calculadora" icon={<Calculator size={18} />} label="Calculadora"

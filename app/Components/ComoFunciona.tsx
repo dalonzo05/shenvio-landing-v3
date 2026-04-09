@@ -1,92 +1,129 @@
 'use client'
 import React from 'react'
+import {
+  ClipboardList,
+  UserCheck,
+  Package,
+  Truck,
+  MonitorSmartphone,
+  Banknote,
+} from 'lucide-react'
 
 const pasos = [
   {
-    titulo: '1. Enviás tu orden',
-    descripcion: 'Nos escribís por WhatsApp con los datos del envío. Confirmamos todo y te damos seguimiento.',
-    icono: '/icons/confirma.svg',
+    titulo: 'Ingresás tu orden',
+    descripcion:
+      'Creás tu pedido directamente desde nuestro panel de comercios o nos escribís por WhatsApp. Registrás el origen, destino, datos del cliente y si el cobro es contra entrega.',
+    Icono: ClipboardList,
+    badge: 'Panel de comercio',
   },
   {
-    titulo: '2. Retiramos el paquete',
-    descripcion: 'Asignamos a un motorizado y pasamos a retirar en tu local o punto acordado.',
-    icono: '/icons/retira.svg',
+    titulo: 'El gestor recibe y asigna',
+    descripcion:
+      'Nuestro equipo recibe la orden, la revisa y asigna al motorizado disponible más cercano. Todo queda registrado en el sistema con estado en tiempo real.',
+    Icono: UserCheck,
+    badge: 'Panel del gestor',
   },
   {
-    titulo: '3. Entregamos y cobramos',
-    descripcion: 'Hacemos la entrega al cliente final. Si es contra entrega, cobramos y luego te depositamos.',
-    icono: '/icons/entrega.svg',
+    titulo: 'Retiro en tu local',
+    descripcion:
+      'El motorizado se dirige al punto de origen acordado y retira el paquete. El estado de la orden se actualiza automáticamente a "En camino".',
+    Icono: Package,
+    badge: 'Motorizado',
   },
   {
-    titulo: '4. Te confirmamos todo',
-    descripcion: 'Recibís confirmación, evidencia y reporte del dinero cobrado. Todo claro y documentado.',
-    icono: '/icons/whatsapp.svg',
+    titulo: 'Entrega y cobro',
+    descripcion:
+      'El repartidor entrega el producto al cliente final. Si es contra entrega, cobra el monto exacto y lo resguarda hasta depositártelo. Quedan registro y evidencia fotográfica.',
+    Icono: Truck,
+    badge: 'Motorizado',
   },
   {
-    titulo: '5. Seguimiento en tiempo real',
-    descripcion: 'Podés consultar el estado de tu envío cuando lo necesités, con atención personalizada.',
-    icono: '/icons/seguimiento.svg',
+    titulo: 'Seguimiento en tu panel',
+    descripcion:
+      'Desde tu panel de comercio podés ver el estado de cada envío en tiempo real: pendiente, en camino o entregado. Sin necesidad de llamar a preguntar.',
+    Icono: MonitorSmartphone,
+    badge: 'Panel de comercio',
   },
   {
-    titulo: '6. Recibís tu pago',
-    descripcion: 'Al finalizar el día, te depositamos todo lo recaudado de tus entregas. Fácil y seguro.',
-    icono: '/icons/deposito.svg',
+    titulo: 'Recibís tu depósito',
+    descripcion:
+      'Al cierre del día (o según tu ciclo acordado: diario o semanal), te depositamos todo lo recaudado. Control claro de pagos en tu historial.',
+    Icono: Banknote,
+    badge: 'Gestión de pagos',
   },
 ]
 
+
 const ComoFunciona = ({ id }: { id: string }) => {
   return (
-    <section id={id} className="relative py-24 px-6 bg-[#f7f7f8] text-gray-800 rounded-t-3xl overflow-hidden">
-      {/* Cigüeña flotante decorativa */}
-      {/*<img
-        src="/backgrounds/cigueña-blanca.png"
-        alt="Cigüeña volando"
-        className="absolute top-40 left-20 w-24 md:w-32 opacity-80 animate-float-x z-0"
-      />*/}
-            {/* Cigüeña flotante decorativa */}
+    <section
+      id={id}
+      className="relative py-24 px-6 bg-[#f7f7f8] text-gray-800 overflow-hidden"
+    >
+      {/* Cigüeña decorativa */}
       <img
         src="/backgrounds/cigueña-blanca.png"
-        alt="Cigüeña volando"
-        className="absolute top-100 left-30 w-45 md:w-32 opacity-50 animate-float-x z-0"
+        alt=""
+        className="absolute top-16 right-4 w-28 md:w-40 opacity-20 animate-float-x pointer-events-none select-none hidden md:block"
       />
-            {/* Cigüeña flotante decorativa */}
       <img
         src="/backgrounds/cigueña-blanca.png"
-        alt="Cigüeña volando"
-        className="absolute top-240 right-40 w-75 md:w-32 opacity-50 animate-float-x z-0"
-      />  
-      
-      <h2 className="text-3xl md:text-4xl font-extrabold text-center mb-6 text-[#004aad] tracking-tight relative z-10">
-        ¿Cómo funciona?
-      </h2>
-        <p className="text-center max-w-3xl mx-auto mb-12 text-gray-700 text-base md:text-lg relative z-10">
-        Tan simple como pedir, entregar y recibir. Así funciona Storkhub.
+        alt=""
+        className="absolute bottom-20 left-6 w-24 md:w-32 opacity-15 animate-float-x pointer-events-none select-none hidden lg:block"
+        style={{ animationDelay: '2.5s' }}
+      />
+
+      <div className="max-w-5xl mx-auto">
+        <h2 className="text-3xl md:text-4xl font-extrabold text-center mb-4 text-[#004aad] tracking-tight">
+          ¿Cómo funciona?
+        </h2>
+        <p className="text-center max-w-2xl mx-auto mb-4 text-gray-600 text-base md:text-lg">
+          Un sistema completo con paneles para comercios, gestores y motorizados. Vos gestionás tus órdenes, nosotros nos encargamos del resto.
         </p>
 
-      <div className="flex flex-col gap-16 max-w-5xl mx-auto relative z-10">
-        {pasos.map((paso, index) => (
-          <div
-            key={index}
-            className={`flex flex-col md:flex-row items-center gap-6 md:gap-12 transition-all duration-300 ${
-              index % 2 !== 0 ? 'md:flex-row-reverse' : ''
-            }`}
-          >
-            <div className="flex-shrink-0">
-              <img
-                src={paso.icono}
-                alt={paso.titulo}
-                className="w-20 h-20 md:w-24 md:h-24 object-contain"
-              />
-            </div>
+        {/* Pill plataforma */}
+        <div className="flex justify-center mb-14">
+          <span className="inline-flex items-center gap-2 bg-[#004aad]/10 text-[#004aad] text-sm font-semibold px-4 py-2 rounded-full">
+            <MonitorSmartphone className="w-4 h-4" />
+            Con plataforma web de seguimiento en tiempo real
+          </span>
+        </div>
 
-            <div className="bg-white rounded-2xl shadow-lg p-6 md:p-8 w-full md:w-3/4 hover:shadow-xl transition-all duration-300">
-              <h3 className="text-xl md:text-2xl font-semibold mb-2 text-[#004aad]">
-                {paso.titulo}
-              </h3>
-              <p className="text-gray-700 text-sm md:text-base">{paso.descripcion}</p>
-            </div>
-          </div>
-        ))}
+        <div className="flex flex-col gap-10">
+          {pasos.map((paso, index) => {
+            const { Icono } = paso
+            const esImpar = index % 2 !== 0
+            return (
+              <div
+                key={index}
+                className={`flex flex-col md:flex-row items-center gap-6 md:gap-12 ${
+                  esImpar ? 'md:flex-row-reverse' : ''
+                }`}
+              >
+                {/* Ícono + número */}
+                <div className="flex-shrink-0 flex flex-col items-center gap-2">
+                  <div className="w-20 h-20 rounded-2xl bg-[#004aad] flex items-center justify-center shadow-lg">
+                    <Icono className="w-9 h-9 text-white" strokeWidth={1.75} />
+                  </div>
+                  <span className="text-xs font-bold text-[#004aad]/40 tracking-widest uppercase">
+                    Paso {index + 1}
+                  </span>
+                </div>
+
+                {/* Tarjeta */}
+                <div className="bg-white rounded-2xl shadow-md hover:shadow-xl transition-shadow duration-300 p-6 md:p-8 w-full">
+                  <h3 className="text-xl md:text-2xl font-bold text-[#004aad] mb-3">
+                    {paso.titulo}
+                  </h3>
+                  <p className="text-gray-600 text-sm md:text-base leading-relaxed">
+                    {paso.descripcion}
+                  </p>
+                </div>
+              </div>
+            )
+          })}
+        </div>
       </div>
     </section>
   )

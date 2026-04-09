@@ -35,6 +35,7 @@ async function getRedirectByRole(uid: string) {
 
   if (rol === 'admin' || rol === 'gestor') return '/panel/gestor'
   if (rol === 'motorizado') return '/panel/motorizado'
+  if (rol === 'Comercio') return '/panel/comercio'
   return '/panel'
 }
 
@@ -47,7 +48,7 @@ export default function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [code, setCode] = useState('')
-  const [remember, setRemember] = useState(true)
+  const [remember, setRemember] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -93,6 +94,7 @@ export default function LoginPage() {
       )
 
       await signIn(email.trim(), password)
+      try { localStorage.setItem('storkhub:remember', remember ? 'true' : 'false') } catch {}
       // La redirección la hace el useEffect cuando authUser ya está cargado
     } catch (err: any) {
       setError(err?.message || 'No se pudo iniciar sesión.')

@@ -42,3 +42,18 @@ export async function uploadEvidencia(
   const url = await getDownloadURL(storageRef)
   return { url, pathStorage }
 }
+
+/**
+ * Uploads a deposit boucher (group receipt) to Firebase Storage under
+ * depositos/{depositoId}/boucher.jpg
+ */
+export async function uploadDepositoBoucher(
+  depositoId: string,
+  blob: Blob,
+): Promise<{ url: string; pathStorage: string }> {
+  const pathStorage = `depositos/${depositoId}/boucher.jpg`
+  const storageRef = ref(storage, pathStorage)
+  await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' })
+  const url = await getDownloadURL(storageRef)
+  return { url, pathStorage }
+}

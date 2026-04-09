@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { collection, onSnapshot, query, where, Timestamp } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { useUser } from '@/app/Components/UserProvider'
@@ -15,6 +16,13 @@ type Solicitud = {
   recoleccion?: { direccionEscrita?: string }
   entrega?: { nombreApellido?: string; direccionEscrita?: string }
   confirmacion?: { precioFinalCordobas?: number }
+  cobroContraEntrega?: { aplica?: boolean }
+  registro?: {
+    deposito?: {
+      confirmadoComercio?: boolean
+      confirmadoMotorizado?: boolean
+    }
+  }
 }
 
 const estadoLabel: Record<string, string> = {
@@ -53,6 +61,7 @@ function fmt(n?: number) {
 
 export default function ComercioDashboard() {
   const { profile } = useUser()
+  const router = useRouter()
   const [ordenes, setOrdenes] = useState<Solicitud[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -84,6 +93,12 @@ export default function ComercioDashboard() {
         const d = tsToDate(o.entregadoAt) || tsToDate(o.createdAt)
         return o.estado === 'entregado' && d && d >= inicioMes
       }).length,
+      depositosPendientes: ordenes.filter((o) =>
+        o.cobroContraEntrega?.aplica &&
+        o.estado === 'entregado' &&
+        !o.registro?.deposito?.confirmadoComercio &&
+        !o.registro?.deposito?.confirmadoMotorizado
+      ).length,
     }
   }, [ordenes])
 
@@ -109,16 +124,17 @@ export default function ComercioDashboard() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {[
-          { label: 'Órdenes hoy', value: loading ? '…' : stats.hoy, color: 'text-[#004aad]', bg: 'bg-blue-50' },
-          { label: 'Pendientes', value: loading ? '…' : stats.pendientes, color: 'text-yellow-700', bg: 'bg-yellow-50' },
-          { label: 'Entregadas este mes', value: loading ? '…' : stats.entregadasMes, color: 'text-green-700', bg: 'bg-green-50' },
+          { label: 'Órdenes hoy', value: loading ? '…' : stats.hoy, color: 'text-[#004aad]', bg: 'bg-blue-50', href: '/panel/comercio/mis-ordenes' },
+          { label: 'Pendientes', value: loading ? '…' : stats.pendientes, color: 'text-yellow-700', bg: 'bg-yellow-50', href: '/panel/comercio/mis-ordenes' },
+          { label: 'Entregadas este mes', value: loading ? '…' : stats.entregadasMes, color: 'text-green-700', bg: 'bg-green-50', href: '/panel/comercio/mis-ordenes' },
+          { label: 'Depósitos pendientes', value: loading ? '…' : stats.depositosPendientes, color: 'text-orange-700', bg: 'bg-orange-50', href: '/panel/comercio/depositos' },
         ].map((s) => (
-          <div key={s.label} className={`${s.bg} rounded-xl border border-gray-200 px-4 py-3`}>
+          <Link key={s.label} href={s.href} className={`${s.bg} rounded-xl border border-gray-200 px-4 py-3 hover:opacity-80 transition`}>
             <p className={`text-3xl font-black ${s.color}`}>{s.value}</p>
             <p className="text-xs font-semibold text-gray-500 mt-0.5">{s.label}</p>
-          </div>
+          </Link>
         ))}
       </div>
 
@@ -155,7 +171,7 @@ export default function ComercioDashboard() {
                 const cls = estadoCls[o.estado || ''] || 'bg-gray-100 text-gray-600'
                 return (
                   <tr key={o.id} className="hover:bg-gray-50 transition-colors cursor-pointer"
-                    onClick={() => window.location.href = `/panel/comercio/mis-ordenes/${o.id}`}>
+                    onClick={() => router.push(`/panel/comercio/mis-ordenes/${o.id}`)}>
                     <td className="px-4 py-3 font-semibold text-gray-900">
                       {o.entrega?.nombreApellido || '—'}
                     </td>

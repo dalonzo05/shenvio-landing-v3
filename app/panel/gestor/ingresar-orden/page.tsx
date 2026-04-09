@@ -308,13 +308,11 @@ async function guardarClienteEntrega(uid: string, data: Omit<ClienteGuardado, 'i
 // ─── Phone helpers ────────────────────────────────────────────────────────────
 
 function formatCelular(v: string): string {
-  const digits = v.replace(/\D/g, '').slice(0, 8)
-  if (digits.length <= 4) return digits
-  return `${digits.slice(0, 4)}-${digits.slice(4)}`
+  return v.replace(/\D/g, '').slice(0, 8)
 }
 
 function validarCelular(v: string): boolean {
-  return /^\d{4}-\d{4}$/.test(v.trim())
+  return /^\d{8}$/.test(v.trim())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1356,11 +1354,11 @@ export default function GestorIngresarOrdenPage() {
     if (!selectedOwnerUid) f.push('Seleccionar el comercio dueño')
     if (!retiro.nombre.trim()) f.push('Nombre de retiro')
     if (!retiro.celular.trim()) f.push('Celular de retiro')
-    else if (!validarCelular(retiro.celular)) f.push('Celular de retiro — formato XXXX-XXXX')
+    else if (!validarCelular(retiro.celular)) f.push('Celular de retiro — 8 dígitos')
     if (!retiro.direccion.trim()) f.push('Dirección de retiro')
     if (!entrega.nombre.trim()) f.push('Nombre de entrega')
     if (!entrega.celular.trim()) f.push('Celular de entrega')
-    else if (!validarCelular(entrega.celular)) f.push('Celular de entrega — formato XXXX-XXXX')
+    else if (!validarCelular(entrega.celular)) f.push('Celular de entrega — 8 dígitos')
     if (!entrega.direccion.trim()) f.push('Dirección de entrega')
     if (cobroCE && (montoCE === '' || Number(montoCE) <= 0)) f.push('Monto del cobro contra entrega')
     if (tipoCliente === 'contado' && !quienPagaDelivery) f.push('Quién paga el delivery')
@@ -1470,7 +1468,7 @@ export default function GestorIngresarOrdenPage() {
         paquete: (fragil || grande) ? {
           fragil,
           grande,
-          notaPaquete: grande && notaPaquete.trim() ? notaPaquete.trim() : null,
+          notaPaquete: notaPaquete.trim() || null,
         } : null,
         detalle: detalle.trim(),
         numeroOrden: numeroOrden.trim() || null,
@@ -1799,12 +1797,12 @@ export default function GestorIngresarOrdenPage() {
           <input
             value={retiro.celular}
             onChange={(e) => setRetiro((prev) => ({ ...prev, celular: formatCelular(e.target.value) }))}
-            placeholder="Ej: 8888-8888"
-            maxLength={9}
+            placeholder="Ej: 88888888"
+            maxLength={8}
             style={{ ...S.input, borderColor: retiro.celular && !validarCelular(retiro.celular) ? '#dc2626' : '#e5e7eb' }}
           />
           {retiro.celular && !validarCelular(retiro.celular) && (
-            <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos formato XXXX-XXXX</p>
+            <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos</p>
           )}
         </Field>
 
@@ -1887,13 +1885,13 @@ export default function GestorIngresarOrdenPage() {
             value={entrega.celular}
             onChange={(v) => setEntrega((prev) => ({ ...prev, celular: formatCelular(v) }))}
             onSelect={handleSelectEntrega}
-            placeholder="Ej: 7777-7777"
+            placeholder="Ej: 77777777"
             clientes={poolPuntos}
             comercioUidActual={selectedOwnerUid || undefined}
             required
           />
           {entrega.celular && !validarCelular(entrega.celular) && (
-            <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos formato XXXX-XXXX</p>
+            <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos</p>
           )}
         </div>
 
@@ -2115,12 +2113,15 @@ export default function GestorIngresarOrdenPage() {
           </p>
         )}
 
-        {grande && (
-          <Field label="Descripción / dimensiones" hint="Ayudá al motorizado a entender el tamaño o tipo de paquete.">
+        {(fragil || grande) && (
+          <Field
+            label={grande ? 'Descripción / dimensiones' : 'Descripción del contenido (opcional)'}
+            hint={grande ? 'Ayudá al motorizado a entender el tamaño o tipo de paquete.' : 'Ej: vidrio, cerámica, electrónico, líquidos...'}
+          >
             <input
               value={notaPaquete}
               onChange={e => setNotaPaquete(e.target.value)}
-              placeholder='Ej: Caja 60×40cm, televisor 32", mueble desmontado...'
+              placeholder={grande ? 'Ej: Caja 60×40cm, televisor 32", mueble desmontado...' : 'Ej: botella de vidrio, pantalla de celular, jarrón...'}
               style={S.input}
             />
           </Field>
@@ -2188,7 +2189,7 @@ export default function GestorIngresarOrdenPage() {
             </label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {[
-                { value: 'recoleccion', label: '📦 Lo paga el comercio (retiro)', desc: 'El motorizado cobra el delivery al retirar' },
+                { value: 'recoleccion', label: '🏁 Se paga en la recolección', desc: 'El motorizado cobra el delivery al retirar' },
                 { value: 'entrega', label: '🏠 Lo paga el destinatario (entrega)', desc: 'El motorizado cobra el delivery al entregar' },
                 { value: 'transferencia', label: '🏦 Ya se pagó por transferencia', desc: 'El delivery fue pagado previamente' },
               ].map((opt) => (
