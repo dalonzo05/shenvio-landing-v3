@@ -41,6 +41,46 @@
         { "fieldPath": "estado", "order": "ASCENDING" },
         { "fieldPath": "semanaKey", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "movimientos_financieros",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "tipo", "order": "ASCENDING" },
+        { "fieldPath": "at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "movimientos_financieros",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "motorizadoId", "order": "ASCENDING" },
+        { "fieldPath": "at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "movimientos_financieros",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "solicitudId", "order": "ASCENDING" },
+        { "fieldPath": "at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "liquidaciones_motorizado",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "motorizadoUid", "order": "ASCENDING" },
+        { "fieldPath": "semanaKey", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "ordenes_deposito",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "estado", "order": "ASCENDING" },
+        { "fieldPath": "creadoAt", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

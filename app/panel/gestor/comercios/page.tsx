@@ -14,9 +14,97 @@ import {
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
 import { upsertCompanyByUid, type BankAccount, type CompanyPayload } from '@/fb/data'
+import { getMapsLoader } from '@/lib/googleMaps'
 import { Search, X, ChevronDown, ChevronUp, Building2, Phone, MapPin, CreditCard, Star, Lock } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+type LatLng = { lat: number; lng: number }
+
+// ─── MapPicker ────────────────────────────────────────────────────────────────
+
+function MapPicker({ coord, onSelect }: { coord: LatLng | null; onSelect: (c: LatLng, address: string) => void }) {
+  const containerRef = React.useRef<HTMLDivElement>(null)
+  const searchRef = React.useRef<HTMLInputElement>(null)
+  const mapRef = React.useRef<google.maps.Map | null>(null)
+  const markerRef = React.useRef<google.maps.Marker | null>(null)
+  const geocoderRef = React.useRef<google.maps.Geocoder | null>(null)
+
+  function placeMarker(g: typeof google, c: LatLng) {
+    markerRef.current?.setMap(null)
+    markerRef.current = new g.maps.Marker({ map: mapRef.current!, position: c, draggable: true })
+    markerRef.current.addListener('dragend', () => {
+      const pos = markerRef.current?.getPosition()
+      if (!pos) return
+      const cc = { lat: pos.lat(), lng: pos.lng() }
+      geocoderRef.current?.geocode({ location: cc }, (results, status) => {
+        onSelect(cc, status === 'OK' && results?.[0] ? results[0].formatted_address : '')
+      })
+    })
+  }
+
+  React.useEffect(() => {
+    let mounted = true
+    getMapsLoader().load().then((google) => {
+      if (!mounted || !containerRef.current || !searchRef.current) return
+      const center = coord || { lat: 12.1364, lng: -86.2514 }
+      mapRef.current = new google.maps.Map(containerRef.current, {
+        center, zoom: coord ? 15 : 13, disableDefaultUI: true, zoomControl: true,
+        styles: [
+          { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+          { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+        ],
+      })
+      geocoderRef.current = new google.maps.Geocoder()
+
+      if (coord) placeMarker(google, coord)
+
+      // Autocomplete search
+      const managua = new google.maps.LatLngBounds(
+        { lat: 12.05, lng: -86.35 },
+        { lat: 12.20, lng: -86.20 }
+      )
+      const autocomplete = new google.maps.places.Autocomplete(searchRef.current!, {
+        fields: ['geometry', 'formatted_address'],
+        componentRestrictions: { country: 'ni' },
+        bounds: managua,
+        strictBounds: false,
+      })
+      autocomplete.addListener('place_changed', () => {
+        const place = autocomplete.getPlace()
+        if (!place.geometry?.location) return
+        const c = { lat: place.geometry.location.lat(), lng: place.geometry.location.lng() }
+        mapRef.current?.panTo(c)
+        mapRef.current?.setZoom(16)
+        placeMarker(google, c)
+        onSelect(c, place.formatted_address || '')
+      })
+
+      mapRef.current.addListener('click', (e: google.maps.MapMouseEvent) => {
+        if (!e.latLng) return
+        const c = { lat: e.latLng.lat(), lng: e.latLng.lng() }
+        placeMarker(google, c)
+        geocoderRef.current?.geocode({ location: c }, (results, status) => {
+          onSelect(c, status === 'OK' && results?.[0] ? results[0].formatted_address : '')
+        })
+      })
+    })
+    return () => { mounted = false }
+  }, [])
+
+  return (
+    <div className="flex flex-col gap-2">
+      <input
+        ref={searchRef}
+        type="text"
+        placeholder="Buscar dirección…"
+        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004aad]/30 focus:border-[#004aad]"
+      />
+      <div ref={containerRef} className="w-full rounded-xl overflow-hidden border border-gray-200" style={{ height: 220 }} />
+      <p className="text-[11px] text-gray-400">Buscá una dirección o tocá el mapa para marcar. Podés arrastrar el pin.</p>
+    </div>
+  )
+}
 
 type PuntoRetiro = {
   key: string
@@ -25,6 +113,8 @@ type PuntoRetiro = {
   celular?: string
   direccion?: string
   nota?: string
+  coord?: LatLng | null
+  tipoUbicacion?: 'referencial' | 'exacto'
 }
 
 type Comercio = {
@@ -79,6 +169,15 @@ export default function ComerciosPage() {
   const [savingNota, setSavingNota] = useState(false)
   const [notaMsg, setNotaMsg] = useState<string | null>(null)
 
+  // Nuevo comercio modal
+  const [showNew, setShowNew] = useState(false)
+  const [ncNombre, setNcNombre] = useState('')
+  const [ncTelefono, setNcTelefono] = useState('')
+  const [ncEmail, setNcEmail] = useState('')
+  const [ncDireccion, setNcDireccion] = useState('')
+  const [ncError, setNcError] = useState('')
+  const [ncLoading, setNcLoading] = useState(false)
+
   // Punto modal
   const [puntoModal, setPuntoModal] = useState(false)
   const [editingPuntoKey, setEditingPuntoKey] = useState<string | null>(null)
@@ -89,6 +188,9 @@ export default function ComerciosPage() {
   const [pNota, setPNota] = useState('')
   const [puntoBusy, setPuntoBusy] = useState(false)
   const [puntoError, setPuntoError] = useState('')
+  const [pCoord, setPCoord] = useState<LatLng | null>(null)
+  const [pTipo, setPTipo] = useState<'referencial' | 'exacto'>('referencial')
+  const [pShowMap, setPShowMap] = useState(false)
 
   // Load all comercios (usuarios with rol=cliente)
   useEffect(() => {
@@ -148,6 +250,8 @@ export default function ComerciosPage() {
       celular: raw?.celular,
       direccion: raw?.direccion,
       nota: raw?.nota,
+      coord: raw?.coord || null,
+      tipoUbicacion: raw?.tipoUbicacion,
     }))
     setEPuntos(puntos)
     setMsg(null)
@@ -208,12 +312,14 @@ export default function ComerciosPage() {
   function openNewPunto() {
     setEditingPuntoKey(null)
     setPLabel(''); setPNombre(''); setPCelular(''); setPDireccion(''); setPNota('')
+    setPCoord(null); setPTipo('referencial'); setPShowMap(false)
     setPuntoError(''); setPuntoModal(true)
   }
   function openEditPunto(p: PuntoRetiro) {
     setEditingPuntoKey(p.key)
     setPLabel(p.label); setPNombre(p.nombre || ''); setPCelular(p.celular || '')
     setPDireccion(p.direccion || ''); setPNota(p.nota || '')
+    setPCoord(p.coord || null); setPTipo(p.tipoUbicacion || 'referencial'); setPShowMap(!!p.coord)
     setPuntoError(''); setPuntoModal(true)
   }
   async function savePunto() {
@@ -228,8 +334,10 @@ export default function ComerciosPage() {
         celular: pCelular.trim(),
         direccion: pDireccion.trim(),
         nota: pNota.trim() || null,
+        tipoUbicacion: pTipo,
         updatedAt: serverTimestamp(),
       }
+      if (pCoord) payload.coord = pCoord
       await setDoc(
         doc(db, 'comercios', selected.uid),
         { puntosRetiro: { [key]: payload }, updatedAt: serverTimestamp() },
@@ -243,6 +351,8 @@ export default function ComerciosPage() {
         celular: pCelular.trim(),
         direccion: pDireccion.trim(),
         nota: pNota.trim() || undefined,
+        coord: pCoord,
+        tipoUbicacion: pTipo,
       }
       setEPuntos((prev) =>
         editingPuntoKey
@@ -285,6 +395,48 @@ export default function ComerciosPage() {
     }
   }
 
+  async function crearComercio() {
+    if (!ncNombre.trim() || !ncTelefono.trim()) {
+      setNcError('Nombre y teléfono son obligatorios')
+      return
+    }
+    const telNorm = ncTelefono.replace(/\D/g, '')
+    const nombreNorm = ncNombre.trim().toLowerCase()
+    const dup = comercios.find((c) => {
+      const cTel = (c.phone || '').replace(/\D/g, '')
+      return (cTel && cTel === telNorm) || (c.name || '').toLowerCase() === nombreNorm
+    })
+    if (dup) { setNcError(`Ya existe: ${dup.name}`); return }
+
+    setNcLoading(true)
+    try {
+      const nuevoRef = doc(collection(db, 'usuarios'))
+      const uid = nuevoRef.id
+      await setDoc(nuevoRef, {
+        name: ncNombre.trim(),
+        email: ncEmail.trim() || null,
+        phone: ncTelefono.trim(),
+        rol: 'Comercio',
+        activo: true,
+        creadoPorGestor: true,
+        sinAuth: true,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+      await upsertCompanyByUid(uid, {
+        name: ncNombre.trim(),
+        phone: ncTelefono.trim(),
+        address: ncDireccion.trim() || undefined,
+      })
+      setShowNew(false)
+      setNcNombre(''); setNcTelefono(''); setNcEmail(''); setNcDireccion(''); setNcError('')
+    } catch (e) {
+      setNcError('Error al crear el comercio')
+    } finally {
+      setNcLoading(false)
+    }
+  }
+
   const countPuntos = (c: Comercio) => Object.keys(c.puntosRetiro || {}).length
 
   return (
@@ -297,8 +449,9 @@ export default function ComerciosPage() {
         </p>
       </div>
 
-      {/* Search */}
-      <div className="mb-4 relative max-w-sm">
+      {/* Search + New */}
+      <div className="flex items-center gap-3 mb-4">
+      <div className="relative flex-1 max-w-sm">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
         <input
           value={search}
@@ -311,6 +464,10 @@ export default function ComerciosPage() {
             <X className="h-4 w-4 text-gray-400" />
           </button>
         )}
+      </div>
+      <button onClick={() => setShowNew(true)} className={S.btnPrimary}>
+        + Nuevo comercio
+      </button>
       </div>
 
       {/* Table */}
@@ -558,6 +715,7 @@ export default function ComerciosPage() {
                           {p.celular && <p className="text-xs text-gray-400">📞 {p.celular}</p>}
                           {p.direccion && <p className="text-xs text-gray-400 truncate">📍 {p.direccion}</p>}
                           {p.nota && <p className="text-xs text-purple-600">📝 {p.nota}</p>}
+                          {p.coord && <p className="text-[11px] text-green-600 font-semibold mt-1">🎯 Ubicación guardada en mapa</p>}
                         </div>
                         <div className="flex gap-2 flex-shrink-0">
                           <button onClick={() => openEditPunto(p)} className={S.btnOutline}>✏️</button>
@@ -573,6 +731,52 @@ export default function ComerciosPage() {
           </>
         )}
       </div>
+
+      {/* Nuevo comercio modal */}
+      {showNew && (
+        <div
+          className="fixed inset-0 z-[70] bg-black/50 flex items-center justify-center p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) { setShowNew(false); setNcError('') } }}
+        >
+          <div className="w-full max-w-md bg-white rounded-2xl border border-gray-200 shadow-2xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-black text-gray-900">Nuevo comercio</h3>
+              <button onClick={() => { setShowNew(false); setNcError('') }} className="w-8 h-8 grid place-items-center rounded-full border border-gray-200 hover:bg-gray-50">
+                <X className="h-4 w-4 text-gray-500" />
+              </button>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className={S.label}>Nombre / empresa <span className="text-red-500">*</span></label>
+                <input value={ncNombre} onChange={(e) => setNcNombre(e.target.value)} placeholder="Ej: Box It Up" className={S.input} autoFocus />
+              </div>
+              <div>
+                <label className={S.label}>Teléfono <span className="text-red-500">*</span></label>
+                <input value={ncTelefono} onChange={(e) => setNcTelefono(e.target.value)} placeholder="8888-8888" className={S.input} />
+              </div>
+              <div>
+                <label className={S.label}>Correo <span className="text-gray-400 normal-case font-normal">(opcional)</span></label>
+                <input value={ncEmail} onChange={(e) => setNcEmail(e.target.value)} placeholder="correo@ejemplo.com" className={S.input} />
+              </div>
+              <div>
+                <label className={S.label}>Dirección <span className="text-gray-400 normal-case font-normal">(opcional)</span></label>
+                <input value={ncDireccion} onChange={(e) => setNcDireccion(e.target.value)} placeholder="Del semáforo 1c al norte…" className={S.input} />
+              </div>
+              {ncError && (
+                <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-600 font-semibold">
+                  {ncError}
+                </div>
+              )}
+              <div className="flex justify-end gap-2 pt-2">
+                <button onClick={() => { setShowNew(false); setNcError('') }} className={S.btnOutline}>Cancelar</button>
+                <button onClick={crearComercio} disabled={ncLoading} className={S.btnPrimary}>
+                  {ncLoading ? 'Creando…' : 'Crear comercio'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Punto modal */}
       {puntoModal && (
@@ -610,6 +814,35 @@ export default function ComerciosPage() {
               <div>
                 <label className={S.label}>Nota <span className="text-gray-400 normal-case font-normal">(opcional)</span></label>
                 <input value={pNota} onChange={(e) => setPNota(e.target.value)} placeholder="Info contextual para el motorizado…" className={S.input} />
+              </div>
+
+              {/* Tipo de ubicación */}
+              <div>
+                <p className="text-xs text-gray-500 mb-2">¿Qué tan exacta es la ubicación?</p>
+                <div className="flex gap-2">
+                  {(['referencial', 'exacto'] as const).map(t => (
+                    <button key={t} type="button" onClick={() => setPTipo(t)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${pTipo === t ? 'bg-[#004aad] text-white border-[#004aad]' : 'bg-white text-gray-600 border-gray-200'}`}>
+                      {t === 'referencial' ? '📍 Referencial' : '🎯 Exacto'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Mapa */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className={S.label}>Ubicación en el mapa</label>
+                  <button type="button" onClick={() => setPShowMap(!pShowMap)} className={`${S.btnOutline} text-xs py-1.5 px-3`}>
+                    {pShowMap ? 'Ocultar mapa' : pCoord ? '✏️ Cambiar en mapa' : '+ Marcar en mapa'}
+                  </button>
+                </div>
+                {pCoord && !pShowMap && (
+                  <p className="text-xs text-green-600 font-semibold">🎯 Ubicación marcada: {pCoord.lat.toFixed(5)}, {pCoord.lng.toFixed(5)}</p>
+                )}
+                {pShowMap && (
+                  <MapPicker coord={pCoord} onSelect={(c, addr) => { setPCoord(c); if (addr && !pDireccion) setPDireccion(addr) }} />
+                )}
               </div>
 
               {puntoError && (

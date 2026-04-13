@@ -6,6 +6,7 @@ import {
   collection,
   doc,
   getDocs,
+  increment,
   limit,
   onSnapshot,
   orderBy,
@@ -16,6 +17,7 @@ import {
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
+import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,6 +35,7 @@ type ClienteGuardado = {
   puntoGoogleTexto?: string
   coord?: LatLng
   tipoUbicacion?: TipoUbicacion
+  totalViajes?: number
 }
 
 type PuntoFavorito = {
@@ -158,6 +161,7 @@ async function guardarClienteEntrega(uid: string, data: Omit<ClienteGuardado, 'i
     celular: data.celular.trim(),
     comercioUid: uid,
     updatedAt: serverTimestamp(),
+    totalViajes: increment(1),
   }
   if (data.direccion?.trim()) payload.direccion = data.direccion.trim()
   if (data.coord) payload.coord = data.coord
@@ -762,6 +766,9 @@ export default function SolicitarEnvioPage() {
   const [grande, setGrande] = useState(false)
   const [notaPaquete, setNotaPaquete] = useState('')
 
+  // Modal buscador de clientes
+  const [showClienteModal, setShowClienteModal] = useState(false)
+
   // Guardar retiro como favorito
   const [showGuardarFav, setShowGuardarFav] = useState(false)
   const [newFavLabel, setNewFavLabel] = useState('')
@@ -980,6 +987,7 @@ export default function SolicitarEnvioPage() {
 
       await addDoc(collection(db, 'solicitudes_envio'), {
         userId: user.uid,
+        comercioUid: user.uid,
         tipoCliente,
         tieneCotizacion: tieneCalculo,
         cotizacion: tieneCalculo
@@ -1262,15 +1270,38 @@ export default function SolicitarEnvioPage() {
 
       {/* ── ENTREGA ── */}
       <SectionCard title="Punto de entrega" icon="🏠">
-        <AutocompleteInput
-          label="Nombre del destinatario"
-          value={entrega.nombre}
-          onChange={v => setEntrega(prev => ({ ...prev, nombre: v }))}
-          onSelect={handleSelectEntrega}
-          placeholder="Ej: María García"
-          clientes={clientesEntrega}
-          required
-        />
+        <div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <AutocompleteInput
+                label="Nombre del destinatario"
+                value={entrega.nombre}
+                onChange={v => setEntrega(prev => ({ ...prev, nombre: v }))}
+                onSelect={handleSelectEntrega}
+                placeholder="Ej: María García"
+                clientes={clientesEntrega}
+                required
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowClienteModal(true)}
+              style={{
+                ...S.btnOutline,
+                padding: '10px 14px',
+                fontSize: 13,
+                fontWeight: 700,
+                whiteSpace: 'nowrap' as const,
+                borderColor: '#004aad',
+                color: '#004aad',
+                background: '#eff6ff',
+                height: 42,
+              }}
+            >
+              🔍 Buscar
+            </button>
+          </div>
+        </div>
 
         <div>
           <AutocompleteInput
@@ -1660,6 +1691,35 @@ export default function SolicitarEnvioPage() {
           {saving ? 'Guardando...' : formularioCompleto ? '✓ Enviar solicitud' : '⚠️ Completar info para enviar'}
         </button>
       </div>
+
+      {/* ── MODAL BUSCADOR DE CLIENTES ── */}
+      <ClienteSearchModal
+        open={showClienteModal}
+        onClose={() => setShowClienteModal(false)}
+        onSelect={(c: ClienteModalItem) => {
+          handleSelectEntrega({
+            id: c.id,
+            nombre: c.nombre,
+            celular: c.celular,
+            direccion: c.direccion,
+            coord: c.coord,
+            tipoUbicacion: c.tipoUbicacion as TipoUbicacion | undefined,
+            totalViajes: c.totalViajes,
+          })
+        }}
+        clientes={clientesEntrega.map((c) => ({
+          id: c.id,
+          nombre: c.nombre,
+          celular: c.celular,
+          direccion: c.direccion,
+          coord: c.coord,
+          tipoUbicacion: c.tipoUbicacion,
+          totalViajes: c.totalViajes,
+          comercioUid: uid || undefined,
+        }))}
+        comercioUidActual={uid || undefined}
+        comercios={[]}
+      />
     </div>
   )
 }

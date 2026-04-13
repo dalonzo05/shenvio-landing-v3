@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import {
   collection,
   doc,
@@ -37,6 +38,12 @@ import {
   Eraser,
   CalendarDays,
   Lock,
+  Star,
+  AlertTriangle,
+  X,
+  DollarSign,
+  Clock,
+  FileCheck,
 } from 'lucide-react'
 
 type EstadoSolicitud =
@@ -114,6 +121,24 @@ type Solicitud = {
     rechazadoAt?: any
     motivoRechazo?: string
   } | null
+
+  prioridad?: boolean
+  entregadoAt?: any
+  cobrosMotorizado?: {
+    delivery?: { monto: number; recibio: boolean; at?: any; justificacion?: string }
+    producto?: { monto: number; recibio: boolean; at?: any; justificacion?: string }
+  }
+  registro?: {
+    deposito?: {
+      confirmadoMotorizado?: boolean
+      confirmadoAt?: any
+      confirmadoComercio?: boolean
+      confirmadoStorkhub?: boolean
+      confirmadoStorkhubAt?: any
+      storkhubDepositoId?: string
+      comercioDepositoId?: string
+    }
+  }
 }
 
 type Motorizado = {
@@ -126,11 +151,56 @@ type Motorizado = {
 }
 
 type FiltroCotizacion = 'todas' | 'con' | 'sin'
-type FiltroOrden = 'recientes' | 'antiguas'
+type FiltroOrden = 'recientes' | 'antiguas' | 'prioritario'
 type FiltroAsignacion = 'todas' | 'sin_asignar' | 'asignadas'
 type FiltroPrecio = 'todos' | 'con_precio' | 'sin_precio'
 type FiltroFecha = 'todos' | 'hoy' | 'ayer' | '7dias' | 'personalizado'
 type ModalMode = 'confirmar' | 'reasignar'
+type EstadoFinanciero = 'pendiente' | 'pagado' | 'en_revision' | 'problema' | 'credito'
+type FiltroRapido = 'todos' | 'con_riesgo' | 'pendiente_cobro' | 'entregadas_hoy' | 'prioritarias'
+
+const TRANSICIONES_VALIDAS: Record<EstadoSolicitud, EstadoSolicitud[]> = {
+  pendiente_confirmacion: ['confirmada', 'rechazada', 'cancelada'],
+  confirmada: ['asignada', 'cancelada'],
+  asignada: ['en_camino_retiro', 'confirmada', 'cancelada'],
+  en_camino_retiro: ['retirado', 'cancelada'],
+  retirado: ['en_camino_entrega'],
+  en_camino_entrega: ['entregado'],
+  entregado: [],
+  rechazada: [],
+  cancelada: [],
+}
+
+function getEstadoFinanciero(s: Solicitud): EstadoFinanciero {
+  if (s.pagoDelivery?.tipo === 'credito_semanal') return 'credito'
+  if (s.cobrosMotorizado?.delivery?.recibio === true) return 'pagado'
+  if (s.estado === 'entregado' && s.cobrosMotorizado?.delivery?.recibio === false) return 'problema'
+  if (s.registro?.deposito && !s.registro.deposito.confirmadoStorkhub) return 'en_revision'
+  return 'pendiente'
+}
+
+type Riesgo = { tipo: string; label: string }
+function getRiesgos(s: Solicitud): Riesgo[] {
+  const riesgos: Riesgo[] = []
+  if (
+    s.estado === 'entregado' &&
+    s.pagoDelivery?.tipo !== 'credito_semanal' &&
+    s.cobrosMotorizado?.delivery?.recibio === false
+  ) {
+    riesgos.push({ tipo: 'entregada_sin_cobro', label: 'Sin cobro' })
+  }
+  if (s.registro?.deposito && !s.registro.deposito.confirmadoStorkhub) {
+    riesgos.push({ tipo: 'deposito_pendiente', label: 'Depósito pendiente' })
+  }
+  return riesgos
+}
+
+function isToday(ts: any): boolean {
+  const d = tsToDate(ts)
+  if (!d) return false
+  const hoy = new Date()
+  return d.getDate() === hoy.getDate() && d.getMonth() === hoy.getMonth() && d.getFullYear() === hoy.getFullYear()
+}
 
 const ESTADOS: { key: EstadoSolicitud; label: string; short: string }[] = [
   { key: 'pendiente_confirmacion', label: 'Pendiente confirmación', short: 'Pendientes' },
@@ -458,6 +528,12 @@ export default function GestorSolicitudesPage() {
   const prevResumenRef = useRef<Record<EstadoSolicitud, number> | null>(null)
 
   const [toast, setToast] = useState<null | { type: 'success' | 'error'; message: string }>(null)
+  const searchParams = useSearchParams()
+  const [filtroRapido, setFiltroRapido] = useState<FiltroRapido>(
+    (searchParams.get('filtro') as FiltroRapido) ?? 'todos'
+  )
+  const [drawerSolicitudId, setDrawerSolicitudId] = useState<string | null>(null)
+  const tableScrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!toast) return
@@ -711,7 +787,27 @@ export default function GestorSolicitudesPage() {
       })
     }
 
+    // Filtro rápido
+    if (filtroRapido === 'con_riesgo') arr = arr.filter((s) => getRiesgos(s).length > 0)
+    if (filtroRapido === 'pendiente_cobro') arr = arr.filter((s) => ['pendiente', 'problema'].includes(getEstadoFinanciero(s)) && s.estado === 'entregado')
+    if (filtroRapido === 'entregadas_hoy') arr = arr.filter((s) => s.estado === 'entregado' && isToday(s.entregadoAt || s.updatedAt))
+    if (filtroRapido === 'prioritarias') arr = arr.filter((s) => s.prioridad === true)
+
     if (ordenUI === 'antiguas') arr = [...arr].reverse()
+
+    if (ordenUI === 'prioritario') {
+      arr = [...arr].sort((a, b) => {
+        const aRiesgo = getRiesgos(a).length > 0 ? 0 : 1
+        const bRiesgo = getRiesgos(b).length > 0 ? 0 : 1
+        if (aRiesgo !== bRiesgo) return aRiesgo - bRiesgo
+        const aPrio = a.prioridad ? 0 : 1
+        const bPrio = b.prioridad ? 0 : 1
+        if (aPrio !== bPrio) return aPrio - bPrio
+        const aT = tsToDate(a.updatedAt)?.getTime() ?? 0
+        const bT = tsToDate(b.updatedAt)?.getTime() ?? 0
+        return aT - bT
+      })
+    }
 
     return arr
   }, [
@@ -727,6 +823,7 @@ export default function GestorSolicitudesPage() {
     motorizadoColFiltro,
     precioColFiltro,
     rangoFechaActivo,
+    filtroRapido,
   ])
 
   useEffect(() => {
@@ -800,6 +897,16 @@ export default function GestorSolicitudesPage() {
   }, [allItems])
 
   const pendientesTotales = resumenEstados.pendiente_confirmacion
+
+  const metricas = useMemo(() => {
+    const TERMINALES = ['entregado', 'cancelada', 'rechazada']
+    const activas = allItems.filter((s) => !TERMINALES.includes(s.estado)).length
+    const entregadasHoy = allItems.filter((s) => s.estado === 'entregado' && isToday(s.entregadoAt || s.updatedAt)).length
+    const conProblema = allItems.filter((s) => getRiesgos(s).length > 0).length
+    const pendCobro = allItems.filter((s) => ['pendiente', 'problema'].includes(getEstadoFinanciero(s)) && s.estado === 'entregado').length
+    const prioritarias = allItems.filter((s) => s.prioridad === true).length
+    return { activas, entregadasHoy, conProblema, pendCobro, prioritarias }
+  }, [allItems])
 
   function getRemainingConfirmacion(s: Solicitud) {
     const created = tsToDate(s.createdAt)
@@ -953,6 +1060,16 @@ export default function GestorSolicitudesPage() {
 
   const cambiarEstado = async (id: string, nuevo: EstadoSolicitud) => {
     setErr(null)
+    const solicitud = allItems.find((x) => x.id === id)
+    if (solicitud) {
+      const validos = TRANSICIONES_VALIDAS[solicitud.estado] ?? []
+      if (!validos.includes(nuevo)) {
+        const labelActual = ESTADOS.find((e) => e.key === solicitud.estado)?.label || solicitud.estado
+        const labelNuevo = ESTADOS.find((e) => e.key === nuevo)?.label || nuevo
+        setToast({ type: 'error', message: `No se puede pasar de "${labelActual}" a "${labelNuevo}"` })
+        return
+      }
+    }
     try {
       await updateDoc(doc(db, 'solicitudes_envio', id), {
         estado: nuevo,
@@ -963,6 +1080,19 @@ export default function GestorSolicitudesPage() {
       console.error(e)
       setErr('No se pudo cambiar el estado.')
       setToast({ type: 'error', message: 'No se pudo cambiar el estado' })
+    }
+  }
+
+  const togglePrioridad = async (id: string, actual?: boolean) => {
+    try {
+      await updateDoc(doc(db, 'solicitudes_envio', id), {
+        prioridad: !actual,
+        updatedAt: serverTimestamp(),
+      } as any)
+      setToast({ type: 'success', message: !actual ? '⭐ Marcada como prioritaria' : 'Prioridad removida' })
+    } catch (e) {
+      console.error(e)
+      setToast({ type: 'error', message: 'No se pudo cambiar la prioridad' })
     }
   }
 
@@ -980,6 +1110,7 @@ export default function GestorSolicitudesPage() {
     setFechaFiltro(estadoFiltro === 'entregado' ? 'hoy' : 'todos')
     setFechaDesde(hoyStr)
     setFechaHasta(hoyStr)
+    setFiltroRapido('todos')
   }
 
   const resumenFecha = useMemo(() => {
@@ -994,7 +1125,7 @@ export default function GestorSolicitudesPage() {
   }, [fechaFiltro, fechaDesde, fechaHasta])
 
   return (
-    <div className="w-full min-h-[calc(100vh-92px)] px-3 md:px-4 py-4 space-y-4">
+    <div className="h-full flex flex-col gap-3 min-w-0">
       <style jsx>{`
         @keyframes cardPop {
           0% {
@@ -1033,7 +1164,7 @@ export default function GestorSolicitudesPage() {
         </div>
       )}
 
-      <section className="rounded-3xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <section className="shrink-0 rounded-3xl border border-gray-200 bg-white shadow-sm overflow-hidden">
         <div className="border-b border-gray-100 bg-gradient-to-r from-slate-50 via-white to-blue-50/70 px-4 md:px-5 py-5">
           <div className="flex flex-col gap-4">
             <div className="flex flex-col 2xl:flex-row 2xl:items-center 2xl:justify-between gap-4">
@@ -1107,6 +1238,7 @@ export default function GestorSolicitudesPage() {
                 >
                   <option value="recientes">Recientes primero</option>
                   <option value="antiguas">Antiguas primero</option>
+                  <option value="prioritario">Prioridad operativa</option>
                 </select>
               </div>
             </div>
@@ -1244,23 +1376,23 @@ export default function GestorSolicitudesPage() {
       </section>
 
       {err && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <div className="shrink-0 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {err}
         </div>
       )}
 
       {loading ? (
-        <div className="rounded-2xl border border-gray-200 bg-white p-6 text-sm text-gray-600 shadow-sm">
+        <div className="flex-1 min-h-0 rounded-2xl border border-gray-200 bg-white p-6 text-sm text-gray-600 shadow-sm">
           Cargando...
         </div>
       ) : itemsFiltrados.length === 0 ? (
-        <div className="rounded-2xl border border-gray-200 bg-white p-6 text-sm text-gray-600 shadow-sm">
+        <div className="flex-1 min-h-0 rounded-2xl border border-gray-200 bg-white p-6 text-sm text-gray-600 shadow-sm">
           No hay solicitudes en este estado con los filtros actuales.
         </div>
       ) : (
-        <>
-          <div className="hidden xl:block rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-            <div className="border-b border-gray-200 bg-gray-50/80 px-4 py-3">
+        <div className="flex-1 min-h-0 flex flex-col gap-3 min-w-0">
+          <div className="hidden xl:flex flex-col flex-1 min-h-0 rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+            <div className="shrink-0 border-b border-gray-200 bg-gray-50/80 px-4 py-3">
               <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
                 <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
                   <span className="inline-flex items-center gap-1 font-medium text-gray-900">
@@ -1310,18 +1442,18 @@ export default function GestorSolicitudesPage() {
               </div>
             </div>
 
-            <div className="overflow-auto h-[72vh]" style={{ scrollbarGutter: 'stable' as any }}>
+            <div ref={tableScrollRef} className="flex-1 min-h-0 overflow-auto" style={{ scrollbarGutter: 'stable' as any }}>
               <table className="min-w-[1850px] w-full text-sm">
                 <thead className="sticky top-0 z-20 bg-gray-50 border-b border-gray-200 shadow-sm">
                   <tr className="text-left text-gray-600">
-                    <th className="px-4 py-3 font-medium min-w-[220px] border-r border-gray-200">Orden</th>
-                    <th className="px-4 py-3 font-medium min-w-[220px] border-r border-gray-200">Estado</th>
-                    <th className="px-4 py-3 font-medium min-w-[340px] border-r border-gray-200">Retiro</th>
-                    <th className="px-4 py-3 font-medium min-w-[340px] border-r border-gray-200">Entrega</th>
-                    <th className="px-4 py-3 font-medium min-w-[170px] border-r border-gray-200">Precio</th>
-                    <th className="px-4 py-3 font-medium min-w-[220px] border-r border-gray-200">Motorizado</th>
-                    <th className="px-4 py-3 font-medium min-w-[160px] border-r border-gray-200">Aceptación</th>
-                    <th className="px-4 py-3 font-medium min-w-[260px] sticky right-0 bg-gray-50 z-20 border-l border-gray-200">
+                    <th className="px-3 py-3 font-medium min-w-[220px] border-r border-gray-200">Orden</th>
+                    <th className="px-3 py-3 font-medium min-w-[220px] border-r border-gray-200">Estado</th>
+                    <th className="px-3 py-3 font-medium min-w-[340px] border-r border-gray-200">Retiro</th>
+                    <th className="px-3 py-3 font-medium min-w-[340px] border-r border-gray-200">Entrega</th>
+                    <th className="px-3 py-3 font-medium min-w-[170px] border-r border-gray-200">Precio</th>
+                    <th className="px-3 py-3 font-medium min-w-[220px] border-r border-gray-200">Motorizado</th>
+                    <th className="px-3 py-3 font-medium min-w-[160px] border-r border-gray-200">Aceptación</th>
+                    <th className="px-3 py-3 font-medium min-w-[160px] sticky right-0 bg-gray-50 z-20 border-l border-gray-200">
                       Acciones
                     </th>
                   </tr>
@@ -1411,8 +1543,8 @@ export default function GestorSolicitudesPage() {
                     const sem = semaforoForRemaining(rem)
 
                     return (
-                      <tr key={s.id} className="align-top hover:bg-blue-50/30 transition-colors">
-                        <td className="px-4 py-4 border-r border-gray-100">
+                      <tr key={s.id} className="align-middle hover:bg-blue-50/60 transition-colors group">
+                        <td className="px-3 py-3 border-r border-gray-100">
                           <Link
                             href={`/panel/gestor/solicitudes/${s.id}`}
                             className="font-semibold text-gray-900 hover:text-blue-700 hover:underline"
@@ -1432,10 +1564,44 @@ export default function GestorSolicitudesPage() {
                           )}
                         </td>
 
-                        <td className="px-4 py-4 border-r border-gray-100">
-                          <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${estadoClass(s.estado)}`}>
-                            {statusLabel(s.estado)}
-                          </span>
+                        <td className="px-3 py-3 border-r border-gray-100">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${estadoClass(s.estado)}`}>
+                              {statusLabel(s.estado)}
+                            </span>
+                            {s.prioridad && (
+                              <span className="inline-flex items-center gap-0.5 rounded-full border border-yellow-300 bg-yellow-50 px-2 py-0.5 text-[10px] font-semibold text-yellow-700">
+                                <Star className="h-2.5 w-2.5 fill-yellow-400 text-yellow-400" />
+                                Prioritaria
+                              </span>
+                            )}
+                          </div>
+
+                          {(() => {
+                            const ef = getEstadoFinanciero(s)
+                            const riesgos = getRiesgos(s)
+                            const efMap: Record<EstadoFinanciero, { label: string; className: string; icon: React.ReactNode }> = {
+                              pendiente: { label: 'Pend. cobro', className: 'bg-yellow-50 text-yellow-700 border-yellow-200', icon: <Clock className="h-2.5 w-2.5" /> },
+                              pagado: { label: 'Cobrado', className: 'bg-green-50 text-green-700 border-green-200', icon: <CheckCircle2 className="h-2.5 w-2.5" /> },
+                              en_revision: { label: 'En revisión', className: 'bg-blue-50 text-blue-700 border-blue-200', icon: <FileCheck className="h-2.5 w-2.5" /> },
+                              problema: { label: 'Problema pago', className: 'bg-red-50 text-red-700 border-red-200', icon: <AlertTriangle className="h-2.5 w-2.5" /> },
+                              credito: { label: 'Crédito', className: 'bg-gray-100 text-gray-600 border-gray-200', icon: <DollarSign className="h-2.5 w-2.5" /> },
+                            }
+                            const efInfo = efMap[ef]
+                            return (
+                              <div className="mt-1.5 flex flex-wrap gap-1">
+                                <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${efInfo.className}`}>
+                                  {efInfo.icon}{efInfo.label}
+                                </span>
+                                {riesgos.length > 0 && (
+                                  <span className="inline-flex items-center gap-0.5 rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+                                    <AlertTriangle className="h-2.5 w-2.5" />
+                                    {riesgos.length} riesgo{riesgos.length > 1 ? 's' : ''}
+                                  </span>
+                                )}
+                              </div>
+                            )
+                          })()}
 
                           {typeof rem === 'number' && (
                             <div className="mt-2">
@@ -1450,7 +1616,7 @@ export default function GestorSolicitudesPage() {
                               Corregir estado
                             </label>
 
-                            {esEntregada ? (
+                            {(esEntregada || s.estado === 'rechazada' || s.estado === 'cancelada') ? (
                               <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-2 text-xs text-gray-600">
                                 <Lock className="h-3.5 w-3.5" />
                                 Orden cerrada
@@ -1461,17 +1627,19 @@ export default function GestorSolicitudesPage() {
                                 onChange={(e) => cambiarEstado(s.id, e.target.value as EstadoSolicitud)}
                                 className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs outline-none focus:border-blue-300"
                               >
-                                {ESTADOS.map((estado) => (
-                                  <option key={estado.key} value={estado.key}>
-                                    {estado.label}
-                                  </option>
-                                ))}
+                                <option value={s.estado} disabled>{statusLabel(s.estado)} (actual)</option>
+                                {(TRANSICIONES_VALIDAS[s.estado] ?? []).map((key) => {
+                                  const e = ESTADOS.find((x) => x.key === key)
+                                  return e ? (
+                                    <option key={e.key} value={e.key}>{e.label}</option>
+                                  ) : null
+                                })}
                               </select>
                             )}
                           </div>
                         </td>
 
-                        <td className="px-4 py-4 border-r border-gray-100">
+                        <td className="px-3 py-3 border-r border-gray-100">
                           <div className="flex items-start gap-2">
                             <User className="h-4 w-4 text-gray-400 mt-0.5 shrink-0" />
                             <div className="min-w-0">
@@ -1511,7 +1679,7 @@ export default function GestorSolicitudesPage() {
                           </div>
                         </td>
 
-                        <td className="px-4 py-4 border-r border-gray-100">
+                        <td className="px-3 py-3 border-r border-gray-100">
                           <div className="flex items-start gap-2">
                             <User className="h-4 w-4 text-gray-400 mt-0.5 shrink-0" />
                             <div className="min-w-0">
@@ -1558,7 +1726,7 @@ export default function GestorSolicitudesPage() {
                           </div>
                         </td>
 
-                        <td className="px-4 py-4 border-r border-gray-100">
+                        <td className="px-3 py-3 border-r border-gray-100">
                           {typeof s.confirmacion?.precioFinalCordobas === 'number' ? (
                             <div className="font-semibold text-gray-900">
                               {money(s.confirmacion.precioFinalCordobas)}
@@ -1582,7 +1750,7 @@ export default function GestorSolicitudesPage() {
                           </div>
                         </td>
 
-                        <td className="px-4 py-4 border-r border-gray-100">
+                        <td className="px-3 py-3 border-r border-gray-100">
                           {s.asignacion?.motorizadoNombre ? (
                             <>
                               <div className="font-medium text-gray-900">{s.asignacion.motorizadoNombre}</div>
@@ -1596,7 +1764,7 @@ export default function GestorSolicitudesPage() {
                           )}
                         </td>
 
-                        <td className="px-4 py-4 border-r border-gray-100">
+                        <td className="px-3 py-3 border-r border-gray-100">
                           {s.estado === 'asignada' ? (
                             <>
                               <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${aceptacionClass(s.asignacion || undefined)}`}>
@@ -1613,83 +1781,121 @@ export default function GestorSolicitudesPage() {
                           )}
                         </td>
 
-                        <td className="px-4 py-4 sticky right-0 bg-white z-10 border-l border-gray-200">
-                          <div className="flex flex-col gap-2 min-w-[220px]">
-                            <button
-                              onClick={() =>
-                                handleCopy(buildCopyRetiroEntrega(s), 'Información de retiro y entrega copiada')
-                              }
-                              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                            >
-                              <Copy className="h-4 w-4" />
-                              Copiar retiro/entrega
-                            </button>
+                        <td className="px-2 py-3 sticky right-0 bg-white z-10 border-l border-gray-200 group-hover:bg-blue-50">
+                          <div className="flex flex-col gap-1.5 min-w-[150px]">
 
-                            <button
-                              onClick={() => handleCopy(buildCopyTelegramFull(s), 'Formato de Telegram copiado')}
-                              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                            >
-                              <Send className="h-4 w-4" />
-                              Copiar Telegram
-                            </button>
-
+                            {/* CTA primaria según estado */}
                             {s.estado === 'pendiente_confirmacion' && (
-                              <>
-                                <button
-                                  onClick={() => abrirConfirmarYAsignar(s)}
-                                  className="inline-flex items-center gap-2 rounded-lg bg-[#004aad] px-3 py-2 text-xs font-medium text-white hover:bg-[#003d94]"
-                                >
-                                  <CheckCircle2 className="h-4 w-4" />
-                                  Confirmar + asignar
-                                </button>
-
-                                <button
-                                  onClick={() => cambiarEstado(s.id, 'rechazada')}
-                                  className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700"
-                                >
-                                  <XCircle className="h-4 w-4" />
-                                  Rechazar
-                                </button>
-                              </>
+                              <button
+                                onClick={() => abrirConfirmarYAsignar(s)}
+                                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#004aad] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#003d94] w-full"
+                              >
+                                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                                Confirmar + asignar
+                              </button>
                             )}
-
                             {s.estado === 'confirmada' && (
                               <button
                                 onClick={() => abrirConfirmarYAsignar(s)}
-                                className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#004aad] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#003d94] w-full"
                               >
-                                <Truck className="h-4 w-4" />
-                                Asignar rápido
+                                <Truck className="h-3.5 w-3.5 shrink-0" />
+                                Asignar
                               </button>
                             )}
-
                             {s.estado === 'asignada' && (
-                              <>
+                              <div className="flex gap-1">
                                 <button
                                   onClick={() => abrirReasignar(s)}
-                                  className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                                  className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-[11px] font-medium text-gray-700 hover:bg-gray-100"
+                                  title="Reasignar motorizado"
                                 >
-                                  <RefreshCcw className="h-4 w-4" />
+                                  <RefreshCcw className="h-3 w-3" />
                                   Reasignar
                                 </button>
-
                                 <button
                                   onClick={() => rebotarAsignacion(s.id)}
-                                  className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                                  className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-[11px] font-medium text-gray-700 hover:bg-gray-100"
+                                  title="Rebotar asignación"
                                 >
-                                  <RotateCcw className="h-4 w-4" />
+                                  <RotateCcw className="h-3 w-3" />
                                   Rebotar
                                 </button>
-                              </>
+                              </div>
                             )}
 
-                            <Link
-                              href={`/panel/gestor/solicitudes/${s.id}`}
-                              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                            >
-                              <Eye className="h-4 w-4" />
-                              Ver detalle
-                            </Link>
+                            {/* Iconos de acciones secundarias */}
+                            <div className="flex items-center gap-0.5 flex-wrap">
+                              <button
+                                onClick={() => togglePrioridad(s.id, s.prioridad)}
+                                title={s.prioridad ? 'Quitar prioridad' : 'Marcar prioritaria'}
+                                className={`rounded-md p-1.5 transition ${s.prioridad ? 'text-yellow-500 bg-yellow-100 hover:bg-yellow-200' : 'text-gray-500 bg-gray-100 hover:bg-gray-200'}`}
+                              >
+                                <Star className={`h-3.5 w-3.5 ${s.prioridad ? 'fill-yellow-400' : ''}`} />
+                              </button>
+
+                              <button
+                                onClick={() => handleCopy(buildCopyRetiroEntrega(s), 'Copiado')}
+                                title="Copiar retiro/entrega"
+                                className="rounded-md p-1.5 text-gray-500 bg-gray-100 hover:bg-gray-200 transition"
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                              </button>
+
+                              <button
+                                onClick={() => handleCopy(buildCopyTelegramFull(s), 'Telegram copiado')}
+                                title="Copiar Telegram"
+                                className="rounded-md p-1.5 text-gray-500 bg-gray-100 hover:bg-gray-200 transition"
+                              >
+                                <Send className="h-3.5 w-3.5" />
+                              </button>
+
+                              <button
+                                onClick={() => setDrawerSolicitudId(s.id)}
+                                title="Ver detalle"
+                                className="rounded-md p-1.5 text-gray-500 bg-gray-100 hover:bg-gray-200 transition"
+                              >
+                                <Eye className="h-3.5 w-3.5" />
+                              </button>
+
+                              <Link
+                                href={`/panel/gestor/solicitudes/${s.id}`}
+                                title="Abrir página completa"
+                                className="rounded-md p-1.5 text-gray-500 bg-gray-100 hover:bg-gray-200 transition"
+                              >
+                                <ExternalLink className="h-3.5 w-3.5" />
+                              </Link>
+
+                              {s.estado === 'pendiente_confirmacion' && (
+                                <button
+                                  onClick={() => cambiarEstado(s.id, 'rechazada')}
+                                  title="Rechazar orden"
+                                  className="rounded-md p-1.5 text-red-600 bg-red-100 hover:bg-red-200 transition"
+                                >
+                                  <XCircle className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+
+                              {getEstadoFinanciero(s) === 'problema' && (
+                                <button
+                                  onClick={() => setDrawerSolicitudId(s.id)}
+                                  title="Ver incidencia de cobro"
+                                  className="rounded-md p-1.5 text-orange-600 bg-orange-100 hover:bg-orange-200 transition"
+                                >
+                                  <AlertTriangle className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+
+                              {s.registro?.deposito && !s.registro.deposito.confirmadoStorkhub && (
+                                <button
+                                  onClick={() => setDrawerSolicitudId(s.id)}
+                                  title="Ver comprobante depósito"
+                                  className="rounded-md p-1.5 text-blue-600 bg-blue-100 hover:bg-blue-200 transition"
+                                >
+                                  <FileCheck className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                            </div>
                           </div>
                         </td>
                       </tr>
@@ -1700,7 +1906,7 @@ export default function GestorSolicitudesPage() {
             </div>
           </div>
 
-          <div className="xl:hidden space-y-3">
+          <div className="xl:hidden flex-1 min-h-0 overflow-auto space-y-3">
             <div className="rounded-2xl border border-gray-200 bg-white p-3 shadow-sm">
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="text-sm text-gray-600">
@@ -1909,8 +2115,186 @@ export default function GestorSolicitudesPage() {
               </div>
             </div>
           </div>
-        </>
+        </div>
       )}
+
+      {/* ── DRAWER LATERAL ─────────────────────────────────────────────────── */}
+      {drawerSolicitudId && (() => {
+        const s = allItems.find((x) => x.id === drawerSolicitudId)
+        if (!s) return null
+        const ef = getEstadoFinanciero(s)
+        const riesgos = getRiesgos(s)
+        const efColors: Record<EstadoFinanciero, string> = {
+          pendiente: 'bg-yellow-50 text-yellow-700 border-yellow-200',
+          pagado: 'bg-green-50 text-green-700 border-green-200',
+          en_revision: 'bg-blue-50 text-blue-700 border-blue-200',
+          problema: 'bg-red-50 text-red-700 border-red-200',
+          credito: 'bg-gray-100 text-gray-600 border-gray-200',
+        }
+        const efLabels: Record<EstadoFinanciero, string> = {
+          pendiente: 'Pendiente cobro', pagado: 'Cobrado', en_revision: 'En revisión', problema: 'Problema pago', credito: 'Crédito semanal',
+        }
+        const precioFinalDrawer = s.confirmacion?.precioFinalCordobas
+        return (
+          <>
+            {/* Backdrop */}
+            <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setDrawerSolicitudId(null)} />
+            {/* Panel */}
+            <div className="fixed right-0 top-0 h-full w-full max-w-[440px] bg-white shadow-2xl z-50 flex flex-col overflow-hidden">
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-gray-50 shrink-0">
+                <div>
+                  <div className="text-xs text-gray-500 font-mono">#{s.id.slice(0, 8)}</div>
+                  <div className="font-semibold text-gray-900 text-sm mt-0.5 flex items-center gap-2">
+                    <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium ${estadoClass(s.estado)}`}>{statusLabel(s.estado)}</span>
+                    {s.prioridad && <span className="inline-flex items-center gap-0.5 rounded-full border border-yellow-300 bg-yellow-50 px-2 py-0.5 text-[10px] font-semibold text-yellow-700"><Star className="h-2.5 w-2.5 fill-yellow-400 text-yellow-400" />Prioritaria</span>}
+                  </div>
+                </div>
+                <button onClick={() => setDrawerSolicitudId(null)} className="rounded-full p-1.5 hover:bg-gray-200 transition text-gray-500">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Contenido scrolleable */}
+              <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4 text-sm">
+
+                {/* Estado financiero */}
+                <div className="rounded-xl border p-3 bg-white">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Estado financiero</div>
+                  <div className="flex flex-wrap gap-2">
+                    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium ${efColors[ef]}`}>
+                      <DollarSign className="h-3 w-3" />
+                      {efLabels[ef]}
+                    </span>
+                    {riesgos.map((r) => (
+                      <span key={r.tipo} className="inline-flex items-center gap-1.5 rounded-full border border-red-300 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700">
+                        <AlertTriangle className="h-3 w-3" />{r.label}
+                      </span>
+                    ))}
+                  </div>
+                  {s.cobrosMotorizado?.delivery && (
+                    <div className="mt-2 text-xs text-gray-600">
+                      Delivery cobrado: <strong>{s.cobrosMotorizado.delivery.recibio ? 'Sí' : 'No'}</strong>
+                      {s.cobrosMotorizado.delivery.justificacion && <span className="ml-1 text-orange-600">— {s.cobrosMotorizado.delivery.justificacion}</span>}
+                    </div>
+                  )}
+                </div>
+
+                {/* Precio */}
+                <div className="rounded-xl border p-3 bg-white">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Precio delivery</div>
+                  {typeof precioFinalDrawer === 'number' ? (
+                    <div className="text-lg font-bold text-gray-900">{money(precioFinalDrawer)}</div>
+                  ) : (
+                    <div className="text-gray-500 text-xs">Sin confirmar</div>
+                  )}
+                  <div className="text-xs text-gray-500 mt-1">
+                    {s.tipoCliente === 'credito' ? 'Crédito semanal' : `Contado · paga: ${(s.pagoDelivery as any)?.quienPaga || '—'}`}
+                  </div>
+                  {s.cobroContraEntrega?.aplica && (
+                    <div className="mt-1 text-xs text-gray-700 flex items-center gap-1">
+                      <Wallet className="h-3 w-3 text-gray-400" />
+                      CE: <strong className="ml-0.5">{money(s.cobroContraEntrega.monto)}</strong>
+                    </div>
+                  )}
+                </div>
+
+                {/* Retiro */}
+                <div className="rounded-xl border p-3 bg-white">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2 flex items-center gap-1">
+                    <MapPin className="h-3 w-3" />Retiro
+                  </div>
+                  <div className="font-medium text-gray-900">{s.recoleccion.nombreApellido || '—'}</div>
+                  <div className="text-gray-600 mt-0.5 flex items-center gap-1"><Phone className="h-3 w-3 text-gray-400" />{s.recoleccion.celular}</div>
+                  <div className="text-gray-600 mt-0.5 text-xs">{s.recoleccion.direccionEscrita}</div>
+                  {getBestMapsUrl(s, 'recoleccion') && (
+                    <a href={getBestMapsUrl(s, 'recoleccion')!} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline mt-1">
+                      <ExternalLink className="h-3 w-3" />Ver en Maps
+                    </a>
+                  )}
+                </div>
+
+                {/* Entrega */}
+                <div className="rounded-xl border p-3 bg-white">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2 flex items-center gap-1">
+                    <MapPin className="h-3 w-3" />Entrega
+                  </div>
+                  <div className="font-medium text-gray-900">{s.entrega.nombreApellido || '—'}</div>
+                  <div className="text-gray-600 mt-0.5 flex items-center gap-1"><Phone className="h-3 w-3 text-gray-400" />{s.entrega.celular}</div>
+                  <div className="text-gray-600 mt-0.5 text-xs">{s.entrega.direccionEscrita}</div>
+                  {getBestMapsUrl(s, 'entrega') && (
+                    <a href={getBestMapsUrl(s, 'entrega')!} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline mt-1">
+                      <ExternalLink className="h-3 w-3" />Ver en Maps
+                    </a>
+                  )}
+                </div>
+
+                {/* Motorizado */}
+                {s.asignacion?.motorizadoNombre && (
+                  <div className="rounded-xl border p-3 bg-white">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2 flex items-center gap-1">
+                      <Truck className="h-3 w-3" />Motorizado
+                    </div>
+                    <div className="font-medium text-gray-900">{s.asignacion.motorizadoNombre}</div>
+                    {s.asignacion.motorizadoTelefono && <div className="text-gray-600 text-xs mt-0.5">{s.asignacion.motorizadoTelefono}</div>}
+                    <div className="text-xs text-gray-500 mt-1">Aceptación: <span className={`font-medium ${s.asignacion.estadoAceptacion === 'aceptada' ? 'text-green-700' : s.asignacion.estadoAceptacion === 'rechazada' ? 'text-red-700' : 'text-yellow-700'}`}>{s.asignacion.estadoAceptacion || '—'}</span></div>
+                  </div>
+                )}
+
+                {/* Fechas */}
+                <div className="rounded-xl border p-3 bg-white">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Historial</div>
+                  <div className="space-y-1 text-xs text-gray-600">
+                    <div>Creado: <span className="font-medium">{formatDateTime(s.createdAt)}</span></div>
+                    <div>Actualizado: <span className="font-medium">{formatDateTime(s.updatedAt)}</span></div>
+                    {s.entregadoAt && <div>Entregado: <span className="font-medium text-green-700">{formatDateTime(s.entregadoAt)}</span></div>}
+                  </div>
+                </div>
+
+                {/* Acciones */}
+                <div className="rounded-xl border p-3 bg-white">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Acciones</div>
+                  <div className="flex flex-col gap-2">
+                    <button onClick={() => togglePrioridad(s.id, s.prioridad)}
+                      className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium ${s.prioridad ? 'border-yellow-300 bg-yellow-50 text-yellow-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+                      <Star className={`h-4 w-4 ${s.prioridad ? 'fill-yellow-400 text-yellow-400' : ''}`} />
+                      {s.prioridad ? 'Quitar prioridad' : 'Marcar prioritaria'}
+                    </button>
+                    {s.estado === 'pendiente_confirmacion' && (
+                      <button onClick={() => { setDrawerSolicitudId(null); abrirConfirmarYAsignar(s) }}
+                        className="inline-flex items-center gap-2 rounded-lg bg-[#004aad] px-3 py-2 text-xs font-medium text-white hover:bg-[#003d94]">
+                        <CheckCircle2 className="h-4 w-4" />Confirmar + asignar
+                      </button>
+                    )}
+                    {s.estado === 'confirmada' && (
+                      <button onClick={() => { setDrawerSolicitudId(null); abrirConfirmarYAsignar(s) }}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">
+                        <Truck className="h-4 w-4" />Asignar rápido
+                      </button>
+                    )}
+                    {s.estado === 'asignada' && (
+                      <>
+                        <button onClick={() => { setDrawerSolicitudId(null); abrirReasignar(s) }}
+                          className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">
+                          <RefreshCcw className="h-4 w-4" />Reasignar
+                        </button>
+                        <button onClick={() => { rebotarAsignacion(s.id); setDrawerSolicitudId(null) }}
+                          className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">
+                          <RotateCcw className="h-4 w-4" />Rebotar
+                        </button>
+                      </>
+                    )}
+                    <Link href={`/panel/gestor/solicitudes/${s.id}`}
+                      className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">
+                      <ExternalLink className="h-4 w-4" />Abrir página completa
+                    </Link>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </>
+        )
+      })()}
 
       {openId && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-4 z-50">

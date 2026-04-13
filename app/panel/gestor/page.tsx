@@ -152,7 +152,17 @@ export default function PanelGestorPage() {
       limit(5)
     )
     const unsub = onSnapshot(q, (snap) => {
-      setCobrosAlerta(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
+      // Igual que en Cobros: excluir incidencias fantasma donde el motorizado ya cobró todo
+      const reales = snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() as any) }))
+        .filter((s: any) => {
+          const d = s.cobrosMotorizado?.delivery
+          const p = s.cobrosMotorizado?.producto
+          const hayNoRecibido = (d != null && d.recibio === false) || (p != null && p.recibio === false)
+          const hayCobroRegistrado = d != null || p != null
+          return !hayCobroRegistrado || hayNoRecibido
+        })
+      setCobrosAlerta(reales)
     })
     return () => unsub()
   }, [])

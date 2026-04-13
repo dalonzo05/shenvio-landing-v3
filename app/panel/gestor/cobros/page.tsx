@@ -17,6 +17,7 @@ import {
   deleteField,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import { registrarMovimiento } from '@/lib/financial-writes'
 import {
   AlertCircle,
   CheckCircle2,
@@ -338,6 +339,9 @@ function PagoModal({
         pagos: arrayUnion(pagoEntry),
         updatedAt: serverTimestamp(),
       })
+      await registrarMovimiento('pago_recibido', montoNum, uid,
+        `Pago crédito semanal · ${cobroSemanal.clienteCompany || cobroSemanal.clienteNombre} · sem ${cobroSemanal.semanaKey}`,
+        { comercioId: cobroSemanal.clienteUid })
       onClose()
     } catch (e: any) {
       setErr(e?.message || 'Error al guardar')
@@ -429,10 +433,15 @@ function PagoContadoModal({
     if (!formaPago) { setErr('Selecciona la forma de cobro'); return }
     setSaving(true); setErr(null)
     try {
+      const uid = auth.currentUser?.uid || 'desconocido'
+      const montoFinal = monto ?? 0
       const updates: any = {
         'cobroDelivery.estado': 'pagado',
         'cobroDelivery.pagadoAt': serverTimestamp(),
         'cobroDelivery.formaPago': formaPago,
+        'cobroDelivery.confirmadoPor': uid,
+        'cobroDelivery.confirmadoAt': serverTimestamp(),
+        'cobroDelivery.metodoPagoReal': formaPago === 'efectivo' ? 'efectivo' : 'transferencia_deposito',
       }
       if (nota.trim()) updates['cobroDelivery.notaPago'] = nota.trim()
       if (!orden.cobroDelivery) {
@@ -441,7 +450,46 @@ function PagoContadoModal({
         updates['cobroDelivery.quienPaga'] = orden.pagoDelivery?.quienPaga || ''
         updates['cobroDelivery.registradoAt'] = serverTimestamp()
       }
-      await updateDoc(doc(db, 'solicitudes_envio', orden.id), updates)
+
+      if (formaPago === 'transferencia') {
+        // Crear registro de depósito por transferencia del cliente
+        const depositoRef = doc(collection(db, 'ordenes_deposito'))
+        const depositoId = depositoRef.id
+        const b = writeBatch(db)
+        b.set(depositoRef, {
+          creadoAt: serverTimestamp(),
+          tipo: 'pago_delivery_deposito',
+          estado: 'confirmado',
+          destinatario: 'storkhub',
+          destinatarioId: 'storkhub',
+          destinatarioNombre: 'Storkhub',
+          cuentasDestino: [],
+          motorizadoUid: orden.asignacion?.motorizadoId ?? '',
+          motorizadoNombre: orden.asignacion?.motorizadoNombre ?? '',
+          solicitudIds: [orden.id],
+          montoTotal: montoFinal,
+          confirmadoMotorizado: false,
+          confirmadoGestor: true,
+          confirmadoGestorAt: serverTimestamp(),
+          confirmadoGestorUid: uid,
+          metadata: { referencia: nota.trim() || null, clienteNombre: nombre },
+        })
+        b.update(doc(db, 'solicitudes_envio', orden.id), {
+          ...updates,
+          'registro.deposito.confirmadoStorkhub': true,
+          'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
+          'registro.deposito.storkhubDepositoId': depositoId,
+        })
+        await b.commit()
+        await registrarMovimiento('pago_recibido', montoFinal, uid,
+          `Pago delivery por transferencia confirmado · ${nombre}`,
+          { solicitudId: orden.id, depositoId })
+      } else {
+        await updateDoc(doc(db, 'solicitudes_envio', orden.id), updates)
+        await registrarMovimiento('pago_recibido', montoFinal, uid,
+          `Pago contado confirmado · ${nombre} · ${formaPago}`,
+          { solicitudId: orden.id })
+      }
       onClose()
     } catch (e: any) {
       setErr(e?.message || 'Error al guardar')
@@ -658,7 +706,17 @@ export default function CobrosPage() {
 
   const incidenciasPendientes = useMemo(() =>
     incidencias
-      .filter((s) => s.cobroPendiente === true)
+      .filter((s) => {
+        if (s.cobroPendiente !== true) return false
+        // Solo mostrar si realmente hay un cobro no recibido.
+        // Si cobroPendiente quedó stale (motorizado eventualmente cobró todo), no mostrar.
+        const d = s.cobrosMotorizado?.delivery
+        const p = s.cobrosMotorizado?.producto
+        const hayNoRecibido = (d != null && d.recibio === false) || (p != null && p.recibio === false)
+        // Si no hay ningún cobro registrado todavía (motorizado aún no respondió), sí mostrar
+        const hayCobroRegistrado = d != null || p != null
+        return !hayCobroRegistrado || hayNoRecibido
+      })
       .sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0)),
     [incidencias]
   )

@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import { auth, db } from '@/fb/config'
-import { collection, doc, getDoc, onSnapshot, query, where } from 'firebase/firestore'
+import { collection, doc, getDoc, onSnapshot, query, where, orderBy } from 'firebase/firestore'
 import {
   LayoutDashboard,
   ClipboardList,
@@ -16,6 +16,12 @@ import {
   ChevronRight,
   AlertCircle,
   Wallet,
+  Receipt,
+  TrendingUp,
+  Users,
+  Star,
+  AlertTriangle,
+  DollarSign,
 } from 'lucide-react'
 
 export default function GestorLayout({ children }: { children: React.ReactNode }) {
@@ -24,6 +30,7 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
   const [loading, setLoading] = useState(true)
   const [collapsed, setCollapsed] = useState(false)
   const [cobrosPendientes, setCobrosPendientes] = useState(0)
+  const [metricas, setMetricas] = useState({ activas: 0, entregadasHoy: 0, conProblema: 0, pendCobro: 0, prioritarias: 0 })
 
   useEffect(() => {
     const run = async () => {
@@ -65,10 +72,50 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
       where('cobroPendiente', '==', true)
     )
     const unsub = onSnapshot(q, (snap) => {
-      setCobrosPendientes(snap.size)
+      // Solo contar si realmente hay un cobro no recibido (excluir incidencias fantasma)
+      const reales = snap.docs.filter((d) => {
+        const data = d.data()
+        const delivery = data?.cobrosMotorizado?.delivery
+        const producto = data?.cobrosMotorizado?.producto
+        const hayNoRecibido = (delivery != null && delivery.recibio === false) || (producto != null && producto.recibio === false)
+        const hayCobroRegistrado = delivery != null || producto != null
+        return !hayCobroRegistrado || hayNoRecibido
+      })
+      setCobrosPendientes(reales.length)
     })
     return () => unsub()
   }, [])
+
+  useEffect(() => {
+    if (loading) return
+    const q = query(collection(db, 'solicitudes_envio'), orderBy('createdAt', 'desc'))
+    const unsub = onSnapshot(q, (snap) => {
+      const docs = snap.docs.map(d => ({ id: d.id, ...d.data() } as any))
+      const hoy = new Date()
+      const isToday = (ts: any) => {
+        const d = ts?.toDate ? ts.toDate() : ts instanceof Date ? ts : null
+        if (!d) return false
+        return d.getDate() === hoy.getDate() && d.getMonth() === hoy.getMonth() && d.getFullYear() === hoy.getFullYear()
+      }
+      const TERMINALES = ['entregado', 'cancelada', 'rechazada']
+      const activas = docs.filter((s: any) => !TERMINALES.includes(s.estado)).length
+      const entregadasHoy = docs.filter((s: any) => s.estado === 'entregado' && isToday(s.entregadoAt || s.updatedAt)).length
+      const conProblema = docs.filter((s: any) => {
+        if (s.estado === 'entregado' && s.pagoDelivery?.tipo !== 'credito_semanal' && s.cobrosMotorizado?.delivery?.recibio === false) return true
+        if (s.registro?.deposito && !s.registro.deposito.confirmadoStorkhub) return true
+        return false
+      }).length
+      const pendCobro = docs.filter((s: any) => {
+        if (s.estado !== 'entregado') return false
+        if (s.pagoDelivery?.tipo === 'credito_semanal') return false
+        if (s.cobrosMotorizado?.delivery?.recibio === true) return false
+        return true
+      }).length
+      const prioritarias = docs.filter((s: any) => s.prioridad === true).length
+      setMetricas({ activas, entregadasHoy, conProblema, pendCobro, prioritarias })
+    })
+    return () => unsub()
+  }, [loading])
 
   if (loading) {
     return <div className="w-full px-6 py-6 text-sm text-gray-600">Validando permisos...</div>
@@ -139,6 +186,14 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
             />
 
             <NavItem
+              href="/panel/gestor/clientes"
+              icon={<Users size={18} />}
+              label="Clientes"
+              active={pathname.startsWith('/panel/gestor/clientes')}
+              collapsed={collapsed}
+            />
+
+            <NavItem
               href="/panel/gestor/base-datos"
               icon={<Database size={18} />}
               label="Base de datos"
@@ -171,12 +226,60 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               active={pathname.startsWith('/panel/gestor/depositos')}
               collapsed={collapsed}
             />
+
+            <NavItem
+              href="/panel/gestor/liquidaciones"
+              icon={<Receipt size={18} />}
+              label="Liquidaciones"
+              active={pathname.startsWith('/panel/gestor/liquidaciones')}
+              collapsed={collapsed}
+            />
+
+            <NavItem
+              href="/panel/gestor/financiero"
+              icon={<TrendingUp size={18} />}
+              label="Financiero"
+              active={pathname.startsWith('/panel/gestor/financiero')}
+              collapsed={collapsed}
+            />
           </nav>
         </div>
       </aside>
 
-      <main className="min-w-0 flex-1 overflow-hidden">
-        <div className="h-full overflow-auto p-4">{children}</div>
+      <main className="min-w-0 flex-1 overflow-hidden flex flex-col">
+        <div className="flex-1 overflow-auto p-4">{children}</div>
+
+        {/* ── BARRA INFERIOR GLOBAL ─── */}
+        <div className="shrink-0 bg-white border-t border-gray-200 shadow-[0_-1px_4px_rgba(0,0,0,0.06)]">
+          <div className="flex items-center gap-2 px-4 py-2 overflow-x-auto">
+            {([
+              { key: 'todos',           label: 'Activas',        value: metricas.activas,       color: 'blue',   filtro: '' },
+              { key: 'entregadas_hoy',  label: 'Entregadas hoy', value: metricas.entregadasHoy, color: 'green',  filtro: 'entregadas_hoy' },
+              { key: 'con_riesgo',      label: 'Con riesgo',     value: metricas.conProblema,   color: 'red',    filtro: 'con_riesgo' },
+              { key: 'pendiente_cobro', label: 'Pend. cobro',    value: metricas.pendCobro,     color: 'yellow', filtro: 'pendiente_cobro' },
+              { key: 'prioritarias',    label: 'Prioritarias',   value: metricas.prioritarias,  color: 'purple', filtro: 'prioritarias' },
+            ] as const).map(({ key, label, value, color, filtro }) => {
+              const colorMap: Record<string, string> = {
+                blue:   'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100',
+                green:  value > 0 ? 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100' : 'bg-gray-50 text-gray-400 border-gray-200',
+                red:    value > 0 ? 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100' : 'bg-gray-50 text-gray-400 border-gray-200',
+                yellow: value > 0 ? 'bg-yellow-50 text-yellow-700 border-yellow-200 hover:bg-yellow-100' : 'bg-gray-50 text-gray-400 border-gray-200',
+                purple: value > 0 ? 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100' : 'bg-gray-50 text-gray-400 border-gray-200',
+              }
+              const href = filtro ? `/panel/gestor/solicitudes?filtro=${filtro}` : '/panel/gestor/solicitudes'
+              return (
+                <Link
+                  key={key}
+                  href={href}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold whitespace-nowrap transition shrink-0 ${colorMap[color]}`}
+                >
+                  <span className="font-bold">{value}</span>
+                  {label}
+                </Link>
+              )
+            })}
+          </div>
+        </div>
       </main>
     </div>
   )

@@ -1,6 +1,6 @@
 // app/auth/action/page.tsx
 'use client'
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { auth } from '@/fb/config'
 import {
@@ -9,7 +9,7 @@ import {
   confirmPasswordReset,
 } from 'firebase/auth'
 
-export default function AuthActionPage() {
+function AuthActionContent() {
   const router = useRouter()
   const qp = useSearchParams()
 
@@ -44,8 +44,8 @@ export default function AuthActionPage() {
         }
 
         throw new Error('Acción no soportada.')
-      } catch (e: any) {
-        setError(e?.message || 'No se pudo procesar el enlace.')
+      } catch (e: unknown) {
+        setError((e as Error)?.message || 'No se pudo procesar el enlace.')
         setStatus('error')
       }
     }
@@ -60,8 +60,8 @@ export default function AuthActionPage() {
       if (!password || password.length < 6) throw new Error('Usá al menos 6 caracteres.')
       await confirmPasswordReset(auth, oobCode, password)
       setStatus('ok')
-    } catch (e: any) {
-      setError(e?.message || 'No se pudo cambiar la contraseña.')
+    } catch (e: unknown) {
+      setError((e as Error)?.message || 'No se pudo cambiar la contraseña.')
     } finally {
       setSubmitting(false)
     }
@@ -170,5 +170,17 @@ export default function AuthActionPage() {
         )}
       </div>
     </div>
+  )
+}
+
+export default function AuthActionPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <p className="text-gray-500">Cargando…</p>
+      </div>
+    }>
+      <AuthActionContent />
+    </Suspense>
   )
 }

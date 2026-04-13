@@ -54,14 +54,28 @@ function MapPicker({
   onSelect: (c: LatLng, address: string) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
   const mapRef = useRef<google.maps.Map | null>(null)
   const markerRef = useRef<google.maps.Marker | null>(null)
   const geocoderRef = useRef<google.maps.Geocoder | null>(null)
 
+  function placeMarker(g: typeof google, c: LatLng) {
+    markerRef.current?.setMap(null)
+    markerRef.current = new g.maps.Marker({ map: mapRef.current!, position: c, draggable: true })
+    markerRef.current.addListener('dragend', () => {
+      const pos = markerRef.current?.getPosition()
+      if (!pos) return
+      const cc = { lat: pos.lat(), lng: pos.lng() }
+      geocoderRef.current?.geocode({ location: cc }, (results, status) => {
+        onSelect(cc, status === 'OK' && results?.[0] ? results[0].formatted_address : '')
+      })
+    })
+  }
+
   useEffect(() => {
     let mounted = true
     getMapsLoader().load().then((google) => {
-      if (!mounted || !containerRef.current) return
+      if (!mounted || !containerRef.current || !searchRef.current) return
       const center = coord || { lat: 12.1364, lng: -86.2514 }
       mapRef.current = new google.maps.Map(containerRef.current, {
         center,
@@ -75,31 +89,32 @@ function MapPicker({
       })
       geocoderRef.current = new google.maps.Geocoder()
 
-      if (coord) {
-        markerRef.current = new google.maps.Marker({ map: mapRef.current, position: coord, draggable: true })
-        markerRef.current.addListener('dragend', () => {
-          const pos = markerRef.current?.getPosition()
-          if (!pos) return
-          const c = { lat: pos.lat(), lng: pos.lng() }
-          geocoderRef.current?.geocode({ location: c }, (results, status) => {
-            onSelect(c, status === 'OK' && results?.[0] ? results[0].formatted_address : '')
-          })
-        })
-      }
+      if (coord) placeMarker(google, coord)
+
+      const managua = new google.maps.LatLngBounds(
+        { lat: 12.05, lng: -86.35 },
+        { lat: 12.20, lng: -86.20 }
+      )
+      const autocomplete = new google.maps.places.Autocomplete(searchRef.current!, {
+        fields: ['geometry', 'formatted_address'],
+        componentRestrictions: { country: 'ni' },
+        bounds: managua,
+        strictBounds: false,
+      })
+      autocomplete.addListener('place_changed', () => {
+        const place = autocomplete.getPlace()
+        if (!place.geometry?.location) return
+        const c = { lat: place.geometry.location.lat(), lng: place.geometry.location.lng() }
+        mapRef.current?.panTo(c)
+        mapRef.current?.setZoom(16)
+        placeMarker(google, c)
+        onSelect(c, place.formatted_address || '')
+      })
 
       mapRef.current.addListener('click', (e: google.maps.MapMouseEvent) => {
         if (!e.latLng) return
         const c = { lat: e.latLng.lat(), lng: e.latLng.lng() }
-        markerRef.current?.setMap(null)
-        markerRef.current = new google.maps.Marker({ map: mapRef.current!, position: c, draggable: true })
-        markerRef.current.addListener('dragend', () => {
-          const pos = markerRef.current?.getPosition()
-          if (!pos) return
-          const cc = { lat: pos.lat(), lng: pos.lng() }
-          geocoderRef.current?.geocode({ location: cc }, (results, status) => {
-            onSelect(cc, status === 'OK' && results?.[0] ? results[0].formatted_address : '')
-          })
-        })
+        placeMarker(google, c)
         geocoderRef.current?.geocode({ location: c }, (results, status) => {
           onSelect(c, status === 'OK' && results?.[0] ? results[0].formatted_address : '')
         })
@@ -109,10 +124,16 @@ function MapPicker({
   }, [])
 
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <input
+        ref={searchRef}
+        type="text"
+        placeholder="Buscar dirección…"
+        style={{ width: '100%', border: '1px solid #e5e7eb', borderRadius: 10, padding: '9px 12px', fontSize: 14, color: '#111827', outline: 'none', background: '#fff', boxSizing: 'border-box', fontFamily: 'inherit' }}
+      />
       <div ref={containerRef} style={{ width: '100%', height: 220, borderRadius: 12, overflow: 'hidden', border: '1px solid #e5e7eb' }} />
-      <p style={{ fontSize: 11, color: '#9ca3af', marginTop: 6 }}>
-        Tocá el mapa para marcar la ubicación exacta del lugar. Podés arrastrar el pin.
+      <p style={{ fontSize: 11, color: '#9ca3af', margin: 0 }}>
+        Buscá una dirección o tocá el mapa para marcar. Podés arrastrar el pin.
       </p>
     </div>
   )
@@ -495,11 +516,6 @@ export default function AjustesPage() {
                 <label style={S.label}>Nota del punto <span style={{ color: '#9ca3af', fontWeight: 400 }}>(opcional)</span></label>
                 <input value={favNota} onChange={e => setFavNota(e.target.value)} placeholder='Ej: Bus 3:30pm Mayoreo, llamar al llegar...' style={S.input} />
                 <p style={{ fontSize: 11, color: '#9ca3af', margin: '5px 0 0' }}>Info contextual para el motorizado sobre este punto.</p>
-              </div>
-
-              <div>
-                <label style={S.label}>Link de Google Maps (opcional)</label>
-                <input value={favLink} onChange={e => setFavLink(e.target.value)} placeholder='Pegá el link de Google Maps si tenés' style={S.input} />
               </div>
 
               <div>

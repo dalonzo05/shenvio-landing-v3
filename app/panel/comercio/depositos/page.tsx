@@ -122,6 +122,9 @@ export default function DepositosPage() {
         .sort((a, b) => (tsToDate(b.creadoAt)?.getTime() ?? 0) - (tsToDate(a.creadoAt)?.getTime() ?? 0))
       setDepositos(list)
       setLoading(false)
+    }, (err) => {
+      console.error('[depositos] onSnapshot error:', err)
+      setLoading(false)
     })
     return () => unsub()
   }, [])
@@ -147,6 +150,8 @@ export default function DepositosPage() {
         }
       })
       setSolicitudesDetalle((prev) => ({ ...prev, ...updates }))
+    }).catch((err) => {
+      console.error('[depositos] solicitudes getDoc error:', err)
     })
   }, [expandedId, depositos])
 

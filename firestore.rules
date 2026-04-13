@@ -167,10 +167,27 @@ service cloud.firestore {
 
       allow read: if isAdminOrGestor()
         || isOwnSolicitudCliente()
-        || isAssignedMotorizado();
+        || isAssignedMotorizado()
+        || (isComercioRole() && resource.data.comercioUid == request.auth.uid);
 
-      allow update: if isAdminOrGestor()
-        || isAssignedMotorizado();
+      // Gestor/admin: acceso completo
+      allow update: if isAdminOrGestor();
+
+      // Motorizado: solo puede modificar campos operativos, NO financieros
+      allow update: if isAssignedMotorizado()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'estado',
+          'updatedAt',
+          'historial',
+          'entregadoAt',
+          'evidencias',
+          'cobrosMotorizado',
+          'cobroPendiente',
+          'cobroDelivery',
+          'asignacion',
+          'registro',
+          'pagoDelivery'
+        ]);
 
       allow delete: if false;
     }
@@ -208,6 +225,8 @@ service cloud.firestore {
 
     match /cobros_semanales/{docId} {
       allow read, write: if isAdminOrGestor();
+      // Motorizado necesita leer/escribir para registrar cobros de crédito al entregar
+      allow read, write: if isMotorizadoRole();
     }
 
     // Órdenes de depósito: agrupan viajes por motorizado + destino, almacenan boucher único
@@ -218,8 +237,37 @@ service cloud.firestore {
         || (isComercioRole()
             && resource.data.destinatario == 'comercio'
             && resource.data.destinatarioId == request.auth.uid);
-      allow update: if isAdminOrGestor()
+
+      // Gestor/admin: puede confirmar, rechazar y editar libremente
+      allow update: if isAdminOrGestor();
+
+      // Motorizado: solo puede subir boucher y pasar a en_revision
+      allow update: if isMotorizadoRole()
+        && resource.data.motorizadoUid == request.auth.uid
+        && resource.data.estado in ['pendiente_boucher', 'rechazado']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'boucher',
+          'estado',
+          'updatedAt'
+        ])
+        && request.resource.data.estado == 'en_revision';
+
+      allow delete: if isAdminOrGestor();
+    }
+
+    // Trail de auditoría financiera
+    match /movimientos_financieros/{id} {
+      allow read, write: if isAdminOrGestor();
+      // Motorizado puede crear registros de auditoría (cobros generados, depósitos subidos)
+      // pero no puede leer ni modificar registros existentes
+      allow create: if isMotorizadoRole();
+    }
+
+    // Liquidaciones semanales de motorizado: gestor/admin escribe, motorizado puede leer la suya
+    match /liquidaciones_motorizado/{id} {
+      allow read: if isAdminOrGestor()
         || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid);
+      allow create, update: if isAdminOrGestor();
       allow delete: if false;
     }
 

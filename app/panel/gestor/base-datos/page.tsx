@@ -853,8 +853,6 @@ export default function BaseDatosPage() {
                     <Td>
                       {(() => {
                         const dep = s.registro?.deposito
-                        if (dep?.confirmadoMotorizado && dep?.confirmadoAt)
-                          return <span className="text-xs text-gray-700">{formatDateTime(dep.confirmadoAt)}</span>
                         const dateC = dep?.confirmadoComercioAt
                         const dateS = dep?.confirmadoStorkhubAt
                         if (!dateC && !dateS) return <span className="text-gray-300 text-xs">—</span>
@@ -873,8 +871,6 @@ export default function BaseDatosPage() {
                     <Td>
                       {(() => {
                         const dep = s.registro?.deposito
-                        if (dep?.confirmadoMotorizado)
-                          return <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700">✓ Todo</span>
                         const okC = dep?.confirmadoComercio
                         const okS = dep?.confirmadoStorkhub
                         if (!okC && !okS) return <span className="inline-flex items-center rounded-full bg-yellow-50 border border-yellow-200 px-2 py-0.5 text-[11px] font-semibold text-yellow-700">Pendiente</span>

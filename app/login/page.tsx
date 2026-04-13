@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { Suspense, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Fredoka } from 'next/font/google'
@@ -12,7 +12,7 @@ import {
   browserSessionPersistence,
 } from 'firebase/auth'
 import { auth, db } from '@/fb/config'
-import { doc, getDoc } from 'firebase/firestore'
+import { doc, getDocFromServer } from 'firebase/firestore'
 
 const fredoka = Fredoka({ subsets: ['latin'], weight: ['400', '700'] })
 
@@ -21,7 +21,7 @@ const requireAccessCode = !!ACCESS_CODE
 
 async function getRedirectByRole(uid: string) {
   const ref = doc(db, 'usuarios', uid)
-  const snap = await getDoc(ref)
+  const snap = await getDocFromServer(ref)
 
   if (!snap.exists()) return '/panel'
 
@@ -39,7 +39,7 @@ async function getRedirectByRole(uid: string) {
   return '/panel'
 }
 
-export default function LoginPage() {
+function LoginContent() {
   const router = useRouter()
   const search = useSearchParams()
   const next = search.get('next')
@@ -66,8 +66,8 @@ export default function LoginPage() {
 
         const target = await getRedirectByRole(authUser.uid)
         router.replace(target)
-      } catch (err: any) {
-        setError(err?.message || 'No se pudo determinar el rol del usuario.')
+      } catch (err: unknown) {
+        setError((err as Error)?.message || 'No se pudo determinar el rol del usuario.')
       }
     }
 
@@ -96,8 +96,8 @@ export default function LoginPage() {
       await signIn(email.trim(), password)
       try { localStorage.setItem('storkhub:remember', remember ? 'true' : 'false') } catch {}
       // La redirección la hace el useEffect cuando authUser ya está cargado
-    } catch (err: any) {
-      setError(err?.message || 'No se pudo iniciar sesión.')
+    } catch (err: unknown) {
+      setError((err as Error)?.message || 'No se pudo iniciar sesión.')
     } finally {
       setSubmitting(false)
     }
@@ -107,14 +107,14 @@ export default function LoginPage() {
     setError(null)
     const e = email.trim()
     if (!e) {
-      setError('Ingresá tu correo y luego presioná “Olvidé mi contraseña”.')
+      setError('Ingresá tu correo y luego presioná "Olvidé mi contraseña".')
       return
     }
     try {
       await resetPassword(e)
       alert('Te enviamos un enlace para restablecer tu contraseña.')
-    } catch (err: any) {
-      setError(err?.message || 'No se pudo enviar el correo de recuperación.')
+    } catch (err: unknown) {
+      setError((err as Error)?.message || 'No se pudo enviar el correo de recuperación.')
     }
   }
 
@@ -123,8 +123,8 @@ export default function LoginPage() {
     try {
       await resendVerification()
       alert('Si tu cuenta no estaba verificada, te enviamos un correo de verificación.')
-    } catch (err: any) {
-      setError(err?.message || 'No se pudo reenviar el correo.')
+    } catch (err: unknown) {
+      setError((err as Error)?.message || 'No se pudo reenviar el correo.')
     }
   }
 
@@ -218,5 +218,17 @@ export default function LoginPage() {
         </p>
       </div>
     </div>
+  )
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <p className="text-gray-500">Cargando…</p>
+      </div>
+    }>
+      <LoginContent />
+    </Suspense>
   )
 }

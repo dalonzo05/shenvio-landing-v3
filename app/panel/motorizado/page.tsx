@@ -8,7 +8,8 @@ import {
   runTransaction, increment, arrayUnion, limit,
 } from 'firebase/firestore';
 import { auth, db } from '@/fb/config';
-import { compressImage, uploadEvidencia, uploadDepositoBoucher, type TipoEvidencia } from '@/fb/storage';
+import { compressImage, uploadEvidencia, uploadDepositoBoucher, type TipoEvidencia } from '@/fb/storage'
+import { registrarMovimiento } from '@/lib/financial-writes';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -60,6 +61,7 @@ type Solicitud = {
     rechazadoAt?: Timestamp | null;
   } | null;
   ownerSnapshot?: { companyName?: string; nombre?: string; phone?: string };
+  prioridad?: boolean;
   cobrosMotorizado?: {
     delivery?: { monto: number; recibio: boolean; at?: any; justificacion?: string };
     producto?: { monto: number; recibio: boolean; at?: any; justificacion?: string };
@@ -394,7 +396,8 @@ export default function PanelMotorizadoPage() {
           if (!cobros.producto.recibio) hayPendiente = true;
         }
       }
-      if (hayPendiente) p.cobroPendiente = true;
+      // Si se proveyeron cobros, actualizar cobroPendiente siempre (para limpiar incidencias resueltas)
+      if (cobros !== undefined) p.cobroPendiente = hayPendiente;
 
       // ── Defer delivery a entrega ──────────────────────────────────────────
       if (cobros?.delivery?.justificacion === 'Se acordó cobrar en la entrega') {
@@ -408,11 +411,16 @@ export default function PanelMotorizadoPage() {
         const esCredito = o.tipoCliente === 'credito' || quienPaga === 'credito_semanal'
         const semanaKey = esCredito ? getSemanaKey(new Date()) : undefined
 
+        // Si el motorizado ya cobró el delivery en la entrega, marcarlo como pagado directamente.
+        // Solo queda 'pendiente' si no se cobró (el gestor deberá gestionarlo).
+        const motorizadoYaCobro = cobros?.delivery?.recibio === true
         p['cobroDelivery'] = {
           monto: precioDelivery,
           tipoCliente: esCredito ? 'credito' : 'contado',
           quienPaga,
-          estado: precioDelivery === 0 ? 'no_cobrar' : 'pendiente',
+          estado: precioDelivery === 0
+            ? 'no_cobrar'
+            : (esCredito ? 'pendiente' : (motorizadoYaCobro ? 'pagado' : 'pendiente')),
           registradoAt: serverTimestamp(),
           ...(semanaKey ? { semanaKey } : {}),
         }
@@ -454,6 +462,9 @@ export default function PanelMotorizadoPage() {
               })
             }
           })
+          await registrarMovimiento('cobro_generado', precioDelivery, uid,
+            `Cobro generado al entregar orden ${o.id} (crédito semanal)`,
+            { solicitudId: o.id, motorizadoId: o.asignacion?.motorizadoId })
           return
         }
       }
@@ -463,6 +474,12 @@ export default function PanelMotorizadoPage() {
       b.update(doc(db, 'solicitudes_envio', o.id), p);
       if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: nuevo === 'entregado' ? 'disponible' : 'ocupado', updatedAt: serverTimestamp() });
       await b.commit();
+      if (nuevo === 'entregado') {
+        const precioDelivery = o.confirmacion?.precioFinalCordobas ?? 0
+        await registrarMovimiento('cobro_generado', precioDelivery, auth.currentUser?.uid ?? '',
+          `Cobro generado al entregar orden ${o.id}`,
+          { solicitudId: o.id, motorizadoId: o.asignacion?.motorizadoId })
+      }
     } catch (e) { console.error(e); setErr('No se pudo cambiar.'); }
     finally { setActionId(null); }
   }
@@ -526,7 +543,13 @@ export default function PanelMotorizadoPage() {
     };
     return todas
       .filter((o) => o.asignacion?.estadoAceptacion === 'aceptada' && ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'].includes(o.estado || ''))
-      .sort((a, b) => urgencyRank(a.estado) - urgencyRank(b.estado));
+      .sort((a, b) => {
+        // Prioritarias primero, luego por urgencia de estado
+        const aPriority = a.prioridad ? 0 : 1;
+        const bPriority = b.prioridad ? 0 : 1;
+        if (aPriority !== bPriority) return aPriority - bPriority;
+        return urgencyRank(a.estado) - urgencyRank(b.estado);
+      });
   }, [todas]);
 
   const entregadas = useMemo(() => sortDesc(todas.filter((o) => o.estado === 'entregado'), 'entregadoAt'), [todas]);
@@ -549,9 +572,6 @@ export default function PanelMotorizadoPage() {
     entregadas.filter((o) => {
       const dep = calcDeposito(o);
       if (dep.totalAlComercio === 0 && dep.totalAStorkhub === 0) return false;
-      // Compatibilidad con flag viejo
-      if (o.registro?.deposito?.confirmadoMotorizado) return false;
-      // Nuevos flags separados
       const comercioOk = dep.totalAlComercio === 0 || !!o.registro?.deposito?.confirmadoComercio;
       const storkhubOk = dep.totalAStorkhub === 0 || !!o.registro?.deposito?.confirmadoStorkhub;
       return !comercioOk || !storkhubOk;
@@ -572,7 +592,10 @@ export default function PanelMotorizadoPage() {
   const [comercioNames, setComercioNames] = useState<Record<string, string>>({});
   // Group-level boucher state: key = '__storkhub' | comercio userId
   const [groupBoucher, setGroupBoucher] = useState<Record<string, File | null>>({});
+  const [groupBoucherPreview, setGroupBoucherPreview] = useState<Record<string, string>>({});
   const [activeGroupKey, setActiveGroupKey] = useState<string | null>(null);
+  const [groupSubmitting, setGroupSubmitting] = useState<Record<string, boolean>>({});
+  const [groupError, setGroupError] = useState<Record<string, string>>({});
   const groupBoucherRef = useRef<HTMLInputElement>(null);
   const depositoUidsKey = depositosPendientes.map((o) => o.userId || '').join(',');
 
@@ -745,7 +768,13 @@ export default function PanelMotorizadoPage() {
             {enCurso.length === 0
               ? <EmptyState icon="🛵" title="Sin órdenes en curso" subtitle="Acepta una nueva orden para verla aquí" />
               : <>
-                {enCurso.length >= 2 && (
+                {enCurso.some(o => o.prioridad) && (
+                  <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 14, padding: '10px 14px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 16 }}>📌</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: '#1e40af' }}>Orden prioritaria marcada por el gestor — atendela primero</span>
+                  </div>
+                )}
+                {!enCurso.some(o => o.prioridad) && enCurso.length >= 2 && (
                   <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 14, padding: '10px 14px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ fontSize: 16 }}>⚠️</span>
                     <span style={{ fontSize: 13, fontWeight: 700, color: '#92400e' }}>{enCurso.length} órdenes activas — atendé la primera primero</span>
@@ -755,9 +784,16 @@ export default function PanelMotorizadoPage() {
                 const actions = nextActions(o.estado);
                 const est = estadoStyle(o.estado);
                 const dep = calcDeposito(o);
-                const isPriority = idx === 0 && enCurso.length >= 2;
+                const isPriority = !!o.prioridad;
                 return (
-                  <div key={o.id} style={{ ...card, ...(isPriority ? { borderLeft: '4px solid #004aad', borderRadius: '0 20px 20px 0' } : {}) }}>
+                  <div key={o.id} style={{
+                    ...card,
+                    borderTop: '1px solid #e5e7eb',
+                    borderRight: '1px solid #e5e7eb',
+                    borderBottom: '1px solid #e5e7eb',
+                    borderLeft: isPriority ? '4px solid #004aad' : '1px solid #e5e7eb',
+                    borderRadius: isPriority ? '0 20px 20px 0' : 20,
+                  }}>
                     <div style={{ height: 4, background: est.accent }} />
                     <div style={{ padding: '14px 16px 0' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -1061,16 +1097,29 @@ export default function PanelMotorizadoPage() {
                             style={{ width: '100%', background: groupBoucher[key] ? '#f0fdf4' : '#eff6ff', border: `1px solid ${groupBoucher[key] ? '#bbf7d0' : '#bfdbfe'}`, borderRadius: 10, padding: '9px', color: groupBoucher[key] ? '#16a34a' : '#2563eb', fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 4 }}>
                             {groupBoucher[key] ? `✅ Boucher adjunto · Cambiar` : '📸 Adjuntar boucher del depósito'}
                           </button>
+                          {groupBoucher[key] && groupBoucherPreview[key] && (
+                            <img
+                              src={groupBoucherPreview[key]}
+                              alt="Preview boucher"
+                              style={{ width: '100%', maxHeight: 140, objectFit: 'cover', borderRadius: 8, marginBottom: 6, border: '1px solid #bbf7d0' }}
+                            />
+                          )}
                           {!groupBoucher[key] && (
                             <p style={{ fontSize: 11, color: '#dc2626', margin: '0 0 8px', textAlign: 'center' as const }}>
                               El boucher es obligatorio para confirmar
                             </p>
                           )}
+                          {groupError[key] && (
+                            <p style={{ fontSize: 12, color: '#dc2626', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '8px 10px', marginBottom: 6, textAlign: 'center' as const }}>
+                              {groupError[key]}
+                            </p>
+                          )}
                           <button
-                            disabled={!groupBoucher[key]}
+                            disabled={!groupBoucher[key] || !!groupSubmitting[key]}
                             onClick={async () => {
-                              if (!groupBoucher[key]) return;
-                              if (!confirm(`¿Confirmás el depósito de ${fmt(g.total)} a Storkhub?`)) return;
+                              if (!groupBoucher[key] || groupSubmitting[key]) return;
+                              setGroupError((prev) => ({ ...prev, [key]: '' }));
+                              setGroupSubmitting((prev) => ({ ...prev, [key]: true }));
                               try {
                                 const depositoRef = doc(collection(db, 'ordenes_deposito'));
                                 const depositoId = depositoRef.id;
@@ -1083,6 +1132,8 @@ export default function PanelMotorizadoPage() {
                                 }
                                 await setDoc(depositoRef, {
                                   creadoAt: serverTimestamp(),
+                                  tipo: 'recaudacion_motorizado_storkhub',
+                                  estado: 'en_revision',
                                   destinatario: 'storkhub',
                                   destinatarioId: 'storkhub',
                                   destinatarioNombre: 'Storkhub',
@@ -1094,22 +1145,31 @@ export default function PanelMotorizadoPage() {
                                   boucher: boucherData,
                                   confirmadoMotorizado: true,
                                   confirmadoMotorizadoAt: serverTimestamp(),
+                                  confirmadoGestor: false,
                                 });
+                                // Marcar en solicitudes que el motorizado ya envió el depósito
+                                // (el gestor confirmará después → escribirá confirmadoStorkhub: true)
                                 const b = writeBatch(db);
                                 g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
-                                  'registro.deposito.confirmadoStorkhub': true,
-                                  'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
+                                  'registro.deposito.confirmadoMotorizado': true,
+                                  'registro.deposito.confirmadoAt': serverTimestamp(),
                                   'registro.deposito.storkhubDepositoId': depositoId,
                                 }));
                                 await b.commit();
+                                await registrarMovimiento('deposito_subido', g.total, auth.currentUser?.uid ?? '',
+                                  `Motorizado subió depósito a Storkhub · ${g.orders.length} órdenes`,
+                                  { depositoId, motorizadoId: auth.currentUser?.uid })
                                 setGroupBoucher((prev) => ({ ...prev, [key]: null }));
-                              } catch (e) {
+                                setGroupBoucherPreview((prev) => { const n = { ...prev }; delete n[key]; return n; });
+                              } catch (e: any) {
                                 console.error(e);
-                                alert('Error al confirmar el depósito. Intentá de nuevo.');
+                                setGroupError((prev) => ({ ...prev, [key]: e?.message || 'Error al confirmar. Intentá de nuevo.' }));
+                              } finally {
+                                setGroupSubmitting((prev) => ({ ...prev, [key]: false }));
                               }
                             }}
-                            style={{ width: '100%', background: groupBoucher[key] ? '#2563eb' : '#d1d5db', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: groupBoucher[key] ? 'pointer' : 'not-allowed' }}>
-                            ✅ Confirmar depósito a Storkhub
+                            style={{ width: '100%', background: groupBoucher[key] && !groupSubmitting[key] ? '#2563eb' : '#d1d5db', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: groupBoucher[key] && !groupSubmitting[key] ? 'pointer' : 'not-allowed' }}>
+                            {groupSubmitting[key] ? '⏳ Enviando...' : '✅ Confirmar depósito a Storkhub'}
                           </button>
                         </div>
                       </div>
@@ -1167,23 +1227,35 @@ export default function PanelMotorizadoPage() {
                               <p style={{ fontSize: 11, color: '#a78bfa', margin: 0, fontStyle: 'italic' }}>El comercio no tiene cuentas registradas. Coordiná el depósito directamente.</p>
                             )}
                           </div>
-                          {/* Boucher de grupo */}
                           {/* Boucher de grupo — obligatorio */}
                           <button
                             onClick={() => { setActiveGroupKey(key); groupBoucherRef.current?.click(); }}
                             style={{ width: '100%', background: groupBoucher[key] ? '#f0fdf4' : '#faf5ff', border: `1px solid ${groupBoucher[key] ? '#bbf7d0' : '#ddd6fe'}`, borderRadius: 10, padding: '9px', color: groupBoucher[key] ? '#16a34a' : '#7c3aed', fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 4 }}>
                             {groupBoucher[key] ? `✅ Boucher adjunto · Cambiar` : '📸 Adjuntar boucher del depósito'}
                           </button>
+                          {groupBoucher[key] && groupBoucherPreview[key] && (
+                            <img
+                              src={groupBoucherPreview[key]}
+                              alt="Preview boucher"
+                              style={{ width: '100%', maxHeight: 140, objectFit: 'cover', borderRadius: 8, marginBottom: 6, border: '1px solid #ddd6fe' }}
+                            />
+                          )}
                           {!groupBoucher[key] && (
                             <p style={{ fontSize: 11, color: '#dc2626', margin: '0 0 8px', textAlign: 'center' as const }}>
                               El boucher es obligatorio para confirmar
                             </p>
                           )}
+                          {groupError[key] && (
+                            <p style={{ fontSize: 12, color: '#dc2626', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '8px 10px', marginBottom: 6, textAlign: 'center' as const }}>
+                              {groupError[key]}
+                            </p>
+                          )}
                           <button
-                            disabled={!groupBoucher[key]}
+                            disabled={!groupBoucher[key] || !!groupSubmitting[key]}
                             onClick={async () => {
-                              if (!groupBoucher[key]) return;
-                              if (!confirm(`¿Confirmás el depósito de ${fmt(g.total)} al comercio ${g.nombre}?`)) return;
+                              if (!groupBoucher[key] || groupSubmitting[key]) return;
+                              setGroupError((prev) => ({ ...prev, [key]: '' }));
+                              setGroupSubmitting((prev) => ({ ...prev, [key]: true }));
                               try {
                                 const depositoRef = doc(collection(db, 'ordenes_deposito'));
                                 const depositoId = depositoRef.id;
@@ -1196,6 +1268,8 @@ export default function PanelMotorizadoPage() {
                                 }
                                 await setDoc(depositoRef, {
                                   creadoAt: serverTimestamp(),
+                                  tipo: 'recaudacion_motorizado_comercio',
+                                  estado: 'en_revision',
                                   destinatario: 'comercio',
                                   destinatarioId: g.uid,
                                   destinatarioNombre: g.nombre,
@@ -1207,22 +1281,31 @@ export default function PanelMotorizadoPage() {
                                   boucher: boucherData,
                                   confirmadoMotorizado: true,
                                   confirmadoMotorizadoAt: serverTimestamp(),
+                                  confirmadoGestor: false,
                                 });
+                                // Marcar en solicitudes que el motorizado ya envió el depósito
+                                // (el gestor confirmará después → escribirá confirmadoComercio: true)
                                 const b = writeBatch(db);
                                 g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
-                                  'registro.deposito.confirmadoComercio': true,
-                                  'registro.deposito.confirmadoComercioAt': serverTimestamp(),
+                                  'registro.deposito.confirmadoMotorizado': true,
+                                  'registro.deposito.confirmadoAt': serverTimestamp(),
                                   'registro.deposito.comercioDepositoId': depositoId,
                                 }));
                                 await b.commit();
+                                await registrarMovimiento('deposito_subido', g.total, auth.currentUser?.uid ?? '',
+                                  `Motorizado subió depósito a comercio ${g.nombre} · ${g.orders.length} órdenes`,
+                                  { depositoId, motorizadoId: auth.currentUser?.uid })
                                 setGroupBoucher((prev) => ({ ...prev, [key]: null }));
-                              } catch (e) {
+                                setGroupBoucherPreview((prev) => { const n = { ...prev }; delete n[key]; return n; });
+                              } catch (e: any) {
                                 console.error(e);
-                                alert('Error al confirmar el depósito. Intentá de nuevo.');
+                                setGroupError((prev) => ({ ...prev, [key]: e?.message || 'Error al confirmar. Intentá de nuevo.' }));
+                              } finally {
+                                setGroupSubmitting((prev) => ({ ...prev, [key]: false }));
                               }
                             }}
-                            style={{ width: '100%', background: groupBoucher[key] ? '#7c3aed' : '#d1d5db', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: groupBoucher[key] ? 'pointer' : 'not-allowed' }}>
-                            ✅ Confirmar depósito al comercio
+                            style={{ width: '100%', background: groupBoucher[key] && !groupSubmitting[key] ? '#7c3aed' : '#d1d5db', border: 'none', borderRadius: 12, padding: '12px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: groupBoucher[key] && !groupSubmitting[key] ? 'pointer' : 'not-allowed' }}>
+                            {groupSubmitting[key] ? '⏳ Enviando...' : '✅ Confirmar depósito al comercio'}
                           </button>
                         </div>
                       </div>
@@ -1243,7 +1326,11 @@ export default function PanelMotorizadoPage() {
         style={{ display: 'none' }}
         onChange={(e) => {
           const f = e.target.files?.[0];
-          if (f && activeGroupKey) setGroupBoucher((prev) => ({ ...prev, [activeGroupKey]: f }));
+          if (f && activeGroupKey) {
+            setGroupBoucher((prev) => ({ ...prev, [activeGroupKey]: f }));
+            const previewUrl = URL.createObjectURL(f);
+            setGroupBoucherPreview((prev) => ({ ...prev, [activeGroupKey]: previewUrl }));
+          }
           if (groupBoucherRef.current) groupBoucherRef.current.value = '';
         }}
       />
@@ -1312,7 +1399,7 @@ export default function PanelMotorizadoPage() {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-const card: React.CSSProperties = { background: '#fff', borderRadius: 20, marginBottom: 16, border: '1px solid #e5e7eb', overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' };
+const card: React.CSSProperties = { background: '#fff', borderRadius: 20, marginBottom: 16, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' };
 const btnPrimary: React.CSSProperties = { flex: 1, background: '#004aad', border: 'none', borderRadius: 14, padding: '14px 18px', color: '#fff', fontSize: 15, fontWeight: 800, cursor: 'pointer' };
 const btnSecondary: React.CSSProperties = { flexShrink: 0, background: '#fff', border: '1px solid #fecaca', borderRadius: 14, padding: '14px 18px', color: '#dc2626', fontSize: 14, fontWeight: 700, cursor: 'pointer' };
 const btnBlue: React.CSSProperties = { background: '#004aad', border: 'none', borderRadius: 14, padding: '16px 20px', color: '#fff', fontSize: 15, fontWeight: 800, cursor: 'pointer', width: '100%' };

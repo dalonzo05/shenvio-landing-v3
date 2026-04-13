@@ -6,6 +6,7 @@ import {
   collection,
   doc,
   getDocs,
+  increment,
   onSnapshot,
   query,
   serverTimestamp,
@@ -14,6 +15,8 @@ import {
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
+import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
+import ComercioSearchModal, { ComercioModalItem } from '@/app/Components/ComercioSearchModal'
 
 type LatLng = { lat: number; lng: number }
 type TipoUbicacion = 'referencial' | 'exacto'
@@ -47,6 +50,7 @@ type ClienteGuardado = {
   coord?: LatLng
   tipoUbicacion?: TipoUbicacion
   comercioUid?: string
+  totalViajes?: number
 }
 
 type PuntoFavorito = {
@@ -93,6 +97,11 @@ type DraftEnvio = {
 
 const CACHE_PREFIX = 'sol:'
 const CACHE_TTL = 10 * 60 * 1000
+
+function coordsMatch(a: LatLng | null, b: LatLng | null) {
+  if (!a || !b) return false
+  return Math.abs(a.lat - b.lat) < 0.00005 && Math.abs(a.lng - b.lng) < 0.00005
+}
 
 function tarifa(km: number): number {
   if (km < 2) return 70
@@ -295,6 +304,7 @@ async function guardarClienteEntrega(uid: string, data: Omit<ClienteGuardado, 'i
     celular: data.celular.trim(),
     comercioUid: uid,
     updatedAt: serverTimestamp(),
+    totalViajes: increment(1),
   }
   if (data.direccion?.trim()) payload.direccion = data.direccion.trim()
   if (data.nota?.trim()) payload.nota = data.nota.trim()
@@ -355,12 +365,16 @@ function MiniMap({
   onGeocode,
   color = '#004aad',
   label = 'R',
+  locked = false,
+  onUnlock,
 }: {
   coord: LatLng | null
   onSelect: (c: LatLng) => void
   onGeocode?: (addr: string) => void
   color?: string
   label?: string
+  locked?: boolean
+  onUnlock?: () => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -369,8 +383,13 @@ function MiniMap({
   const geocoderRef = useRef<google.maps.Geocoder | null>(null)
   const onSelectRef = useRef(onSelect)
   const onGeocodeRef = useRef(onGeocode)
+  const lockedRef = useRef(locked)
   useEffect(() => { onSelectRef.current = onSelect })
   useEffect(() => { onGeocodeRef.current = onGeocode })
+  useEffect(() => {
+    lockedRef.current = locked
+    if (markerRef.current) markerRef.current.setDraggable(!locked)
+  }, [locked])
 
   const reverseGeocode = useCallback((c: LatLng) => {
     geocoderRef.current?.geocode({ location: c }, (results, status) => {
@@ -386,11 +405,12 @@ function MiniMap({
     markerRef.current = new goog.maps.Marker({
       map: mapRef.current!,
       position: c,
-      draggable: true,
+      draggable: !lockedRef.current,
       icon: { path: goog.maps.SymbolPath.CIRCLE, fillColor: color, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 10 },
       label: { text: label, color: '#fff', fontWeight: 'bold', fontSize: '11px' },
     })
     markerRef.current.addListener('dragend', () => {
+      if (lockedRef.current) return
       const pos = markerRef.current?.getPosition()
       if (!pos) return
       const dc = { lat: pos.lat(), lng: pos.lng() }
@@ -457,7 +477,7 @@ function MiniMap({
       }
 
       mapRef.current.addListener('click', (e: google.maps.MapMouseEvent) => {
-        if (!e.latLng) return
+        if (!e.latLng || lockedRef.current) return
         placeMarker({ lat: e.latLng.lat(), lng: e.latLng.lng() }, google)
       })
     })
@@ -496,13 +516,25 @@ function MiniMap({
         type="text"
         placeholder="🔍 Buscar dirección en Google Maps..."
         style={{ ...S.input, marginBottom: 8 }}
+        disabled={locked}
       />
-      <div
-        ref={containerRef}
-        style={{ width: '100%', height: 220, borderRadius: 12, overflow: 'hidden', border: '1px solid #e5e7eb' }}
-      />
-      <p style={{ fontSize: 11, color: '#9ca3af', margin: '5px 0 0' }}>
-        Tocá el mapa para marcar el punto exacto. Podés arrastrar el pin para ajustar.
+      <div style={{ position: 'relative' }}>
+        <div
+          ref={containerRef}
+          style={{ width: '100%', height: 220, borderRadius: 12, overflow: 'hidden', border: '1px solid #e5e7eb' }}
+        />
+        {locked && (
+          <button
+            type="button"
+            onClick={onUnlock}
+            style={{ position: 'absolute', top: 8, right: 8, background: '#fff', border: '1px solid #d1d5db', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer', color: '#374151', display: 'flex', alignItems: 'center', gap: 5, boxShadow: '0 2px 8px rgba(0,0,0,0.15)', zIndex: 10 }}
+          >
+            ✏️ Mover punto
+          </button>
+        )}
+      </div>
+      <p style={{ fontSize: 11, color: locked ? '#9ca3af' : '#6b7280', margin: '5px 0 0' }}>
+        {locked ? '🔒 Punto fijado. Hacé click en "Mover punto" para ajustarlo.' : 'Tocá el mapa para marcar el punto exacto. Podés arrastrar el pin para ajustar.'}
       </p>
     </div>
   )
@@ -697,16 +729,17 @@ function ComercioSearchInput({
 
   const selected = comercios.find((c) => c.uid === selectedUid) || null
 
-  const filtered = useMemo(() => {
+  const MAX_RESULTS = 8
+
+  const { filtered, totalMatches } = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return comercios.slice(0, 8)
-    return comercios
-      .filter((c) =>
-        (c.companyName || c.nombre).toLowerCase().includes(q) ||
-        c.email.toLowerCase().includes(q) ||
-        (c.phone || '').includes(q)
-      )
-      .slice(0, 10)
+    if (!q) return { filtered: [], totalMatches: 0 }
+    const all = comercios.filter((c) =>
+      (c.companyName || c.nombre).toLowerCase().includes(q) ||
+      c.email.toLowerCase().includes(q) ||
+      (c.phone || '').includes(q)
+    )
+    return { filtered: all.slice(0, MAX_RESULTS), totalMatches: all.length }
   }, [query, comercios])
 
   useEffect(() => {
@@ -768,21 +801,33 @@ function ComercioSearchInput({
 
       {open && (
         <div style={{ ...S.dropdown, zIndex: 100 }}>
-          {filtered.length === 0 ? (
-            <div style={{ padding: '12px 14px', fontSize: 13, color: '#9ca3af' }}>Sin resultados</div>
+          {!query.trim() ? (
+            <div style={{ padding: '12px 14px', fontSize: 13, color: '#9ca3af', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>🔍</span>
+              <span>Escribí nombre o teléfono para buscar entre {comercios.length} comercio{comercios.length !== 1 ? 's' : ''}…</span>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div style={{ padding: '12px 14px', fontSize: 13, color: '#9ca3af' }}>Sin resultados para "{query}"</div>
           ) : (
-            filtered.map((c) => (
-              <button
-                key={c.uid}
-                type="button"
-                onClick={() => handleSelect(c)}
-                style={S.dropdownItem}
-              >
-                <span style={{ fontWeight: 700, color: '#111827' }}>{c.companyName || c.nombre}</span>
-                {c.phone && <span style={{ color: '#6b7280', fontSize: 12, marginLeft: 8 }}>{c.phone}</span>}
-                {c.email && <span style={{ color: '#9ca3af', fontSize: 11, display: 'block', marginTop: 1 }}>{c.email}</span>}
-              </button>
-            ))
+            <>
+              {filtered.map((c) => (
+                <button
+                  key={c.uid}
+                  type="button"
+                  onClick={() => handleSelect(c)}
+                  style={S.dropdownItem}
+                >
+                  <span style={{ fontWeight: 700, color: '#111827' }}>{c.companyName || c.nombre}</span>
+                  {c.phone && <span style={{ color: '#6b7280', fontSize: 12, marginLeft: 8 }}>{c.phone}</span>}
+                  {c.email && <span style={{ color: '#9ca3af', fontSize: 11, display: 'block', marginTop: 1 }}>{c.email}</span>}
+                </button>
+              ))}
+              {totalMatches > MAX_RESULTS && (
+                <div style={{ padding: '8px 14px', fontSize: 11, color: '#9ca3af', borderTop: '1px solid #f3f4f6', background: '#fafafa' }}>
+                  Mostrando {MAX_RESULTS} de {totalMatches} resultados — afinás la búsqueda para ver más
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -1220,11 +1265,34 @@ export default function GestorIngresarOrdenPage() {
   const [grande, setGrande] = useState(false)
   const [notaPaquete, setNotaPaquete] = useState('')
 
+  // ── Modal buscador de comercios ──
+  const [showComercioModal, setShowComercioModal] = useState(false)
+
+  // ── Modal buscador de clientes ──
+  const [showClienteModal, setShowClienteModal] = useState(false)
+
+  // ── Map lock + saved coord states ──
+  const [retiroLocked, setRetiroLocked] = useState(false)
+  const [entregaLocked, setEntregaLocked] = useState(false)
+  const [retiroSavedCoord, setRetiroSavedCoord] = useState<LatLng | null>(null)
+  const [entregaSavedCoord, setEntregaSavedCoord] = useState<LatLng | null>(null)
+
   // ── Manual price calculation ──
   const [calcResult, setCalcResult] = useState<{ km: number; precio: number } | null>(null)
   const [calcLoading, setCalcLoading] = useState(false)
   const [calcError, setCalcError] = useState<string | null>(null)
   const lastCalcKey = useRef<string | null>(null)
+
+  // Limpiar precio cuando cambia alguna coordenada (evita precio desactualizado)
+  const isFirstCoordRender = useRef(true)
+  useEffect(() => {
+    if (isFirstCoordRender.current) { isFirstCoordRender.current = false; return }
+    if (calcResult || calcError) {
+      setCalcResult(null)
+      setCalcError(null)
+      lastCalcKey.current = null
+    }
+  }, [retiro.coord, entrega.coord])
 
   const handleCalcularPrecio = () => {
     const o = retiro.coord
@@ -1262,6 +1330,8 @@ export default function GestorIngresarOrdenPage() {
     // que el re-render de selectedOwnerData pise la auto-selección)
     didAutoSelect.current = false
     setRetiro(blankRetiro())
+    setRetiroLocked(false)
+    setRetiroSavedCoord(null)
   }, [selectedOwnerUid])
 
   useEffect(() => {
@@ -1278,6 +1348,7 @@ export default function GestorIngresarOrdenPage() {
   const seleccionarFavorito = (fav: PuntoFavorito) => {
     if (fav.key === '__otro__') {
       setRetiro(blankRetiro())
+      setRetiroLocked(false)
       return
     }
     setRetiro({
@@ -1289,6 +1360,8 @@ export default function GestorIngresarOrdenPage() {
       coord: fav.coord || null,
       tipoUbicacion: fav.tipoUbicacion || 'referencial',
     })
+    setRetiroSavedCoord(fav.coord || null)
+    if (fav.coord) setRetiroLocked(true)
   }
 
   // ── Retiro autocomplete ──
@@ -1315,6 +1388,9 @@ export default function GestorIngresarOrdenPage() {
       coord: c.coord || null,
       tipoUbicacion: c.tipoUbicacion || 'referencial',
     })
+    setEntregaSavedCoord(c.coord || null)
+    if (c.coord) setEntregaLocked(true)
+    else setEntregaLocked(false)
   }
 
   // ── Invert ──
@@ -1414,6 +1490,7 @@ export default function GestorIngresarOrdenPage() {
 
       await addDoc(collection(db, 'solicitudes_envio'), {
         userId: selectedOwner.uid,
+        comercioUid: selectedOwner.uid,
         tipoCliente,
         tieneCotizacion: tieneCalculo,
         cotizacion: tieneCalculo
@@ -1574,7 +1651,7 @@ export default function GestorIngresarOrdenPage() {
         name: ncNombre.trim(),
         email: ncEmail.trim() || null,
         phone: ncTelefono.trim(),
-        rol: 'cliente',
+        rol: 'Comercio',
         activo: true,
         creadoPorGestor: true,
         sinAuth: true,
@@ -1636,13 +1713,59 @@ export default function GestorIngresarOrdenPage() {
       {/* ── Dueño de la orden ── */}
       <SectionCard title="Dueño de la orden" icon="🏪">
         <Field label="Comercio / cliente" required hint="La orden se guardará y cobrará a este comercio.">
-          <ComercioSearchInput
-            comercios={comercios}
-            selectedUid={selectedOwnerUid}
-            onSelect={setSelectedOwnerUid}
-            loading={loadingComercios}
-            onNuevo={() => { setModalNuevoComercio(true); setNcError('') }}
-          />
+          <div style={{ display: 'flex', gap: 8 }}>
+            {selectedOwner ? (
+              <div style={{ ...S.input, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f9fafb' }}>
+                <span style={{ fontWeight: 700, color: '#111827' }}>
+                  {selectedOwnerData?.name || selectedOwner.companyName || selectedOwner.nombre}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { setSelectedOwnerUid('') }}
+                  style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: 16, padding: '0 4px', lineHeight: 1 }}
+                >
+                  ✕
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => !loadingComercios && setShowComercioModal(true)}
+                style={{
+                  ...S.input, flex: 1, textAlign: 'left' as const, cursor: loadingComercios ? 'not-allowed' : 'pointer',
+                  color: '#9ca3af', display: 'flex', alignItems: 'center', gap: 8,
+                  background: loadingComercios ? '#f9fafb' : '#fff',
+                }}
+              >
+                <span style={{ fontSize: 15 }}>🔍</span>
+                <span style={{ fontSize: 14 }}>
+                  {loadingComercios ? 'Cargando comercios...' : `Buscar entre ${comercios.length} comercios…`}
+                </span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowComercioModal(true)}
+              disabled={loadingComercios}
+              style={{
+                ...S.btnOutline,
+                padding: '10px 14px', fontSize: 13, fontWeight: 700,
+                whiteSpace: 'nowrap' as const, borderColor: '#004aad',
+                color: '#004aad', background: '#eff6ff', height: 42,
+                opacity: loadingComercios ? 0.5 : 1,
+                cursor: loadingComercios ? 'not-allowed' : 'pointer',
+              }}
+            >
+              🔍 Buscar
+            </button>
+            <button
+              type="button"
+              onClick={() => { setModalNuevoComercio(true); setNcError('') }}
+              style={{ ...S.btnOutline, whiteSpace: 'nowrap' as const, fontSize: 13, padding: '9px 14px' }}
+            >
+              + Nuevo
+            </button>
+          </div>
         </Field>
 
         {selectedOwner && (
@@ -1834,11 +1957,33 @@ export default function GestorIngresarOrdenPage() {
               Ubicación en el mapa
               {retiro.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
             </label>
+
+            {/* Banner: el punto favorito tiene coord guardado y fue movido */}
+            {retiroSavedCoord && !coordsMatch(retiro.coord, retiroSavedCoord) && (
+              <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, padding: '8px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+                <span style={{ fontSize: 12, color: '#92400e', fontWeight: 600 }}>
+                  📍 Este punto tiene una ubicación guardada
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRetiro((prev) => ({ ...prev, coord: retiroSavedCoord }))
+                    setRetiroLocked(true)
+                  }}
+                  style={{ background: '#d97706', border: 'none', borderRadius: 6, padding: '5px 12px', fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer', whiteSpace: 'nowrap' as const }}
+                >
+                  Usar punto guardado
+                </button>
+              </div>
+            )}
+
             <MiniMap
               coord={retiro.coord}
               color="#004aad"
               label="R"
-              onSelect={(c) => setRetiro((prev) => ({ ...prev, coord: c }))}
+              locked={retiroLocked}
+              onUnlock={() => setRetiroLocked(false)}
+              onSelect={(c) => { setRetiro((prev) => ({ ...prev, coord: c })); setRetiroLocked(true) }}
               onGeocode={(addr) => setGeoRetiro(addr)}
             />
           </div>
@@ -1867,17 +2012,41 @@ export default function GestorIngresarOrdenPage() {
 
       {/* ── ENTREGA ── */}
       <SectionCard title="Punto de entrega" icon="🏠">
-        {/* Pool global de clientes */}
-        <AutocompleteInput
-          label="Nombre del destinatario"
-          value={entrega.nombre}
-          onChange={(v) => setEntrega((prev) => ({ ...prev, nombre: v }))}
-          onSelect={handleSelectEntrega}
-          placeholder="Ej: María García"
-          clientes={poolPuntos}
-          comercioUidActual={selectedOwnerUid || undefined}
-          required
-        />
+        {/* Nombre del destinatario + botón para abrir modal buscador */}
+        <div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <AutocompleteInput
+                label="Nombre del destinatario"
+                value={entrega.nombre}
+                onChange={(v) => setEntrega((prev) => ({ ...prev, nombre: v }))}
+                onSelect={handleSelectEntrega}
+                placeholder="Ej: María García"
+                clientes={poolPuntos}
+                comercioUidActual={selectedOwnerUid || undefined}
+                required
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowClienteModal(true)}
+              style={{
+                ...S.btnOutline,
+                padding: '10px 14px',
+                fontSize: 13,
+                fontWeight: 700,
+                whiteSpace: 'nowrap' as const,
+                borderColor: '#004aad',
+                color: '#004aad',
+                background: '#eff6ff',
+                marginBottom: 0,
+                height: 42,
+              }}
+            >
+              🔍 Buscar
+            </button>
+          </div>
+        </div>
 
         <div>
           <AutocompleteInput
@@ -1909,11 +2078,33 @@ export default function GestorIngresarOrdenPage() {
             Ubicación en el mapa
             {entrega.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
           </label>
+
+          {/* Banner: el cliente tiene coord guardado y el punto actual difiere */}
+          {entregaSavedCoord && !coordsMatch(entrega.coord, entregaSavedCoord) && (
+            <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, padding: '8px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 12, color: '#92400e', fontWeight: 600 }}>
+                📍 Este cliente tiene una ubicación guardada
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setEntrega((prev) => ({ ...prev, coord: entregaSavedCoord }))
+                  setEntregaLocked(true)
+                }}
+                style={{ background: '#d97706', border: 'none', borderRadius: 6, padding: '5px 12px', fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer', whiteSpace: 'nowrap' as const }}
+              >
+                Usar punto guardado
+              </button>
+            </div>
+          )}
+
           <MiniMap
             coord={entrega.coord}
             color="#16a34a"
             label="E"
-            onSelect={(c) => setEntrega((prev) => ({ ...prev, coord: c }))}
+            locked={entregaLocked}
+            onUnlock={() => setEntregaLocked(false)}
+            onSelect={(c) => { setEntrega((prev) => ({ ...prev, coord: c })); setEntregaLocked(true) }}
             onGeocode={(addr) => setGeoEntrega(addr)}
           />
         </div>
@@ -2243,13 +2434,15 @@ export default function GestorIngresarOrdenPage() {
                     </button>
                   ))}
                 </div>
-                {montoCE !== '' && montoDelivery > 0 && (
-                  <p style={{ fontSize: 11, color: '#d46b08', margin: '8px 0 0' }}>
-                    {deducirDelivery === 'deducir_del_cobro'
-                      ? `El destinatario pagará C$ ${montoProducto}. Se depositará C$ ${montoADepositarComercio} al comercio.`
-                      : `El destinatario pagará C$ ${montoProducto + montoDelivery}. Se depositará C$ ${montoProducto} al comercio.`}
-                  </p>
-                )}
+                <p style={{ fontSize: 11, color: '#d46b08', margin: '8px 0 0' }}>
+                  {deducirDelivery === 'deducir_del_cobro'
+                    ? montoCE !== '' && montoDelivery > 0
+                      ? `El motorizado cobrará solo C$ ${montoProducto} al destinatario. Se depositará C$ ${montoADepositarComercio} al comercio (el delivery se descuenta de su cobro).`
+                      : 'El motorizado cobrará solo el monto del producto al destinatario. El delivery se descuenta de lo que se deposita al comercio.'
+                    : montoCE !== '' && montoDelivery > 0
+                      ? `El motorizado cobrará C$ ${montoProducto + montoDelivery} al destinatario (producto + delivery). Se depositará C$ ${montoProducto} al comercio.`
+                      : 'El motorizado cobrará el producto + delivery al destinatario. Al comercio se le deposita solo el monto del producto.'}
+                </p>
               </div>
             )}
           </div>
@@ -2375,6 +2568,56 @@ export default function GestorIngresarOrdenPage() {
           {saving ? 'Guardando...' : formularioCompleto ? '✓ Crear orden interna' : '⚠️ Completar info para enviar'}
         </button>
       </div>
+
+      {/* ── MODAL BUSCADOR DE COMERCIOS ── */}
+      <ComercioSearchModal
+        open={showComercioModal}
+        onClose={() => setShowComercioModal(false)}
+        onSelect={(c: ComercioModalItem) => setSelectedOwnerUid(c.uid)}
+        comercios={comercios.map((c) => ({
+          uid: c.uid,
+          nombre: c.nombre,
+          companyName: c.companyName,
+          email: c.email,
+          phone: c.phone,
+          address: c.address,
+        }))}
+      />
+
+      {/* ── MODAL BUSCADOR DE CLIENTES ── */}
+      <ClienteSearchModal
+        open={showClienteModal}
+        onClose={() => setShowClienteModal(false)}
+        onSelect={(c: ClienteModalItem) => {
+          handleSelectEntrega({
+            id: c.id,
+            nombre: c.nombre,
+            celular: c.celular,
+            direccion: c.direccion,
+            nota: c.nota,
+            coord: c.coord,
+            tipoUbicacion: c.tipoUbicacion as TipoUbicacion | undefined,
+            comercioUid: c.comercioUid,
+          })
+        }}
+        clientes={poolPuntos.map((p) => ({
+          id: p.id,
+          nombre: p.nombre,
+          celular: p.celular,
+          direccion: p.direccion,
+          nota: p.nota,
+          coord: p.coord,
+          tipoUbicacion: p.tipoUbicacion,
+          comercioUid: p.comercioUid,
+          totalViajes: p.totalViajes,
+        }))}
+        comercioUidActual={selectedOwnerUid || undefined}
+        comercios={comercios.map((c) => ({
+          uid: c.uid,
+          nombre: c.nombre,
+          companyName: c.companyName,
+        }))}
+      />
 
       {/* ── MODAL NUEVO COMERCIO ── */}
       {modalNuevoComercio && (
