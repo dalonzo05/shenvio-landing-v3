@@ -247,7 +247,7 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
       </aside>
 
       <main className="min-w-0 flex-1 overflow-hidden flex flex-col">
-        <div className="flex-1 overflow-auto p-4">{children}</div>
+        <div className="flex-1 overflow-auto flex flex-col p-4 min-h-0">{children}</div>
 
         {/* ── BARRA INFERIOR GLOBAL ─── */}
         <div className="shrink-0 bg-white border-t border-gray-200 shadow-[0_-1px_4px_rgba(0,0,0,0.06)]">

@@ -1125,7 +1125,7 @@ export default function GestorSolicitudesPage() {
   }, [fechaFiltro, fechaDesde, fechaHasta])
 
   return (
-    <div className="h-full flex flex-col gap-3 min-w-0">
+    <div className="flex-1 min-h-0 flex flex-col gap-3 min-w-0">
       <style jsx>{`
         @keyframes cardPop {
           0% {
