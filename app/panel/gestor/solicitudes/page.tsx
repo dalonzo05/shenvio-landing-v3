@@ -1164,213 +1164,120 @@ export default function GestorSolicitudesPage() {
         </div>
       )}
 
-      <section className="shrink-0 rounded-3xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-        <div className="border-b border-gray-100 bg-gradient-to-r from-slate-50 via-white to-blue-50/70 px-4 md:px-5 py-5">
-          <div className="flex flex-col gap-4">
-            <div className="flex flex-col 2xl:flex-row 2xl:items-center 2xl:justify-between gap-4">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700">
-                    <Activity className="h-3.5 w-3.5" />
-                    En vivo
-                  </span>
-                  <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
-                    <Sparkles className="h-3.5 w-3.5" />
-                    Operación sincronizada
-                  </span>
-                </div>
+      {/* ── TOOLBAR COMPACTA ─── */}
+      <section className="shrink-0 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+        {/* Fila 1: título + filtros principales */}
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100 flex-wrap">
+          <span className="font-bold text-sm text-gray-900 whitespace-nowrap mr-1">Solicitudes</span>
+          <span className="inline-flex items-center gap-0.5 rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 shrink-0">
+            <Activity className="h-3 w-3" /> En vivo
+          </span>
 
-                <h1 className="mt-3 text-3xl font-bold tracking-tight text-gray-900">
-                  Centro de solicitudes
-                </h1>
-                <p className="mt-1 text-sm text-gray-600">
-                  Confirma, asigna y monitorea pedidos en tiempo real desde un solo panel.
-                </p>
-              </div>
+          <div className="w-px h-4 bg-gray-200 shrink-0" />
 
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-2.5 w-full 2xl:w-auto">
-                <div className="relative min-w-[220px]">
-                  <Search className="h-4 w-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    value={busqueda}
-                    onChange={(e) => setBusqueda(e.target.value)}
-                    placeholder="Buscar orden, nombre o teléfono"
-                    className="w-full rounded-xl border border-gray-200 bg-white py-2.5 pl-9 pr-3 text-sm outline-none transition focus:border-blue-300 focus:ring-4 focus:ring-blue-50"
-                  />
-                </div>
-
-                <select
-                  value={estadoFiltro}
-                  onChange={(e) => setEstadoFiltro(e.target.value as EstadoSolicitud)}
-                  className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-blue-300 focus:ring-4 focus:ring-blue-50"
-                >
-                  {ESTADOS.map((estado) => (
-                    <option key={estado.key} value={estado.key}>
-                      {estado.label}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  value={cotizacionFiltro}
-                  onChange={(e) => setCotizacionFiltro(e.target.value as FiltroCotizacion)}
-                  className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-blue-300 focus:ring-4 focus:ring-blue-50"
-                >
-                  <option value="todas">Todas las cotizaciones</option>
-                  <option value="con">Con cotización</option>
-                  <option value="sin">Sin cotización</option>
-                </select>
-
-                <select
-                  value={asignacionFiltro}
-                  onChange={(e) => setAsignacionFiltro(e.target.value as FiltroAsignacion)}
-                  className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-blue-300 focus:ring-4 focus:ring-blue-50"
-                >
-                  <option value="todas">Todas las asignaciones</option>
-                  <option value="sin_asignar">Sin asignar</option>
-                  <option value="asignadas">Con motorizado</option>
-                </select>
-
-                <select
-                  value={ordenUI}
-                  onChange={(e) => setOrdenUI(e.target.value as FiltroOrden)}
-                  className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-blue-300 focus:ring-4 focus:ring-blue-50"
-                >
-                  <option value="recientes">Recientes primero</option>
-                  <option value="antiguas">Antiguas primero</option>
-                  <option value="prioritario">Prioridad operativa</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-2.5">
-              <select
-                value={fechaFiltro}
-                onChange={(e) => setFechaFiltro(e.target.value as FiltroFecha)}
-                className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-blue-300 focus:ring-4 focus:ring-blue-50"
-              >
-                <option value="todos">Todas las fechas</option>
-                <option value="hoy">Hoy</option>
-                <option value="ayer">Ayer</option>
-                <option value="7dias">Últimos 7 días</option>
-                <option value="personalizado">Rango personalizado</option>
-              </select>
-
-              {fechaFiltro === 'personalizado' && (
-                <>
-                  <input
-                    type="date"
-                    value={fechaDesde}
-                    onChange={(e) => setFechaDesde(e.target.value)}
-                    className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-blue-300 focus:ring-4 focus:ring-blue-50"
-                  />
-                  <input
-                    type="date"
-                    value={fechaHasta}
-                    onChange={(e) => setFechaHasta(e.target.value)}
-                    className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-blue-300 focus:ring-4 focus:ring-blue-50"
-                  />
-                </>
-              )}
-
-              <div className="xl:col-span-2 flex flex-wrap items-center gap-2">
-                <span className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700">
-                  <CalendarDays className="h-3.5 w-3.5" />
-                  Fecha: {resumenFecha}
-                </span>
-
-                {estadoFiltro === 'entregado' && (
-                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                    Entregadas muestra hoy por defecto; lo anterior queda para historial
-                  </span>
-                )}
-              </div>
-            </div>
+          {/* Buscar */}
+          <div className="relative min-w-[160px] flex-1 max-w-[220px]">
+            <Search className="h-3.5 w-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <input
+              value={busqueda}
+              onChange={(e) => setBusqueda(e.target.value)}
+              placeholder="Buscar orden, nombre o tel."
+              className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-7 pr-2 text-xs outline-none focus:border-blue-300"
+            />
           </div>
+
+          {/* Filtro cotización */}
+          <select
+            value={cotizacionFiltro}
+            onChange={(e) => setCotizacionFiltro(e.target.value as FiltroCotizacion)}
+            className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-300"
+          >
+            <option value="todas">Cotización: todas</option>
+            <option value="con">Con cotización</option>
+            <option value="sin">Sin cotización</option>
+          </select>
+
+          {/* Filtro asignación */}
+          <select
+            value={asignacionFiltro}
+            onChange={(e) => setAsignacionFiltro(e.target.value as FiltroAsignacion)}
+            className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-300"
+          >
+            <option value="todas">Asignación: todas</option>
+            <option value="sin_asignar">Sin asignar</option>
+            <option value="asignadas">Con motorizado</option>
+          </select>
+
+          {/* Filtro fecha */}
+          <select
+            value={fechaFiltro}
+            onChange={(e) => setFechaFiltro(e.target.value as FiltroFecha)}
+            className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-300"
+          >
+            <option value="todos">Fecha: todas</option>
+            <option value="hoy">Hoy</option>
+            <option value="ayer">Ayer</option>
+            <option value="7dias">Últimos 7 días</option>
+            <option value="personalizado">Rango...</option>
+          </select>
+
+          {fechaFiltro === 'personalizado' && (
+            <>
+              <input type="date" value={fechaDesde} onChange={(e) => setFechaDesde(e.target.value)}
+                className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-300" />
+              <input type="date" value={fechaHasta} onChange={(e) => setFechaHasta(e.target.value)}
+                className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-300" />
+            </>
+          )}
+
+          {/* Orden */}
+          <select
+            value={ordenUI}
+            onChange={(e) => setOrdenUI(e.target.value as FiltroOrden)}
+            className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-300"
+          >
+            <option value="recientes">↓ Recientes</option>
+            <option value="antiguas">↑ Antiguas</option>
+            <option value="prioritario">⭐ Prioridad</option>
+          </select>
+
+          {totalActivos > 0 && (
+            <button onClick={limpiarFiltrosTabla} className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-[11px] font-medium text-gray-600 hover:bg-gray-50">
+              <Eraser className="h-3 w-3" /> Limpiar
+            </button>
+          )}
         </div>
 
-        <div className="px-4 md:px-5 py-4 border-b border-gray-100">
-          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-9 gap-2.5">
-            {ESTADOS.map((estado) => {
-              const count = resumenEstados[estado.key]
-              const activo = estadoFiltro === estado.key
-              const animating = cardsAnimating.includes(estado.key)
-
-              return (
-                <button
-                  key={estado.key}
-                  onClick={() => setEstadoFiltro(estado.key)}
-                  className={`rounded-xl border px-3 py-2.5 text-left transition-all duration-200 ${
-                    activo
-                      ? 'border-blue-300 bg-blue-50 shadow-sm ring-1 ring-blue-100'
-                      : 'border-gray-200 bg-white hover:border-gray-300'
-                  } ${animating ? 'animate-card-pop' : ''}`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                      {estado.short}
-                    </span>
-                    <span
-                      className={`text-lg font-bold tabular-nums ${
-                        activo ? 'text-blue-700' : 'text-gray-900'
-                      }`}
-                    >
-                      {count}
-                    </span>
-                  </div>
-                </button>
-              )
-            })}
-          </div>
-
-          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-            <div className="rounded-xl border border-gray-200 bg-gray-50/70 px-4 py-3">
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                Pendientes por confirmar
-              </div>
-              <div className="mt-1 text-xl font-bold text-gray-900 tabular-nums">{pendientesTotales}</div>
-            </div>
-
-            <div className="rounded-xl border border-gray-200 bg-gray-50/70 px-4 py-3">
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                Confirmadas sin motorizado
-              </div>
-              <div className="mt-1 text-xl font-bold text-gray-900 tabular-nums">
-                {sinAsignarConfirmadas}
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-gray-200 bg-gray-50/70 px-4 py-3">
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                Entregadas hoy
-              </div>
-              <div className="mt-1 text-xl font-bold text-gray-900 tabular-nums">{hoyEntregadas}</div>
-            </div>
-          </div>
-
-          <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
-            <span className="font-semibold text-gray-900">{titulo}</span>
-            <span className="text-gray-500">({itemsFiltrados.length})</span>
-
-            <span className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs text-gray-600">
-              <Filter className="h-3.5 w-3.5" />
-              {totalActivos > 0 ? `${totalActivos} filtro(s) activos` : 'Sin filtros extra'}
-            </span>
-
-            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs text-emerald-700">
-              <Activity className="h-3.5 w-3.5" />
-              Actualización automática
-            </span>
-
-            {totalActivos > 0 && (
+        {/* Fila 2: tabs de estado + métricas inline */}
+        <div className="flex items-center gap-0 overflow-x-auto border-b border-gray-100">
+          {ESTADOS.map((estado) => {
+            const count = resumenEstados[estado.key]
+            const activo = estadoFiltro === estado.key
+            const animating = cardsAnimating.includes(estado.key)
+            return (
               <button
-                onClick={limpiarFiltrosTabla}
-                className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                key={estado.key}
+                onClick={() => setEstadoFiltro(estado.key)}
+                className={`shrink-0 flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 transition-all whitespace-nowrap ${
+                  activo
+                    ? 'border-blue-500 text-blue-700 bg-blue-50/60'
+                    : 'border-transparent text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+                } ${animating ? 'animate-card-pop' : ''}`}
               >
-                <Eraser className="h-3.5 w-3.5" />
-                Limpiar filtros
+                {estado.short}
+                <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums ${
+                  activo ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'
+                }`}>{count}</span>
               </button>
-            )}
+            )
+          })}
+          <div className="flex-1" />
+          {/* Métricas inline al lado derecho */}
+          <div className="flex items-center gap-3 px-3 text-[11px] text-gray-500 shrink-0 border-l border-gray-100">
+            <span>Pend: <strong className="text-gray-800">{pendientesTotales}</strong></span>
+            <span>Sin moto: <strong className="text-gray-800">{sinAsignarConfirmadas}</strong></span>
+            <span>Hoy: <strong className="text-gray-800">{hoyEntregadas}</strong></span>
+            <span className="text-gray-400">({itemsFiltrados.length} mostradas)</span>
           </div>
         </div>
       </section>
@@ -1392,54 +1299,29 @@ export default function GestorSolicitudesPage() {
       ) : (
         <div className="flex-1 min-h-0 flex flex-col gap-3 min-w-0">
           <div className="hidden xl:flex flex-col flex-1 min-h-0 rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-            <div className="shrink-0 border-b border-gray-200 bg-gray-50/80 px-4 py-3">
-              <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
-                  <span className="inline-flex items-center gap-1 font-medium text-gray-900">
-                    <SlidersHorizontal className="h-4 w-4 text-gray-500" />
-                    Tabla operativa
-                  </span>
-                  <span className="text-gray-400">•</span>
-                  <span>
-                    Mostrando <strong>{itemsFiltrados.length === 0 ? 0 : startIndex + 1}</strong>–
-                    <strong>{endIndex}</strong> de <strong>{itemsFiltrados.length}</strong>
-                  </span>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <select
-                    value={pageSize}
-                    onChange={(e) => setPageSize(Number(e.target.value))}
-                    className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-300"
-                  >
-                    <option value={10}>10 por página</option>
-                    <option value={20}>20 por página</option>
-                    <option value={50}>50 por página</option>
-                  </select>
-
-                  <button
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    disabled={safePage === 1}
-                    className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    <ChevronLeft className="h-4 w-4" />
-                    Anterior
-                  </button>
-
-                  <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700">
-                    Página <strong>{safePage}</strong> de <strong>{totalPages}</strong>
-                  </div>
-
-                  <button
-                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                    disabled={safePage === totalPages}
-                    className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    Siguiente
-                    <ChevronRight className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
+            <div className="shrink-0 border-b border-gray-200 bg-gray-50/60 px-3 py-1.5 flex items-center gap-3">
+              <span className="text-xs text-gray-500">
+                <strong>{itemsFiltrados.length === 0 ? 0 : startIndex + 1}</strong>–<strong>{endIndex}</strong> / <strong>{itemsFiltrados.length}</strong>
+              </span>
+              <div className="flex-1" />
+              <select
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value))}
+                className="rounded border border-gray-200 bg-white px-2 py-1 text-xs outline-none focus:border-blue-300"
+              >
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+              </select>
+              <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={safePage === 1}
+                className="rounded border border-gray-200 bg-white p-1 text-gray-600 disabled:opacity-30 hover:bg-gray-100">
+                <ChevronLeft className="h-3.5 w-3.5" />
+              </button>
+              <span className="text-xs text-gray-600">{safePage}/{totalPages}</span>
+              <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={safePage === totalPages}
+                className="rounded border border-gray-200 bg-white p-1 text-gray-600 disabled:opacity-30 hover:bg-gray-100">
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
             </div>
 
             <div ref={tableScrollRef} className="flex-1 min-h-0 overflow-auto" style={{ scrollbarGutter: 'stable' as any }}>
