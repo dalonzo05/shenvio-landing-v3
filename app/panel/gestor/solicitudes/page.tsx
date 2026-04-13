@@ -1443,17 +1443,17 @@ export default function GestorSolicitudesPage() {
             </div>
 
             <div ref={tableScrollRef} className="flex-1 min-h-0 overflow-auto" style={{ scrollbarGutter: 'stable' as any }}>
-              <table className="min-w-[1850px] w-full text-sm">
+              <table className="min-w-[1520px] w-full text-sm">
                 <thead className="sticky top-0 z-20 bg-gray-50 border-b border-gray-200 shadow-sm">
                   <tr className="text-left text-gray-600">
-                    <th className="px-3 py-3 font-medium min-w-[220px] border-r border-gray-200">Orden</th>
-                    <th className="px-3 py-3 font-medium min-w-[220px] border-r border-gray-200">Estado</th>
-                    <th className="px-3 py-3 font-medium min-w-[340px] border-r border-gray-200">Retiro</th>
-                    <th className="px-3 py-3 font-medium min-w-[340px] border-r border-gray-200">Entrega</th>
-                    <th className="px-3 py-3 font-medium min-w-[170px] border-r border-gray-200">Precio</th>
-                    <th className="px-3 py-3 font-medium min-w-[220px] border-r border-gray-200">Motorizado</th>
-                    <th className="px-3 py-3 font-medium min-w-[160px] border-r border-gray-200">Aceptación</th>
-                    <th className="px-3 py-3 font-medium min-w-[160px] sticky right-0 bg-gray-50 z-20 border-l border-gray-200">
+                    <th className="px-3 py-2.5 font-medium min-w-[190px] border-r border-gray-200">Orden</th>
+                    <th className="px-3 py-2.5 font-medium min-w-[210px] border-r border-gray-200">Estado</th>
+                    <th className="px-3 py-2.5 font-medium min-w-[260px] border-r border-gray-200">Retiro</th>
+                    <th className="px-3 py-2.5 font-medium min-w-[260px] border-r border-gray-200">Entrega</th>
+                    <th className="px-3 py-2.5 font-medium min-w-[140px] border-r border-gray-200">Precio</th>
+                    <th className="px-3 py-2.5 font-medium min-w-[170px] border-r border-gray-200">Motorizado</th>
+                    <th className="px-3 py-2.5 font-medium min-w-[130px] border-r border-gray-200">Aceptación</th>
+                    <th className="px-3 py-2.5 font-medium min-w-[160px] sticky right-0 bg-gray-50 z-20 border-l border-gray-200">
                       Acciones
                     </th>
                   </tr>
@@ -1544,245 +1544,165 @@ export default function GestorSolicitudesPage() {
 
                     return (
                       <tr key={s.id} className="align-middle hover:bg-blue-50/60 transition-colors group">
-                        <td className="px-3 py-3 border-r border-gray-100">
+                        <td className="px-3 py-2 border-r border-gray-100">
                           <Link
                             href={`/panel/gestor/solicitudes/${s.id}`}
-                            className="font-semibold text-gray-900 hover:text-blue-700 hover:underline"
+                            className="block font-semibold text-xs text-gray-900 hover:text-blue-700 hover:underline truncate max-w-[170px]"
+                            title={s.id}
                           >
                             {s.id}
                           </Link>
-
-                          <div className="text-xs text-gray-500 mt-1">{formatDateTime(s.createdAt)}</div>
-                          <div className="text-xs text-gray-500 mt-1">
-                            {s.tieneCotizacion ? 'Con cotización' : 'Sin cotización'} · {s.tipoCliente}
+                          <div className="text-[11px] text-gray-500 mt-0.5 truncate">
+                            {formatDateTime(s.createdAt)}
                           </div>
-
-                          {typeof s?.cotizacion?.distanciaKm === 'number' && (
-                            <div className="text-xs text-gray-500 mt-1">
-                              Distancia: {s.cotizacion.distanciaKm} km
-                            </div>
-                          )}
+                          <div className="text-[11px] text-gray-400 mt-0.5">
+                            {s.tipoCliente}{typeof s?.cotizacion?.distanciaKm === 'number' ? ` · ${s.cotizacion.distanciaKm}km` : ''}
+                          </div>
                         </td>
 
-                        <td className="px-3 py-3 border-r border-gray-100">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${estadoClass(s.estado)}`}>
+                        <td className="px-3 py-2 border-r border-gray-100">
+                          {/* Fila 1: estado + prioridad + timer */}
+                          <div className="flex flex-wrap items-center gap-1">
+                            <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${estadoClass(s.estado)}`}>
                               {statusLabel(s.estado)}
                             </span>
                             {s.prioridad && (
-                              <span className="inline-flex items-center gap-0.5 rounded-full border border-yellow-300 bg-yellow-50 px-2 py-0.5 text-[10px] font-semibold text-yellow-700">
-                                <Star className="h-2.5 w-2.5 fill-yellow-400 text-yellow-400" />
-                                Prioritaria
+                              <span className="inline-flex items-center rounded-full border border-yellow-300 bg-yellow-50 px-1.5 py-0.5 text-[10px] font-semibold text-yellow-700">
+                                <Star className="h-2.5 w-2.5 fill-yellow-400" />
+                              </span>
+                            )}
+                            {typeof rem === 'number' && (
+                              <span className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${sem.className}`}>
+                                {formatMMSS(rem)}
                               </span>
                             )}
                           </div>
 
+                          {/* Fila 2: financiero + riesgo */}
                           {(() => {
                             const ef = getEstadoFinanciero(s)
                             const riesgos = getRiesgos(s)
-                            const efMap: Record<EstadoFinanciero, { label: string; className: string; icon: React.ReactNode }> = {
-                              pendiente: { label: 'Pend. cobro', className: 'bg-yellow-50 text-yellow-700 border-yellow-200', icon: <Clock className="h-2.5 w-2.5" /> },
-                              pagado: { label: 'Cobrado', className: 'bg-green-50 text-green-700 border-green-200', icon: <CheckCircle2 className="h-2.5 w-2.5" /> },
-                              en_revision: { label: 'En revisión', className: 'bg-blue-50 text-blue-700 border-blue-200', icon: <FileCheck className="h-2.5 w-2.5" /> },
-                              problema: { label: 'Problema pago', className: 'bg-red-50 text-red-700 border-red-200', icon: <AlertTriangle className="h-2.5 w-2.5" /> },
-                              credito: { label: 'Crédito', className: 'bg-gray-100 text-gray-600 border-gray-200', icon: <DollarSign className="h-2.5 w-2.5" /> },
+                            const efMap: Record<EstadoFinanciero, { label: string; className: string }> = {
+                              pendiente: { label: 'Pend. cobro', className: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
+                              pagado:    { label: 'Cobrado',     className: 'bg-green-50 text-green-700 border-green-200' },
+                              en_revision:{ label: 'En revisión',className: 'bg-blue-50 text-blue-700 border-blue-200' },
+                              problema:  { label: '⚠ Pago',     className: 'bg-red-50 text-red-700 border-red-200' },
+                              credito:   { label: 'Crédito',    className: 'bg-gray-100 text-gray-600 border-gray-200' },
                             }
                             const efInfo = efMap[ef]
                             return (
-                              <div className="mt-1.5 flex flex-wrap gap-1">
-                                <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${efInfo.className}`}>
-                                  {efInfo.icon}{efInfo.label}
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                <span className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${efInfo.className}`}>
+                                  {efInfo.label}
                                 </span>
                                 {riesgos.length > 0 && (
-                                  <span className="inline-flex items-center gap-0.5 rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-700">
-                                    <AlertTriangle className="h-2.5 w-2.5" />
-                                    {riesgos.length} riesgo{riesgos.length > 1 ? 's' : ''}
+                                  <span className="inline-flex items-center gap-0.5 rounded-full border border-red-300 bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">
+                                    <AlertTriangle className="h-2.5 w-2.5" />{riesgos.length}
                                   </span>
                                 )}
                               </div>
                             )
                           })()}
 
-                          {typeof rem === 'number' && (
-                            <div className="mt-2">
-                              <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${sem.className}`}>
-                                {formatMMSS(rem)} · {sem.label}
-                              </span>
-                            </div>
-                          )}
-
-                          <div className="mt-3">
-                            <label className="block text-[11px] font-medium uppercase tracking-wide text-gray-500 mb-1">
-                              Corregir estado
-                            </label>
-
+                          {/* Fila 3: dropdown de estado (sin label) */}
+                          <div className="mt-1.5">
                             {(esEntregada || s.estado === 'rechazada' || s.estado === 'cancelada') ? (
-                              <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-2 text-xs text-gray-600">
-                                <Lock className="h-3.5 w-3.5" />
-                                Orden cerrada
+                              <div className="inline-flex items-center gap-1 rounded border border-gray-200 bg-gray-50 px-2 py-1 text-[10px] text-gray-500">
+                                <Lock className="h-3 w-3" /> Cerrada
                               </div>
                             ) : (
                               <select
                                 value={s.estado}
                                 onChange={(e) => cambiarEstado(s.id, e.target.value as EstadoSolicitud)}
-                                className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs outline-none focus:border-blue-300"
+                                className="w-full rounded border border-gray-200 bg-white px-2 py-1 text-[11px] outline-none focus:border-blue-300"
                               >
-                                <option value={s.estado} disabled>{statusLabel(s.estado)} (actual)</option>
+                                <option value={s.estado} disabled>{statusLabel(s.estado)}</option>
                                 {(TRANSICIONES_VALIDAS[s.estado] ?? []).map((key) => {
                                   const e = ESTADOS.find((x) => x.key === key)
-                                  return e ? (
-                                    <option key={e.key} value={e.key}>{e.label}</option>
-                                  ) : null
+                                  return e ? <option key={e.key} value={e.key}>{e.label}</option> : null
                                 })}
                               </select>
                             )}
                           </div>
                         </td>
 
-                        <td className="px-3 py-3 border-r border-gray-100">
-                          <div className="flex items-start gap-2">
-                            <User className="h-4 w-4 text-gray-400 mt-0.5 shrink-0" />
-                            <div className="min-w-0">
-                              <div className="font-medium text-gray-900">{s.recoleccion.nombreApellido || '—'}</div>
-                              <div className="text-gray-700 mt-1 flex items-center gap-1">
-                                <Phone className="h-3.5 w-3.5 text-gray-400" />
-                                {s.recoleccion.celular}
-                              </div>
-                              <div className="text-gray-600 mt-1 break-words flex items-start gap-1">
-                                <MapPin className="h-3.5 w-3.5 text-gray-400 mt-0.5 shrink-0" />
-                                <span>{s.recoleccion.direccionEscrita}</span>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {retiroMaps && (
-                              <a
-                                href={retiroMaps}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center gap-1 text-xs text-blue-700 hover:underline"
-                              >
-                                <ExternalLink className="h-3.5 w-3.5" />
-                                Maps
+                        <td className="px-3 py-2 border-r border-gray-100">
+                          <div className="text-xs font-medium text-gray-900 truncate">{s.recoleccion.nombreApellido || '—'}</div>
+                          <div className="text-[11px] text-gray-600 mt-0.5">{s.recoleccion.celular}</div>
+                          <div className="text-[11px] text-gray-500 mt-0.5 truncate" title={s.recoleccion.direccionEscrita}>{s.recoleccion.direccionEscrita}</div>
+                          {retiroMaps && (
+                            <div className="mt-1 flex gap-1">
+                              <a href={retiroMaps} target="_blank" rel="noreferrer" title="Ver en Maps" className="rounded p-1 text-blue-600 bg-blue-50 hover:bg-blue-100 transition">
+                                <MapPin className="h-3 w-3" />
                               </a>
-                            )}
-                            {retiroMaps && (
-                              <button
-                                onClick={() => handleCopy(retiroMaps, 'Link de retiro copiado')}
-                                className="inline-flex items-center gap-1 text-xs text-gray-700 hover:underline"
-                              >
-                                <Copy className="h-3.5 w-3.5" />
-                                Copiar link
+                              <button onClick={() => handleCopy(retiroMaps, 'Link retiro copiado')} title="Copiar link" className="rounded p-1 text-gray-500 bg-gray-100 hover:bg-gray-200 transition">
+                                <Copy className="h-3 w-3" />
                               </button>
-                            )}
-                          </div>
-                        </td>
-
-                        <td className="px-3 py-3 border-r border-gray-100">
-                          <div className="flex items-start gap-2">
-                            <User className="h-4 w-4 text-gray-400 mt-0.5 shrink-0" />
-                            <div className="min-w-0">
-                              <div className="font-medium text-gray-900">{s.entrega.nombreApellido || '—'}</div>
-                              <div className="text-gray-700 mt-1 flex items-center gap-1">
-                                <Phone className="h-3.5 w-3.5 text-gray-400" />
-                                {s.entrega.celular}
-                              </div>
-                              <div className="text-gray-600 mt-1 break-words flex items-start gap-1">
-                                <MapPin className="h-3.5 w-3.5 text-gray-400 mt-0.5 shrink-0" />
-                                <span>{s.entrega.direccionEscrita}</span>
-                              </div>
-                            </div>
-                          </div>
-
-                          {s.cobroContraEntrega?.aplica && (
-                            <div className="text-xs text-gray-700 mt-2 flex items-center gap-1">
-                              <Wallet className="h-3.5 w-3.5 text-gray-400" />
-                              CE: <span className="font-semibold">{money(s.cobroContraEntrega.monto)}</span>
                             </div>
                           )}
-
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {entregaMaps && (
-                              <a
-                                href={entregaMaps}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center gap-1 text-xs text-blue-700 hover:underline"
-                              >
-                                <ExternalLink className="h-3.5 w-3.5" />
-                                Maps
-                              </a>
-                            )}
-                            {entregaMaps && (
-                              <button
-                                onClick={() => handleCopy(entregaMaps, 'Link de entrega copiado')}
-                                className="inline-flex items-center gap-1 text-xs text-gray-700 hover:underline"
-                              >
-                                <Copy className="h-3.5 w-3.5" />
-                                Copiar link
-                              </button>
-                            )}
-                          </div>
                         </td>
 
-                        <td className="px-3 py-3 border-r border-gray-100">
+                        <td className="px-3 py-2 border-r border-gray-100">
+                          <div className="text-xs font-medium text-gray-900 truncate">{s.entrega.nombreApellido || '—'}</div>
+                          <div className="text-[11px] text-gray-600 mt-0.5 flex items-center gap-1.5">
+                            <span>{s.entrega.celular}</span>
+                            {s.cobroContraEntrega?.aplica && (
+                              <span className="inline-flex items-center gap-0.5 rounded-full bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                <Wallet className="h-2.5 w-2.5" />{money(s.cobroContraEntrega.monto)}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-gray-500 mt-0.5 truncate" title={s.entrega.direccionEscrita}>{s.entrega.direccionEscrita}</div>
+                          {entregaMaps && (
+                            <div className="mt-1 flex gap-1">
+                              <a href={entregaMaps} target="_blank" rel="noreferrer" title="Ver en Maps" className="rounded p-1 text-blue-600 bg-blue-50 hover:bg-blue-100 transition">
+                                <MapPin className="h-3 w-3" />
+                              </a>
+                              <button onClick={() => handleCopy(entregaMaps, 'Link entrega copiado')} title="Copiar link" className="rounded p-1 text-gray-500 bg-gray-100 hover:bg-gray-200 transition">
+                                <Copy className="h-3 w-3" />
+                              </button>
+                            </div>
+                          )}
+                        </td>
+
+                        <td className="px-3 py-2 border-r border-gray-100">
                           {typeof s.confirmacion?.precioFinalCordobas === 'number' ? (
-                            <div className="font-semibold text-gray-900">
-                              {money(s.confirmacion.precioFinalCordobas)}
-                            </div>
+                            <div className="font-semibold text-xs text-gray-900">{money(s.confirmacion.precioFinalCordobas)}</div>
                           ) : typeof (s as any)?.pagoDelivery?.montoSugerido === 'number' ? (
-                            <div className="text-gray-700">
-                              Sugerido: {money((s as any).pagoDelivery.montoSugerido)}
-                            </div>
+                            <div className="text-[11px] text-gray-500">~{money((s as any).pagoDelivery.montoSugerido)}</div>
                           ) : typeof s?.cotizacion?.precioSugerido === 'number' ? (
-                            <div className="text-gray-700">
-                              Sugerido: {money(s.cotizacion.precioSugerido)}
-                            </div>
+                            <div className="text-[11px] text-gray-500">~{money(s.cotizacion.precioSugerido)}</div>
                           ) : (
-                            <div className="text-gray-500">—</div>
+                            <div className="text-[11px] text-gray-400">—</div>
                           )}
-
-                          <div className="text-xs text-gray-500 mt-1">
-                            {s.tipoCliente === 'credito'
-                              ? 'Crédito semanal'
-                              : `Contado (${(s.pagoDelivery as any)?.quienPaga || '—'})`}
+                          <div className="text-[11px] text-gray-400 mt-0.5 truncate">
+                            {s.tipoCliente === 'credito' ? 'Crédito' : `Contado · ${(s.pagoDelivery as any)?.quienPaga || '—'}`}
                           </div>
                         </td>
 
-                        <td className="px-3 py-3 border-r border-gray-100">
+                        <td className="px-3 py-2 border-r border-gray-100">
                           {s.asignacion?.motorizadoNombre ? (
                             <>
-                              <div className="font-medium text-gray-900">{s.asignacion.motorizadoNombre}</div>
-                              <div className="text-gray-700 mt-1">{s.asignacion.motorizadoTelefono || '—'}</div>
-                              <div className="text-xs text-gray-500 mt-1">
-                                Asignado: {formatDateTime(s.asignacion.asignadoAt)}
-                              </div>
+                              <div className="text-xs font-medium text-gray-900 truncate">{s.asignacion.motorizadoNombre}</div>
+                              <div className="text-[11px] text-gray-600 mt-0.5">{s.asignacion.motorizadoTelefono || '—'}</div>
                             </>
                           ) : (
-                            <div className="text-gray-500">Sin asignar</div>
+                            <div className="text-[11px] text-gray-400">Sin asignar</div>
                           )}
                         </td>
 
-                        <td className="px-3 py-3 border-r border-gray-100">
+                        <td className="px-3 py-2 border-r border-gray-100">
                           {s.estado === 'asignada' ? (
-                            <>
-                              <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${aceptacionClass(s.asignacion || undefined)}`}>
-                                {aceptacionLabel(s.asignacion || undefined)}
-                              </span>
-                              {s.asignacion?.aceptadoAt && (
-                                <div className="text-xs text-gray-500 mt-1">
-                                  {formatDateTime(s.asignacion.aceptadoAt)}
-                                </div>
-                              )}
-                            </>
+                            <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${aceptacionClass(s.asignacion || undefined)}`}>
+                              {aceptacionLabel(s.asignacion || undefined)}
+                            </span>
                           ) : (
-                            <div className="text-gray-500">—</div>
+                            <div className="text-[11px] text-gray-400">—</div>
                           )}
                         </td>
 
-                        <td className="px-2 py-3 sticky right-0 bg-white z-10 border-l border-gray-200 group-hover:bg-blue-50">
-                          <div className="flex flex-col gap-1.5 min-w-[150px]">
+                        <td className="px-2 py-2 sticky right-0 bg-white z-10 border-l border-gray-200 group-hover:bg-blue-50">
+                          <div className="flex flex-col gap-1 min-w-[150px]">
 
                             {/* CTA primaria según estado */}
                             {s.estado === 'pendiente_confirmacion' && (
