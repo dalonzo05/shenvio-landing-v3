@@ -412,8 +412,12 @@ export default function PanelMotorizadoPage() {
         const semanaKey = esCredito ? getSemanaKey(new Date()) : undefined
 
         // Si el motorizado ya cobró el delivery en la entrega, marcarlo como pagado directamente.
+        // Para recolección, el cobro se confirma en el paso 'retirado' (cobrosMotorizado.delivery).
         // Solo queda 'pendiente' si no se cobró (el gestor deberá gestionarlo).
-        const motorizadoYaCobro = cobros?.delivery?.recibio === true
+        const esRecoleccion = quienPaga === 'recoleccion'
+        const motorizadoYaCobro =
+          cobros?.delivery?.recibio === true ||
+          (esRecoleccion && o.cobrosMotorizado?.delivery?.recibio === true)
         p['cobroDelivery'] = {
           monto: precioDelivery,
           tipoCliente: esCredito ? 'credito' : 'contado',

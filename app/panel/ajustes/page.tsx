@@ -8,7 +8,6 @@ import {
   readCompanyByUid,
   upsertUserProfileByUid,
   upsertCompanyByUid,
-  type CompanyPayload,
   type BankAccount,
 } from '@/fb/data'
 import {
@@ -192,9 +191,7 @@ export default function AjustesPage() {
 
   // Feedback
   const [savingProfile, setSavingProfile] = useState(false)
-  const [savingCompany, setSavingCompany] = useState(false)
   const [msgProfile, setMsgProfile] = useState<string | null>(null)
-  const [msgCompany, setMsgCompany] = useState<string | null>(null)
   const [msgPwd, setMsgPwd] = useState<string | null>(null)
 
   useEffect(() => {
@@ -253,17 +250,23 @@ export default function AjustesPage() {
     finally { setSavingProfile(false) }
   }
 
-  // ── Company ──
+  // ── Company (solo cuentas bancarias) ──
+  const [savingCompany, setSavingCompany] = useState(false)
+  const [msgCompany, setMsgCompany] = useState<string | null>(null)
+
   const saveCompany = async () => {
     setSavingCompany(true); setMsgCompany(null)
     try {
       const accountsClean = accounts.filter(a => a.bank || a.number || a.holder).map(a => ({ bank: (a.bank || '').trim(), number: (a.number || '').trim(), holder: (a.holder || '').trim(), currency: a.currency || 'NIO' }))
-      const payload: CompanyPayload = { name: companyName.trim(), phone: phone.trim(), address: address.trim(), accounts: accountsClean }
-      await upsertCompanyByUid(authUser.uid, payload)
-      setMsgCompany('✅ Empresa guardada')
+      await upsertCompanyByUid(authUser.uid, { accounts: accountsClean })
+      setMsgCompany('✅ Cuentas guardadas')
     } catch (e: any) { setMsgCompany(`❌ No se pudo guardar: ${e?.message || ''}`) }
     finally { setSavingCompany(false) }
   }
+
+  const addAccount = () => setAccounts(prev => [...prev, { bank: '', number: '', holder: '', currency: 'NIO' }])
+  const updateAccount = (idx: number, patch: Partial<BankAccount>) => setAccounts(prev => prev.map((a, i) => i === idx ? { ...a, ...patch } : a))
+  const removeAccount = (idx: number) => setAccounts(prev => prev.filter((_, i) => i !== idx))
 
   // ── Password ──
   const changePassword = async () => {
@@ -332,10 +335,6 @@ export default function AjustesPage() {
     catch (e: any) { alert(e?.message || 'No se pudo reenviar.') }
   }
 
-  const addAccount = () => setAccounts(prev => [...prev, { bank: '', number: '', holder: '', currency: 'NIO' }])
-  const updateAccount = (idx: number, patch: Partial<BankAccount>) => setAccounts(prev => prev.map((a, i) => i === idx ? { ...a, ...patch } : a))
-  const removeAccount = (idx: number) => setAccounts(prev => prev.filter((_, i) => i !== idx))
-
   return (
     <div style={{ maxWidth: 680, margin: '0 auto', padding: '0 0 48px', fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
 
@@ -386,19 +385,24 @@ export default function AjustesPage() {
 
       {/* ── EMPRESA ── */}
       <div style={S.section}>
-        <h2 style={{ fontSize: 16, fontWeight: 800, color: '#111827', margin: '0 0 16px' }}>Datos de la empresa</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 800, color: '#111827', margin: 0 }}>Datos de la empresa</h2>
+          <span style={{ fontSize: 12, color: '#6b7280', background: '#f3f4f6', border: '1px solid #e5e7eb', borderRadius: 8, padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 5 }}>
+            🔒 Gestionado por Storkhub
+          </span>
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <div>
             <label style={S.label}>Nombre comercial</label>
-            <input value={companyName} onChange={e => setCompanyName(e.target.value)} style={S.input} />
+            <input value={companyName} readOnly style={{ ...S.input, background: '#f9fafb', color: '#6b7280', cursor: 'default' }} />
           </div>
           <div>
             <label style={S.label}>Teléfono</label>
-            <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+505 8888-8888" style={S.input} />
+            <input value={phone} readOnly style={{ ...S.input, background: '#f9fafb', color: '#6b7280', cursor: 'default' }} />
           </div>
           <div style={{ gridColumn: '1 / -1' }}>
             <label style={S.label}>Dirección</label>
-            <input value={address} onChange={e => setAddress(e.target.value)} style={S.input} />
+            <input value={address} readOnly style={{ ...S.input, background: '#f9fafb', color: '#6b7280', cursor: 'default' }} />
           </div>
         </div>
 
@@ -431,7 +435,7 @@ export default function AjustesPage() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 20 }}>
-          <button onClick={saveCompany} disabled={savingCompany} style={S.btnPrimary}>{savingCompany ? 'Guardando...' : 'Guardar empresa'}</button>
+          <button onClick={saveCompany} disabled={savingCompany} style={S.btnPrimary}>{savingCompany ? 'Guardando...' : 'Guardar cuentas'}</button>
           {msgCompany && <span style={{ fontSize: 13, color: msgCompany.startsWith('✅') ? '#16a34a' : '#dc2626', fontWeight: 600 }}>{msgCompany}</span>}
         </div>
       </div>

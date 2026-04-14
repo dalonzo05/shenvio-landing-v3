@@ -5,6 +5,7 @@ import {
   addDoc,
   collection,
   doc,
+  getDoc,
   getDocs,
   increment,
   limit,
@@ -691,6 +692,19 @@ export default function SolicitarEnvioPage() {
   const [uid, setUid] = useState<string | null>(null)
   useEffect(() => { const u = auth.currentUser; if (u) setUid(u.uid) }, [])
 
+  const [ownerCompanyName, setOwnerCompanyName] = useState('')
+  useEffect(() => {
+    if (!uid) return
+    Promise.all([
+      getDoc(doc(db, 'comercios', uid)),
+      getDoc(doc(db, 'usuarios', uid)),
+    ]).then(([comercioSnap, usuarioSnap]) => {
+      const c = comercioSnap.exists() ? (comercioSnap.data() as any) : null
+      const u = usuarioSnap.exists() ? (usuarioSnap.data() as any) : null
+      setOwnerCompanyName(c?.name || c?.companyName || u?.name || u?.nombre || '')
+    })
+  }, [uid])
+
   const clientesEntrega = useClientesEntrega(uid)
   const puntosFavoritos = usePuntosFavoritos(uid)
 
@@ -988,6 +1002,10 @@ export default function SolicitarEnvioPage() {
       await addDoc(collection(db, 'solicitudes_envio'), {
         userId: user.uid,
         comercioUid: user.uid,
+        ownerSnapshot: {
+          uid: user.uid,
+          companyName: ownerCompanyName || '',
+        },
         tipoCliente,
         tieneCotizacion: tieneCalculo,
         cotizacion: tieneCalculo
