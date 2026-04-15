@@ -11,8 +11,16 @@ import {
   query,
   serverTimestamp,
   Timestamp,
+  where,
 } from 'firebase/firestore'
 import { db, auth } from '@/fb/config'
+import {
+  rankearMotorizados,
+  type MotorizadoConRanking,
+  type OrdenActivaRanking,
+  type NuevaOrdenRanking,
+  type MotorizadoRankeado,
+} from '@/lib/motorizado-ranking'
 import {
   X,
   ExternalLink,
@@ -28,6 +36,7 @@ import {
   Truck,
   AlertTriangle,
   CheckCheck,
+  Star,
 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -100,7 +109,7 @@ export type SolicitudDetalle = {
   }
 }
 
-type Motorizado = { id: string; nombre: string; telefono?: string; estado?: string; authUid?: string }
+type Motorizado = MotorizadoConRanking
 
 // ─── Helpers exportados ───────────────────────────────────────────────────────
 
@@ -201,6 +210,8 @@ export function SolicitudDrawer({
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
   const [motorizadoSel, setMotorizadoSel] = useState('')
   const [tick, setTick] = useState(Date.now())
+  const [ordenesActivas, setOrdenesActivas] = useState<OrdenActivaRanking[]>([])
+  const [loadingOrdenes, setLoadingOrdenes] = useState(false)
 
   useEffect(() => {
     const t = setInterval(() => setTick(Date.now()), 1000)
@@ -215,6 +226,22 @@ export function SolicitudDrawer({
           .sort((a, b) => (b.estado === 'disponible' ? 1 : 0) - (a.estado === 'disponible' ? 1 : 0))
       )
     })
+  }, [])
+
+  // Cargar órdenes activas del sistema para el cálculo de carga y ranking
+  useEffect(() => {
+    setLoadingOrdenes(true)
+    getDocs(
+      query(
+        collection(db, 'solicitudes_envio'),
+        where('estado', 'in', ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'])
+      )
+    )
+      .then((snap) =>
+        setOrdenesActivas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
+      )
+      .catch((e) => console.error('[SolicitudDrawer] Error cargando órdenes activas:', e))
+      .finally(() => setLoadingOrdenes(false))
   }, [])
 
   useEffect(() => {
@@ -252,6 +279,17 @@ export function SolicitudDrawer({
     }
     return null
   }, [solicitud, tick])
+
+  // Ranking de sugerencia — función pura, sin I/O
+  const rankingCalculado = useMemo<MotorizadoRankeado[]>(() => {
+    if (!solicitud || motorizados.length === 0) return []
+    const nuevaOrden: NuevaOrdenRanking = {
+      recoleccion: { coord: solicitud.recoleccion?.coord ?? null },
+      entrega: { coord: solicitud.entrega?.coord ?? null },
+      requiereBolso: false, // campo no existe en Firestore aún → siempre false
+    }
+    return rankearMotorizados(motorizados as MotorizadoConRanking[], ordenesActivas, nuevaOrden)
+  }, [solicitud, motorizados, ordenesActivas])
 
   const confirmarYAsignar = async () => {
     if (!solicitud) return
@@ -542,6 +580,41 @@ export function SolicitudDrawer({
                 </Section>
               )}
 
+              {/* Motorizado sugerido */}
+              {(estado === 'pendiente_confirmacion' || estado === 'confirmada') &&
+                rankingCalculado.length > 0 && (
+                  <Section title="⭐ Motorizado sugerido">
+                    {(() => {
+                      const top = rankingCalculado[0]
+                      return (
+                        <div className="rounded-xl border-2 border-blue-200 bg-blue-50 p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Star size={14} className="text-blue-600" />
+                              <span className="text-sm font-bold text-blue-900">{top.nombre}</span>
+                              {top.telefono && (
+                                <span className="text-xs text-blue-500">{top.telefono}</span>
+                              )}
+                            </div>
+                            <span className="text-xs font-black text-blue-700 bg-blue-100 border border-blue-200 rounded-full px-2.5 py-0.5">
+                              Score: {top.scoreResult.score}
+                            </span>
+                          </div>
+                          <p className="text-xs text-blue-700 leading-relaxed">
+                            {top.scoreResult.explicacion}
+                          </p>
+                          <button
+                            onClick={() => setMotorizadoSel(top.id)}
+                            className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700 transition-colors"
+                          >
+                            <Bike size={14} /> Asignar sugerido
+                          </button>
+                        </div>
+                      )
+                    })()}
+                  </Section>
+                )}
+
               {/* Decisión rápida */}
               <Section title="⚡ Decisión rápida">
                 <div className="space-y-3">
@@ -559,19 +632,41 @@ export function SolicitudDrawer({
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Motorizado</label>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      Motorizado
+                      {loadingOrdenes && (
+                        <span className="ml-1 text-gray-400 font-normal">(calculando scores…)</span>
+                      )}
+                    </label>
                     <select
                       value={motorizadoSel}
                       onChange={(e) => setMotorizadoSel(e.target.value)}
                       className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
                     >
                       <option value="">-- No asignar todavía --</option>
-                      {motorizados.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.estado === 'disponible' ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}
-                        </option>
-                      ))}
+                      {(() => {
+                        const scoreMap = new Map(
+                          rankingCalculado.map((r) => [r.id, r.scoreResult.score])
+                        )
+                        const ordenMostrar =
+                          rankingCalculado.length > 0 ? rankingCalculado : motorizados
+                        return ordenMostrar.map((m) => {
+                          const score = scoreMap.get(m.id)
+                          const scoreLabel = score !== undefined ? ` [${score}]` : ''
+                          const estadoIcon = m.estado === 'disponible' ? '✅ ' : '⛔ '
+                          return (
+                            <option key={m.id} value={m.id}>
+                              {estadoIcon}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}{scoreLabel}
+                            </option>
+                          )
+                        })
+                      })()}
                     </select>
+                    {rankingCalculado.length > 0 && (
+                      <div className="text-xs text-gray-400 mt-1">
+                        Ordenados por score de idoneidad · [100] = ideal
+                      </div>
+                    )}
                   </div>
 
                   <div className="space-y-2 pt-1">
