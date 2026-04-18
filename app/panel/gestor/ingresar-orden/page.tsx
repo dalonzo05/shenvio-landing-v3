@@ -1491,6 +1491,11 @@ export default function GestorIngresarOrdenPage() {
       await addDoc(collection(db, 'solicitudes_envio'), {
         userId: selectedOwner.uid,
         comercioUid: selectedOwner.uid,
+        ownerSnapshot: {
+          uid: selectedOwner.uid,
+          companyName: selectedOwner.companyName || selectedOwner.nombre || '',
+          nombre: selectedOwner.nombre || '',
+        },
         tipoCliente,
         tieneCotizacion: tieneCalculo,
         cotizacion: tieneCalculo

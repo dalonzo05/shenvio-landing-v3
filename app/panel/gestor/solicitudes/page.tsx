@@ -122,6 +122,10 @@ type Solicitud = {
     motivoRechazo?: string
   } | null
 
+  userId?: string
+  comercioUid?: string
+  ownerSnapshot?: { companyName?: string; nombre?: string }
+
   prioridad?: boolean
   entregadoAt?: any
   cobrosMotorizado?: {
@@ -494,6 +498,7 @@ export default function GestorSolicitudesPage() {
   const [allItems, setAllItems] = useState<Solicitud[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
+  const [comerciosMap, setComerciosMap] = useState<Record<string, string>>({})
 
   const [cotizacionFiltro, setCotizacionFiltro] = useState<FiltroCotizacion>('todas')
   const [ordenUI, setOrdenUI] = useState<FiltroOrden>('recientes')
@@ -564,6 +569,22 @@ export default function GestorSolicitudesPage() {
           return bDisp - aDisp
         })
         setMotorizados(list)
+      } catch (e) {
+        console.error(e)
+      }
+    })()
+  }, [])
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const snap = await getDocs(collection(db, 'comercios'))
+        const map: Record<string, string> = {}
+        snap.docs.forEach((d) => {
+          const data = d.data() as any
+          map[d.id] = data.name || data.companyName || data.nombre || d.id.slice(0, 8)
+        })
+        setComerciosMap(map)
       } catch (e) {
         console.error(e)
       }
@@ -1325,17 +1346,17 @@ export default function GestorSolicitudesPage() {
             </div>
 
             <div ref={tableScrollRef} className="flex-1 min-h-0 overflow-auto" style={{ scrollbarGutter: 'stable' as any }}>
-              <table className="min-w-[1520px] w-full text-sm">
+              <table className="table-fixed min-w-[1280px] w-full text-sm">
                 <thead className="sticky top-0 z-20 bg-gray-50 border-b border-gray-200 shadow-sm">
                   <tr className="text-left text-gray-600">
-                    <th className="px-3 py-2.5 font-medium min-w-[190px] border-r border-gray-200">Orden</th>
-                    <th className="px-3 py-2.5 font-medium min-w-[210px] border-r border-gray-200">Estado</th>
-                    <th className="px-3 py-2.5 font-medium min-w-[260px] border-r border-gray-200">Retiro</th>
-                    <th className="px-3 py-2.5 font-medium min-w-[260px] border-r border-gray-200">Entrega</th>
-                    <th className="px-3 py-2.5 font-medium min-w-[140px] border-r border-gray-200">Precio</th>
-                    <th className="px-3 py-2.5 font-medium min-w-[170px] border-r border-gray-200">Motorizado</th>
-                    <th className="px-3 py-2.5 font-medium min-w-[130px] border-r border-gray-200">Aceptación</th>
-                    <th className="px-3 py-2.5 font-medium min-w-[160px] sticky right-0 bg-gray-50 z-20 border-l border-gray-200">
+                    <th className="px-3 py-2.5 font-medium w-[165px] border-r border-gray-200">Orden</th>
+                    <th className="px-3 py-2.5 font-medium w-[195px] border-r border-gray-200">Estado</th>
+                    <th className="px-3 py-2.5 font-medium w-[190px] border-r border-gray-200">Retiro</th>
+                    <th className="px-3 py-2.5 font-medium w-[190px] border-r border-gray-200">Entrega</th>
+                    <th className="px-3 py-2.5 font-medium w-[125px] border-r border-gray-200">Precio</th>
+                    <th className="px-3 py-2.5 font-medium w-[150px] border-r border-gray-200">Motorizado</th>
+                    <th className="px-3 py-2.5 font-medium w-[115px] border-r border-gray-200">Aceptación</th>
+                    <th className="px-3 py-2.5 font-medium w-[150px] sticky right-0 bg-gray-50 z-20 border-l border-gray-200">
                       Acciones
                     </th>
                   </tr>
@@ -1414,6 +1435,13 @@ export default function GestorSolicitudesPage() {
                     const retiroMaps = getBestMapsUrl(s, 'recoleccion')
                     const entregaMaps = getBestMapsUrl(s, 'entrega')
                     const esEntregada = s.estado === 'entregado'
+                    const pagoDeliv = s.pagoDelivery as any
+                    const quienPagaDelivery: string | null = pagoDeliv?.quienPaga ?? null
+                    const deliveryPrice: number | null =
+                      typeof s.confirmacion?.precioFinalCordobas === 'number' ? s.confirmacion.precioFinalCordobas
+                      : typeof pagoDeliv?.montoSugerido === 'number' ? pagoDeliv.montoSugerido
+                      : typeof s?.cotizacion?.precioSugerido === 'number' ? s.cotizacion.precioSugerido
+                      : null
 
                     const rem =
                       s.estado === 'pendiente_confirmacion'
@@ -1437,6 +1465,15 @@ export default function GestorSolicitudesPage() {
                           <div className="text-[11px] text-gray-500 mt-0.5 truncate">
                             {formatDateTime(s.createdAt)}
                           </div>
+                          {(() => {
+                            const ownerName = s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre
+                              || (s.userId && comerciosMap[s.userId])
+                              || (s.comercioUid && comerciosMap[s.comercioUid])
+                              || null
+                            return ownerName ? (
+                              <div className="text-[11px] font-medium text-blue-700 mt-0.5 truncate" title={ownerName}>{ownerName}</div>
+                            ) : null
+                          })()}
                           <div className="text-[11px] text-gray-400 mt-0.5">
                             {s.tipoCliente}{typeof s?.cotizacion?.distanciaKm === 'number' ? ` · ${s.cotizacion.distanciaKm}km` : ''}
                           </div>
@@ -1508,9 +1545,16 @@ export default function GestorSolicitudesPage() {
                           </div>
                         </td>
 
-                        <td className="px-3 py-2 border-r border-gray-100">
+                        <td className="px-3 py-2 border-r border-gray-100 overflow-hidden">
                           <div className="text-xs font-medium text-gray-900 truncate">{s.recoleccion.nombreApellido || '—'}</div>
-                          <div className="text-[11px] text-gray-600 mt-0.5">{s.recoleccion.celular}</div>
+                          <div className="text-[11px] text-gray-600 mt-0.5 flex items-center gap-1 min-w-0">
+                            <span className="truncate shrink">{s.recoleccion.celular}</span>
+                            {quienPagaDelivery === 'recoleccion' && deliveryPrice !== null && (
+                              <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-blue-50 border border-blue-200 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">
+                                <Truck className="h-2.5 w-2.5" />{money(deliveryPrice)}
+                              </span>
+                            )}
+                          </div>
                           <div className="text-[11px] text-gray-500 mt-0.5 truncate" title={s.recoleccion.direccionEscrita}>{s.recoleccion.direccionEscrita}</div>
                           {retiroMaps && (
                             <div className="mt-1 flex gap-1">
@@ -1524,13 +1568,18 @@ export default function GestorSolicitudesPage() {
                           )}
                         </td>
 
-                        <td className="px-3 py-2 border-r border-gray-100">
+                        <td className="px-3 py-2 border-r border-gray-100 overflow-hidden">
                           <div className="text-xs font-medium text-gray-900 truncate">{s.entrega.nombreApellido || '—'}</div>
-                          <div className="text-[11px] text-gray-600 mt-0.5 flex items-center gap-1.5">
-                            <span>{s.entrega.celular}</span>
+                          <div className="text-[11px] text-gray-600 mt-0.5 flex items-center gap-1 min-w-0">
+                            <span className="truncate shrink">{s.entrega.celular}</span>
                             {s.cobroContraEntrega?.aplica && (
-                              <span className="inline-flex items-center gap-0.5 rounded-full bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                              <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
                                 <Wallet className="h-2.5 w-2.5" />{money(s.cobroContraEntrega.monto)}
+                              </span>
+                            )}
+                            {quienPagaDelivery === 'entrega' && deliveryPrice !== null && (
+                              <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-blue-50 border border-blue-200 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">
+                                <Truck className="h-2.5 w-2.5" />{money(deliveryPrice)}
                               </span>
                             )}
                           </div>
@@ -1628,13 +1677,23 @@ export default function GestorSolicitudesPage() {
 
                             {/* Iconos de acciones secundarias */}
                             <div className="flex items-center gap-0.5 flex-wrap">
-                              <button
-                                onClick={() => togglePrioridad(s.id, s.prioridad)}
-                                title={s.prioridad ? 'Quitar prioridad' : 'Marcar prioritaria'}
-                                className={`rounded-md p-1.5 transition ${s.prioridad ? 'text-yellow-500 bg-yellow-100 hover:bg-yellow-200' : 'text-gray-500 bg-gray-100 hover:bg-gray-200'}`}
-                              >
-                                <Star className={`h-3.5 w-3.5 ${s.prioridad ? 'fill-yellow-400' : ''}`} />
-                              </button>
+                              {esEntregada && s.prioridad ? (
+                                <button
+                                  disabled
+                                  title="Prioridad registrada — no se puede quitar en entregadas"
+                                  className="rounded-md p-1.5 text-yellow-500 bg-yellow-100 cursor-not-allowed opacity-70"
+                                >
+                                  <Star className="h-3.5 w-3.5 fill-yellow-400" />
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => togglePrioridad(s.id, s.prioridad)}
+                                  title={s.prioridad ? 'Quitar prioridad' : 'Marcar prioritaria'}
+                                  className={`rounded-md p-1.5 transition ${s.prioridad ? 'text-yellow-500 bg-yellow-100 hover:bg-yellow-200' : 'text-gray-500 bg-gray-100 hover:bg-gray-200'}`}
+                                >
+                                  <Star className={`h-3.5 w-3.5 ${s.prioridad ? 'fill-yellow-400' : ''}`} />
+                                </button>
+                              )}
 
                               <button
                                 onClick={() => handleCopy(buildCopyRetiroEntrega(s), 'Copiado')}
@@ -2057,11 +2116,22 @@ export default function GestorSolicitudesPage() {
                 <div className="rounded-xl border p-3 bg-white">
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Acciones</div>
                   <div className="flex flex-col gap-2">
-                    <button onClick={() => togglePrioridad(s.id, s.prioridad)}
-                      className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium ${s.prioridad ? 'border-yellow-300 bg-yellow-50 text-yellow-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
-                      <Star className={`h-4 w-4 ${s.prioridad ? 'fill-yellow-400 text-yellow-400' : ''}`} />
-                      {s.prioridad ? 'Quitar prioridad' : 'Marcar prioritaria'}
-                    </button>
+                    {s.estado === 'entregado' && s.prioridad ? (
+                      <button
+                        disabled
+                        title="Prioridad registrada — no se puede quitar en entregadas"
+                        className="inline-flex items-center gap-2 rounded-lg border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs font-medium text-yellow-700 cursor-not-allowed opacity-70"
+                      >
+                        <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" />
+                        Prioritaria (bloqueada)
+                      </button>
+                    ) : (
+                      <button onClick={() => togglePrioridad(s.id, s.prioridad)}
+                        className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium ${s.prioridad ? 'border-yellow-300 bg-yellow-50 text-yellow-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+                        <Star className={`h-4 w-4 ${s.prioridad ? 'fill-yellow-400 text-yellow-400' : ''}`} />
+                        {s.prioridad ? 'Quitar prioridad' : 'Marcar prioritaria'}
+                      </button>
+                    )}
                     {s.estado === 'pendiente_confirmacion' && (
                       <button onClick={() => { setDrawerSolicitudId(null); abrirConfirmarYAsignar(s) }}
                         className="inline-flex items-center gap-2 rounded-lg bg-[#004aad] px-3 py-2 text-xs font-medium text-white hover:bg-[#003d94]">

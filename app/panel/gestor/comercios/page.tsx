@@ -484,6 +484,7 @@ export default function ComerciosPage() {
             <thead>
               <tr className="bg-gray-50 border-b border-gray-200">
                 <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wide">Comercio</th>
+                <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wide">UID</th>
                 <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wide">Email</th>
                 <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wide">Teléfono</th>
                 <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wide">Cuentas</th>
@@ -498,6 +499,9 @@ export default function ComerciosPage() {
                   <td className="px-4 py-3">
                     <div className="font-semibold text-gray-900">{c.name || '—'}</div>
                     {c.address && <div className="text-xs text-gray-400 truncate max-w-[180px]">{c.address}</div>}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="font-mono text-[11px] text-gray-500 select-all">{c.uid}</span>
                   </td>
                   <td className="px-4 py-3 text-gray-600">{c.email}</td>
                   <td className="px-4 py-3 text-gray-600">{c.phone || '—'}</td>

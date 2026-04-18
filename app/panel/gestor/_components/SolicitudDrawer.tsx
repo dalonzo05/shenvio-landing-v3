@@ -172,21 +172,60 @@ export async function copyToClipboard(text: string) {
 
 // ─── Sub-componentes ──────────────────────────────────────────────────────────
 
-export function Section({ title, children }: { title: string; children: React.ReactNode }) {
+type AccentColor = 'blue' | 'orange' | 'emerald' | 'amber' | 'indigo' | 'purple' | 'teal' | 'gray' | 'red'
+
+const accentBorder: Record<AccentColor, string> = {
+  blue:    'border-l-[#004aad]',
+  orange:  'border-l-orange-400',
+  emerald: 'border-l-emerald-500',
+  amber:   'border-l-amber-400',
+  indigo:  'border-l-indigo-500',
+  purple:  'border-l-purple-500',
+  teal:    'border-l-teal-500',
+  gray:    'border-l-gray-300',
+  red:     'border-l-red-400',
+}
+
+const accentTitle: Record<AccentColor, string> = {
+  blue:    'text-[#004aad]',
+  orange:  'text-orange-500',
+  emerald: 'text-emerald-600',
+  amber:   'text-amber-500',
+  indigo:  'text-indigo-500',
+  purple:  'text-purple-500',
+  teal:    'text-teal-600',
+  gray:    'text-gray-400',
+  red:     'text-red-500',
+}
+
+export function Section({
+  title,
+  children,
+  accent = 'blue',
+}: {
+  title: string
+  children: React.ReactNode
+  accent?: AccentColor
+}) {
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-      <h3 className="text-sm font-semibold text-gray-900 mb-3">{title}</h3>
-      <div className="space-y-2">{children}</div>
+    <div className={`rounded-xl border border-gray-200 bg-white shadow-sm border-l-4 overflow-hidden ${accentBorder[accent]}`}>
+      <div className="px-4 pt-3 pb-2.5 border-b border-gray-100 bg-gray-50/60">
+        <h3 className={`text-[10px] font-bold uppercase tracking-widest ${accentTitle[accent]}`}>
+          {title}
+        </h3>
+      </div>
+      <div className="p-4 space-y-3">{children}</div>
     </div>
   )
 }
 
 export function InfoRow({ label, value, icon }: { label: string; value?: string | null; icon?: React.ReactNode }) {
   return (
-    <div>
-      <div className="text-xs text-gray-400">{label}</div>
+    <div className="flex flex-col gap-0.5">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{label}</div>
       <div className="text-sm font-medium text-gray-900 flex items-center gap-1.5">
-        {icon}{value || <span className="text-gray-300">—</span>}
+        {icon && <span className="text-gray-400">{icon}</span>}
+        {value || <span className="text-gray-300">—</span>}
       </div>
     </div>
   )
@@ -335,48 +374,66 @@ export function SolicitudDrawer({
   return (
     <>
       {/* Overlay */}
-      <div className="fixed inset-0 z-40 bg-black/20" onClick={onClose} />
+      <div className="fixed inset-0 z-40 bg-black/25 backdrop-blur-[1px]" onClick={onClose} />
 
       {/* Panel */}
-      <div className="fixed right-0 top-0 z-50 flex h-full w-full max-w-[520px] flex-col bg-white shadow-2xl">
+      <div className="fixed right-0 top-0 z-50 flex h-full w-full max-w-[500px] flex-col shadow-2xl">
+
+        {/* Brand strip */}
+        <div className="h-1 w-full shrink-0 bg-gradient-to-r from-[#004aad] via-[#0057d0] to-[#3b82f6]" />
+
         {/* Header */}
-        <div className="flex items-center justify-between border-b px-5 py-4">
-          <div className="flex items-center gap-3">
-            <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-gray-100">
-              <X size={18} />
+        <div className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-3 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              onClick={onClose}
+              className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition shrink-0"
+            >
+              <X size={16} />
             </button>
-            <div>
-              <div className="text-xs text-gray-400 font-mono">{solicitudId}</div>
-              {solicitud && (
-                <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium mt-0.5 ${estadoClass(solicitud.estado)}`}>
+            <div className="min-w-0">
+              <div className="text-[11px] text-gray-400 font-mono truncate leading-none mb-1">{solicitudId}</div>
+              {solicitud ? (
+                <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${estadoClass(solicitud.estado)}`}>
                   {statusLabel(solicitud.estado)}
                 </span>
+              ) : (
+                <span className="inline-block h-5 w-20 rounded-full bg-gray-100 animate-pulse" />
               )}
             </div>
           </div>
           <Link
             href={`/panel/gestor/solicitudes/${solicitudId}`}
             target="_blank"
-            className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition"
           >
-            <ExternalLink size={13} />
-            Pantalla completa
+            <ExternalLink size={12} />
+            Ver página
           </Link>
         </div>
 
         {/* Contenido */}
-        <div className="flex-1 overflow-y-auto">
-          {loading && <div className="p-6 text-sm text-gray-400">Cargando...</div>}
-          {err && <div className="m-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{err}</div>}
+        <div className="flex-1 overflow-y-auto bg-gray-50">
+          {loading && (
+            <div className="p-6 space-y-3">
+              {[1,2,3].map(i => (
+                <div key={i} className="h-24 rounded-xl bg-white border border-gray-200 animate-pulse" />
+              ))}
+            </div>
+          )}
+          {err && !loading && (
+            <div className="m-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{err}</div>
+          )}
 
           {solicitud && (
-            <div className="p-5 space-y-5">
+            <div className="p-4 space-y-3">
+
               {/* Timeline operativo */}
               {(() => {
                 const est = solicitud.estado
                 const estadoAceptacion = solicitud.asignacion?.estadoAceptacion
                 const timeline = [
-                  { title: 'Creada', done: true, current: false, subtitle: formatDateTime(solicitud.createdAt) },
+                  { title: 'Creada',       done: true,  current: false, subtitle: formatDateTime(solicitud.createdAt) },
                   {
                     title: 'Confirmada',
                     done: ['confirmada','asignada','en_camino_retiro','retirado','en_camino_entrega','entregado'].includes(est || ''),
@@ -390,7 +447,7 @@ export function SolicitudDrawer({
                     subtitle: solicitud.asignacion?.asignadoAt ? formatDateTime(solicitud.asignacion.asignadoAt) : undefined,
                   },
                   {
-                    title: 'Aceptada por motorizado',
+                    title: 'Aceptada motorizado',
                     done: ['en_camino_retiro','retirado','en_camino_entrega','entregado'].includes(est || '') || estadoAceptacion === 'aceptada',
                     current: est === 'asignada',
                     subtitle: solicitud.asignacion?.aceptadoAt ? formatDateTime(solicitud.asignacion.aceptadoAt) : estadoAceptacion || undefined,
@@ -408,7 +465,7 @@ export function SolicitudDrawer({
                     subtitle: solicitud.historial?.retiradoAt ? formatDateTime(solicitud.historial.retiradoAt) : undefined,
                   },
                   {
-                    title: 'En camino a entrega',
+                    title: 'En camino entrega',
                     done: est === 'entregado',
                     current: est === 'en_camino_entrega',
                     subtitle: solicitud.historial?.en_camino_entregaAt ? formatDateTime(solicitud.historial.en_camino_entregaAt) : undefined,
@@ -421,25 +478,25 @@ export function SolicitudDrawer({
                   },
                 ]
                 return (
-                  <Section title="🗂 Timeline operativo">
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-3 pt-1">
-                      {timeline.map((step) => (
-                        <div key={step.title} className="flex items-start gap-2">
-                          <div className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-bold ${
+                  <Section title="Timeline operativo" accent="blue">
+                    <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+                      {timeline.map((step, i) => (
+                        <div key={step.title} className="flex items-start gap-2.5">
+                          <div className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ring-2 ${
                             step.current
-                              ? 'border-blue-300 bg-blue-50 text-blue-700'
+                              ? 'ring-blue-300 bg-blue-100 text-blue-700'
                               : step.done
-                              ? 'border-green-300 bg-green-50 text-green-700'
-                              : 'border-gray-200 bg-white text-gray-400'
+                              ? 'ring-green-300 bg-green-100 text-green-700'
+                              : 'ring-gray-200 bg-white text-gray-300'
                           }`}>
-                            {step.done ? '✓' : '•'}
+                            {step.done ? '✓' : i + 1}
                           </div>
-                          <div>
-                            <div className={`text-xs font-medium ${step.current || step.done ? 'text-gray-900' : 'text-gray-400'}`}>
+                          <div className="min-w-0">
+                            <div className={`text-xs font-medium leading-tight ${step.current ? 'text-blue-700' : step.done ? 'text-gray-800' : 'text-gray-400'}`}>
                               {step.title}
                             </div>
                             {step.subtitle && (
-                              <div className="text-[11px] text-gray-500 mt-0.5">{step.subtitle}</div>
+                              <div className="text-[10px] text-gray-400 mt-0.5 leading-tight">{step.subtitle}</div>
                             )}
                           </div>
                         </div>
@@ -451,53 +508,103 @@ export function SolicitudDrawer({
 
               {/* Tiempo restante */}
               {tiempoRestante !== null && (
-                <div className={`flex items-center gap-2 rounded-xl border px-4 py-3 text-sm font-medium ${minLeft !== null && minLeft <= 2 ? 'border-red-200 bg-red-50 text-red-700' : 'border-yellow-200 bg-yellow-50 text-yellow-800'}`}>
-                  <Clock3 size={15} />
-                  {Math.floor(Math.max(0, tiempoRestante) / 60000)}:{String(Math.floor((Math.max(0, tiempoRestante) % 60000) / 1000)).padStart(2, '0')} restantes
+                <div className={`flex items-center gap-2.5 rounded-xl border px-4 py-3 text-sm font-semibold ${
+                  minLeft !== null && minLeft <= 2
+                    ? 'border-red-200 bg-red-50 text-red-700'
+                    : 'border-amber-200 bg-amber-50 text-amber-800'
+                }`}>
+                  <Clock3 size={16} className="shrink-0" />
+                  <span>
+                    {Math.floor(Math.max(0, tiempoRestante) / 60000)}:{String(Math.floor((Math.max(0, tiempoRestante) % 60000) / 1000)).padStart(2, '0')}
+                    <span className="font-normal ml-1 text-xs opacity-75">restantes</span>
+                  </span>
                 </div>
               )}
 
               {/* Retiro */}
-              <Section title="📍 Retiro">
-                <InfoRow label="Nombre" value={solicitud.recoleccion?.nombreApellido} />
-                <InfoRow label="Teléfono" value={solicitud.recoleccion?.celular} icon={<Phone size={13} />} />
-                <InfoRow label="Dirección" value={solicitud.recoleccion?.direccionEscrita} icon={<MapPin size={13} />} />
-                {solicitud.recoleccion?.nota && <InfoRow label="Nota" value={solicitud.recoleccion.nota} />}
-                {retiroMaps && (
-                  <div className="flex gap-2 pt-1">
-                    <a href={retiroMaps} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs text-blue-700 hover:bg-gray-50">
-                      <ExternalLink size={12} /> Maps
-                    </a>
-                    <button onClick={() => copyToClipboard(retiroMaps)} className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50">
-                      <Copy size={12} /> Copiar link
-                    </button>
+              <Section title="Retiro" accent="orange">
+                <div className="space-y-2.5">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-orange-100 text-orange-500">
+                      <MapPin size={15} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-semibold text-gray-900 leading-tight">{solicitud.recoleccion?.nombreApellido || '—'}</div>
+                      {solicitud.recoleccion?.celular && (
+                        <div className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                          <Phone size={10} />{solicitud.recoleccion.celular}
+                        </div>
+                      )}
+                      {solicitud.recoleccion?.direccionEscrita && (
+                        <div className="mt-1 text-xs text-gray-500 leading-snug">{solicitud.recoleccion.direccionEscrita}</div>
+                      )}
+                      {solicitud.recoleccion?.nota && (
+                        <div className="mt-1 rounded-lg bg-orange-50 border border-orange-100 px-2.5 py-1.5 text-xs text-orange-700 italic">{solicitud.recoleccion.nota}</div>
+                      )}
+                    </div>
                   </div>
-                )}
+                  {retiroMaps && (
+                    <div className="flex gap-2 pt-0.5">
+                      <a href={retiroMaps} target="_blank" rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100 transition">
+                        <ExternalLink size={11} /> Ver en Maps
+                      </a>
+                      <button onClick={() => copyToClipboard(retiroMaps)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition">
+                        <Copy size={11} /> Copiar
+                      </button>
+                    </div>
+                  )}
+                </div>
               </Section>
 
               {/* Entrega */}
-              <Section title="📦 Entrega">
-                <InfoRow label="Nombre" value={solicitud.entrega?.nombreApellido} />
-                <InfoRow label="Teléfono" value={solicitud.entrega?.celular} icon={<Phone size={13} />} />
-                <InfoRow label="Dirección" value={solicitud.entrega?.direccionEscrita} icon={<MapPin size={13} />} />
-                {solicitud.entrega?.nota && <InfoRow label="Nota" value={solicitud.entrega.nota} />}
-                {entregaMaps && (
-                  <div className="flex gap-2 pt-1">
-                    <a href={entregaMaps} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs text-blue-700 hover:bg-gray-50">
-                      <ExternalLink size={12} /> Maps
-                    </a>
-                    <button onClick={() => copyToClipboard(entregaMaps)} className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50">
-                      <Copy size={12} /> Copiar link
-                    </button>
+              <Section title="Entrega" accent="emerald">
+                <div className="space-y-2.5">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                      <Package size={15} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-semibold text-gray-900 leading-tight">{solicitud.entrega?.nombreApellido || '—'}</div>
+                      {solicitud.entrega?.celular && (
+                        <div className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                          <Phone size={10} />{solicitud.entrega.celular}
+                        </div>
+                      )}
+                      {solicitud.cobroContraEntrega?.aplica && (
+                        <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                          CE: {money(solicitud.cobroContraEntrega.monto)}
+                        </div>
+                      )}
+                      {solicitud.entrega?.direccionEscrita && (
+                        <div className="mt-1 text-xs text-gray-500 leading-snug">{solicitud.entrega.direccionEscrita}</div>
+                      )}
+                      {solicitud.entrega?.nota && (
+                        <div className="mt-1 rounded-lg bg-emerald-50 border border-emerald-100 px-2.5 py-1.5 text-xs text-emerald-700 italic">{solicitud.entrega.nota}</div>
+                      )}
+                    </div>
                   </div>
-                )}
+                  {entregaMaps && (
+                    <div className="flex gap-2 pt-0.5">
+                      <a href={entregaMaps} target="_blank" rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100 transition">
+                        <ExternalLink size={11} /> Ver en Maps
+                      </a>
+                      <button onClick={() => copyToClipboard(entregaMaps)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition">
+                        <Copy size={11} /> Copiar
+                      </button>
+                    </div>
+                  )}
+                </div>
               </Section>
 
               {/* Resumen comercial */}
-              <Section title="💰 Resumen comercial">
+              <Section title="Resumen comercial" accent="amber">
                 <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                   <InfoRow label="Comercio" value={solicitud.ownerSnapshot?.companyName || solicitud.ownerSnapshot?.nombre || (solicitud.userId ? comercioNames[solicitud.userId] : undefined)} />
-                  <InfoRow label="Tipo" value={solicitud.tipoCliente} />
+                  <InfoRow label="Tipo cliente" value={solicitud.tipoCliente} />
                   <InfoRow label="Distancia" value={solicitud.cotizacion?.distanciaKm != null ? `${solicitud.cotizacion.distanciaKm} km` : undefined} />
                   <InfoRow label="Precio sugerido" value={solicitud.cotizacion?.precioSugerido != null ? money(solicitud.cotizacion.precioSugerido) : solicitud.pagoDelivery?.montoSugerido != null ? money(solicitud.pagoDelivery.montoSugerido) : undefined} />
                   <InfoRow label="Precio final" value={solicitud.confirmacion?.precioFinalCordobas != null ? money(solicitud.confirmacion.precioFinalCordobas) : undefined} />
@@ -506,18 +613,33 @@ export function SolicitudDrawer({
                   <InfoRow label="Creada" value={formatDateTime(solicitud.createdAt)} />
                 </div>
                 {solicitud.detalle?.trim() && (
-                  <div className="mt-3 rounded-xl border bg-gray-50 p-3 text-sm text-gray-700 whitespace-pre-wrap">{solicitud.detalle.trim()}</div>
+                  <div className="mt-1 rounded-lg border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800 whitespace-pre-wrap leading-relaxed">{solicitud.detalle.trim()}</div>
                 )}
               </Section>
 
               {/* Motorizado actual */}
               {solicitud.asignacion?.motorizadoNombre && (
-                <Section title="🛵 Motorizado asignado">
-                  <InfoRow label="Nombre" value={solicitud.asignacion.motorizadoNombre} icon={<Bike size={13} />} />
-                  <InfoRow label="Teléfono" value={solicitud.asignacion.motorizadoTelefono} />
-                  <InfoRow label="Asignado" value={formatDateTime(solicitud.asignacion.asignadoAt)} />
-                  <InfoRow label="Aceptación" value={solicitud.asignacion.estadoAceptacion} />
-                  {solicitud.asignacion.motivoRechazo && <InfoRow label="Motivo rechazo" value={solicitud.asignacion.motivoRechazo} />}
+                <Section title="Motorizado asignado" accent="indigo">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-600">
+                      <Bike size={15} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-semibold text-gray-900">{solicitud.asignacion.motorizadoNombre}</div>
+                      {solicitud.asignacion.motorizadoTelefono && (
+                        <div className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                          <Phone size={10} />{solicitud.asignacion.motorizadoTelefono}
+                        </div>
+                      )}
+                      <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1.5">
+                        <InfoRow label="Asignado" value={formatDateTime(solicitud.asignacion.asignadoAt)} />
+                        <InfoRow label="Aceptación" value={solicitud.asignacion.estadoAceptacion} />
+                        {solicitud.asignacion.motivoRechazo && (
+                          <InfoRow label="Motivo rechazo" value={solicitud.asignacion.motivoRechazo} />
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </Section>
               )}
 
@@ -528,17 +650,17 @@ export function SolicitudDrawer({
                 const tieneInfo = dep.confirmadoComercio || dep.confirmadoStorkhub || dep.confirmadoMotorizado
                 if (!tieneInfo) return null
                 return (
-                  <Section title="🏦 Depósito">
+                  <Section title="Depósito" accent="teal">
                     <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                       {dep.confirmadoStorkhub && (
                         <>
-                          <InfoRow label="Storkhub confirmado" value="✓ Sí" />
+                          <InfoRow label="Storkhub" value="✓ Confirmado" />
                           <InfoRow label="Fecha Storkhub" value={formatDateTime(dep.confirmadoStorkhubAt)} />
                         </>
                       )}
                       {dep.confirmadoComercio && (
                         <>
-                          <InfoRow label="Comercio confirmado" value="✓ Sí" />
+                          <InfoRow label="Comercio" value="✓ Confirmado" />
                           <InfoRow label="Fecha Comercio" value={formatDateTime(dep.confirmadoComercioAt)} />
                         </>
                       )}
@@ -555,12 +677,12 @@ export function SolicitudDrawer({
 
               {/* Evidencias fotográficas */}
               {solicitud.evidencias && (['retiro', 'entrega', 'deposito'] as const).some((k) => solicitud.evidencias?.[k]) && (
-                <Section title="📸 Evidencias fotográficas">
+                <Section title="Evidencias fotográficas" accent="purple">
                   <div className="grid grid-cols-3 gap-2">
                     {([
-                      { key: 'retiro', label: '📦 Retiro' },
-                      { key: 'entrega', label: '✅ Entrega' },
-                      { key: 'deposito', label: '🏦 Boucher' },
+                      { key: 'retiro',  label: 'Retiro' },
+                      { key: 'entrega', label: 'Entrega' },
+                      { key: 'deposito', label: 'Boucher' },
                     ] as const).map(({ key, label }) => {
                       const ev = solicitud.evidencias?.[key]
                       if (!ev) return null
@@ -568,11 +690,11 @@ export function SolicitudDrawer({
                         <button
                           key={key}
                           onClick={() => window.open(ev.url, '_blank')}
-                          className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 cursor-pointer"
+                          className="flex flex-col items-center gap-1.5 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 hover:border-gray-300 transition cursor-pointer"
                         >
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img src={ev.url} alt={label} className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
-                          <span className="text-xs text-gray-500">{label}</span>
+                          <span className="text-[10px] font-medium text-gray-500 uppercase tracking-wide">{label}</span>
                         </button>
                       )
                     })}
@@ -583,31 +705,31 @@ export function SolicitudDrawer({
               {/* Motorizado sugerido */}
               {(estado === 'pendiente_confirmacion' || estado === 'confirmada') &&
                 rankingCalculado.length > 0 && (
-                  <Section title="⭐ Motorizado sugerido">
+                  <Section title="Motorizado sugerido" accent="indigo">
                     {(() => {
                       const top = rankingCalculado[0]
                       return (
-                        <div className="rounded-xl border-2 border-blue-200 bg-blue-50 p-3 space-y-2">
+                        <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 space-y-2.5">
                           <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <Star size={14} className="text-blue-600" />
-                              <span className="text-sm font-bold text-blue-900">{top.nombre}</span>
+                            <div className="flex items-center gap-2 min-w-0">
+                              <Star size={13} className="text-indigo-500 shrink-0" />
+                              <span className="text-sm font-bold text-indigo-900 truncate">{top.nombre}</span>
                               {top.telefono && (
-                                <span className="text-xs text-blue-500">{top.telefono}</span>
+                                <span className="text-xs text-indigo-400 shrink-0">{top.telefono}</span>
                               )}
                             </div>
-                            <span className="text-xs font-black text-blue-700 bg-blue-100 border border-blue-200 rounded-full px-2.5 py-0.5">
-                              Score: {top.scoreResult.score}
+                            <span className="text-xs font-black text-indigo-700 bg-indigo-100 border border-indigo-200 rounded-full px-2.5 py-0.5 shrink-0 ml-2">
+                              {top.scoreResult.score} pts
                             </span>
                           </div>
-                          <p className="text-xs text-blue-700 leading-relaxed">
+                          <p className="text-xs text-indigo-700 leading-relaxed">
                             {top.scoreResult.explicacion}
                           </p>
                           <button
                             onClick={() => setMotorizadoSel(top.id)}
-                            className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700 transition-colors"
+                            className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700 transition"
                           >
-                            <Bike size={14} /> Asignar sugerido
+                            <Bike size={13} /> Asignar sugerido
                           </button>
                         </div>
                       )
@@ -616,98 +738,117 @@ export function SolicitudDrawer({
                 )}
 
               {/* Decisión rápida */}
-              <Section title="⚡ Decisión rápida">
+              <Section title="Decisión rápida" accent="blue">
                 <div className="space-y-3">
                   <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Precio final (C$)</label>
+                    <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Precio final (C$)</label>
                     <input
                       type="number"
                       step={10}
                       value={precioFinal}
                       onChange={(e) => setPrecioFinal(e.target.value === '' ? '' : roundTo10(e.target.value))}
-                      className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300"
                       placeholder="Ej: 130"
                     />
-                    <div className="text-xs text-gray-400 mt-1">Se redondea a múltiplos de 10.</div>
+                    <div className="text-[10px] text-gray-400 mt-1">Se redondea a múltiplos de 10</div>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                    <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">
                       Motorizado
                       {loadingOrdenes && (
-                        <span className="ml-1 text-gray-400 font-normal">(calculando scores…)</span>
+                        <span className="ml-1 text-gray-300 font-normal normal-case">(calculando scores…)</span>
                       )}
                     </label>
                     <select
                       value={motorizadoSel}
                       onChange={(e) => setMotorizadoSel(e.target.value)}
-                      className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
                     >
-                      <option value="">-- No asignar todavía --</option>
+                      <option value="">— No asignar todavía —</option>
                       {(() => {
-                        const scoreMap = new Map(
-                          rankingCalculado.map((r) => [r.id, r.scoreResult.score])
-                        )
-                        const ordenMostrar =
-                          rankingCalculado.length > 0 ? rankingCalculado : motorizados
+                        const scoreMap = new Map(rankingCalculado.map((r) => [r.id, r.scoreResult.score]))
+                        const ordenMostrar = rankingCalculado.length > 0 ? rankingCalculado : motorizados
                         return ordenMostrar.map((m) => {
                           const score = scoreMap.get(m.id)
                           const scoreLabel = score !== undefined ? ` [${score}]` : ''
-                          const estadoIcon = m.estado === 'disponible' ? '✅ ' : '⛔ '
                           return (
                             <option key={m.id} value={m.id}>
-                              {estadoIcon}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}{scoreLabel}
+                              {m.estado === 'disponible' ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}{scoreLabel}
                             </option>
                           )
                         })
                       })()}
                     </select>
                     {rankingCalculado.length > 0 && (
-                      <div className="text-xs text-gray-400 mt-1">
-                        Ordenados por score de idoneidad · [100] = ideal
-                      </div>
+                      <div className="text-[10px] text-gray-400 mt-1">Ordenados por score · [100] = ideal</div>
                     )}
                   </div>
 
                   <div className="space-y-2 pt-1">
-                    <button onClick={confirmarYAsignar} className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#004aad] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003d94]">
+                    <button
+                      onClick={confirmarYAsignar}
+                      className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-[#004aad] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003d94] transition shadow-sm"
+                    >
                       <CheckCircle2 size={15} /> Guardar confirmación / asignación
                     </button>
 
                     {estado === 'pendiente_confirmacion' && (
-                      <button onClick={() => cambiarEstado('rechazada')} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-700">
+                      <button
+                        onClick={() => cambiarEstado('rechazada')}
+                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-700 hover:bg-red-100 transition"
+                      >
                         <XCircle size={15} /> Rechazar orden
                       </button>
                     )}
                     {estado === 'confirmada' && (
-                      <button onClick={() => cambiarEstado('cancelada')} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50">
+                      <button
+                        onClick={() => cambiarEstado('cancelada')}
+                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
+                      >
                         <AlertTriangle size={15} /> Cancelar
                       </button>
                     )}
                     {estado === 'asignada' && (
-                      <button onClick={rebotarAsignacion} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50">
+                      <button
+                        onClick={rebotarAsignacion}
+                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
+                      >
                         <RotateCcw size={15} /> Rebotar a confirmada
                       </button>
                     )}
                     {estado === 'en_camino_retiro' && (
-                      <button onClick={() => cambiarEstado('retirado')} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50">
+                      <button
+                        onClick={() => cambiarEstado('retirado')}
+                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
+                      >
                         <Package size={15} /> Marcar retirado
                       </button>
                     )}
                     {estado === 'retirado' && (
-                      <button onClick={() => cambiarEstado('en_camino_entrega')} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50">
+                      <button
+                        onClick={() => cambiarEstado('en_camino_entrega')}
+                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
+                      >
                         <Truck size={15} /> Pasar a entrega
                       </button>
                     )}
                     {estado === 'en_camino_entrega' && (
-                      <button onClick={() => cambiarEstado('entregado')} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-2.5 text-sm font-semibold text-green-700">
+                      <button
+                        onClick={() => cambiarEstado('entregado')}
+                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-green-200 bg-green-50 px-4 py-2.5 text-sm font-semibold text-green-700 hover:bg-green-100 transition"
+                      >
                         <CheckCheck size={15} /> Marcar entregado
                       </button>
                     )}
                   </div>
-                  {err && <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{err}</div>}
+
+                  {err && (
+                    <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{err}</div>
+                  )}
                 </div>
               </Section>
+
             </div>
           )}
         </div>
