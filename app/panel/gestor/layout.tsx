@@ -22,6 +22,7 @@ import {
   Star,
   AlertTriangle,
   DollarSign,
+  Map,
 } from 'lucide-react'
 
 export default function GestorLayout({ children }: { children: React.ReactNode }) {
@@ -206,6 +207,14 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               icon={<BarChart3 size={18} />}
               label="Reportes"
               active={pathname.startsWith('/panel/gestor/reportes')}
+              collapsed={collapsed}
+            />
+
+            <NavItem
+              href="/panel/gestor/zonas"
+              icon={<Map size={18} />}
+              label="Zonas"
+              active={pathname.startsWith('/panel/gestor/zonas')}
               collapsed={collapsed}
             />
 

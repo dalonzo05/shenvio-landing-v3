@@ -81,6 +81,22 @@
         { "fieldPath": "estado", "order": "ASCENDING" },
         { "fieldPath": "creadoAt", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "solicitudes_envio",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "zonaRetiroId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "solicitudes_envio",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "zonaEntregaId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

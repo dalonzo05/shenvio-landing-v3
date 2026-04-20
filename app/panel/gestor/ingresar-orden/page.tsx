@@ -15,6 +15,8 @@ import {
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
+import { getZonasActivas } from '@/fb/zonas'
+import { clasificarOrden } from '@/lib/zonas'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import ComercioSearchModal, { ComercioModalItem } from '@/app/Components/ComercioSearchModal'
 
@@ -38,6 +40,7 @@ type ComercioData = {
   phone?: string
   address?: string
   puntosRetiro?: Record<string, any>
+  requiereBolso?: boolean
 }
 
 type ClienteGuardado = {
@@ -1240,6 +1243,7 @@ export default function GestorIngresarOrdenPage() {
   const [detalle, setDetalle] = useState('')
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
+  const [zonaPreview, setZonaPreview] = useState<{ zonaRetiroNombre: string | null; zonaEntregaNombre: string | null } | null>(null)
 
   // Instrucciones adicionales toggles
   const [showNotaRetiro, setShowNotaRetiro] = useState(false)
@@ -1470,6 +1474,20 @@ export default function GestorIngresarOrdenPage() {
     return montoProducto
   }, [cobroCE, montoProducto, montoDelivery, tipoCliente, quienPagaDelivery, deducirDelivery])
 
+  // ── Preview de zona (se actualiza al cambiar coords de retiro o entrega) ──
+  useEffect(() => {
+    const retiroCoord = retiro.coord || null
+    const entregaCoord = entrega.coord || null
+    if (!retiroCoord && !entregaCoord) { setZonaPreview(null); return }
+    let cancelled = false
+    getZonasActivas().then((zonas) => {
+      if (cancelled) return
+      const { zonaRetiroNombre, zonaEntregaNombre } = clasificarOrden(retiroCoord, entregaCoord, zonas)
+      setZonaPreview({ zonaRetiroNombre, zonaEntregaNombre })
+    }).catch(() => setZonaPreview(null))
+    return () => { cancelled = true }
+  }, [retiro.coord, entrega.coord])
+
   // ── Save ──
   const handleGuardar = async () => {
     setMsg(null)
@@ -1481,6 +1499,15 @@ export default function GestorIngresarOrdenPage() {
     try {
       setSaving(true)
       const gestorUid = auth.currentUser?.uid || null
+
+      // Clasificar zonas antes de guardar la orden
+      const zonasActivas = await getZonasActivas()
+      const { zonaRetiroId, zonaRetiroNombre, zonaEntregaId, zonaEntregaNombre } = clasificarOrden(
+        retiro.coord || null,
+        entrega.coord || null,
+        zonasActivas
+      )
+
       const deducirAplica =
         tipoCliente === 'contado' &&
         cobroCE &&
@@ -1566,6 +1593,11 @@ export default function GestorIngresarOrdenPage() {
             }
           : null,
         estado: esProgramado ? 'programada' : 'pendiente_confirmacion',
+        requiereBolso: selectedOwnerData?.requiereBolso ?? false,
+        zonaRetiroId,
+        zonaRetiroNombre,
+        zonaEntregaId,
+        zonaEntregaNombre,
         createdAt: serverTimestamp(),
         creadoInternamente: true,
         creadoPorGestorUid: gestorUid,
@@ -2549,6 +2581,15 @@ export default function GestorIngresarOrdenPage() {
           }}
         >
           {msg.text}
+        </div>
+      )}
+
+      {/* Preview de zona */}
+      {zonaPreview && (
+        <div style={{ marginTop: 12, borderRadius: 10, border: '1px solid #bfdbfe', background: '#eff6ff', padding: '8px 12px', fontSize: 12, color: '#1d4ed8', display: 'flex', gap: 8, flexWrap: 'wrap' as const }}>
+          <span>📍 Zona retiro: <strong>{zonaPreview.zonaRetiroNombre ?? 'Sin zona'}</strong></span>
+          <span style={{ color: '#93c5fd' }}>·</span>
+          <span>📦 Zona entrega: <strong>{zonaPreview.zonaEntregaNombre ?? 'Sin zona'}</strong></span>
         </div>
       )}
 

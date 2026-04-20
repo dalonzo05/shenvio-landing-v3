@@ -18,6 +18,8 @@ import {
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
+import { getZonasActivas } from '@/fb/zonas'
+import { clasificarOrden } from '@/lib/zonas'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -693,6 +695,7 @@ export default function SolicitarEnvioPage() {
   useEffect(() => { const u = auth.currentUser; if (u) setUid(u.uid) }, [])
 
   const [ownerCompanyName, setOwnerCompanyName] = useState('')
+  const [comercioRequiereBolso, setComercioRequiereBolso] = useState(false)
   useEffect(() => {
     if (!uid) return
     Promise.all([
@@ -702,6 +705,7 @@ export default function SolicitarEnvioPage() {
       const c = comercioSnap.exists() ? (comercioSnap.data() as any) : null
       const u = usuarioSnap.exists() ? (usuarioSnap.data() as any) : null
       setOwnerCompanyName(c?.name || c?.companyName || u?.name || u?.nombre || '')
+      setComercioRequiereBolso(c?.requiereBolso ?? false)
     })
   }, [uid])
 
@@ -996,6 +1000,14 @@ export default function SolicitarEnvioPage() {
       const user = auth.currentUser
       if (!user) { setMsg({ type: 'error', text: 'No hay sesión iniciada.' }); return }
 
+      // Clasificar zonas antes de guardar la orden
+      const zonasActivas = await getZonasActivas()
+      const { zonaRetiroId, zonaRetiroNombre, zonaEntregaId, zonaEntregaNombre } = clasificarOrden(
+        retiro.coord || null,
+        entrega.coord || null,
+        zonasActivas
+      )
+
       const deducirAplica = tipoCliente === 'contado' && cobroCE && quienPagaDelivery === 'entrega' && deducirDelivery === 'deducir_del_cobro'
       const tieneCalculo = !!calcResult || !!draft
 
@@ -1060,6 +1072,11 @@ export default function SolicitarEnvioPage() {
             }
           : null,
         estado: esProgramado ? 'programada' : 'pendiente_confirmacion',
+        requiereBolso: comercioRequiereBolso,
+        zonaRetiroId,
+        zonaRetiroNombre,
+        zonaEntregaId,
+        zonaEntregaNombre,
         createdAt: serverTimestamp(),
       })
 

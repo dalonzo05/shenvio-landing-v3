@@ -271,5 +271,13 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Zonas geográficas: solo gestor/admin escribe; cualquier usuario activo puede leer
+    // (lectura necesaria al crear órdenes desde comercio y motorizado)
+    match /zonas/{zonaId} {
+      allow read: if isActiveUser();
+      allow create, update: if isAdminOrGestor();
+      allow delete: if false;
+    }
+
   }
 }

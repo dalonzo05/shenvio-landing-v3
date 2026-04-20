@@ -8,6 +8,7 @@ import {
   doc,
   updateDoc,
   getDocs,
+  getDoc,
   query,
   serverTimestamp,
   Timestamp,
@@ -84,6 +85,7 @@ export type SolicitudDetalle = {
     en_camino_entregaAt?: any; entregadoAt?: any
   }
   userId?: string
+  requiereBolso?: boolean
   ownerSnapshot?: { companyName?: string; phone?: string; nombre?: string; uid?: string }
   cobrosMotorizado?: {
     delivery?: { monto: number; recibio: boolean; at?: any; justificacion?: string }
@@ -107,6 +109,10 @@ export type SolicitudDetalle = {
     entrega?: { url: string; pathStorage: string; uploadedAt?: any; motorizadoUid?: string }
     deposito?: { url: string; pathStorage: string; uploadedAt?: any; motorizadoUid?: string }
   }
+  zonaRetiroId?: string | null
+  zonaRetiroNombre?: string | null
+  zonaEntregaId?: string | null
+  zonaEntregaNombre?: string | null
 }
 
 type Motorizado = MotorizadoConRanking
@@ -251,6 +257,7 @@ export function SolicitudDrawer({
   const [tick, setTick] = useState(Date.now())
   const [ordenesActivas, setOrdenesActivas] = useState<OrdenActivaRanking[]>([])
   const [loadingOrdenes, setLoadingOrdenes] = useState(false)
+  const [comercioRequiereBolso, setComercioRequiereBolso] = useState<boolean | null>(null)
 
   useEffect(() => {
     const t = setInterval(() => setTick(Date.now()), 1000)
@@ -290,6 +297,7 @@ export function SolicitudDrawer({
       (snap) => {
         if (!snap.exists()) { setErr('La orden no existe.'); setLoading(false); return }
         const data = { id: snap.id, ...(snap.data() as any) } as SolicitudDetalle
+        setComercioRequiereBolso(null)
         setSolicitud(data)
         setPrecioFinal(data.confirmacion?.precioFinalCordobas ?? '')
         setMotorizadoSel(data.asignacion?.motorizadoId || '')
@@ -299,6 +307,16 @@ export function SolicitudDrawer({
     )
     return () => unsub()
   }, [solicitudId])
+
+  // Fetch del comercio para resolver requiereBolso
+  useEffect(() => {
+    if (!solicitud?.userId) return
+    getDoc(doc(db, 'comercios', solicitud.userId))
+      .then((snap) => {
+        setComercioRequiereBolso(snap.exists() ? (snap.data()?.requiereBolso ?? false) : false)
+      })
+      .catch(() => setComercioRequiereBolso(false))
+  }, [solicitud?.userId])
 
   const tiempoRestante = useMemo(() => {
     if (!solicitud) return null
@@ -322,13 +340,21 @@ export function SolicitudDrawer({
   // Ranking de sugerencia — función pura, sin I/O
   const rankingCalculado = useMemo<MotorizadoRankeado[]>(() => {
     if (!solicitud || motorizados.length === 0) return []
+    // Cadena de herencia: orden explícita → comercio → false
+    const requiereBolso =
+      solicitud.requiereBolso ??
+      (comercioRequiereBolso !== null ? comercioRequiereBolso : false)
     const nuevaOrden: NuevaOrdenRanking = {
       recoleccion: { coord: solicitud.recoleccion?.coord ?? null },
       entrega: { coord: solicitud.entrega?.coord ?? null },
-      requiereBolso: false, // campo no existe en Firestore aún → siempre false
+      cotizacion: {
+        origenCoord: solicitud.cotizacion?.origenCoord ?? null,
+        destinoCoord: solicitud.cotizacion?.destinoCoord ?? null,
+      },
+      requiereBolso,
     }
     return rankearMotorizados(motorizados as MotorizadoConRanking[], ordenesActivas, nuevaOrden)
-  }, [solicitud, motorizados, ordenesActivas])
+  }, [solicitud, motorizados, ordenesActivas, comercioRequiereBolso])
 
   const confirmarYAsignar = async () => {
     if (!solicitud) return
@@ -538,6 +564,12 @@ export function SolicitudDrawer({
                       {solicitud.recoleccion?.direccionEscrita && (
                         <div className="mt-1 text-xs text-gray-500 leading-snug">{solicitud.recoleccion.direccionEscrita}</div>
                       )}
+                      {solicitud.zonaRetiroNombre && (
+                        <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-indigo-50 border border-indigo-200 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                          <MapPin size={10} />
+                          {solicitud.zonaRetiroNombre}
+                        </div>
+                      )}
                       {solicitud.recoleccion?.nota && (
                         <div className="mt-1 rounded-lg bg-orange-50 border border-orange-100 px-2.5 py-1.5 text-xs text-orange-700 italic">{solicitud.recoleccion.nota}</div>
                       )}
@@ -579,6 +611,12 @@ export function SolicitudDrawer({
                       )}
                       {solicitud.entrega?.direccionEscrita && (
                         <div className="mt-1 text-xs text-gray-500 leading-snug">{solicitud.entrega.direccionEscrita}</div>
+                      )}
+                      {solicitud.zonaEntregaNombre && (
+                        <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-indigo-50 border border-indigo-200 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                          <MapPin size={10} />
+                          {solicitud.zonaEntregaNombre}
+                        </div>
                       )}
                       {solicitud.entrega?.nota && (
                         <div className="mt-1 rounded-lg bg-emerald-50 border border-emerald-100 px-2.5 py-1.5 text-xs text-emerald-700 italic">{solicitud.entrega.nota}</div>
@@ -760,28 +798,80 @@ export function SolicitudDrawer({
                         <span className="ml-1 text-gray-300 font-normal normal-case">(calculando scores…)</span>
                       )}
                     </label>
-                    <select
-                      value={motorizadoSel}
-                      onChange={(e) => setMotorizadoSel(e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
+
+                    {/* Opción "No asignar" */}
+                    <button
+                      onClick={() => setMotorizadoSel('')}
+                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border mb-2 text-left transition ${
+                        motorizadoSel === ''
+                          ? 'border-gray-400 bg-gray-100 ring-1 ring-gray-300'
+                          : 'border-gray-200 bg-white hover:bg-gray-50'
+                      }`}
                     >
-                      <option value="">— No asignar todavía —</option>
+                      <span className="text-xs font-semibold text-gray-500 italic">— No asignar todavía —</span>
+                    </button>
+
+                    {/* Lista de candidatos */}
+                    <div className="space-y-1.5 max-h-[280px] overflow-y-auto pr-0.5">
                       {(() => {
-                        const scoreMap = new Map(rankingCalculado.map((r) => [r.id, r.scoreResult.score]))
+                        const scoreMap = new Map(rankingCalculado.map((r) => [r.id, r.scoreResult]))
                         const ordenMostrar = rankingCalculado.length > 0 ? rankingCalculado : motorizados
-                        return ordenMostrar.map((m) => {
-                          const score = scoreMap.get(m.id)
-                          const scoreLabel = score !== undefined ? ` [${score}]` : ''
+                        return ordenMostrar.map((m, idx) => {
+                          const sr = scoreMap.get(m.id)
+                          const esSeleccionado = motorizadoSel === m.id
+                          const esMejor = idx === 0 && rankingCalculado.length > 0
                           return (
-                            <option key={m.id} value={m.id}>
-                              {m.estado === 'disponible' ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}{scoreLabel}
-                            </option>
+                            <button
+                              key={m.id}
+                              onClick={() => setMotorizadoSel(m.id)}
+                              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border text-left transition ${
+                                esSeleccionado
+                                  ? 'border-indigo-400 bg-indigo-50 ring-1 ring-indigo-300'
+                                  : 'border-gray-200 bg-white hover:bg-gray-50'
+                              }`}
+                            >
+                              {/* Badge estado */}
+                              <span className={`shrink-0 inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full border ${
+                                m.estado === 'disponible'
+                                  ? 'bg-green-50 text-green-700 border-green-200'
+                                  : 'bg-yellow-50 text-yellow-700 border-yellow-200'
+                              }`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${m.estado === 'disponible' ? 'bg-green-500' : 'bg-yellow-500'}`} />
+                                {m.estado === 'disponible' ? 'Disp.' : (m.estado || 'Ocup.')}
+                              </span>
+
+                              {/* Nombre + explicacion */}
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  {esMejor && <Star size={10} className="text-amber-500 shrink-0" />}
+                                  <span className="text-xs font-bold text-gray-900 truncate">{m.nombre}</span>
+                                  {m.telefono && <span className="text-[10px] text-gray-400 shrink-0">{m.telefono}</span>}
+                                </div>
+                                {sr?.explicacion && (
+                                  <p className="text-[10px] text-gray-500 mt-0.5 leading-snug truncate">{sr.explicacion}</p>
+                                )}
+                              </div>
+
+                              {/* Score badge con color */}
+                              {sr !== undefined && (
+                                <span className={`shrink-0 text-xs font-black px-2 py-1 rounded-full border ${
+                                  sr.score >= 70 ? 'bg-green-50 text-green-700 border-green-200'
+                                  : sr.score >= 40 ? 'bg-yellow-50 text-yellow-700 border-yellow-200'
+                                  : 'bg-red-50 text-red-600 border-red-200'
+                                }`}>
+                                  {sr.score}
+                                </span>
+                              )}
+                            </button>
                           )
                         })
                       })()}
-                    </select>
+                    </div>
+
                     {rankingCalculado.length > 0 && (
-                      <div className="text-[10px] text-gray-400 mt-1">Ordenados por score · [100] = ideal</div>
+                      <div className="text-[10px] text-gray-400 mt-1.5">
+                        Ordenados por score · 100 = ideal · {rankingCalculado.length} candidatos
+                      </div>
                     )}
                   </div>
 

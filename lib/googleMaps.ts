@@ -6,7 +6,7 @@ export function getMapsLoader() {
   if (!loader) {
     loader = new Loader({
       apiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY!, // ya la tenés
-      libraries: ['places'],
+      libraries: ['places', 'drawing'],
       region: 'NI',
       language: 'es',
     })

@@ -1,6 +1,14 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { SolicitudDrawer } from '../_components/SolicitudDrawer'
+import {
+  rankearMotorizados,
+  type MotorizadoConRanking,
+  type OrdenActivaRanking,
+  type NuevaOrdenRanking,
+  type MotorizadoRankeado,
+} from '@/lib/motorizado-ranking'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import {
@@ -12,6 +20,7 @@ import {
   query,
   serverTimestamp,
   updateDoc,
+  where,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import {
@@ -125,6 +134,12 @@ type Solicitud = {
   userId?: string
   comercioUid?: string
   ownerSnapshot?: { companyName?: string; nombre?: string }
+  requiereBolso?: boolean
+
+  zonaRetiroId?: string | null
+  zonaRetiroNombre?: string | null
+  zonaEntregaId?: string | null
+  zonaEntregaNombre?: string | null
 
   prioridad?: boolean
   entregadoAt?: any
@@ -145,14 +160,7 @@ type Solicitud = {
   }
 }
 
-type Motorizado = {
-  id: string
-  authUid?: string
-  nombre: string
-  telefono?: string
-  estado?: string
-  activo?: boolean
-}
+type Motorizado = MotorizadoConRanking
 
 type FiltroCotizacion = 'todas' | 'con' | 'sin'
 type FiltroOrden = 'recientes' | 'antiguas' | 'prioritario'
@@ -528,6 +536,9 @@ export default function GestorSolicitudesPage() {
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [motorizadoSel, setMotorizadoSel] = useState('')
+  const [ordenesActivas, setOrdenesActivas] = useState<OrdenActivaRanking[]>([])
+  const [loadingRanking, setLoadingRanking] = useState(false)
+  const [asignandoId, setAsignandoId] = useState<string | null>(null)
 
   const [cardsAnimating, setCardsAnimating] = useState<string[]>([])
   const prevResumenRef = useRef<Record<EstadoSolicitud, number> | null>(null)
@@ -573,6 +584,20 @@ export default function GestorSolicitudesPage() {
         console.error(e)
       }
     })()
+  }, [])
+
+  // Cargar órdenes activas para el ranking de motorizado
+  useEffect(() => {
+    setLoadingRanking(true)
+    getDocs(
+      query(
+        collection(db, 'solicitudes_envio'),
+        where('estado', 'in', ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'])
+      )
+    )
+      .then((snap) => setOrdenesActivas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))))
+      .catch((e) => console.error('[ranking] Error cargando órdenes activas:', e))
+      .finally(() => setLoadingRanking(false))
   }, [])
 
   useEffect(() => {
@@ -968,6 +993,39 @@ export default function GestorSolicitudesPage() {
     }
   }
 
+  const asignarSugerido = async (solicitudId: string, m: MotorizadoConRanking) => {
+    const user = auth.currentUser
+    if (!user) return
+    setAsignandoId(solicitudId)
+    try {
+      const now = new Date()
+      const aceptarAntesDe = new Date(now.getTime() + 10 * 60 * 1000)
+      await updateDoc(doc(db, 'solicitudes_envio', solicitudId), {
+        estado: 'asignada',
+        asignacion: {
+          motorizadoId: m.id,
+          motorizadoAuthUid: (m.authUid || '').trim(),
+          motorizadoNombre: m.nombre,
+          motorizadoTelefono: m.telefono || '',
+          asignadoPorUid: user.uid,
+          asignadoAt: serverTimestamp(),
+          estadoAceptacion: 'pendiente',
+          aceptadoAt: null,
+          rechazadoAt: null,
+          motivoRechazo: '',
+          aceptarAntesDe,
+        },
+        updatedAt: serverTimestamp(),
+      } as any)
+      setToast({ type: 'success', message: `Asignado a ${m.nombre}` })
+    } catch (e) {
+      console.error(e)
+      setToast({ type: 'error', message: 'No se pudo asignar' })
+    } finally {
+      setAsignandoId(null)
+    }
+  }
+
   const abrirConfirmarYAsignar = (s: Solicitud) => {
     setModalMode('confirmar')
     setOpenId(s.id)
@@ -1144,6 +1202,45 @@ export default function GestorSolicitudesPage() {
     }
     return 'Sin filtro de fecha'
   }, [fechaFiltro, fechaDesde, fechaHasta])
+
+  // Ranking pre-computado para la tabla: top-1 motorizado por cada solicitud en estado "confirmada"
+  // Se recalcula cuando cambia el roster de motorizados, las órdenes activas o la lista de solicitudes.
+  const rankingTabla = useMemo<Map<string, MotorizadoRankeado>>(() => {
+    if (motorizados.length === 0 || loadingRanking) return new Map()
+    const confirmadas = allItems.filter((s) => s.estado === 'confirmada')
+    const result = new Map<string, MotorizadoRankeado>()
+    for (const s of confirmadas) {
+      const nuevaOrden: NuevaOrdenRanking = {
+        recoleccion: { coord: (s.recoleccion as any)?.coord ?? null },
+        entrega: { coord: (s.entrega as any)?.coord ?? null },
+        cotizacion: {
+          origenCoord: s.cotizacion?.origenCoord ?? null,
+          destinoCoord: s.cotizacion?.destinoCoord ?? null,
+        },
+        requiereBolso: s.requiereBolso ?? false,
+      }
+      const top = rankearMotorizados(motorizados, ordenesActivas, nuevaOrden)[0]
+      if (top) result.set(s.id, top)
+    }
+    return result
+  }, [motorizados, ordenesActivas, allItems, loadingRanking])
+
+  // Ranking de motorizado para el modal actual
+  const rankingModal = useMemo<MotorizadoRankeado[]>(() => {
+    if (!openId || motorizados.length === 0) return []
+    const solicitud = allItems.find((x) => x.id === openId)
+    if (!solicitud) return []
+    const nuevaOrden: NuevaOrdenRanking = {
+      recoleccion: { coord: (solicitud.recoleccion as any)?.coord ?? null },
+      entrega: { coord: (solicitud.entrega as any)?.coord ?? null },
+      cotizacion: {
+        origenCoord: solicitud.cotizacion?.origenCoord ?? null,
+        destinoCoord: solicitud.cotizacion?.destinoCoord ?? null,
+      },
+      requiereBolso: solicitud.requiereBolso ?? false,
+    }
+    return rankearMotorizados(motorizados, ordenesActivas, nuevaOrden)
+  }, [openId, motorizados, ordenesActivas, allItems])
 
   return (
     <div className="flex-1 min-h-0 flex flex-col gap-3 min-w-0">
@@ -1453,7 +1550,7 @@ export default function GestorSolicitudesPage() {
                     const sem = semaforoForRemaining(rem)
 
                     return (
-                      <tr key={s.id} className="align-middle hover:bg-blue-50/60 transition-colors group">
+                      <tr key={s.id} className={`align-middle transition-colors group ${s.estado === 'confirmada' ? 'bg-emerald-50/20 hover:bg-emerald-50/50' : 'hover:bg-blue-50/60'}`}>
                         <td className="px-3 py-2 border-r border-gray-100">
                           <Link
                             href={`/panel/gestor/solicitudes/${s.id}`}
@@ -1556,6 +1653,11 @@ export default function GestorSolicitudesPage() {
                             )}
                           </div>
                           <div className="text-[11px] text-gray-500 mt-0.5 truncate" title={s.recoleccion.direccionEscrita}>{s.recoleccion.direccionEscrita}</div>
+                          {s.zonaRetiroNombre && (
+                            <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 mt-0.5">
+                              {s.zonaRetiroNombre}
+                            </span>
+                          )}
                           {retiroMaps && (
                             <div className="mt-1 flex gap-1">
                               <a href={retiroMaps} target="_blank" rel="noreferrer" title="Ver en Maps" className="rounded p-1 text-blue-600 bg-blue-50 hover:bg-blue-100 transition">
@@ -1584,6 +1686,11 @@ export default function GestorSolicitudesPage() {
                             )}
                           </div>
                           <div className="text-[11px] text-gray-500 mt-0.5 truncate" title={s.entrega.direccionEscrita}>{s.entrega.direccionEscrita}</div>
+                          {s.zonaEntregaNombre && (
+                            <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 mt-0.5">
+                              {s.zonaEntregaNombre}
+                            </span>
+                          )}
                           {entregaMaps && (
                             <div className="mt-1 flex gap-1">
                               <a href={entregaMaps} target="_blank" rel="noreferrer" title="Ver en Maps" className="rounded p-1 text-blue-600 bg-blue-50 hover:bg-blue-100 transition">
@@ -1617,7 +1724,24 @@ export default function GestorSolicitudesPage() {
                               <div className="text-xs font-medium text-gray-900 truncate">{s.asignacion.motorizadoNombre}</div>
                               <div className="text-[11px] text-gray-600 mt-0.5">{s.asignacion.motorizadoTelefono || '—'}</div>
                             </>
-                          ) : (
+                          ) : s.estado === 'confirmada' ? (() => {
+                            const top = rankingTabla.get(s.id)
+                            if (!top) return <div className="text-[11px] text-gray-400">{loadingRanking ? 'Calculando…' : 'Sin candidatos'}</div>
+                            const { score, explicacion } = top.scoreResult
+                            return (
+                              <div className="space-y-1">
+                                <div className="text-xs font-semibold text-gray-900 truncate">{top.nombre}</div>
+                                <div className="flex items-center gap-1 min-w-0">
+                                  <span className={`shrink-0 text-[10px] font-black px-1.5 py-0.5 rounded-full border ${
+                                    score >= 70 ? 'bg-green-50 text-green-700 border-green-200'
+                                    : score >= 40 ? 'bg-yellow-50 text-yellow-700 border-yellow-200'
+                                    : 'bg-red-50 text-red-600 border-red-200'
+                                  }`}>{score}</span>
+                                  <span className="text-[10px] text-gray-500 truncate leading-tight">{explicacion}</span>
+                                </div>
+                              </div>
+                            )
+                          })() : (
                             <div className="text-[11px] text-gray-400">Sin asignar</div>
                           )}
                         </td>
@@ -1632,7 +1756,7 @@ export default function GestorSolicitudesPage() {
                           )}
                         </td>
 
-                        <td className="px-2 py-2 sticky right-0 bg-white z-10 border-l border-gray-200 group-hover:bg-blue-50">
+                        <td className={`px-2 py-2 sticky right-0 z-10 border-l border-gray-200 ${s.estado === 'confirmada' ? 'bg-emerald-50/30 group-hover:bg-emerald-50/70' : 'bg-white group-hover:bg-blue-50'}`}>
                           <div className="flex flex-col gap-1 min-w-[150px]">
 
                             {/* CTA primaria según estado */}
@@ -1645,15 +1769,34 @@ export default function GestorSolicitudesPage() {
                                 Confirmar + asignar
                               </button>
                             )}
-                            {s.estado === 'confirmada' && (
-                              <button
-                                onClick={() => abrirConfirmarYAsignar(s)}
-                                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#004aad] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#003d94] w-full"
-                              >
-                                <Truck className="h-3.5 w-3.5 shrink-0" />
-                                Asignar
-                              </button>
-                            )}
+                            {s.estado === 'confirmada' && (() => {
+                              const top = rankingTabla.get(s.id)
+                              return (
+                                <>
+                                  {top && (
+                                    <button
+                                      onClick={() => asignarSugerido(s.id, top)}
+                                      disabled={asignandoId === s.id}
+                                      className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-700 w-full disabled:opacity-50 transition"
+                                    >
+                                      <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                                      {asignandoId === s.id ? 'Asignando…' : 'Asignar sugerido'}
+                                    </button>
+                                  )}
+                                  <button
+                                    onClick={() => abrirConfirmarYAsignar(s)}
+                                    className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold w-full transition ${
+                                      top
+                                        ? 'border border-gray-200 text-gray-600 bg-white hover:bg-gray-50'
+                                        : 'bg-[#004aad] text-white hover:bg-[#003d94]'
+                                    }`}
+                                  >
+                                    <Truck className="h-3.5 w-3.5 shrink-0" />
+                                    {top ? 'Ver opciones' : 'Asignar'}
+                                  </button>
+                                </>
+                              )
+                            })()}
                             {s.estado === 'asignada' && (
                               <div className="flex gap-1">
                                 <button
@@ -1980,193 +2123,12 @@ export default function GestorSolicitudesPage() {
       )}
 
       {/* ── DRAWER LATERAL ─────────────────────────────────────────────────── */}
-      {drawerSolicitudId && (() => {
-        const s = allItems.find((x) => x.id === drawerSolicitudId)
-        if (!s) return null
-        const ef = getEstadoFinanciero(s)
-        const riesgos = getRiesgos(s)
-        const efColors: Record<EstadoFinanciero, string> = {
-          pendiente: 'bg-yellow-50 text-yellow-700 border-yellow-200',
-          pagado: 'bg-green-50 text-green-700 border-green-200',
-          en_revision: 'bg-blue-50 text-blue-700 border-blue-200',
-          problema: 'bg-red-50 text-red-700 border-red-200',
-          credito: 'bg-gray-100 text-gray-600 border-gray-200',
-        }
-        const efLabels: Record<EstadoFinanciero, string> = {
-          pendiente: 'Pendiente cobro', pagado: 'Cobrado', en_revision: 'En revisión', problema: 'Problema pago', credito: 'Crédito semanal',
-        }
-        const precioFinalDrawer = s.confirmacion?.precioFinalCordobas
-        return (
-          <>
-            {/* Backdrop */}
-            <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setDrawerSolicitudId(null)} />
-            {/* Panel */}
-            <div className="fixed right-0 top-0 h-full w-full max-w-[440px] bg-white shadow-2xl z-50 flex flex-col overflow-hidden">
-              {/* Header */}
-              <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-gray-50 shrink-0">
-                <div>
-                  <div className="text-xs text-gray-500 font-mono">#{s.id.slice(0, 8)}</div>
-                  <div className="font-semibold text-gray-900 text-sm mt-0.5 flex items-center gap-2">
-                    <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium ${estadoClass(s.estado)}`}>{statusLabel(s.estado)}</span>
-                    {s.prioridad && <span className="inline-flex items-center gap-0.5 rounded-full border border-yellow-300 bg-yellow-50 px-2 py-0.5 text-[10px] font-semibold text-yellow-700"><Star className="h-2.5 w-2.5 fill-yellow-400 text-yellow-400" />Prioritaria</span>}
-                  </div>
-                </div>
-                <button onClick={() => setDrawerSolicitudId(null)} className="rounded-full p-1.5 hover:bg-gray-200 transition text-gray-500">
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-
-              {/* Contenido scrolleable */}
-              <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4 text-sm">
-
-                {/* Estado financiero */}
-                <div className="rounded-xl border p-3 bg-white">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Estado financiero</div>
-                  <div className="flex flex-wrap gap-2">
-                    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium ${efColors[ef]}`}>
-                      <DollarSign className="h-3 w-3" />
-                      {efLabels[ef]}
-                    </span>
-                    {riesgos.map((r) => (
-                      <span key={r.tipo} className="inline-flex items-center gap-1.5 rounded-full border border-red-300 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700">
-                        <AlertTriangle className="h-3 w-3" />{r.label}
-                      </span>
-                    ))}
-                  </div>
-                  {s.cobrosMotorizado?.delivery && (
-                    <div className="mt-2 text-xs text-gray-600">
-                      Delivery cobrado: <strong>{s.cobrosMotorizado.delivery.recibio ? 'Sí' : 'No'}</strong>
-                      {s.cobrosMotorizado.delivery.justificacion && <span className="ml-1 text-orange-600">— {s.cobrosMotorizado.delivery.justificacion}</span>}
-                    </div>
-                  )}
-                </div>
-
-                {/* Precio */}
-                <div className="rounded-xl border p-3 bg-white">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Precio delivery</div>
-                  {typeof precioFinalDrawer === 'number' ? (
-                    <div className="text-lg font-bold text-gray-900">{money(precioFinalDrawer)}</div>
-                  ) : (
-                    <div className="text-gray-500 text-xs">Sin confirmar</div>
-                  )}
-                  <div className="text-xs text-gray-500 mt-1">
-                    {s.tipoCliente === 'credito' ? 'Crédito semanal' : `Contado · paga: ${(s.pagoDelivery as any)?.quienPaga || '—'}`}
-                  </div>
-                  {s.cobroContraEntrega?.aplica && (
-                    <div className="mt-1 text-xs text-gray-700 flex items-center gap-1">
-                      <Wallet className="h-3 w-3 text-gray-400" />
-                      CE: <strong className="ml-0.5">{money(s.cobroContraEntrega.monto)}</strong>
-                    </div>
-                  )}
-                </div>
-
-                {/* Retiro */}
-                <div className="rounded-xl border p-3 bg-white">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2 flex items-center gap-1">
-                    <MapPin className="h-3 w-3" />Retiro
-                  </div>
-                  <div className="font-medium text-gray-900">{s.recoleccion.nombreApellido || '—'}</div>
-                  <div className="text-gray-600 mt-0.5 flex items-center gap-1"><Phone className="h-3 w-3 text-gray-400" />{s.recoleccion.celular}</div>
-                  <div className="text-gray-600 mt-0.5 text-xs">{s.recoleccion.direccionEscrita}</div>
-                  {getBestMapsUrl(s, 'recoleccion') && (
-                    <a href={getBestMapsUrl(s, 'recoleccion')!} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline mt-1">
-                      <ExternalLink className="h-3 w-3" />Ver en Maps
-                    </a>
-                  )}
-                </div>
-
-                {/* Entrega */}
-                <div className="rounded-xl border p-3 bg-white">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2 flex items-center gap-1">
-                    <MapPin className="h-3 w-3" />Entrega
-                  </div>
-                  <div className="font-medium text-gray-900">{s.entrega.nombreApellido || '—'}</div>
-                  <div className="text-gray-600 mt-0.5 flex items-center gap-1"><Phone className="h-3 w-3 text-gray-400" />{s.entrega.celular}</div>
-                  <div className="text-gray-600 mt-0.5 text-xs">{s.entrega.direccionEscrita}</div>
-                  {getBestMapsUrl(s, 'entrega') && (
-                    <a href={getBestMapsUrl(s, 'entrega')!} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline mt-1">
-                      <ExternalLink className="h-3 w-3" />Ver en Maps
-                    </a>
-                  )}
-                </div>
-
-                {/* Motorizado */}
-                {s.asignacion?.motorizadoNombre && (
-                  <div className="rounded-xl border p-3 bg-white">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2 flex items-center gap-1">
-                      <Truck className="h-3 w-3" />Motorizado
-                    </div>
-                    <div className="font-medium text-gray-900">{s.asignacion.motorizadoNombre}</div>
-                    {s.asignacion.motorizadoTelefono && <div className="text-gray-600 text-xs mt-0.5">{s.asignacion.motorizadoTelefono}</div>}
-                    <div className="text-xs text-gray-500 mt-1">Aceptación: <span className={`font-medium ${s.asignacion.estadoAceptacion === 'aceptada' ? 'text-green-700' : s.asignacion.estadoAceptacion === 'rechazada' ? 'text-red-700' : 'text-yellow-700'}`}>{s.asignacion.estadoAceptacion || '—'}</span></div>
-                  </div>
-                )}
-
-                {/* Fechas */}
-                <div className="rounded-xl border p-3 bg-white">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Historial</div>
-                  <div className="space-y-1 text-xs text-gray-600">
-                    <div>Creado: <span className="font-medium">{formatDateTime(s.createdAt)}</span></div>
-                    <div>Actualizado: <span className="font-medium">{formatDateTime(s.updatedAt)}</span></div>
-                    {s.entregadoAt && <div>Entregado: <span className="font-medium text-green-700">{formatDateTime(s.entregadoAt)}</span></div>}
-                  </div>
-                </div>
-
-                {/* Acciones */}
-                <div className="rounded-xl border p-3 bg-white">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Acciones</div>
-                  <div className="flex flex-col gap-2">
-                    {s.estado === 'entregado' && s.prioridad ? (
-                      <button
-                        disabled
-                        title="Prioridad registrada — no se puede quitar en entregadas"
-                        className="inline-flex items-center gap-2 rounded-lg border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs font-medium text-yellow-700 cursor-not-allowed opacity-70"
-                      >
-                        <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" />
-                        Prioritaria (bloqueada)
-                      </button>
-                    ) : (
-                      <button onClick={() => togglePrioridad(s.id, s.prioridad)}
-                        className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium ${s.prioridad ? 'border-yellow-300 bg-yellow-50 text-yellow-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
-                        <Star className={`h-4 w-4 ${s.prioridad ? 'fill-yellow-400 text-yellow-400' : ''}`} />
-                        {s.prioridad ? 'Quitar prioridad' : 'Marcar prioritaria'}
-                      </button>
-                    )}
-                    {s.estado === 'pendiente_confirmacion' && (
-                      <button onClick={() => { setDrawerSolicitudId(null); abrirConfirmarYAsignar(s) }}
-                        className="inline-flex items-center gap-2 rounded-lg bg-[#004aad] px-3 py-2 text-xs font-medium text-white hover:bg-[#003d94]">
-                        <CheckCircle2 className="h-4 w-4" />Confirmar + asignar
-                      </button>
-                    )}
-                    {s.estado === 'confirmada' && (
-                      <button onClick={() => { setDrawerSolicitudId(null); abrirConfirmarYAsignar(s) }}
-                        className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">
-                        <Truck className="h-4 w-4" />Asignar rápido
-                      </button>
-                    )}
-                    {s.estado === 'asignada' && (
-                      <>
-                        <button onClick={() => { setDrawerSolicitudId(null); abrirReasignar(s) }}
-                          className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">
-                          <RefreshCcw className="h-4 w-4" />Reasignar
-                        </button>
-                        <button onClick={() => { rebotarAsignacion(s.id); setDrawerSolicitudId(null) }}
-                          className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">
-                          <RotateCcw className="h-4 w-4" />Rebotar
-                        </button>
-                      </>
-                    )}
-                    <Link href={`/panel/gestor/solicitudes/${s.id}`}
-                      className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">
-                      <ExternalLink className="h-4 w-4" />Abrir página completa
-                    </Link>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </>
-        )
-      })()}
+      {drawerSolicitudId && (
+        <SolicitudDrawer
+          solicitudId={drawerSolicitudId}
+          onClose={() => setDrawerSolicitudId(null)}
+        />
+      )}
 
       {openId && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-4 z-50">
@@ -2202,9 +2164,36 @@ export default function GestorSolicitudesPage() {
               <div className="text-xs text-gray-500 mt-1">Se redondea automáticamente a múltiplos de 10.</div>
             </div>
 
+            {/* Motorizado sugerido */}
+            {modalMode === 'confirmar' && rankingModal.length > 0 && (() => {
+              const top = rankingModal[0]
+              return (
+                <div className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Star className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
+                      <span className="text-sm font-bold text-indigo-900 truncate">{top.nombre}</span>
+                      {top.telefono && <span className="text-xs text-indigo-400 shrink-0">{top.telefono}</span>}
+                    </div>
+                    <span className="text-xs font-black text-indigo-700 bg-indigo-100 border border-indigo-200 rounded-full px-2.5 py-0.5 shrink-0 ml-2">
+                      {top.scoreResult.score} pts
+                    </span>
+                  </div>
+                  <p className="text-xs text-indigo-700 leading-relaxed">{top.scoreResult.explicacion}</p>
+                  <button
+                    onClick={() => setMotorizadoSel(top.id)}
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700 transition"
+                  >
+                    <Truck className="h-4 w-4" /> Asignar sugerido
+                  </button>
+                </div>
+              )
+            })()}
+
             <div className="mt-4">
               <label className="block text-sm font-medium mb-1">
                 Motorizado {modalMode === 'confirmar' ? '(opcional)' : ''}
+                {loadingRanking && <span className="ml-1 text-xs text-gray-400 font-normal">(calculando scores…)</span>}
               </label>
               <select
                 value={motorizadoSel}
@@ -2212,14 +2201,23 @@ export default function GestorSolicitudesPage() {
                 className="w-full border rounded-lg px-3 py-2"
               >
                 {modalMode === 'confirmar' && <option value="">-- No asignar todavía --</option>}
-                {motorizados.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.estado === 'disponible' ? '✅ ' : '⛔ '}
-                    {m.nombre}
-                    {m.telefono ? ` · ${m.telefono}` : ''}
-                  </option>
-                ))}
+                {(() => {
+                  const scoreMap = new Map(rankingModal.map((r) => [r.id, r.scoreResult.score]))
+                  const lista = rankingModal.length > 0 ? rankingModal : motorizados
+                  return lista.map((m) => {
+                    const score = scoreMap.get(m.id)
+                    const scoreLabel = score !== undefined ? ` [${score}]` : ''
+                    return (
+                      <option key={m.id} value={m.id}>
+                        {m.estado === 'disponible' ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}{scoreLabel}
+                      </option>
+                    )
+                  })
+                })()}
               </select>
+              {rankingModal.length > 0 && (
+                <div className="text-xs text-gray-400 mt-1">Ordenados por score · [100] = ideal</div>
+              )}
               <div className="text-xs text-gray-500 mt-1">
                 Si asignás ahora, el motorizado tendrá <strong>10 minutos</strong> para aceptar.
               </div>
