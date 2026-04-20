@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { auth } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { onZonasSnapshot, crearZona, actualizarZona, toggleZonaActiva } from '@/fb/zonas'
+import { clasificarPuntoEnZona } from '@/lib/zonas'
 import type { ZonaGeografica, Coord } from '@/lib/zonas'
 import {
   Map,
@@ -16,58 +17,83 @@ import {
   X,
   Pentagon,
   Check,
+  Satellite,
+  Crosshair,
+  Copy,
+  Focus,
 } from 'lucide-react'
 
 // ── Constantes ────────────────────────────────────────────────────────────────
 
-const MAP_CENTER = { lat: 12.1364, lng: -86.2514 } // Managua, Nicaragua
+const MAP_CENTER = { lat: 12.1364, lng: -86.2514 }
 
 const COLORES_PRESET = [
-  '#ef4444', // rojo
-  '#f97316', // naranja
-  '#eab308', // amarillo
-  '#22c55e', // verde
-  '#14b8a6', // teal
-  '#3b82f6', // azul
-  '#6366f1', // índigo
-  '#a855f7', // violeta
+  '#ef4444', '#f97316', '#eab308', '#22c55e',
+  '#14b8a6', '#3b82f6', '#6366f1', '#a855f7',
 ]
 
 type Mode = 'idle' | 'nueva' | 'editando'
 
+/** Centroide del polígono (promedio de vértices) */
+function polygonCentroid(poligono: Coord[]): Coord {
+  const lat = poligono.reduce((s, p) => s + p.lat, 0) / poligono.length
+  const lng = poligono.reduce((s, p) => s + p.lng, 0) / poligono.length
+  return { lat, lng }
+}
+
 // ── Componente ────────────────────────────────────────────────────────────────
 
 export default function ZonasPage() {
-  // ── State ──
+
+  // ── State ──────────────────────────────────────────────────────────────────
   const [zonas, setZonas] = useState<ZonaGeografica[]>([])
   const [mode, setMode] = useState<Mode>('idle')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)   // zona en edición
+  const [clickedId, setClickedId] = useState<string | null>(null)     // zona seleccionada en mapa
+  const [modoTest, setModoTest] = useState(false)
+  const [busqueda, setBusqueda] = useState('')
+  const [satelite, setSatelite] = useState(false)
 
+  // form
   const [draftNombre, setDraftNombre] = useState('')
   const [draftColor, setDraftColor] = useState('#3b82f6')
-  const [draftPrioridad, setDraftPrioridad] = useState(50)
+  const [draftPrioridad, setDraftPrioridad] = useState(1)
   const [draftPoligono, setDraftPoligono] = useState<Coord[] | null>(null)
   const [dibujando, setDibujando] = useState(false)
-
   const [saving, setSaving] = useState(false)
   const [mapReady, setMapReady] = useState(false)
   const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
-  // ── Google Maps refs ──
+  // ── Google Maps refs ────────────────────────────────────────────────────────
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<google.maps.Map | null>(null)
-  const dmRef = useRef<any>(null) // DrawingManager
+  const dmRef = useRef<any>(null)
   const overlaysRef = useRef<Record<string, google.maps.Polygon>>({})
+  const labelsRef = useRef<Record<string, google.maps.Marker>>({})
+  const infoWindowRef = useRef<google.maps.InfoWindow | null>(null)
   const editPolyRef = useRef<google.maps.Polygon | null>(null)
   const draftPolyRef = useRef<google.maps.Polygon | null>(null)
-  // Ref para leer draftColor sin stale closure en el callback del DrawingManager
   const draftColorRef = useRef(draftColor)
   useEffect(() => { draftColorRef.current = draftColor }, [draftColor])
 
-  // ── Inicializar mapa ──
+  // Refs sin stale closure en callbacks del mapa
+  const zonasRef = useRef<ZonaGeografica[]>([])
+  useEffect(() => { zonasRef.current = zonas }, [zonas])
+  const modoTestRef = useRef(modoTest)
+  useEffect(() => { modoTestRef.current = modoTest }, [modoTest])
+  const modeRef = useRef(mode)
+  useEffect(() => { modeRef.current = mode }, [mode])
+
+  // Refs para scroll-to-card
+  const cardRefs = useRef<Record<string, HTMLDivElement | null>>({})
+
+  // ── Handlers forward-declared como refs (usados en InfoWindow domready) ──
+  const handleEditarZonaRef = useRef<(zona: ZonaGeografica) => void>(() => {})
+  const handleToggleRef = useRef<(zona: ZonaGeografica) => void>(() => {})
+
+  // ── Inicializar mapa ────────────────────────────────────────────────────────
   useEffect(() => {
-    const loader = getMapsLoader()
-    loader.load().then(() => {
+    getMapsLoader().load().then(() => {
       if (!containerRef.current || mapRef.current) return
 
       const map = new google.maps.Map(containerRef.current, {
@@ -80,93 +106,196 @@ export default function ZonasPage() {
       })
       mapRef.current = map
 
+      // ── CLIC EN EL MAPA: lógica de selección por prioridad ──────────────────
+      // NO usamos click en polígonos individuales para evitar el bug de orden de render.
+      // Toda la selección pasa por aquí usando pointInPolygon.
+      map.addListener('click', (e: google.maps.MapMouseEvent) => {
+        if (!e.latLng) return
+        // En modo dibujo o edición no seleccionar zonas
+        if (modeRef.current !== 'idle') return
+
+        const coord: Coord = { lat: e.latLng.lat(), lng: e.latLng.lng() }
+        const zonaGanadora = clasificarPuntoEnZona(coord, zonasRef.current)
+
+        if (modoTestRef.current) {
+          // Modo prueba: mostrar resultado sin seleccionar
+          if (!infoWindowRef.current) infoWindowRef.current = new google.maps.InfoWindow()
+          if (zonaGanadora) {
+            infoWindowRef.current.setContent(`
+              <div style="font-family:system-ui,sans-serif;padding:4px 0 2px">
+                <div style="font-size:10px;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Modo prueba</div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${zonaGanadora.color};flex-shrink:0"></span>
+                  <span style="font-size:13px;font-weight:700;color:#111827">${zonaGanadora.nombre}</span>
+                </div>
+                <div style="margin-top:4px;font-size:11px;color:#6b7280">Prioridad: ${'★'.repeat(zonaGanadora.prioridad)}${'☆'.repeat(5 - zonaGanadora.prioridad)}</div>
+              </div>
+            `)
+          } else {
+            infoWindowRef.current.setContent(`
+              <div style="font-family:system-ui,sans-serif;padding:4px 0 2px">
+                <div style="font-size:10px;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Modo prueba</div>
+                <div style="font-size:12px;color:#6b7280">Este punto no pertenece<br>a ninguna zona activa.</div>
+              </div>
+            `)
+          }
+          infoWindowRef.current.setPosition(e.latLng)
+          infoWindowRef.current.open(map)
+          return
+        }
+
+        if (!zonaGanadora) {
+          infoWindowRef.current?.close()
+          setClickedId(null)
+          return
+        }
+
+        setClickedId(zonaGanadora.id)
+
+        // Scroll a la tarjeta de la lista
+        const card = cardRefs.current[zonaGanadora.id]
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+
+        // Mostrar InfoWindow con acciones
+        abrirInfoWindow(zonaGanadora, e.latLng, map)
+      })
+
+      // ── DrawingManager ───────────────────────────────────────────────────────
       const dm = new (google.maps as any).drawing.DrawingManager({
         drawingMode: null,
         drawingControl: false,
-        polygonOptions: {
-          strokeWeight: 2,
-          fillOpacity: 0.25,
-          editable: false,
-          clickable: false,
-        },
+        polygonOptions: { strokeWeight: 2, fillOpacity: 0.25, editable: false, clickable: false },
       })
       dm.setMap(map)
       dmRef.current = dm
 
       dm.addListener('polygoncomplete', (polygon: google.maps.Polygon) => {
-        // Capturar vértices del polígono dibujado
         const path = polygon.getPath()
         const coords: Coord[] = []
         for (let i = 0; i < path.getLength(); i++) {
           const pt = path.getAt(i)
           coords.push({ lat: pt.lat(), lng: pt.lng() })
         }
-        // Eliminar overlay temporal del DrawingManager
         polygon.setMap(null)
-
-        // Desactivar modo dibujo
         dm.setDrawingMode(null)
         setDibujando(false)
         setDraftPoligono(coords)
 
-        // Mostrar preview del polígono nuevo
         if (draftPolyRef.current) draftPolyRef.current.setMap(null)
         const color = draftColorRef.current
-        const preview = new google.maps.Polygon({
+        draftPolyRef.current = new google.maps.Polygon({
           paths: coords.map((c) => ({ lat: c.lat, lng: c.lng })),
-          strokeColor: color,
-          strokeWeight: 2,
-          fillColor: color,
-          fillOpacity: 0.3,
-          map,
-          editable: false,
-          clickable: false,
+          strokeColor: color, strokeWeight: 2, fillColor: color, fillOpacity: 0.3,
+          map, editable: false, clickable: false,
         })
-        draftPolyRef.current = preview
       })
 
       setMapReady(true)
     })
   }, [])
 
-  // ── Actualizar color del polígono draft al cambiar el color seleccionado ──
+  // ── Función para abrir InfoWindow con botones ────────────────────────────────
+  function abrirInfoWindow(zona: ZonaGeografica, pos: google.maps.LatLng, map: google.maps.Map) {
+    if (!infoWindowRef.current) infoWindowRef.current = new google.maps.InfoWindow()
+
+    const badge = zona.activa
+      ? `<span style="background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0;border-radius:99px;padding:1px 8px;font-size:10px;font-weight:700">Activa</span>`
+      : `<span style="background:#f3f4f6;color:#6b7280;border:1px solid #d1d5db;border-radius:99px;padding:1px 8px;font-size:10px;font-weight:700">Inactiva</span>`
+
+    infoWindowRef.current.setContent(`
+      <div style="font-family:system-ui,sans-serif;padding:2px 0 4px;min-width:180px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${zona.color};flex-shrink:0"></span>
+          <strong style="font-size:13px;color:#111827;flex:1">${zona.nombre}</strong>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+          ${badge}
+          <span style="font-size:11px;color:#f59e0b;letter-spacing:1px" title="Prioridad ${zona.prioridad}/5">${'★'.repeat(zona.prioridad)}${'☆'.repeat(5 - zona.prioridad)}</span>
+        </div>
+        <div style="display:flex;gap:5px;flex-wrap:wrap">
+          <button id="iw-btn-edit" style="cursor:pointer;background:#004aad;color:#fff;border:none;border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600">✏ Editar</button>
+          <button id="iw-btn-toggle" style="cursor:pointer;background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600">${zona.activa ? '⊘ Desactivar' : '✓ Activar'}</button>
+          <button id="iw-btn-center" style="cursor:pointer;background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600">⊙ Centrar</button>
+          <button id="iw-btn-dup" style="cursor:pointer;background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600">⎘ Duplicar</button>
+        </div>
+      </div>
+    `)
+    infoWindowRef.current.setPosition(pos)
+    infoWindowRef.current.open(map)
+
+    google.maps.event.addListenerOnce(infoWindowRef.current, 'domready', () => {
+      document.getElementById('iw-btn-edit')?.addEventListener('click', () => {
+        infoWindowRef.current?.close()
+        handleEditarZonaRef.current(zona)
+      })
+      document.getElementById('iw-btn-toggle')?.addEventListener('click', () => {
+        infoWindowRef.current?.close()
+        handleToggleRef.current(zona)
+      })
+      document.getElementById('iw-btn-center')?.addEventListener('click', () => {
+        if (!mapRef.current) return
+        const bounds = new google.maps.LatLngBounds()
+        zona.poligono.forEach((p) => bounds.extend({ lat: p.lat, lng: p.lng }))
+        mapRef.current.fitBounds(bounds, 60)
+      })
+      document.getElementById('iw-btn-dup')?.addEventListener('click', () => {
+        infoWindowRef.current?.close()
+        handleDuplicarZona(zona)
+      })
+    })
+  }
+
+  // ── Satélite ─────────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (draftPolyRef.current) {
-      draftPolyRef.current.setOptions({ strokeColor: draftColor, fillColor: draftColor })
-    }
-    if (editPolyRef.current) {
-      editPolyRef.current.setOptions({ strokeColor: draftColor, fillColor: draftColor })
-    }
+    if (!mapRef.current) return
+    mapRef.current.setMapTypeId(satelite ? google.maps.MapTypeId.HYBRID : google.maps.MapTypeId.ROADMAP)
+  }, [satelite, mapReady])
+
+  // ── Color del draft al cambiar selección de color ─────────────────────────────
+  useEffect(() => {
+    draftPolyRef.current?.setOptions({ strokeColor: draftColor, fillColor: draftColor })
+    editPolyRef.current?.setOptions({ strokeColor: draftColor, fillColor: draftColor })
   }, [draftColor])
 
-  // ── Suscribir a zonas en Firestore ──
+  // ── Suscribir a zonas ─────────────────────────────────────────────────────────
   useEffect(() => {
     const unsub = onZonasSnapshot((z) => setZonas(z))
     return () => unsub()
   }, [])
 
-  // ── Actualizar overlays del mapa cuando cambian las zonas ──
+  // ── Actualizar overlays + etiquetas en el mapa ────────────────────────────────
   useEffect(() => {
     if (!mapReady || !mapRef.current) return
-
     const map = mapRef.current
     const currentIds = new Set(zonas.map((z) => z.id))
 
-    // Eliminar overlays de zonas que ya no existen
+    // Eliminar overlays y etiquetas de zonas borradas
     Object.keys(overlaysRef.current).forEach((id) => {
       if (!currentIds.has(id)) {
         overlaysRef.current[id].setMap(null)
         delete overlaysRef.current[id]
       }
     })
+    Object.keys(labelsRef.current).forEach((id) => {
+      if (!currentIds.has(id)) {
+        labelsRef.current[id].setMap(null)
+        delete labelsRef.current[id]
+      }
+    })
 
-    // Crear / actualizar overlay por cada zona
     zonas.forEach((zona) => {
-      // Si la zona está en modo edición, su polígono lo maneja editPolyRef
       if (zona.id === selectedId && mode === 'editando') return
 
-      const opacity = zona.activa ? 0.8 : 0.3
-      const fill = zona.activa ? 0.15 : 0.04
+      const isHighlighted = zona.id === clickedId
+      const hasSelection = clickedId !== null
+
+      const strokeOpacity = zona.activa
+        ? isHighlighted ? 1 : hasSelection ? 0.25 : 0.8
+        : 0.2
+      const fillOpacity = zona.activa
+        ? isHighlighted ? 0.35 : hasSelection ? 0.04 : 0.15
+        : 0.03
+      const strokeWeight = isHighlighted ? 4 : 2
 
       const existing = overlaysRef.current[zona.id]
       if (existing) {
@@ -174,93 +303,118 @@ export default function ZonasPage() {
           paths: zona.poligono.map((p) => ({ lat: p.lat, lng: p.lng })),
           strokeColor: zona.color,
           fillColor: zona.color,
-          strokeOpacity: opacity,
-          fillOpacity: fill,
+          strokeOpacity,
+          fillOpacity,
+          strokeWeight,
         })
       } else {
+        // Polígonos NO clickables — el clic se maneja a nivel de mapa
         const poly = new google.maps.Polygon({
           paths: zona.poligono.map((p) => ({ lat: p.lat, lng: p.lng })),
           strokeColor: zona.color,
-          strokeWeight: 2,
-          strokeOpacity: opacity,
+          strokeWeight,
+          strokeOpacity,
           fillColor: zona.color,
-          fillOpacity: fill,
+          fillOpacity,
           map,
           editable: false,
-          clickable: false,
+          clickable: false, // ← intencional: toda la selección pasa por map.click
         })
         overlaysRef.current[zona.id] = poly
       }
-    })
-  }, [zonas, mapReady, mode, selectedId])
 
-  // ── Handlers ──
+      // Etiqueta de nombre en el centroide
+      const centro = polygonCentroid(zona.poligono)
+      const existingLabel = labelsRef.current[zona.id]
+      if (existingLabel) {
+        existingLabel.setOptions({
+          position: centro,
+          label: {
+            text: zona.nombre,
+            color: zona.activa ? zona.color : '#9ca3af',
+            fontWeight: isHighlighted ? '800' : '600',
+            fontSize: isHighlighted ? '12px' : '11px',
+          },
+          opacity: zona.activa ? (hasSelection && !isHighlighted ? 0.4 : 1) : 0.4,
+        })
+      } else {
+        const label = new google.maps.Marker({
+          position: centro,
+          map,
+          label: {
+            text: zona.nombre,
+            color: zona.activa ? zona.color : '#9ca3af',
+            fontWeight: '600',
+            fontSize: '11px',
+          },
+          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 0 },
+          clickable: false,
+          zIndex: 10,
+        })
+        labelsRef.current[zona.id] = label
+      }
+    })
+  }, [zonas, mapReady, mode, selectedId, clickedId])
+
+  // ── Handlers ─────────────────────────────────────────────────────────────────
 
   const limpiarDraft = useCallback(() => {
     if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
     if (editPolyRef.current) { editPolyRef.current.setMap(null); editPolyRef.current = null }
-    if (dmRef.current) dmRef.current.setDrawingMode(null)
+    dmRef.current?.setDrawingMode(null)
     setDibujando(false)
     setDraftPoligono(null)
     setDraftNombre('')
     setDraftColor('#3b82f6')
-    setDraftPrioridad(50)
+    setDraftPrioridad(1)
     setSelectedId(null)
     setMsg(null)
   }, [])
 
   const handleNuevaZona = useCallback(() => {
     limpiarDraft()
+    setClickedId(null)
+    infoWindowRef.current?.close()
     setMode('nueva')
   }, [limpiarDraft])
 
   const handleEditarZona = useCallback((zona: ZonaGeografica) => {
     limpiarDraft()
+    setClickedId(null)
+    infoWindowRef.current?.close()
     setSelectedId(zona.id)
     setDraftNombre(zona.nombre)
     setDraftColor(zona.color)
     setDraftPrioridad(zona.prioridad)
 
-    // Ocultar overlay estático de esta zona
-    if (overlaysRef.current[zona.id]) {
-      overlaysRef.current[zona.id].setMap(null)
-    }
+    if (overlaysRef.current[zona.id]) overlaysRef.current[zona.id].setMap(null)
+    if (labelsRef.current[zona.id]) labelsRef.current[zona.id].setMap(null)
 
-    // Crear polígono editable para editar vértices
     if (mapRef.current) {
-      const editPoly = new google.maps.Polygon({
+      editPolyRef.current = new google.maps.Polygon({
         paths: zona.poligono.map((p) => ({ lat: p.lat, lng: p.lng })),
-        strokeColor: zona.color,
-        strokeWeight: 2,
-        fillColor: zona.color,
-        fillOpacity: 0.3,
-        map: mapRef.current,
-        editable: true,
-        clickable: false,
+        strokeColor: zona.color, strokeWeight: 3, fillColor: zona.color, fillOpacity: 0.3,
+        map: mapRef.current, editable: true, clickable: false,
       })
-      editPolyRef.current = editPoly
-
-      // Centrar mapa en la zona
       const bounds = new google.maps.LatLngBounds()
       zona.poligono.forEach((p) => bounds.extend({ lat: p.lat, lng: p.lng }))
       mapRef.current.fitBounds(bounds, 60)
     }
-
     setMode('editando')
   }, [limpiarDraft])
 
+  // Mantener ref actualizado para el InfoWindow
+  handleEditarZonaRef.current = handleEditarZona
+
   const handleCancelar = useCallback(() => {
-    // Restaurar overlay estático de la zona que se estaba editando
-    if (selectedId && overlaysRef.current[selectedId]) {
-      overlaysRef.current[selectedId].setMap(mapRef.current)
-    }
+    if (selectedId && overlaysRef.current[selectedId]) overlaysRef.current[selectedId].setMap(mapRef.current)
+    if (selectedId && labelsRef.current[selectedId]) labelsRef.current[selectedId].setMap(mapRef.current)
     limpiarDraft()
     setMode('idle')
   }, [selectedId, limpiarDraft])
 
   const handleStartDraw = useCallback(() => {
     if (!dmRef.current) return
-    // Limpiar polígono anterior si hay
     if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
     setDraftPoligono(null)
     dmRef.current.setDrawingMode((google.maps as any).drawing.OverlayType.POLYGON)
@@ -272,9 +426,16 @@ export default function ZonasPage() {
       setMsg({ type: 'error', text: 'El nombre de la zona es obligatorio.' })
       return
     }
+    // Validar nombre duplicado
+    const nombreDup = zonas.find(
+      (z) => z.nombre.trim().toLowerCase() === draftNombre.trim().toLowerCase() && z.id !== selectedId
+    )
+    if (nombreDup) {
+      setMsg({ type: 'error', text: `Ya existe una zona con el nombre "${draftNombre.trim()}".` })
+      return
+    }
 
     let finalPoligono: Coord[] | null = null
-
     if (mode === 'editando' && editPolyRef.current) {
       const path = editPolyRef.current.getPath()
       finalPoligono = []
@@ -287,72 +448,81 @@ export default function ZonasPage() {
     }
 
     if (!finalPoligono || finalPoligono.length < 3) {
-      setMsg({ type: 'error', text: 'Dibuja el polígono de la zona antes de guardar (mínimo 3 vértices).' })
+      setMsg({ type: 'error', text: 'Dibujá el polígono antes de guardar (mínimo 3 vértices).' })
       return
     }
 
     try {
-      setSaving(true)
-      setMsg(null)
+      setSaving(true); setMsg(null)
       const uid = auth.currentUser?.uid ?? ''
-
       if (mode === 'nueva') {
-        await crearZona({
-          nombre: draftNombre.trim(),
-          color: draftColor,
-          poligono: finalPoligono,
-          activa: true,
-          prioridad: draftPrioridad,
-        }, uid)
-        setMsg({ type: 'success', text: `Zona "${draftNombre.trim()}" creada correctamente.` })
+        await crearZona({ nombre: draftNombre.trim(), color: draftColor, poligono: finalPoligono, activa: true, prioridad: draftPrioridad }, uid)
+        setMsg({ type: 'success', text: `Zona "${draftNombre.trim()}" creada.` })
       } else if (mode === 'editando' && selectedId) {
-        await actualizarZona(selectedId, {
-          nombre: draftNombre.trim(),
-          color: draftColor,
-          poligono: finalPoligono,
-          prioridad: draftPrioridad,
-        })
+        await actualizarZona(selectedId, { nombre: draftNombre.trim(), color: draftColor, poligono: finalPoligono, prioridad: draftPrioridad })
         setMsg({ type: 'success', text: `Zona "${draftNombre.trim()}" actualizada.` })
       }
-
-      // Limpiar y volver a idle
       if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
       if (editPolyRef.current) { editPolyRef.current.setMap(null); editPolyRef.current = null }
-      if (dmRef.current) dmRef.current.setDrawingMode(null)
-      setDibujando(false)
-      setDraftPoligono(null)
-      setDraftNombre('')
-      setDraftColor('#3b82f6')
-      setDraftPrioridad(50)
-      setSelectedId(null)
-      setMode('idle')
+      dmRef.current?.setDrawingMode(null)
+      setDibujando(false); setDraftPoligono(null); setDraftNombre(''); setDraftColor('#3b82f6')
+      setDraftPrioridad(1); setSelectedId(null); setMode('idle')
     } catch (err) {
       console.error(err)
-      setMsg({ type: 'error', text: 'No se pudo guardar la zona. Intenta de nuevo.' })
+      setMsg({ type: 'error', text: 'No se pudo guardar la zona. Intentá de nuevo.' })
     } finally {
       setSaving(false)
     }
-  }, [mode, draftNombre, draftColor, draftPrioridad, draftPoligono, selectedId])
+  }, [mode, draftNombre, draftColor, draftPrioridad, draftPoligono, selectedId, zonas])
 
   const handleToggle = useCallback(async (zona: ZonaGeografica) => {
+    try { await toggleZonaActiva(zona.id, !zona.activa) } catch (err) { console.error(err) }
+  }, [])
+  handleToggleRef.current = handleToggle
+
+  const handleDuplicarZona = useCallback(async (zona: ZonaGeografica) => {
     try {
-      await toggleZonaActiva(zona.id, !zona.activa)
-    } catch (err) {
-      console.error(err)
-    }
+      const uid = auth.currentUser?.uid ?? ''
+      const nuevoNombre = `${zona.nombre} (copia)`
+      await crearZona({
+        nombre: nuevoNombre, color: zona.color,
+        poligono: zona.poligono, activa: false, prioridad: zona.prioridad,
+      }, uid)
+    } catch (err) { console.error(err) }
   }, [])
 
-  // ── UI ────────────────────────────────────────────────────────────────────
+  const centrarEnZona = useCallback((zona: ZonaGeografica) => {
+    if (!mapRef.current) return
+    const bounds = new google.maps.LatLngBounds()
+    zona.poligono.forEach((p) => bounds.extend({ lat: p.lat, lng: p.lng }))
+    mapRef.current.fitBounds(bounds, 60)
+  }, [])
+
+  const handleClickCard = useCallback((zona: ZonaGeografica) => {
+    if (mode !== 'idle') return
+    setClickedId(zona.id)
+    centrarEnZona(zona)
+    if (mapRef.current) {
+      const centro = polygonCentroid(zona.poligono)
+      const latLng = new google.maps.LatLng(centro.lat, centro.lng)
+      abrirInfoWindow(zona, latLng, mapRef.current)
+    }
+  }, [mode, centrarEnZona])
+
+  // ── UI helpers ────────────────────────────────────────────────────────────────
 
   const zonaSeleccionada = zonas.find((z) => z.id === selectedId)
   const puedeGuardar = draftNombre.trim().length > 0 &&
     (mode === 'editando' || (draftPoligono !== null && draftPoligono.length >= 3))
+  const zonasFiltradas = zonas.filter((z) => z.nombre.toLowerCase().includes(busqueda.toLowerCase()))
+
+  // ── Render ─────────────────────────────────────────────────────────────────────
 
   return (
     <div className="flex h-full min-h-0 gap-4">
 
-      {/* ── Panel izquierdo: lista de zonas ── */}
-      <div className="flex w-72 shrink-0 flex-col gap-3">
+      {/* ── Panel izquierdo ─────────────────────────────────────────────────── */}
+      <div className="flex w-64 shrink-0 flex-col gap-2.5">
 
         {/* Header */}
         <div className="flex items-center justify-between">
@@ -366,101 +536,95 @@ export default function ZonasPage() {
           <button
             onClick={handleNuevaZona}
             disabled={mode !== 'idle'}
-            className="flex items-center gap-1.5 rounded-xl bg-[#004aad] px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-[#003a8c] disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-1 rounded-xl bg-[#004aad] px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-[#003a8c] disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <Plus size={14} />
-            Nueva zona
+            <Plus size={13} />
+            Nueva
           </button>
         </div>
 
+        {/* Buscador */}
+        <input
+          type="text"
+          value={busqueda}
+          onChange={(e) => setBusqueda(e.target.value)}
+          placeholder="Buscar zona…"
+          className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs outline-none focus:border-[#004aad]"
+        />
+
         {/* Lista */}
-        <div className="flex flex-col gap-2 overflow-y-auto">
+        <div className="flex flex-col gap-1.5 overflow-y-auto">
           {zonas.length === 0 && (
             <div className="rounded-2xl border border-dashed border-gray-200 bg-white p-6 text-center">
-              <Pentagon size={28} className="mx-auto mb-2 text-gray-300" />
+              <Pentagon size={24} className="mx-auto mb-2 text-gray-300" />
               <p className="text-xs text-gray-500">No hay zonas creadas.</p>
-              <p className="mt-0.5 text-xs text-gray-400">Haz clic en "Nueva zona" para comenzar.</p>
             </div>
           )}
 
-          {zonas.map((zona) => (
+          {zonasFiltradas.map((zona) => (
             <div
               key={zona.id}
-              className={`rounded-2xl border bg-white p-3.5 shadow-sm transition ${
-                selectedId === zona.id
-                  ? 'border-[#004aad] ring-1 ring-[#004aad]/20'
-                  : 'border-gray-200'
-              }`}
+              ref={(el) => { cardRefs.current[zona.id] = el }}
+              onClick={() => handleClickCard(zona)}
+              className={`cursor-pointer rounded-xl border bg-white px-3 py-2.5 shadow-sm transition ${
+                clickedId === zona.id
+                  ? 'border-[#004aad] ring-1 ring-[#004aad]/20 bg-blue-50/30'
+                  : 'border-gray-200 hover:border-gray-300'
+              } ${mode !== 'idle' ? 'pointer-events-none opacity-50' : ''}`}
             >
-              {/* Header de tarjeta */}
-              <div className="flex items-start gap-2.5">
-                {/* Swatch de color */}
-                <div
-                  className="mt-0.5 h-4 w-4 shrink-0 rounded-full border border-white shadow-sm"
-                  style={{ backgroundColor: zona.color }}
-                />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-semibold text-gray-900">{zona.nombre}</p>
-                  <p className="text-[10px] text-gray-400">Prioridad: {zona.prioridad}</p>
-                </div>
-                {/* Badge activa */}
-                <span
-                  className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
-                    zona.activa
-                      ? 'border-green-200 bg-green-50 text-green-700'
-                      : 'border-gray-200 bg-gray-100 text-gray-500'
-                  }`}
-                >
-                  {zona.activa ? 'Activa' : 'Inactiva'}
-                </span>
+              <div className="flex items-center gap-2">
+                <div className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: zona.color }} />
+                <p className="min-w-0 flex-1 truncate text-xs font-semibold text-gray-900">{zona.nombre}</p>
+                <span className="shrink-0 text-[10px] font-bold text-amber-500">{'★'.repeat(zona.prioridad)}</span>
+                <span className={`shrink-0 h-1.5 w-1.5 rounded-full ${zona.activa ? 'bg-green-500' : 'bg-gray-300'}`} title={zona.activa ? 'Activa' : 'Inactiva'} />
               </div>
 
-              {/* Polígono info */}
-              <p className="mt-1.5 text-[10px] text-gray-400">
-                {zona.poligono.length} vértices
-              </p>
-
-              {/* Acciones */}
-              <div className="mt-2.5 flex items-center gap-1.5">
+              <div className="mt-1.5 flex items-center gap-1">
                 <button
-                  onClick={() => handleEditarZona(zona)}
+                  onClick={(e) => { e.stopPropagation(); handleEditarZona(zona) }}
                   disabled={mode !== 'idle'}
-                  className="flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  <Pencil size={12} />
-                  Editar
+                  <Pencil size={11} /> Editar
                 </button>
                 <button
-                  onClick={() => handleToggle(zona)}
+                  onClick={(e) => { e.stopPropagation(); handleToggle(zona) }}
                   disabled={mode !== 'idle'}
-                  title={zona.activa ? 'Desactivar zona' : 'Activar zona'}
-                  className="flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  {zona.activa ? <EyeOff size={12} /> : <Eye size={12} />}
-                  {zona.activa ? 'Desactivar' : 'Activar'}
+                  {zona.activa ? <EyeOff size={11} /> : <Eye size={11} />}
+                  {zona.activa ? 'Desact.' : 'Activar'}
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleDuplicarZona(zona) }}
+                  disabled={mode !== 'idle'}
+                  title="Duplicar zona"
+                  className="flex items-center rounded-lg border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Copy size={11} />
                 </button>
               </div>
             </div>
           ))}
+
+          {busqueda && zonasFiltradas.length === 0 && (
+            <p className="py-4 text-center text-xs text-gray-400">Sin resultados para "{busqueda}"</p>
+          )}
         </div>
       </div>
 
-      {/* ── Panel derecho: mapa + formulario ── */}
+      {/* ── Panel derecho: formulario + mapa ────────────────────────────────── */}
       <div className="relative flex min-h-0 flex-1 flex-col gap-3">
 
-        {/* Formulario (visible en modo nueva/editando) */}
+        {/* Formulario */}
         {mode !== 'idle' && (
           <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-bold text-gray-900">
                 {mode === 'nueva' ? 'Nueva zona' : `Editando: ${zonaSeleccionada?.nombre ?? ''}`}
               </h2>
-              <button
-                onClick={handleCancelar}
-                className="flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs font-medium text-gray-600 transition hover:bg-gray-50"
-              >
-                <X size={12} />
-                Cancelar
+              <button onClick={handleCancelar} className="flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs font-medium text-gray-600 transition hover:bg-gray-50">
+                <X size={12} /> Cancelar
               </button>
             </div>
 
@@ -480,19 +644,26 @@ export default function ZonasPage() {
               </div>
 
               {/* Prioridad */}
-              <div className="w-28">
+              <div>
                 <label className="mb-1 block text-xs font-medium text-gray-700">
-                  Prioridad
+                  Prioridad <span className="font-normal text-gray-400">(5 = máxima)</span>
                 </label>
-                <input
-                  type="number"
-                  min={0}
-                  max={999}
-                  value={draftPrioridad}
-                  onChange={(e) => setDraftPrioridad(Number(e.target.value))}
-                  className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-[#004aad]"
-                />
-                <p className="mt-0.5 text-[10px] text-gray-400">0 = mayor</p>
+                <div className="flex gap-1">
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => setDraftPrioridad(n)}
+                      className={`h-8 w-8 rounded-lg border text-xs font-bold transition ${
+                        draftPrioridad === n
+                          ? 'border-[#004aad] bg-[#004aad] text-white'
+                          : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {/* Color */}
@@ -503,20 +674,11 @@ export default function ZonasPage() {
                     <button
                       key={c}
                       onClick={() => setDraftColor(c)}
-                      className={`h-6 w-6 rounded-full border-2 transition ${
-                        draftColor === c ? 'border-gray-800 scale-110' : 'border-transparent'
-                      }`}
+                      className={`h-6 w-6 rounded-full border-2 transition ${draftColor === c ? 'border-gray-800 scale-110' : 'border-transparent'}`}
                       style={{ backgroundColor: c }}
-                      title={c}
                     />
                   ))}
-                  <input
-                    type="color"
-                    value={draftColor}
-                    onChange={(e) => setDraftColor(e.target.value)}
-                    className="h-6 w-6 cursor-pointer rounded border border-gray-200"
-                    title="Color personalizado"
-                  />
+                  <input type="color" value={draftColor} onChange={(e) => setDraftColor(e.target.value)} className="h-6 w-6 cursor-pointer rounded border border-gray-200" />
                 </div>
               </div>
             </div>
@@ -527,46 +689,26 @@ export default function ZonasPage() {
                 <button
                   onClick={handleStartDraw}
                   disabled={dibujando}
-                  className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition ${
-                    dibujando
-                      ? 'border border-blue-200 bg-blue-50 text-blue-700'
-                      : 'bg-gray-900 text-white hover:bg-gray-700'
-                  }`}
+                  className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition ${dibujando ? 'border border-blue-200 bg-blue-50 text-blue-700' : 'bg-gray-900 text-white hover:bg-gray-700'}`}
                 >
                   <Pentagon size={13} />
                   {dibujando ? 'Dibujando… haz clic en el mapa' : draftPoligono ? 'Redibujar polígono' : 'Dibujar polígono'}
                 </button>
               )}
-
-              {mode === 'editando' && (
-                <p className="text-xs text-gray-500">
-                  Arrastrá los vértices del polígono para editar la forma.
-                </p>
-              )}
-
+              {mode === 'editando' && <p className="text-xs text-gray-500">Arrastrá los vértices del polígono para editar la forma.</p>}
               {draftPoligono && mode === 'nueva' && (
                 <span className="flex items-center gap-1 text-xs text-green-700">
-                  <Check size={13} />
-                  {draftPoligono.length} vértices dibujados
+                  <Check size={13} /> {draftPoligono.length} vértices dibujados
                 </span>
               )}
             </div>
 
-            {/* Mensaje de error/éxito */}
             {msg && (
-              <div
-                className={`mt-3 flex items-center gap-2 rounded-lg px-3 py-2 text-xs ${
-                  msg.type === 'error'
-                    ? 'border border-red-200 bg-red-50 text-red-700'
-                    : 'border border-green-200 bg-green-50 text-green-700'
-                }`}
-              >
-                <AlertCircle size={13} />
-                {msg.text}
+              <div className={`mt-3 flex items-center gap-2 rounded-lg px-3 py-2 text-xs ${msg.type === 'error' ? 'border border-red-200 bg-red-50 text-red-700' : 'border border-green-200 bg-green-50 text-green-700'}`}>
+                <AlertCircle size={13} /> {msg.text}
               </div>
             )}
 
-            {/* Botón guardar */}
             <div className="mt-4 flex justify-end">
               <button
                 onClick={handleGuardar}
@@ -585,30 +727,71 @@ export default function ZonasPage() {
           {!mapReady && (
             <div className="absolute inset-0 z-10 flex items-center justify-center bg-gray-50">
               <div className="flex items-center gap-2 text-sm text-gray-500">
-                <Loader2 size={16} className="animate-spin" />
-                Cargando mapa…
+                <Loader2 size={16} className="animate-spin" /> Cargando mapa…
               </div>
             </div>
           )}
           <div ref={containerRef} className="h-full w-full" />
 
-          {/* Instrucción de dibujo */}
-          {dibujando && (
-            <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-xl bg-gray-900/85 px-4 py-2 text-xs text-white backdrop-blur-sm">
-              Haz clic en el mapa para dibujar vértices · Cierra el polígono haciendo doble clic o clic en el primer punto
+          {/* Controles flotantes */}
+          <div className="absolute left-3 top-3 z-10 flex gap-2">
+            {/* Toggle satélite */}
+            <button
+              onClick={() => setSatelite((v) => !v)}
+              className={`flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold shadow-sm backdrop-blur-sm transition ${satelite ? 'border-blue-300 bg-blue-600 text-white' : 'border-gray-200 bg-white/95 text-gray-700 hover:bg-gray-50'}`}
+            >
+              <Satellite size={13} />
+              Satélite
+            </button>
+
+            {/* Modo prueba */}
+            {mode === 'idle' && (
+              <button
+                onClick={() => { setModoTest((v) => !v); infoWindowRef.current?.close(); setClickedId(null) }}
+                className={`flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold shadow-sm backdrop-blur-sm transition ${modoTest ? 'border-orange-300 bg-orange-500 text-white' : 'border-gray-200 bg-white/95 text-gray-700 hover:bg-gray-50'}`}
+                title="Haz clic en el mapa para ver a qué zona pertenece un punto"
+              >
+                <Crosshair size={13} />
+                {modoTest ? 'Modo prueba ON' : 'Modo prueba'}
+              </button>
+            )}
+
+            {/* Limpiar selección */}
+            {clickedId && mode === 'idle' && (
+              <button
+                onClick={() => { setClickedId(null); infoWindowRef.current?.close() }}
+                className="flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white/95 px-3 py-1.5 text-xs font-semibold text-gray-600 shadow-sm backdrop-blur-sm transition hover:bg-gray-50"
+              >
+                <X size={13} /> Deseleccionar
+              </button>
+            )}
+          </div>
+
+          {/* Banner modo prueba */}
+          {modoTest && (
+            <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-xl bg-orange-500/90 px-4 py-2 text-xs font-semibold text-white backdrop-blur-sm">
+              Modo prueba activo — haz clic en cualquier punto del mapa
             </div>
           )}
 
-          {/* Leyenda de zonas */}
+          {/* Instrucción de dibujo */}
+          {dibujando && (
+            <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-xl bg-gray-900/85 px-4 py-2 text-xs text-white backdrop-blur-sm">
+              Haz clic para dibujar vértices · Doble clic o clic en el primer punto para cerrar
+            </div>
+          )}
+
+          {/* Leyenda */}
           {mode === 'idle' && zonas.filter((z) => z.activa).length > 0 && (
-            <div className="absolute bottom-4 right-4 max-w-[160px] rounded-xl border border-gray-200 bg-white/95 p-2.5 shadow-sm backdrop-blur-sm">
+            <div className="absolute bottom-4 right-4 max-w-[180px] rounded-xl border border-gray-200 bg-white/95 p-2.5 shadow-sm backdrop-blur-sm">
               <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500">Leyenda</p>
               {zonas.filter((z) => z.activa).map((z) => (
-                <div key={z.id} className="flex items-center gap-1.5 py-0.5">
-                  <div
-                    className="h-3 w-3 shrink-0 rounded-sm border border-white shadow-sm"
-                    style={{ backgroundColor: z.color }}
-                  />
+                <div
+                  key={z.id}
+                  onClick={() => handleClickCard(z)}
+                  className={`flex cursor-pointer items-center gap-1.5 rounded-lg px-1.5 py-0.5 transition ${clickedId === z.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                >
+                  <div className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: z.color }} />
                   <span className="truncate text-[11px] text-gray-700">{z.nombre}</span>
                 </div>
               ))}

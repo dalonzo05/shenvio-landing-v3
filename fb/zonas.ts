@@ -40,7 +40,7 @@ export async function getZonasActivas(): Promise<ZonaGeografica[]> {
     const q = query(
       collection(db, COLECCION),
       where('activa', '==', true),
-      orderBy('prioridad', 'asc')
+      orderBy('prioridad', 'desc')
     )
     const snap = await getDocs(q)
     return snap.docs.map((d) => docToZona(d.id, d.data()))
@@ -56,7 +56,7 @@ export async function getZonasActivas(): Promise<ZonaGeografica[]> {
  * Retorna la función de unsubscribe.
  */
 export function onZonasSnapshot(cb: (zonas: ZonaGeografica[]) => void): () => void {
-  const q = query(collection(db, COLECCION), orderBy('prioridad', 'asc'))
+  const q = query(collection(db, COLECCION), orderBy('prioridad', 'desc'))
   return onSnapshot(q, (snap) => {
     const zonas = snap.docs.map((d) => docToZona(d.id, d.data()))
     cb(zonas)

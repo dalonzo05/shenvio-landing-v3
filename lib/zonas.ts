@@ -48,7 +48,7 @@ export function pointInPolygon(point: Coord, polygon: Coord[]): boolean {
 
 /**
  * Clasifica un punto devolviendo la primera zona activa que lo contiene.
- * Regla de solapes: se ordenan por prioridad ASC (menor número = mayor prioridad).
+ * Regla de solapes: se ordenan por prioridad DESC (mayor número = mayor prioridad, escala 1-5).
  * Si dos zonas empatan en prioridad, gana la que aparece primero en el array (orden estable).
  * Retorna null si el punto no cae en ninguna zona activa.
  */
@@ -59,7 +59,7 @@ export function clasificarPuntoEnZona(
   const activas = zonas
     .filter((z) => z.activa)
     .slice()
-    .sort((a, b) => a.prioridad - b.prioridad)
+    .sort((a, b) => b.prioridad - a.prioridad)
 
   for (const zona of activas) {
     if (pointInPolygon(coord, zona.poligono)) {
