@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { auth } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
-import { onZonasSnapshot, crearZona, actualizarZona, toggleZonaActiva } from '@/fb/zonas'
+import { onZonasSnapshot, crearZona, actualizarZona, toggleZonaActiva, eliminarZona } from '@/fb/zonas'
 import { clasificarPuntoEnZona } from '@/lib/zonas'
 import type { ZonaGeografica, Coord } from '@/lib/zonas'
 import {
@@ -21,6 +21,7 @@ import {
   Crosshair,
   Copy,
   Focus,
+  Trash2,
 } from 'lucide-react'
 
 // ── Constantes ────────────────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ export default function ZonasPage() {
   const [modoTest, setModoTest] = useState(false)
   const [busqueda, setBusqueda] = useState('')
   const [satelite, setSatelite] = useState(false)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
 
   // form
   const [draftNombre, setDraftNombre] = useState('')
@@ -242,6 +244,7 @@ export default function ZonasPage() {
           <button id="iw-btn-toggle" style="cursor:pointer;background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600">${zona.activa ? '⊘ Desactivar' : '✓ Activar'}</button>
           <button id="iw-btn-center" style="cursor:pointer;background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600">⊙ Centrar</button>
           <button id="iw-btn-dup" style="cursor:pointer;background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600">⎘ Duplicar</button>
+          <button id="iw-btn-del" style="cursor:pointer;background:#fff1f2;color:#ef4444;border:1px solid #fecaca;border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600">🗑 Eliminar</button>
         </div>
       </div>
     `)
@@ -266,6 +269,12 @@ export default function ZonasPage() {
       document.getElementById('iw-btn-dup')?.addEventListener('click', () => {
         infoWindowRef.current?.close()
         handleDuplicarZona(zona)
+      })
+      document.getElementById('iw-btn-del')?.addEventListener('click', () => {
+        infoWindowRef.current?.close()
+        setConfirmDeleteId(zona.id)
+        // Scroll a la tarjeta para que vea la confirmación
+        cardRefs.current[zona.id]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
       })
     })
   }
@@ -541,6 +550,20 @@ export default function ZonasPage() {
     } catch (err) { console.error(err) }
   }, [])
 
+  const handleEliminar = useCallback(async (zona: ZonaGeografica) => {
+    try {
+      infoWindowRef.current?.close()
+      // Limpiar overlay del mapa
+      overlaysRef.current[zona.id]?.setMap(null)
+      delete overlaysRef.current[zona.id]
+      labelsRef.current[zona.id]?.setMap(null)
+      delete labelsRef.current[zona.id]
+      if (clickedId === zona.id) setClickedId(null)
+      await eliminarZona(zona.id)
+    } catch (err) { console.error(err) }
+    finally { setConfirmDeleteId(null) }
+  }, [clickedId])
+
   const centrarEnZona = useCallback((zona: ZonaGeografica) => {
     if (!mapRef.current) return
     const bounds = new google.maps.LatLngBounds()
@@ -653,6 +676,33 @@ export default function ZonasPage() {
                 >
                   <Copy size={11} />
                 </button>
+
+                {/* Eliminar con confirmación inline */}
+                {confirmDeleteId === zona.id ? (
+                  <span className="flex items-center gap-1 ml-auto">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleEliminar(zona) }}
+                      className="rounded-lg bg-red-500 px-2 py-1 text-[11px] font-semibold text-white transition hover:bg-red-600"
+                    >
+                      Confirmar
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null) }}
+                      className="rounded-lg border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-500 transition hover:bg-gray-50"
+                    >
+                      No
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(zona.id) }}
+                    disabled={mode !== 'idle'}
+                    title="Eliminar zona"
+                    className="ml-auto flex items-center rounded-lg border border-red-100 px-2 py-1 text-[11px] font-medium text-red-400 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                )}
               </div>
             </div>
           ))}

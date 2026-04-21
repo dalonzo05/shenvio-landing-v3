@@ -99,11 +99,19 @@ export async function actualizarZona(
 
 /**
  * Activa o desactiva una zona.
- * Las zonas nunca se borran físicamente; se desactivan para preservar referencias históricas.
  */
 export async function toggleZonaActiva(id: string, activa: boolean): Promise<void> {
   await updateDoc(doc(db, COLECCION, id), {
     activa,
     updatedAt: serverTimestamp(),
   })
+}
+
+/**
+ * Elimina físicamente una zona.
+ * Usar solo cuando la zona no tiene órdenes históricas asociadas.
+ */
+export async function eliminarZona(id: string): Promise<void> {
+  const { deleteDoc } = await import('firebase/firestore')
+  await deleteDoc(doc(db, COLECCION, id))
 }

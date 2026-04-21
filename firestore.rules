@@ -276,7 +276,7 @@ service cloud.firestore {
     match /zonas/{zonaId} {
       allow read: if isActiveUser();
       allow create, update: if isAdminOrGestor();
-      allow delete: if false;
+      allow delete: if isAdminOrGestor();
     }
 
   }
