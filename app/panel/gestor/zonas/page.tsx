@@ -428,11 +428,19 @@ export default function ZonasPage() {
     if (labelsRef.current[zona.id]) labelsRef.current[zona.id].setMap(null)
 
     if (mapRef.current) {
-      editPolyRef.current = new google.maps.Polygon({
+      const poly = new google.maps.Polygon({
         paths: zona.poligono.map((p) => ({ lat: p.lat, lng: p.lng })),
         strokeColor: zona.color, strokeWeight: 3, fillColor: zona.color, fillOpacity: 0.3,
         map: mapRef.current, editable: true, clickable: true,
       })
+      // Clic derecho sobre un vértice → lo elimina directamente (mínimo 3)
+      poly.addListener('rightclick', (e: any) => {
+        if (e.vertex === undefined) return
+        const path = poly.getPath()
+        if (path.getLength() <= 3) return // no se puede quedar con menos de 3
+        path.removeAt(e.vertex)
+      })
+      editPolyRef.current = poly
       const bounds = new google.maps.LatLngBounds()
       zona.poligono.forEach((p) => bounds.extend({ lat: p.lat, lng: p.lng }))
       mapRef.current.fitBounds(bounds, 60)
