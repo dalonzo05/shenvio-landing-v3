@@ -31,6 +31,15 @@ type Motorizado = {
   activo?: boolean
   authUid?: string
   createdAt?: any
+  tieneBolso?: boolean
+  // Métricas de desempeño (persistidas por motorizado-stats.ts)
+  totalAsignaciones?: number
+  totalAceptadas?: number
+  totalRechazos?: number
+  tasaAceptacion?: number
+  tiempoPromedioAceptacion?: number
+  ultimaUbicacionOperativa?: { lat: number; lng: number; timestamp?: any }
+  scoreDesempeño?: number
 }
 
 type Stats = {
@@ -122,6 +131,7 @@ export default function MotorizadosPage() {
   const [eAuthUid, setEAuthUid] = useState('')
   const [eActivo, setEActivo] = useState(true)
   const [eEstado, setEEstado] = useState<EstadoMoto>('disponible')
+  const [eTieneBolso, setETieneBolso] = useState(false)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
 
@@ -154,6 +164,7 @@ export default function MotorizadosPage() {
     setEAuthUid(m.authUid || '')
     setEActivo(m.activo !== false)
     setEEstado(m.estado || 'disponible')
+    setETieneBolso(m.tieneBolso ?? false)
     setMsg(null)
     setStats(null)
     setDrawerOpen(true)
@@ -170,6 +181,7 @@ export default function MotorizadosPage() {
     setEAuthUid('')
     setEActivo(true)
     setEEstado('disponible')
+    setETieneBolso(false)
     setMsg(null)
     setStats(null)
     setDrawerOpen(true)
@@ -191,6 +203,7 @@ export default function MotorizadosPage() {
           estado: eEstado,
           activo: eActivo,
           authUid: eAuthUid.trim() || null,
+          tieneBolso: eTieneBolso,
           createdAt: serverTimestamp(),
         })
         setMsg('✅ Motorizado creado')
@@ -202,6 +215,7 @@ export default function MotorizadosPage() {
           estado: eEstado,
           activo: eActivo,
           authUid: eAuthUid.trim() || null,
+          tieneBolso: eTieneBolso,
         })
         setMsg('✅ Guardado')
       }
@@ -471,6 +485,29 @@ export default function MotorizadosPage() {
               </div>
               <div className={`w-11 h-6 rounded-full transition-colors ${eActivo ? 'bg-green-500' : 'bg-gray-300'} relative`}>
                 <div className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${eActivo ? 'translate-x-5' : 'translate-x-0.5'}`} />
+              </div>
+            </button>
+          </section>
+
+          {/* Equipamiento */}
+          <section className="space-y-2">
+            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wide">Equipamiento</h3>
+            <button
+              onClick={() => setETieneBolso(!eTieneBolso)}
+              className={`w-full flex items-center justify-between px-4 py-3 rounded-xl border transition ${
+                eTieneBolso ? 'bg-blue-50 border-blue-200' : 'bg-gray-50 border-gray-200'
+              }`}
+            >
+              <div className="text-left">
+                <p className={`text-sm font-bold ${eTieneBolso ? 'text-blue-700' : 'text-gray-500'}`}>
+                  {eTieneBolso ? 'Tiene bolso térmico' : 'Sin bolso térmico'}
+                </p>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {eTieneBolso ? 'Puede recibir órdenes que requieren bolso.' : 'Recibe penalización en órdenes de bolso.'}
+                </p>
+              </div>
+              <div className={`w-11 h-6 rounded-full transition-colors relative shrink-0 ${eTieneBolso ? 'bg-blue-500' : 'bg-gray-300'}`}>
+                <div className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${eTieneBolso ? 'translate-x-5' : 'translate-x-0.5'}`} />
               </div>
             </button>
           </section>

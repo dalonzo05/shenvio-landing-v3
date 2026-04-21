@@ -130,6 +130,7 @@ type Comercio = {
   accounts?: BankAccount[]
   puntosRetiro?: Record<string, any>
   notaInterna?: string
+  requiereBolso?: boolean
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
@@ -168,6 +169,11 @@ export default function ComerciosPage() {
   const [eNota, setENota] = useState('')
   const [savingNota, setSavingNota] = useState(false)
   const [notaMsg, setNotaMsg] = useState<string | null>(null)
+
+  // Bolso
+  const [eRequiereBolso, setERequiereBolso] = useState(false)
+  const [savingBolso, setSavingBolso] = useState(false)
+  const [bolsoMsg, setBolsoMsg] = useState<string | null>(null)
 
   // Nuevo comercio modal
   const [showNew, setShowNew] = useState(false)
@@ -214,6 +220,7 @@ export default function ComerciosPage() {
           accounts: Array.isArray(comData.accounts) ? comData.accounts : [],
           puntosRetiro: comData.puntosRetiro || {},
           notaInterna: comData.notaInterna || '',
+          requiereBolso: comData.requiereBolso ?? false,
         }
       })
       list.sort((a, b) => (a.name || '').localeCompare(b.name || ''))
@@ -257,6 +264,8 @@ export default function ComerciosPage() {
     setMsg(null)
     setENota(c.notaInterna || '')
     setNotaMsg(null)
+    setERequiereBolso(c.requiereBolso ?? false)
+    setBolsoMsg(null)
     setDrawerOpen(true)
   }
 
@@ -378,6 +387,26 @@ export default function ComerciosPage() {
       setEPuntos((prev) => prev.filter((p) => p.key !== key))
     } catch (e) {
       console.error(e)
+    }
+  }
+
+  async function saveRequiereBolso() {
+    if (!selected) return
+    setSavingBolso(true); setBolsoMsg(null)
+    try {
+      await setDoc(
+        doc(db, 'comercios', selected.uid),
+        { requiereBolso: eRequiereBolso, updatedAt: serverTimestamp() },
+        { merge: true }
+      )
+      setComerciosList((prev) =>
+        prev.map((c) => c.uid === selected.uid ? { ...c, requiereBolso: eRequiereBolso } : c)
+      )
+      setBolsoMsg('✅ Guardado')
+    } catch {
+      setBolsoMsg('❌ No se pudo guardar')
+    } finally {
+      setSavingBolso(false)
     }
   }
 
@@ -687,6 +716,45 @@ export default function ComerciosPage() {
                   {notaMsg && (
                     <span className={`text-xs font-semibold ${notaMsg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>
                       {notaMsg}
+                    </span>
+                  )}
+                </div>
+              </section>
+
+              {/* ── Configuración de bolso ── */}
+              <section className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+                <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wide">Configuración de bolso</h3>
+                <button
+                  onClick={() => setERequiereBolso(!eRequiereBolso)}
+                  className={`w-full flex items-center justify-between px-4 py-3 rounded-xl border transition ${
+                    eRequiereBolso ? 'bg-blue-100 border-blue-300' : 'bg-white border-blue-200'
+                  }`}
+                >
+                  <div className="text-left">
+                    <p className={`text-sm font-bold ${eRequiereBolso ? 'text-blue-700' : 'text-gray-500'}`}>
+                      {eRequiereBolso ? 'Requiere bolso térmico' : 'No requiere bolso térmico'}
+                    </p>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      {eRequiereBolso
+                        ? 'Se penalizan motorizados sin bolso en órdenes de este comercio.'
+                        : 'Cualquier motorizado aplica sin penalización.'}
+                    </p>
+                  </div>
+                  <div className={`w-11 h-6 rounded-full transition-colors relative shrink-0 ${eRequiereBolso ? 'bg-blue-500' : 'bg-gray-300'}`}>
+                    <div className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${eRequiereBolso ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                  </div>
+                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={saveRequiereBolso}
+                    disabled={savingBolso}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-blue-500 text-white hover:bg-blue-600 transition disabled:opacity-40"
+                  >
+                    {savingBolso ? 'Guardando…' : 'Guardar configuración'}
+                  </button>
+                  {bolsoMsg && (
+                    <span className={`text-xs font-semibold ${bolsoMsg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>
+                      {bolsoMsg}
                     </span>
                   )}
                 </div>
