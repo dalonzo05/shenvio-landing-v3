@@ -10,6 +10,7 @@ import {
 import { auth, db } from '@/fb/config';
 import { compressImage, uploadEvidencia, uploadDepositoBoucher, type TipoEvidencia } from '@/fb/storage'
 import { registrarMovimiento } from '@/lib/financial-writes';
+import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -346,6 +347,9 @@ export default function PanelMotorizadoPage() {
       b.update(doc(db, 'solicitudes_envio', o.id), { 'asignacion.estadoAceptacion': 'aceptada', 'asignacion.aceptadoAt': serverTimestamp(), updatedAt: serverTimestamp() });
       if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: 'ocupado', updatedAt: serverTimestamp() });
       await b.commit();
+      if (o.asignacion?.motorizadoId) {
+        registrarAceptacion(o.asignacion.motorizadoId, o.asignacion.asignadoAt ?? null);
+      }
     } catch (e) { console.error(e); setErr('No se pudo aceptar.'); }
     finally { setActionId(null); }
   }
@@ -354,10 +358,14 @@ export default function PanelMotorizadoPage() {
     if (!o.id) return;
     setErr(null); setActionId(o.id);
     try {
+      const motorizadoId = o.asignacion?.motorizadoId;
       const b = writeBatch(db);
       b.update(doc(db, 'solicitudes_envio', o.id), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() });
-      if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() });
+      if (motorizadoId) b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() });
       await b.commit();
+      if (motorizadoId) {
+        registrarRechazo(motorizadoId);
+      }
     } catch (e) { console.error(e); setErr('No se pudo rechazar.'); }
     finally { setActionId(null); }
   }
@@ -469,6 +477,9 @@ export default function PanelMotorizadoPage() {
           await registrarMovimiento('cobro_generado', precioDelivery, uid,
             `Cobro generado al entregar orden ${o.id} (crédito semanal)`,
             { solicitudId: o.id, motorizadoId: o.asignacion?.motorizadoId })
+          if (o.asignacion?.motorizadoId && o.entrega?.coord) {
+            actualizarUbicacionOperativa(o.asignacion.motorizadoId, o.entrega.coord);
+          }
           return
         }
       }
@@ -478,11 +489,17 @@ export default function PanelMotorizadoPage() {
       b.update(doc(db, 'solicitudes_envio', o.id), p);
       if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: nuevo === 'entregado' ? 'disponible' : 'ocupado', updatedAt: serverTimestamp() });
       await b.commit();
+      if (nuevo === 'retirado' && o.asignacion?.motorizadoId && o.recoleccion?.coord) {
+        actualizarUbicacionOperativa(o.asignacion.motorizadoId, o.recoleccion.coord);
+      }
       if (nuevo === 'entregado') {
         const precioDelivery = o.confirmacion?.precioFinalCordobas ?? 0
         await registrarMovimiento('cobro_generado', precioDelivery, auth.currentUser?.uid ?? '',
           `Cobro generado al entregar orden ${o.id}`,
           { solicitudId: o.id, motorizadoId: o.asignacion?.motorizadoId })
+        if (o.asignacion?.motorizadoId && o.entrega?.coord) {
+          actualizarUbicacionOperativa(o.asignacion.motorizadoId, o.entrega.coord);
+        }
       }
     } catch (e) { console.error(e); setErr('No se pudo cambiar.'); }
     finally { setActionId(null); }

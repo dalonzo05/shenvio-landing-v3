@@ -9,15 +9,20 @@ export interface MotorizadoConRanking {
   id: string
   nombre: string
   telefono?: string
-  estado?: 'disponible' | 'ocupado'
+  estado?: string
   activo?: boolean
   authUid?: string
   // Nuevos campos opcionales — Firestore los devolverá cuando existan en el doc:
   ubicacionBase?: { lat: number; lng: number } | null
   ultimaUbicacionOperativa?: { lat: number; lng: number } | null
-  tasaAceptacion?: number   // 0-1, asumir 1.0 si ausente
-  tieneBolso?: boolean      // asumir false si ausente
-  zonaBase?: string         // reservado para futura lógica de zonas
+  tasaAceptacion?: number         // 0-1, asumir 1.0 si ausente
+  totalRechazos?: number          // acumulado histórico de rechazos
+  totalAsignaciones?: number      // acumulado histórico de asignaciones procesadas
+  totalAceptadas?: number         // acumulado histórico de aceptaciones
+  tiempoPromedioAceptacion?: number // segundos promedio desde asignación a aceptación
+  tieneBolso?: boolean            // asumir false si ausente
+  zonaBase?: string               // reservado para futura lógica de zonas
+  scoreDesempeño?: number         // reservado para uso futuro
 }
 
 export interface OrdenActivaRanking {
@@ -26,11 +31,19 @@ export interface OrdenActivaRanking {
   asignacion?: { motorizadoId?: string } | null
   recoleccion?: { coord?: { lat: number; lng: number } | null }
   entrega?: { coord?: { lat: number; lng: number } | null }
+  cotizacion?: {
+    origenCoord?: { lat: number; lng: number } | null
+    destinoCoord?: { lat: number; lng: number } | null
+  }
 }
 
 export interface NuevaOrdenRanking {
   recoleccion?: { coord?: { lat: number; lng: number } | null }
   entrega?: { coord?: { lat: number; lng: number } | null }
+  cotizacion?: {
+    origenCoord?: { lat: number; lng: number } | null
+    destinoCoord?: { lat: number; lng: number } | null
+  }
   requiereBolso?: boolean   // asumir false si ausente
   // Reservado para futura lógica de zonas (sin APIs externas):
   zonaRetiro?: string
@@ -49,6 +62,7 @@ export interface ScoreResult {
     scoreCompatibilidad: number
     scoreAceptacion: number
     penalizacionBolso: number
+    penalizacionRechazos: number
     proximoPuntoOperativo: { lat: number; lng: number } | null
   }
 }
@@ -76,6 +90,10 @@ const DIST_MAX_COMPAT = 15
 
 /** Puntos a restar si la orden requiere bolso y el motorizado no lo tiene */
 const PENALIZACION_BOLSO = 30
+
+/** Penalización por rechazos: -2 pts por cada 5 rechazos, máximo -10 pts */
+const PENALIZACION_RECHAZOS_POR_5 = 2
+const PENALIZACION_RECHAZOS_MAX   = 10
 
 /** Prioridad de estado para determinar el orden activo más relevante */
 const PRIORIDAD_ESTADO: Record<string, number> = {
@@ -142,8 +160,8 @@ export function getProximoPuntoOperativo(
 
     const apuntaRetiro = ['asignada', 'en_camino_retiro'].includes(ordenRel.estado)
     const coord = apuntaRetiro
-      ? ordenRel.recoleccion?.coord ?? null
-      : ordenRel.entrega?.coord ?? null
+      ? (ordenRel.recoleccion?.coord ?? ordenRel.cotizacion?.origenCoord ?? null)
+      : (ordenRel.entrega?.coord ?? ordenRel.cotizacion?.destinoCoord ?? null)
 
     if (coord) return coord
   }
@@ -171,7 +189,8 @@ export function calcularScore(
 
   // ── 2. Cercanía al próximo punto operativo (30%) ────────────────────────────
   const proximoPunto = getProximoPuntoOperativo(motorizado, todasLasOrdenes)
-  const coordRetiroNueva = nuevaOrden.recoleccion?.coord ?? null
+  const coordRetiroNueva =
+    nuevaOrden.recoleccion?.coord ?? nuevaOrden.cotizacion?.origenCoord ?? null
 
   let distanciaProximoKm: number | null = null
   let scoreCercania: number
@@ -211,11 +230,16 @@ export function calcularScore(
       scoreAceptacion * PESO_ACEPTACION) *
     100
 
-  // ── 6. Penalización bolso ───────────────────────────────────────────────────
+  // ── 6. Penalizaciones ───────────────────────────────────────────────────────
   const requiereBolso = nuevaOrden.requiereBolso ?? false
   const penalizacionBolso = requiereBolso && !motorizado.tieneBolso ? PENALIZACION_BOLSO : 0
 
-  const scoreTotal = Math.round(Math.max(0, scoreFinal - penalizacionBolso))
+  // -2 pts por cada 5 rechazos acumulados, máximo -10 pts
+  const penalizacionRechazos = motorizado.totalRechazos
+    ? Math.min(PENALIZACION_RECHAZOS_MAX, Math.floor(motorizado.totalRechazos / 5) * PENALIZACION_RECHAZOS_POR_5)
+    : 0
+
+  const scoreTotal = Math.round(Math.max(0, scoreFinal - penalizacionBolso - penalizacionRechazos))
 
   // ── 7. Explicación textual ──────────────────────────────────────────────────
   const partes: string[] = []
@@ -259,6 +283,7 @@ export function calcularScore(
       scoreCompatibilidad,
       scoreAceptacion,
       penalizacionBolso,
+      penalizacionRechazos,
       proximoPuntoOperativo: proximoPunto,
     },
   }
