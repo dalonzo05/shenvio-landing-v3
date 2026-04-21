@@ -87,6 +87,13 @@ export default function ZonasPage() {
   // Refs para scroll-to-card
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({})
 
+  // ── Dibujo manual de polígono (WIP = work in progress) ────────────────────
+  const wipRef = useRef<Coord[]>([])
+  const wipPolyRef = useRef<google.maps.Polygon | null>(null)
+  const wipMarkersRef = useRef<google.maps.Marker[]>([])
+  const dibujandoRef = useRef(false)
+  useEffect(() => { dibujandoRef.current = dibujando }, [dibujando])
+
   // ── Handlers forward-declared como refs (usados en InfoWindow domready) ──
   const handleEditarZonaRef = useRef<(zona: ZonaGeografica) => void>(() => {})
   const handleToggleRef = useRef<(zona: ZonaGeografica) => void>(() => {})
@@ -106,12 +113,57 @@ export default function ZonasPage() {
       })
       mapRef.current = map
 
-      // ── CLIC EN EL MAPA: lógica de selección por prioridad ──────────────────
-      // NO usamos click en polígonos individuales para evitar el bug de orden de render.
-      // Toda la selección pasa por aquí usando pointInPolygon.
+      // ── Helper: actualiza preview del polígono WIP ───────────────────────────
+      function actualizarWip() {
+        const pts = wipRef.current
+        // Actualizar marcadores de vértices
+        wipMarkersRef.current.forEach((m) => m.setMap(null))
+        wipMarkersRef.current = pts.map((pt) =>
+          new google.maps.Marker({
+            position: pt, map,
+            icon: { path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: '#fff', fillOpacity: 1, strokeColor: draftColorRef.current, strokeWeight: 2 },
+            clickable: false, zIndex: 20,
+          })
+        )
+        // Actualizar polígono de preview
+        if (pts.length >= 2) {
+          const path = pts.map((p) => ({ lat: p.lat, lng: p.lng }))
+          if (!wipPolyRef.current) {
+            wipPolyRef.current = new google.maps.Polygon({
+              paths: path, strokeColor: draftColorRef.current, strokeWeight: 2, strokeOpacity: 0.9,
+              fillColor: draftColorRef.current, fillOpacity: 0.15, map, clickable: false, editable: false,
+            })
+          } else {
+            wipPolyRef.current.setPath(path)
+            wipPolyRef.current.setOptions({ strokeColor: draftColorRef.current, fillColor: draftColorRef.current })
+          }
+        } else {
+          wipPolyRef.current?.setMap(null)
+          wipPolyRef.current = null
+        }
+        // Sincronizar estado para mostrar contador en UI
+        setDraftPoligono(pts.length > 0 ? [...pts] : null)
+      }
+
+      // ── CLIC DERECHO: deshacer último vértice mientras se dibuja ─────────────
+      map.addListener('rightclick', () => {
+        if (!dibujandoRef.current || wipRef.current.length === 0) return
+        wipRef.current = wipRef.current.slice(0, -1)
+        actualizarWip()
+      })
+
+      // ── CLIC EN EL MAPA: agregar vértice (dibujo) o seleccionar zona (idle) ──
       map.addListener('click', (e: google.maps.MapMouseEvent) => {
         if (!e.latLng) return
-        // En modo dibujo o edición no seleccionar zonas
+
+        // ── Modo dibujo: agregar vértice ──────────────────────────────────────
+        if (dibujandoRef.current) {
+          wipRef.current = [...wipRef.current, { lat: e.latLng.lat(), lng: e.latLng.lng() }]
+          actualizarWip()
+          return
+        }
+
+        // ── Modo edición: no seleccionar zonas ────────────────────────────────
         if (modeRef.current !== 'idle') return
 
         const coord: Coord = { lat: e.latLng.lat(), lng: e.latLng.lng() }
@@ -160,35 +212,8 @@ export default function ZonasPage() {
         abrirInfoWindow(zonaGanadora, e.latLng, map)
       })
 
-      // ── DrawingManager ───────────────────────────────────────────────────────
-      const dm = new (google.maps as any).drawing.DrawingManager({
-        drawingMode: null,
-        drawingControl: false,
-        polygonOptions: { strokeWeight: 2, fillOpacity: 0.25, editable: false, clickable: false },
-      })
-      dm.setMap(map)
-      dmRef.current = dm
-
-      dm.addListener('polygoncomplete', (polygon: google.maps.Polygon) => {
-        const path = polygon.getPath()
-        const coords: Coord[] = []
-        for (let i = 0; i < path.getLength(); i++) {
-          const pt = path.getAt(i)
-          coords.push({ lat: pt.lat(), lng: pt.lng() })
-        }
-        polygon.setMap(null)
-        dm.setDrawingMode(null)
-        setDibujando(false)
-        setDraftPoligono(coords)
-
-        if (draftPolyRef.current) draftPolyRef.current.setMap(null)
-        const color = draftColorRef.current
-        draftPolyRef.current = new google.maps.Polygon({
-          paths: coords.map((c) => ({ lat: c.lat, lng: c.lng })),
-          strokeColor: color, strokeWeight: 2, fillColor: color, fillOpacity: 0.3,
-          map, editable: false, clickable: false,
-        })
-      })
+      // DrawingManager ya no se usa para polígonos (reemplazado por dibujo manual).
+      // Se conserva inicializado por si se necesita en el futuro para otras formas.
 
       setMapReady(true)
     })
@@ -361,7 +386,10 @@ export default function ZonasPage() {
   const limpiarDraft = useCallback(() => {
     if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
     if (editPolyRef.current) { editPolyRef.current.setMap(null); editPolyRef.current = null }
-    dmRef.current?.setDrawingMode(null)
+    // Limpiar WIP de dibujo manual
+    wipRef.current = []
+    wipPolyRef.current?.setMap(null); wipPolyRef.current = null
+    wipMarkersRef.current.forEach((m) => m.setMap(null)); wipMarkersRef.current = []
     setDibujando(false)
     setDraftPoligono(null)
     setDraftNombre('')
@@ -414,11 +442,34 @@ export default function ZonasPage() {
   }, [selectedId, limpiarDraft])
 
   const handleStartDraw = useCallback(() => {
-    if (!dmRef.current) return
+    // Limpiar WIP anterior
+    wipRef.current = []
+    wipPolyRef.current?.setMap(null); wipPolyRef.current = null
+    wipMarkersRef.current.forEach((m) => m.setMap(null)); wipMarkersRef.current = []
     if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
     setDraftPoligono(null)
-    dmRef.current.setDrawingMode((google.maps as any).drawing.OverlayType.POLYGON)
     setDibujando(true)
+  }, [])
+
+  const completarDibujo = useCallback(() => {
+    const coords = wipRef.current
+    if (coords.length < 3) return
+    // Limpiar markers y preview WIP
+    wipMarkersRef.current.forEach((m) => m.setMap(null)); wipMarkersRef.current = []
+    wipPolyRef.current?.setMap(null); wipPolyRef.current = null
+    wipRef.current = []
+    // Dibujar polígono final
+    if (draftPolyRef.current) draftPolyRef.current.setMap(null)
+    if (mapRef.current) {
+      draftPolyRef.current = new google.maps.Polygon({
+        paths: coords.map((c) => ({ lat: c.lat, lng: c.lng })),
+        strokeColor: draftColorRef.current, strokeWeight: 2,
+        fillColor: draftColorRef.current, fillOpacity: 0.3,
+        map: mapRef.current, editable: false, clickable: false,
+      })
+    }
+    setDraftPoligono(coords)
+    setDibujando(false)
   }, [])
 
   const handleGuardar = useCallback(async () => {
@@ -464,7 +515,6 @@ export default function ZonasPage() {
       }
       if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
       if (editPolyRef.current) { editPolyRef.current.setMap(null); editPolyRef.current = null }
-      dmRef.current?.setDrawingMode(null)
       setDibujando(false); setDraftPoligono(null); setDraftNombre(''); setDraftColor('#3b82f6')
       setDraftPrioridad(1); setSelectedId(null); setMode('idle')
     } catch (err) {
@@ -684,21 +734,43 @@ export default function ZonasPage() {
             </div>
 
             {/* Polígono */}
-            <div className="mt-3 flex items-center gap-3">
-              {mode === 'nueva' && (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {mode === 'nueva' && !dibujando && (
                 <button
                   onClick={handleStartDraw}
-                  disabled={dibujando}
-                  className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition ${dibujando ? 'border border-blue-200 bg-blue-50 text-blue-700' : 'bg-gray-900 text-white hover:bg-gray-700'}`}
+                  className="flex items-center gap-1.5 rounded-xl bg-gray-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-gray-700"
                 >
                   <Pentagon size={13} />
-                  {dibujando ? 'Dibujando… haz clic en el mapa' : draftPoligono ? 'Redibujar polígono' : 'Dibujar polígono'}
+                  {draftPoligono ? 'Redibujar polígono' : 'Dibujar polígono'}
                 </button>
               )}
+              {mode === 'nueva' && dibujando && (
+                <>
+                  <span className="flex items-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700">
+                    <Pentagon size={13} />
+                    {draftPoligono && draftPoligono.length > 0 ? `${draftPoligono.length} vértices` : 'Haz clic para dibujar'}
+                  </span>
+                  {draftPoligono && draftPoligono.length >= 3 && (
+                    <button
+                      onClick={completarDibujo}
+                      className="flex items-center gap-1.5 rounded-xl bg-green-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-green-700"
+                    >
+                      <Check size={13} /> Completar
+                    </button>
+                  )}
+                  <button
+                    onClick={handleStartDraw}
+                    className="flex items-center gap-1 rounded-xl border border-gray-200 px-2.5 py-2 text-xs font-medium text-gray-500 transition hover:bg-gray-50"
+                    title="Borrar y empezar de nuevo"
+                  >
+                    <X size={12} /> Reiniciar
+                  </button>
+                </>
+              )}
               {mode === 'editando' && <p className="text-xs text-gray-500">Arrastrá los vértices del polígono para editar la forma.</p>}
-              {draftPoligono && mode === 'nueva' && (
+              {draftPoligono && !dibujando && mode === 'nueva' && (
                 <span className="flex items-center gap-1 text-xs text-green-700">
-                  <Check size={13} /> {draftPoligono.length} vértices dibujados
+                  <Check size={13} /> {draftPoligono.length} vértices
                 </span>
               )}
             </div>
@@ -776,8 +848,8 @@ export default function ZonasPage() {
 
           {/* Instrucción de dibujo */}
           {dibujando && (
-            <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-xl bg-gray-900/85 px-4 py-2 text-xs text-white backdrop-blur-sm">
-              Haz clic para dibujar vértices · Doble clic o clic en el primer punto para cerrar
+            <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-xl bg-gray-900/85 px-4 py-2 text-center text-xs text-white backdrop-blur-sm">
+              Clic izquierdo para agregar punto · <span className="text-red-300">Clic derecho para deshacer</span> · Completar cuando tengas ≥ 3 vértices
             </div>
           )}
 
