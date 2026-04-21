@@ -422,7 +422,7 @@ export default function ZonasPage() {
       editPolyRef.current = new google.maps.Polygon({
         paths: zona.poligono.map((p) => ({ lat: p.lat, lng: p.lng })),
         strokeColor: zona.color, strokeWeight: 3, fillColor: zona.color, fillOpacity: 0.3,
-        map: mapRef.current, editable: true, clickable: false,
+        map: mapRef.current, editable: true, clickable: true,
       })
       const bounds = new google.maps.LatLngBounds()
       zona.poligono.forEach((p) => bounds.extend({ lat: p.lat, lng: p.lng }))
