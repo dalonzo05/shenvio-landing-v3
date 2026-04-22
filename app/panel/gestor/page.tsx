@@ -33,6 +33,8 @@ type OrdenActiva = {
   userId?: string
   asignacion?: { motorizadoNombre?: string; motorizadoId?: string } | null
   cobroDelivery?: { estado?: string; registradoAt?: Timestamp }
+  macroZonaRetiroNombre?: string | null
+  macroZonaEntregaNombre?: string | null
 }
 
 type CobroAlerta = {
@@ -241,6 +243,21 @@ export default function PanelGestorPage() {
     return { creadas, entregadas, enCurso, sinAsignar, rechazadas }
   }, [ordenesHoy, ordenesActivas])
 
+  // Resumen por macrozona (basado en órdenes de hoy)
+  const resumenMacroZonas = useMemo(() => {
+    const retiro = new Map<string, number>()
+    const entrega = new Map<string, number>()
+    for (const o of ordenesHoy) {
+      const mr = o.macroZonaRetiroNombre
+      const me = o.macroZonaEntregaNombre
+      if (mr) retiro.set(mr, (retiro.get(mr) ?? 0) + 1)
+      if (me) entrega.set(me, (entrega.get(me) ?? 0) + 1)
+    }
+    const topRetiro = [...retiro.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+    const topEntrega = [...entrega.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+    return { topRetiro, topEntrega, hasData: retiro.size > 0 || entrega.size > 0 }
+  }, [ordenesHoy])
+
   // Alertas operacionales
   const alertas = useMemo(() => {
     const now = Date.now()
@@ -356,6 +373,74 @@ export default function PanelGestorPage() {
           </div>
         ))}
       </div>
+
+      {/* ── Distribución por macrozona ── */}
+      {resumenMacroZonas.hasData && (
+        <section className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
+            <MapPin className="h-4 w-4 text-violet-500" />
+            <h2 className="text-sm font-black text-gray-900">Distribución por macrozona — hoy</h2>
+          </div>
+          <div className="grid grid-cols-2 divide-x divide-gray-100">
+            {/* Retiro */}
+            <div className="px-5 py-4">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 mb-3">Retiro</p>
+              {resumenMacroZonas.topRetiro.length === 0 ? (
+                <p className="text-xs text-gray-400">Sin datos</p>
+              ) : (
+                <div className="space-y-2.5">
+                  {resumenMacroZonas.topRetiro.map(([nombre, count], i) => {
+                    const max = resumenMacroZonas.topRetiro[0][1]
+                    const pct = max > 0 ? Math.round((count / max) * 100) : 0
+                    return (
+                      <div key={nombre}>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-xs font-medium text-gray-800 flex items-center gap-1.5">
+                            <span className="text-[10px] font-bold text-violet-500">{i + 1}</span>
+                            {nombre}
+                          </span>
+                          <span className="text-xs font-bold text-gray-700">{count}</span>
+                        </div>
+                        <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                          <div className="h-full bg-violet-400 rounded-full" style={{ width: `${pct}%` }} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+            {/* Entrega */}
+            <div className="px-5 py-4">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 mb-3">Entrega</p>
+              {resumenMacroZonas.topEntrega.length === 0 ? (
+                <p className="text-xs text-gray-400">Sin datos</p>
+              ) : (
+                <div className="space-y-2.5">
+                  {resumenMacroZonas.topEntrega.map(([nombre, count], i) => {
+                    const max = resumenMacroZonas.topEntrega[0][1]
+                    const pct = max > 0 ? Math.round((count / max) * 100) : 0
+                    return (
+                      <div key={nombre}>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-xs font-medium text-gray-800 flex items-center gap-1.5">
+                            <span className="text-[10px] font-bold text-indigo-500">{i + 1}</span>
+                            {nombre}
+                          </span>
+                          <span className="text-xs font-bold text-gray-700">{count}</span>
+                        </div>
+                        <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                          <div className="h-full bg-indigo-400 rounded-full" style={{ width: `${pct}%` }} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* ── Alertas operacionales ── */}
       {(alertas.sinAsignarMucho.length > 0 || alertas.atascadas.length > 0) && (

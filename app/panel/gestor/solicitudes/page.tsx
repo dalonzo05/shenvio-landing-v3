@@ -141,6 +141,11 @@ type Solicitud = {
   zonaEntregaId?: string | null
   zonaEntregaNombre?: string | null
 
+  macroZonaRetiroId?: string | null
+  macroZonaRetiroNombre?: string | null
+  macroZonaEntregaId?: string | null
+  macroZonaEntregaNombre?: string | null
+
   prioridad?: boolean
   entregadoAt?: any
   cobrosMotorizado?: {
@@ -522,6 +527,11 @@ export default function GestorSolicitudesPage() {
   const [motorizadoColFiltro, setMotorizadoColFiltro] = useState('')
   const [precioColFiltro, setPrecioColFiltro] = useState<FiltroPrecio>('todos')
 
+  const [zonaRetiroFiltro, setZonaRetiroFiltro] = useState('')
+  const [zonaEntregaFiltro, setZonaEntregaFiltro] = useState('')
+  const [macroZonaRetiroFiltro, setMacroZonaRetiroFiltro] = useState('')
+  const [macroZonaEntregaFiltro, setMacroZonaEntregaFiltro] = useState('')
+
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
 
@@ -723,6 +733,25 @@ export default function GestorSolicitudesPage() {
     return null
   }, [fechaFiltro, fechaDesde, fechaHasta])
 
+  const opcionesZona = useMemo(() => {
+    const retiro = new Set<string>()
+    const entrega = new Set<string>()
+    const macroRetiro = new Set<string>()
+    const macroEntrega = new Set<string>()
+    for (const s of allItems) {
+      if (s.zonaRetiroNombre) retiro.add(s.zonaRetiroNombre)
+      if (s.zonaEntregaNombre) entrega.add(s.zonaEntregaNombre)
+      if (s.macroZonaRetiroNombre) macroRetiro.add(s.macroZonaRetiroNombre)
+      if (s.macroZonaEntregaNombre) macroEntrega.add(s.macroZonaEntregaNombre)
+    }
+    return {
+      retiro: [...retiro].sort(),
+      entrega: [...entrega].sort(),
+      macroRetiro: [...macroRetiro].sort(),
+      macroEntrega: [...macroEntrega].sort(),
+    }
+  }, [allItems])
+
   const itemsFiltrados = useMemo(() => {
     let arr = allItems.filter((x) => x.estado === estadoFiltro)
 
@@ -839,6 +868,11 @@ export default function GestorSolicitudesPage() {
     if (filtroRapido === 'entregadas_hoy') arr = arr.filter((s) => s.estado === 'entregado' && isToday(s.entregadoAt || s.updatedAt))
     if (filtroRapido === 'prioritarias') arr = arr.filter((s) => s.prioridad === true)
 
+    if (zonaRetiroFiltro) arr = arr.filter((s) => s.zonaRetiroNombre === zonaRetiroFiltro)
+    if (zonaEntregaFiltro) arr = arr.filter((s) => s.zonaEntregaNombre === zonaEntregaFiltro)
+    if (macroZonaRetiroFiltro) arr = arr.filter((s) => s.macroZonaRetiroNombre === macroZonaRetiroFiltro)
+    if (macroZonaEntregaFiltro) arr = arr.filter((s) => s.macroZonaEntregaNombre === macroZonaEntregaFiltro)
+
     if (ordenUI === 'antiguas') arr = [...arr].reverse()
 
     if (ordenUI === 'prioritario') {
@@ -870,6 +904,10 @@ export default function GestorSolicitudesPage() {
     precioColFiltro,
     rangoFechaActivo,
     filtroRapido,
+    zonaRetiroFiltro,
+    zonaEntregaFiltro,
+    macroZonaRetiroFiltro,
+    macroZonaEntregaFiltro,
   ])
 
   useEffect(() => {
@@ -889,6 +927,10 @@ export default function GestorSolicitudesPage() {
     fechaDesde,
     fechaHasta,
     pageSize,
+    zonaRetiroFiltro,
+    zonaEntregaFiltro,
+    macroZonaRetiroFiltro,
+    macroZonaEntregaFiltro,
   ])
 
   const totalPages = Math.max(1, Math.ceil(itemsFiltrados.length / pageSize))
@@ -909,6 +951,10 @@ export default function GestorSolicitudesPage() {
       !!entregaColFiltro.trim(),
       !!motorizadoColFiltro.trim(),
       precioColFiltro !== 'todos',
+      !!zonaRetiroFiltro,
+      !!zonaEntregaFiltro,
+      !!macroZonaRetiroFiltro,
+      !!macroZonaEntregaFiltro,
     ]
     return vals.filter(Boolean).length
   }, [
@@ -1190,6 +1236,10 @@ export default function GestorSolicitudesPage() {
     setFechaDesde(hoyStr)
     setFechaHasta(hoyStr)
     setFiltroRapido('todos')
+    setZonaRetiroFiltro('')
+    setZonaEntregaFiltro('')
+    setMacroZonaRetiroFiltro('')
+    setMacroZonaEntregaFiltro('')
   }
 
   const resumenFecha = useMemo(() => {
@@ -1365,6 +1415,59 @@ export default function GestorSolicitudesPage() {
             </button>
           )}
         </div>
+
+        {/* Fila 1b: filtros de zona/macrozona (solo si hay datos de zona en las órdenes) */}
+        {(opcionesZona.macroRetiro.length > 0 || opcionesZona.macroEntrega.length > 0 || opcionesZona.retiro.length > 0 || opcionesZona.entrega.length > 0) && (
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100 flex-wrap bg-gray-50/60">
+            <MapPin className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide shrink-0">Zona</span>
+            {opcionesZona.macroRetiro.length > 0 && (
+              <select
+                value={macroZonaRetiroFiltro}
+                onChange={(e) => setMacroZonaRetiroFiltro(e.target.value)}
+                className={`rounded-lg border px-2 py-1.5 text-xs outline-none focus:border-blue-300 ${macroZonaRetiroFiltro ? 'border-violet-300 bg-violet-50 text-violet-800' : 'border-gray-200 bg-white'}`}
+              >
+                <option value="">Macrozona retiro: todas</option>
+                {opcionesZona.macroRetiro.map((z) => <option key={z} value={z}>{z}</option>)}
+              </select>
+            )}
+            {opcionesZona.macroEntrega.length > 0 && (
+              <select
+                value={macroZonaEntregaFiltro}
+                onChange={(e) => setMacroZonaEntregaFiltro(e.target.value)}
+                className={`rounded-lg border px-2 py-1.5 text-xs outline-none focus:border-blue-300 ${macroZonaEntregaFiltro ? 'border-violet-300 bg-violet-50 text-violet-800' : 'border-gray-200 bg-white'}`}
+              >
+                <option value="">Macrozona entrega: todas</option>
+                {opcionesZona.macroEntrega.map((z) => <option key={z} value={z}>{z}</option>)}
+              </select>
+            )}
+            {opcionesZona.retiro.length > 0 && (
+              <select
+                value={zonaRetiroFiltro}
+                onChange={(e) => setZonaRetiroFiltro(e.target.value)}
+                className={`rounded-lg border px-2 py-1.5 text-xs outline-none focus:border-blue-300 ${zonaRetiroFiltro ? 'border-indigo-300 bg-indigo-50 text-indigo-800' : 'border-gray-200 bg-white'}`}
+              >
+                <option value="">Zona retiro: todas</option>
+                {opcionesZona.retiro.map((z) => <option key={z} value={z}>{z}</option>)}
+              </select>
+            )}
+            {opcionesZona.entrega.length > 0 && (
+              <select
+                value={zonaEntregaFiltro}
+                onChange={(e) => setZonaEntregaFiltro(e.target.value)}
+                className={`rounded-lg border px-2 py-1.5 text-xs outline-none focus:border-blue-300 ${zonaEntregaFiltro ? 'border-indigo-300 bg-indigo-50 text-indigo-800' : 'border-gray-200 bg-white'}`}
+              >
+                <option value="">Zona entrega: todas</option>
+                {opcionesZona.entrega.map((z) => <option key={z} value={z}>{z}</option>)}
+              </select>
+            )}
+            {(macroZonaRetiroFiltro || macroZonaEntregaFiltro || zonaRetiroFiltro || zonaEntregaFiltro) && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 border border-violet-200 px-2 py-0.5 text-[10px] font-semibold text-violet-700">
+                {[macroZonaRetiroFiltro, macroZonaEntregaFiltro, zonaRetiroFiltro, zonaEntregaFiltro].filter(Boolean).length} zona{[macroZonaRetiroFiltro, macroZonaEntregaFiltro, zonaRetiroFiltro, zonaEntregaFiltro].filter(Boolean).length > 1 ? 's' : ''} activa{[macroZonaRetiroFiltro, macroZonaEntregaFiltro, zonaRetiroFiltro, zonaEntregaFiltro].filter(Boolean).length > 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Fila 2: tabs de estado + métricas inline */}
         <div className="flex items-center gap-0 overflow-x-auto border-b border-gray-100">
@@ -1653,10 +1756,19 @@ export default function GestorSolicitudesPage() {
                             )}
                           </div>
                           <div className="text-[11px] text-gray-500 mt-0.5 truncate" title={s.recoleccion.direccionEscrita}>{s.recoleccion.direccionEscrita}</div>
-                          {s.zonaRetiroNombre && (
-                            <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 mt-0.5">
-                              {s.zonaRetiroNombre}
-                            </span>
+                          {(s.macroZonaRetiroNombre || s.zonaRetiroNombre) && (
+                            <div className="flex flex-wrap gap-1 mt-0.5">
+                              {s.macroZonaRetiroNombre && (
+                                <span className="inline-flex items-center rounded-full bg-violet-50 border border-violet-200 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">
+                                  {s.macroZonaRetiroNombre}
+                                </span>
+                              )}
+                              {s.zonaRetiroNombre && (
+                                <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
+                                  {s.zonaRetiroNombre}
+                                </span>
+                              )}
+                            </div>
                           )}
                           {retiroMaps && (
                             <div className="mt-1 flex gap-1">
@@ -1686,10 +1798,19 @@ export default function GestorSolicitudesPage() {
                             )}
                           </div>
                           <div className="text-[11px] text-gray-500 mt-0.5 truncate" title={s.entrega.direccionEscrita}>{s.entrega.direccionEscrita}</div>
-                          {s.zonaEntregaNombre && (
-                            <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 mt-0.5">
-                              {s.zonaEntregaNombre}
-                            </span>
+                          {(s.macroZonaEntregaNombre || s.zonaEntregaNombre) && (
+                            <div className="flex flex-wrap gap-1 mt-0.5">
+                              {s.macroZonaEntregaNombre && (
+                                <span className="inline-flex items-center rounded-full bg-violet-50 border border-violet-200 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">
+                                  {s.macroZonaEntregaNombre}
+                                </span>
+                              )}
+                              {s.zonaEntregaNombre && (
+                                <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
+                                  {s.zonaEntregaNombre}
+                                </span>
+                              )}
+                            </div>
                           )}
                           {entregaMaps && (
                             <div className="mt-1 flex gap-1">
