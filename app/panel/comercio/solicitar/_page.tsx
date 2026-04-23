@@ -19,7 +19,7 @@ import {
 import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
-import { clasificarOrden } from '@/lib/zonas'
+import { clasificarOrdenCompleto } from '@/lib/zonas'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1002,11 +1002,12 @@ export default function SolicitarEnvioPage() {
 
       // Clasificar zonas antes de guardar la orden
       const zonasActivas = await getZonasActivas()
-      const { zonaRetiroId, zonaRetiroNombre, zonaEntregaId, zonaEntregaNombre } = clasificarOrden(
-        retiro.coord || null,
-        entrega.coord || null,
-        zonasActivas
-      )
+      const {
+        zonaRetiroId, zonaRetiroNombre,
+        zonaEntregaId, zonaEntregaNombre,
+        macroZonaRetiroId, macroZonaRetiroNombre,
+        macroZonaEntregaId, macroZonaEntregaNombre,
+      } = clasificarOrdenCompleto(retiro.coord || null, entrega.coord || null, zonasActivas)
 
       const deducirAplica = tipoCliente === 'contado' && cobroCE && quienPagaDelivery === 'entrega' && deducirDelivery === 'deducir_del_cobro'
       const tieneCalculo = !!calcResult || !!draft
@@ -1077,6 +1078,10 @@ export default function SolicitarEnvioPage() {
         zonaRetiroNombre,
         zonaEntregaId,
         zonaEntregaNombre,
+        macroZonaRetiroId,
+        macroZonaRetiroNombre,
+        macroZonaEntregaId,
+        macroZonaEntregaNombre,
         createdAt: serverTimestamp(),
       })
 

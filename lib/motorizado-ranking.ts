@@ -21,7 +21,10 @@ export interface MotorizadoConRanking {
   totalAceptadas?: number         // acumulado histórico de aceptaciones
   tiempoPromedioAceptacion?: number // segundos promedio desde asignación a aceptación
   tieneBolso?: boolean            // asumir false si ausente
-  zonaBase?: string               // reservado para futura lógica de zonas
+  zonaBase?: string | null        // zona pequeña de base del motorizado
+  macroZonaBase?: string | null   // macrozona de base del motorizado
+  zonaOperativaActual?: string | null       // zona pequeña operativa actual (para uso futuro)
+  macroZonaOperativaActual?: string | null  // macrozona operativa actual (para uso futuro)
   scoreDesempeño?: number         // reservado para uso futuro
 }
 
@@ -35,6 +38,11 @@ export interface OrdenActivaRanking {
     origenCoord?: { lat: number; lng: number } | null
     destinoCoord?: { lat: number; lng: number } | null
   }
+  // Campos de zona y macrozona — presentes si la orden fue clasificada con clasificarOrdenCompleto
+  zonaRetiroId?: string | null
+  zonaEntregaId?: string | null
+  macroZonaRetiroId?: string | null
+  macroZonaEntregaId?: string | null
 }
 
 export interface NuevaOrdenRanking {
@@ -45,9 +53,11 @@ export interface NuevaOrdenRanking {
     destinoCoord?: { lat: number; lng: number } | null
   }
   requiereBolso?: boolean   // asumir false si ausente
-  // Reservado para futura lógica de zonas (sin APIs externas):
-  zonaRetiro?: string
-  zonaEntrega?: string
+  // Campos de zona territorial (sin APIs externas):
+  zonaRetiroId?: string | null
+  zonaEntregaId?: string | null
+  macroZonaRetiroId?: string | null
+  macroZonaEntregaId?: string | null
 }
 
 export interface ScoreResult {
@@ -63,6 +73,9 @@ export interface ScoreResult {
     scoreAceptacion: number
     penalizacionBolso: number
     penalizacionRechazos: number
+    bonificacionZonaTotal: number
+    mismaMacroZona: boolean | null
+    mismaZona: boolean | null
     proximoPuntoOperativo: { lat: number; lng: number } | null
   }
 }
@@ -94,6 +107,11 @@ const PENALIZACION_BOLSO = 30
 /** Penalización por rechazos: -2 pts por cada 5 rechazos, máximo -10 pts */
 const PENALIZACION_RECHAZOS_POR_5 = 2
 const PENALIZACION_RECHAZOS_MAX   = 10
+
+/** Bonificaciones/penalizaciones territoriales — solo se aplican cuando el motorizado está ocupado */
+const BONUS_MISMA_MACROZONA         = 8   // entrega activa y nueva coinciden en macrozona
+const BONUS_MISMA_ZONA              = 4   // además coinciden en zona pequeña
+const PENALIZACION_DESVIO_MACROZONA = 5   // las macrozonas son distintas (desvío de ruta)
 
 /** Prioridad de estado para determinar el orden activo más relevante */
 const PRIORIDAD_ESTADO: Record<string, number> = {
@@ -239,9 +257,54 @@ export function calcularScore(
     ? Math.min(PENALIZACION_RECHAZOS_MAX, Math.floor(motorizado.totalRechazos / 5) * PENALIZACION_RECHAZOS_POR_5)
     : 0
 
-  const scoreTotal = Math.round(Math.max(0, scoreFinal - penalizacionBolso - penalizacionRechazos))
+  // ── 6b. Bonificación/penalización territorial ────────────────────────────────
+  // Solo aplica cuando el motorizado está ocupado y tiene órdenes activas.
+  // Compara la macrozona de entrega de su orden más avanzada con la macrozona
+  // de entrega del nuevo pedido: misma dirección territorial → bonus,
+  // dirección opuesta → penalización.
+  // Si faltan datos de macrozona en cualquiera de los dos lados → sin efecto.
+  let bonificacionZonaTotal = 0
+  let mismaMacroZona: boolean | null = null
+  let mismaZona: boolean | null = null
 
-  // ── 7. Explicación textual ──────────────────────────────────────────────────
+  if (motorizado.estado === 'ocupado' && ordenesDelMoto.length > 0) {
+    const ordenMasAvanzada = [...ordenesDelMoto].sort(
+      (a, b) => (PRIORIDAD_ESTADO[b.estado] ?? 0) - (PRIORIDAD_ESTADO[a.estado] ?? 0)
+    )[0]
+
+    const macroActual = ordenMasAvanzada.macroZonaEntregaId ?? null
+    const macraNueva  = nuevaOrden.macroZonaEntregaId ?? null
+
+    if (macroActual !== null && macraNueva !== null) {
+      if (macroActual === macraNueva) {
+        mismaMacroZona = true
+        bonificacionZonaTotal += BONUS_MISMA_MACROZONA
+
+        // Bonus adicional si además coincide la zona pequeña
+        const zonaActual = ordenMasAvanzada.zonaEntregaId ?? null
+        const zonaNueva  = nuevaOrden.zonaEntregaId ?? null
+        if (zonaActual !== null && zonaNueva !== null && zonaActual === zonaNueva) {
+          mismaZona = true
+          bonificacionZonaTotal += BONUS_MISMA_ZONA
+        } else {
+          mismaZona = false
+        }
+      } else {
+        // Macrozonas distintas: el nuevo pedido llevaría al motorizado en dirección opuesta
+        mismaMacroZona = false
+        bonificacionZonaTotal -= PENALIZACION_DESVIO_MACROZONA
+      }
+    }
+    // Si alguna macrozona es null → datos insuficientes → sin efecto (fallback gracioso)
+  }
+  // Motorizados disponibles: no aplica bonificación zonal (son igualmente flexibles)
+
+  // ── 7. Score total ──────────────────────────────────────────────────────────
+  const scoreTotal = Math.round(
+    Math.max(0, scoreFinal - penalizacionBolso - penalizacionRechazos + bonificacionZonaTotal)
+  )
+
+  // ── 8. Explicación textual ──────────────────────────────────────────────────
   const partes: string[] = []
 
   partes.push(motorizado.estado === 'disponible' ? 'Disponible' : 'Ocupado')
@@ -265,6 +328,13 @@ export function calcularScore(
     partes.push('Ruta compatible')
   }
 
+  // Contexto territorial (solo cuando hay datos de macrozona)
+  if (mismaMacroZona === true) {
+    partes.push(mismaZona ? 'Ruta territorial compatible' : 'Misma macrozona')
+  } else if (mismaMacroZona === false) {
+    partes.push('Desvío alto')
+  }
+
   if (penalizacionBolso > 0) {
     partes.push(`Sin bolso (-${PENALIZACION_BOLSO} pts)`)
   }
@@ -284,6 +354,9 @@ export function calcularScore(
       scoreAceptacion,
       penalizacionBolso,
       penalizacionRechazos,
+      bonificacionZonaTotal,
+      mismaMacroZona,
+      mismaZona,
       proximoPuntoOperativo: proximoPunto,
     },
   }

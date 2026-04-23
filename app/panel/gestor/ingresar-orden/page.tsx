@@ -16,7 +16,7 @@ import {
 import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
-import { clasificarOrden } from '@/lib/zonas'
+import { clasificarOrdenCompleto } from '@/lib/zonas'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import ComercioSearchModal, { ComercioModalItem } from '@/app/Components/ComercioSearchModal'
 
@@ -1243,7 +1243,12 @@ export default function GestorIngresarOrdenPage() {
   const [detalle, setDetalle] = useState('')
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
-  const [zonaPreview, setZonaPreview] = useState<{ zonaRetiroNombre: string | null; zonaEntregaNombre: string | null } | null>(null)
+  const [zonaPreview, setZonaPreview] = useState<{
+    zonaRetiroNombre: string | null
+    zonaEntregaNombre: string | null
+    macroZonaRetiroNombre: string | null
+    macroZonaEntregaNombre: string | null
+  } | null>(null)
 
   // Instrucciones adicionales toggles
   const [showNotaRetiro, setShowNotaRetiro] = useState(false)
@@ -1482,8 +1487,8 @@ export default function GestorIngresarOrdenPage() {
     let cancelled = false
     getZonasActivas().then((zonas) => {
       if (cancelled) return
-      const { zonaRetiroNombre, zonaEntregaNombre } = clasificarOrden(retiroCoord, entregaCoord, zonas)
-      setZonaPreview({ zonaRetiroNombre, zonaEntregaNombre })
+      const { zonaRetiroNombre, zonaEntregaNombre, macroZonaRetiroNombre, macroZonaEntregaNombre } = clasificarOrdenCompleto(retiroCoord, entregaCoord, zonas)
+      setZonaPreview({ zonaRetiroNombre, zonaEntregaNombre, macroZonaRetiroNombre, macroZonaEntregaNombre })
     }).catch(() => setZonaPreview(null))
     return () => { cancelled = true }
   }, [retiro.coord, entrega.coord])
@@ -1502,11 +1507,12 @@ export default function GestorIngresarOrdenPage() {
 
       // Clasificar zonas antes de guardar la orden
       const zonasActivas = await getZonasActivas()
-      const { zonaRetiroId, zonaRetiroNombre, zonaEntregaId, zonaEntregaNombre } = clasificarOrden(
-        retiro.coord || null,
-        entrega.coord || null,
-        zonasActivas
-      )
+      const {
+        zonaRetiroId, zonaRetiroNombre,
+        zonaEntregaId, zonaEntregaNombre,
+        macroZonaRetiroId, macroZonaRetiroNombre,
+        macroZonaEntregaId, macroZonaEntregaNombre,
+      } = clasificarOrdenCompleto(retiro.coord || null, entrega.coord || null, zonasActivas)
 
       const deducirAplica =
         tipoCliente === 'contado' &&
@@ -1598,6 +1604,10 @@ export default function GestorIngresarOrdenPage() {
         zonaRetiroNombre,
         zonaEntregaId,
         zonaEntregaNombre,
+        macroZonaRetiroId,
+        macroZonaRetiroNombre,
+        macroZonaEntregaId,
+        macroZonaEntregaNombre,
         createdAt: serverTimestamp(),
         creadoInternamente: true,
         creadoPorGestorUid: gestorUid,
@@ -2590,6 +2600,14 @@ export default function GestorIngresarOrdenPage() {
           <span>📍 Zona retiro: <strong>{zonaPreview.zonaRetiroNombre ?? 'Sin zona'}</strong></span>
           <span style={{ color: '#93c5fd' }}>·</span>
           <span>📦 Zona entrega: <strong>{zonaPreview.zonaEntregaNombre ?? 'Sin zona'}</strong></span>
+          {(zonaPreview.macroZonaRetiroNombre || zonaPreview.macroZonaEntregaNombre) && (
+            <>
+              <span style={{ color: '#93c5fd' }}>·</span>
+              <span>🗺 Macro retiro: <strong>{zonaPreview.macroZonaRetiroNombre ?? '—'}</strong></span>
+              <span style={{ color: '#93c5fd' }}>·</span>
+              <span>🗺 Macro entrega: <strong>{zonaPreview.macroZonaEntregaNombre ?? '—'}</strong></span>
+            </>
+          )}
         </div>
       )}
 

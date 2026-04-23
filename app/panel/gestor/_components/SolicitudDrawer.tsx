@@ -113,6 +113,10 @@ export type SolicitudDetalle = {
   zonaRetiroNombre?: string | null
   zonaEntregaId?: string | null
   zonaEntregaNombre?: string | null
+  macroZonaRetiroId?: string | null
+  macroZonaRetiroNombre?: string | null
+  macroZonaEntregaId?: string | null
+  macroZonaEntregaNombre?: string | null
 }
 
 type Motorizado = MotorizadoConRanking
@@ -352,6 +356,10 @@ export function SolicitudDrawer({
         destinoCoord: solicitud.cotizacion?.destinoCoord ?? null,
       },
       requiereBolso,
+      zonaRetiroId: solicitud.zonaRetiroId ?? null,
+      zonaEntregaId: solicitud.zonaEntregaId ?? null,
+      macroZonaRetiroId: solicitud.macroZonaRetiroId ?? null,
+      macroZonaEntregaId: solicitud.macroZonaEntregaId ?? null,
     }
     return rankearMotorizados(motorizados as MotorizadoConRanking[], ordenesActivas, nuevaOrden)
   }, [solicitud, motorizados, ordenesActivas, comercioRequiereBolso])

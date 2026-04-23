@@ -53,6 +53,7 @@ export default function ZonasPage() {
   const [clickedId, setClickedId] = useState<string | null>(null)     // zona seleccionada en mapa
   const [modoTest, setModoTest] = useState(false)
   const [busqueda, setBusqueda] = useState('')
+  const [filtroTipo, setFiltroTipo] = useState<'todas' | 'zona' | 'macrozona'>('todas')
   const [satelite, setSatelite] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
 
@@ -60,6 +61,7 @@ export default function ZonasPage() {
   const [draftNombre, setDraftNombre] = useState('')
   const [draftColor, setDraftColor] = useState('#3b82f6')
   const [draftPrioridad, setDraftPrioridad] = useState(1)
+  const [draftTipo, setDraftTipo] = useState<'zona' | 'macrozona'>('zona')
   const [draftPoligono, setDraftPoligono] = useState<Coord[] | null>(null)
   const [dibujando, setDibujando] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -182,7 +184,10 @@ export default function ZonasPage() {
                   <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${zonaGanadora.color};flex-shrink:0"></span>
                   <span style="font-size:13px;font-weight:700;color:#111827">${zonaGanadora.nombre}</span>
                 </div>
-                <div style="margin-top:4px;font-size:11px;color:#6b7280">Prioridad: ${'★'.repeat(zonaGanadora.prioridad)}${'☆'.repeat(5 - zonaGanadora.prioridad)}</div>
+                <div style="margin-top:4px;display:flex;align-items:center;gap:6px">
+                  <span style="background:${zonaGanadora.tipo === 'macrozona' ? '#f5f3ff' : '#eff6ff'};color:${zonaGanadora.tipo === 'macrozona' ? '#7c3aed' : '#1d4ed8'};border:1px solid ${zonaGanadora.tipo === 'macrozona' ? '#ddd6fe' : '#bfdbfe'};border-radius:99px;padding:1px 7px;font-size:10px;font-weight:700">${zonaGanadora.tipo === 'macrozona' ? 'Macrozona' : 'Zona'}</span>
+                  <span style="font-size:11px;color:#6b7280">Prioridad: ${'★'.repeat(zonaGanadora.prioridad)}${'☆'.repeat(5 - zonaGanadora.prioridad)}</span>
+                </div>
               </div>
             `)
           } else {
@@ -237,6 +242,7 @@ export default function ZonasPage() {
         </div>
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-wrap:wrap">
           ${badge}
+          <span style="background:${zona.tipo === 'macrozona' ? '#f5f3ff' : '#eff6ff'};color:${zona.tipo === 'macrozona' ? '#7c3aed' : '#1d4ed8'};border:1px solid ${zona.tipo === 'macrozona' ? '#ddd6fe' : '#bfdbfe'};border-radius:99px;padding:1px 8px;font-size:10px;font-weight:700">${zona.tipo === 'macrozona' ? 'Macrozona' : 'Zona'}</span>
           <span style="font-size:11px;color:#f59e0b;letter-spacing:1px" title="Prioridad ${zona.prioridad}/5">${'★'.repeat(zona.prioridad)}${'☆'.repeat(5 - zona.prioridad)}</span>
         </div>
         <div style="display:flex;gap:5px;flex-wrap:wrap">
@@ -340,6 +346,7 @@ export default function ZonasPage() {
           strokeOpacity,
           fillOpacity,
           strokeWeight,
+          map, // restaurar visibilidad si el overlay fue ocultado durante edición
         })
       } else {
         // Polígonos NO clickables — el clic se maneja a nivel de mapa
@@ -371,6 +378,7 @@ export default function ZonasPage() {
           },
           opacity: zona.activa ? (hasSelection && !isHighlighted ? 0.4 : 1) : 0.4,
         })
+        existingLabel.setMap(map) // restaurar visibilidad si fue ocultada durante edición
       } else {
         const label = new google.maps.Marker({
           position: centro,
@@ -404,6 +412,7 @@ export default function ZonasPage() {
     setDraftNombre('')
     setDraftColor('#3b82f6')
     setDraftPrioridad(1)
+    setDraftTipo('zona')
     setSelectedId(null)
     setMsg(null)
   }, [])
@@ -423,6 +432,7 @@ export default function ZonasPage() {
     setDraftNombre(zona.nombre)
     setDraftColor(zona.color)
     setDraftPrioridad(zona.prioridad)
+    setDraftTipo(zona.tipo ?? 'zona')
 
     if (overlaysRef.current[zona.id]) overlaysRef.current[zona.id].setMap(null)
     if (labelsRef.current[zona.id]) labelsRef.current[zona.id].setMap(null)
@@ -524,23 +534,23 @@ export default function ZonasPage() {
       setSaving(true); setMsg(null)
       const uid = auth.currentUser?.uid ?? ''
       if (mode === 'nueva') {
-        await crearZona({ nombre: draftNombre.trim(), color: draftColor, poligono: finalPoligono, activa: true, prioridad: draftPrioridad }, uid)
-        setMsg({ type: 'success', text: `Zona "${draftNombre.trim()}" creada.` })
+        await crearZona({ nombre: draftNombre.trim(), color: draftColor, poligono: finalPoligono, activa: true, prioridad: draftPrioridad, tipo: draftTipo }, uid)
+        setMsg({ type: 'success', text: `${draftTipo === 'macrozona' ? 'Macrozona' : 'Zona'} "${draftNombre.trim()}" creada.` })
       } else if (mode === 'editando' && selectedId) {
-        await actualizarZona(selectedId, { nombre: draftNombre.trim(), color: draftColor, poligono: finalPoligono, prioridad: draftPrioridad })
-        setMsg({ type: 'success', text: `Zona "${draftNombre.trim()}" actualizada.` })
+        await actualizarZona(selectedId, { nombre: draftNombre.trim(), color: draftColor, poligono: finalPoligono, prioridad: draftPrioridad, tipo: draftTipo })
+        setMsg({ type: 'success', text: `${draftTipo === 'macrozona' ? 'Macrozona' : 'Zona'} "${draftNombre.trim()}" actualizada.` })
       }
       if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
       if (editPolyRef.current) { editPolyRef.current.setMap(null); editPolyRef.current = null }
       setDibujando(false); setDraftPoligono(null); setDraftNombre(''); setDraftColor('#3b82f6')
-      setDraftPrioridad(1); setSelectedId(null); setMode('idle')
+      setDraftPrioridad(1); setDraftTipo('zona'); setSelectedId(null); setMode('idle')
     } catch (err) {
       console.error(err)
       setMsg({ type: 'error', text: 'No se pudo guardar la zona. Intentá de nuevo.' })
     } finally {
       setSaving(false)
     }
-  }, [mode, draftNombre, draftColor, draftPrioridad, draftPoligono, selectedId, zonas])
+  }, [mode, draftNombre, draftColor, draftPrioridad, draftTipo, draftPoligono, selectedId, zonas])
 
   const handleToggle = useCallback(async (zona: ZonaGeografica) => {
     try { await toggleZonaActiva(zona.id, !zona.activa) } catch (err) { console.error(err) }
@@ -553,7 +563,7 @@ export default function ZonasPage() {
       const nuevoNombre = `${zona.nombre} (copia)`
       await crearZona({
         nombre: nuevoNombre, color: zona.color,
-        poligono: zona.poligono, activa: false, prioridad: zona.prioridad,
+        poligono: zona.poligono, activa: false, prioridad: zona.prioridad, tipo: zona.tipo,
       }, uid)
     } catch (err) { console.error(err) }
   }, [])
@@ -595,7 +605,9 @@ export default function ZonasPage() {
   const zonaSeleccionada = zonas.find((z) => z.id === selectedId)
   const puedeGuardar = draftNombre.trim().length > 0 &&
     (mode === 'editando' || (draftPoligono !== null && draftPoligono.length >= 3))
-  const zonasFiltradas = zonas.filter((z) => z.nombre.toLowerCase().includes(busqueda.toLowerCase()))
+  const zonasFiltradas = zonas
+    .filter((z) => z.nombre.toLowerCase().includes(busqueda.toLowerCase()))
+    .filter((z) => filtroTipo === 'todas' || z.tipo === filtroTipo)
 
   // ── Render ─────────────────────────────────────────────────────────────────────
 
@@ -633,6 +645,27 @@ export default function ZonasPage() {
           className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs outline-none focus:border-[#004aad]"
         />
 
+        {/* Filtro por tipo */}
+        <div className="flex gap-1">
+          {(['todas', 'zona', 'macrozona'] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setFiltroTipo(t)}
+              className={`flex-1 rounded-lg border px-2 py-1 text-[11px] font-semibold transition ${
+                filtroTipo === t
+                  ? t === 'macrozona'
+                    ? 'border-purple-500 bg-purple-500 text-white'
+                    : t === 'zona'
+                    ? 'border-blue-500 bg-blue-500 text-white'
+                    : 'border-[#004aad] bg-[#004aad] text-white'
+                  : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
+              }`}
+            >
+              {t === 'todas' ? 'Todas' : t === 'zona' ? 'Zonas' : 'Macro'}
+            </button>
+          ))}
+        </div>
+
         {/* Lista */}
         <div className="flex flex-col gap-1.5 overflow-y-auto">
           {zonas.length === 0 && (
@@ -656,6 +689,13 @@ export default function ZonasPage() {
               <div className="flex items-center gap-2">
                 <div className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: zona.color }} />
                 <p className="min-w-0 flex-1 truncate text-xs font-semibold text-gray-900">{zona.nombre}</p>
+                <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold ring-1 ${
+                  zona.tipo === 'macrozona'
+                    ? 'bg-purple-50 text-purple-600 ring-purple-200'
+                    : 'bg-blue-50 text-blue-600 ring-blue-200'
+                }`}>
+                  {zona.tipo === 'macrozona' ? 'Macro' : 'Zona'}
+                </span>
                 <span className="shrink-0 text-[10px] font-bold text-amber-500">{'★'.repeat(zona.prioridad)}</span>
                 <span className={`shrink-0 h-1.5 w-1.5 rounded-full ${zona.activa ? 'bg-green-500' : 'bg-gray-300'}`} title={zona.activa ? 'Activa' : 'Inactiva'} />
               </div>
@@ -771,6 +811,35 @@ export default function ZonasPage() {
                       {n}
                     </button>
                   ))}
+                </div>
+              </div>
+
+              {/* Tipo */}
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-700">Tipo</label>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setDraftTipo('zona')}
+                    className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                      draftTipo === 'zona'
+                        ? 'border-blue-500 bg-blue-500 text-white'
+                        : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+                    }`}
+                  >
+                    Zona
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDraftTipo('macrozona')}
+                    className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                      draftTipo === 'macrozona'
+                        ? 'border-purple-500 bg-purple-500 text-white'
+                        : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+                    }`}
+                  >
+                    Macrozona
+                  </button>
                 </div>
               </div>
 
