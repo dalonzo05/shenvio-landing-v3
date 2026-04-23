@@ -478,6 +478,7 @@ export default function PanelMotorizadoPage() {
             `Cobro generado al entregar orden ${o.id} (crédito semanal)`,
             { solicitudId: o.id, motorizadoId: o.asignacion?.motorizadoId })
           if (o.asignacion?.motorizadoId && o.entrega?.coord) {
+            console.log('[motorizado] Ubicación operativa actualizada en entrega (crédito semanal):', o.entrega.coord);
             actualizarUbicacionOperativa(o.asignacion.motorizadoId, o.entrega.coord);
           }
           return
@@ -490,6 +491,7 @@ export default function PanelMotorizadoPage() {
       if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: nuevo === 'entregado' ? 'disponible' : 'ocupado', updatedAt: serverTimestamp() });
       await b.commit();
       if (nuevo === 'retirado' && o.asignacion?.motorizadoId && o.recoleccion?.coord) {
+        console.log('[motorizado] Ubicación operativa actualizada en retiro:', o.recoleccion.coord);
         actualizarUbicacionOperativa(o.asignacion.motorizadoId, o.recoleccion.coord);
       }
       if (nuevo === 'entregado') {
@@ -498,6 +500,7 @@ export default function PanelMotorizadoPage() {
           `Cobro generado al entregar orden ${o.id}`,
           { solicitudId: o.id, motorizadoId: o.asignacion?.motorizadoId })
         if (o.asignacion?.motorizadoId && o.entrega?.coord) {
+          console.log('[motorizado] Ubicación operativa actualizada en entrega:', o.entrega.coord);
           actualizarUbicacionOperativa(o.asignacion.motorizadoId, o.entrega.coord);
         }
       }
