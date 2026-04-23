@@ -326,6 +326,10 @@ export default function ZonasPage() {
     zonas.forEach((zona) => {
       if (zona.id === selectedId && mode === 'editando') return
 
+      // Visibilidad según filtro de tipo activo en el panel lateral
+      const visiblePorFiltro = filtroTipo === 'todas' || zona.tipo === filtroTipo
+      const mapaTarget = visiblePorFiltro ? map : null
+
       const isHighlighted = zona.id === clickedId
       const hasSelection = clickedId !== null
 
@@ -346,7 +350,7 @@ export default function ZonasPage() {
           strokeOpacity,
           fillOpacity,
           strokeWeight,
-          map, // restaurar visibilidad si el overlay fue ocultado durante edición
+          map: mapaTarget,
         })
       } else {
         // Polígonos NO clickables — el clic se maneja a nivel de mapa
@@ -357,7 +361,7 @@ export default function ZonasPage() {
           strokeOpacity,
           fillColor: zona.color,
           fillOpacity,
-          map,
+          map: mapaTarget,
           editable: false,
           clickable: false, // ← intencional: toda la selección pasa por map.click
         })
@@ -378,11 +382,11 @@ export default function ZonasPage() {
           },
           opacity: zona.activa ? (hasSelection && !isHighlighted ? 0.4 : 1) : 0.4,
         })
-        existingLabel.setMap(map) // restaurar visibilidad si fue ocultada durante edición
+        existingLabel.setMap(mapaTarget)
       } else {
         const label = new google.maps.Marker({
           position: centro,
-          map,
+          map: mapaTarget,
           label: {
             text: zona.nombre,
             color: zona.activa ? zona.color : '#9ca3af',
@@ -396,7 +400,7 @@ export default function ZonasPage() {
         labelsRef.current[zona.id] = label
       }
     })
-  }, [zonas, mapReady, mode, selectedId, clickedId])
+  }, [zonas, mapReady, mode, selectedId, clickedId, filtroTipo])
 
   // ── Handlers ─────────────────────────────────────────────────────────────────
 
