@@ -518,15 +518,19 @@ export default function ZonasPage() {
       return
     }
 
-    // Leer el polígono del editable ANTES de removerlo del mapa
+    // Leer el polígono ANTES de limpiar el mapa
     let finalPoligono: Coord[] | null = null
     if (mode === 'editando' && editPolyRef.current) {
+      // Zona en edición: leer vértices del polígono editable
       const path = editPolyRef.current.getPath()
       finalPoligono = []
       for (let i = 0; i < path.getLength(); i++) {
         const pt = path.getAt(i)
         finalPoligono.push({ lat: pt.lat(), lng: pt.lng() })
       }
+    } else if (wipRef.current.length >= 3) {
+      // Nueva zona: el usuario dibujó pero no presionó "Completar" — lo completamos aquí
+      finalPoligono = [...wipRef.current]
     } else {
       finalPoligono = draftPoligono
     }
@@ -536,12 +540,16 @@ export default function ZonasPage() {
       return
     }
 
-    // ── Limpiar el polígono editable del mapa ANTES del await ─────────────────
+    // ── Limpiar todos los overlays del mapa ANTES del await ──────────────────
     // Firestore dispara el onSnapshot local al mismo tiempo que resuelve el await,
     // por lo que si limpiamos después, el efecto de overlays ya corrió con el
     // polígono editable (y sus vertex handles) todavía en el mapa.
     if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
     if (editPolyRef.current) { const _p = editPolyRef.current; editPolyRef.current = null; try { _p.setEditable(false); _p.getPath().clear(); } catch {} _p.setMap(null) }
+    // Limpiar WIP por si el usuario guardó sin presionar "Completar"
+    wipMarkersRef.current.forEach((m) => m.setMap(null)); wipMarkersRef.current = []
+    wipPolyRef.current?.setMap(null); wipPolyRef.current = null
+    wipRef.current = []
 
     try {
       setSaving(true); setMsg(null)
