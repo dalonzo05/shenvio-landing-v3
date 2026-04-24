@@ -42,6 +42,35 @@ function polygonCentroid(poligono: Coord[]): Coord {
   return { lat, lng }
 }
 
+/** Genera un icono SVG con fondo blanco y texto coloreado para usar como etiqueta en el mapa */
+function crearIconoEtiqueta(
+  texto: string,
+  color: string,
+  fontWeight: string,
+  fontSize: number,
+): google.maps.Icon {
+  const charW = fontSize * 0.6
+  const textW = Math.ceil(texto.length * charW)
+  const padH = 8
+  const padV = 4
+  const w = textW + padH * 2
+  const h = fontSize + padV * 2
+  // Escapar caracteres especiales para SVG
+  const safe = texto.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">` +
+    `<rect x="0.5" y="0.5" width="${w - 1}" height="${h - 1}" rx="3" ry="3" ` +
+    `fill="white" fill-opacity="0.9" stroke="${color}" stroke-width="1.5"/>` +
+    `<text x="${w / 2}" y="${h / 2}" font-family="system-ui,-apple-system,sans-serif" ` +
+    `font-size="${fontSize}" font-weight="${fontWeight}" fill="${color}" ` +
+    `text-anchor="middle" dominant-baseline="central">${safe}</text>` +
+    `</svg>`
+  return {
+    url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg),
+    anchor: new google.maps.Point(w / 2, h / 2),
+    scaledSize: new google.maps.Size(w, h),
+  }
+}
+
 // ── Componente ────────────────────────────────────────────────────────────────
 
 export default function ZonasPage() {
@@ -370,32 +399,27 @@ export default function ZonasPage() {
         overlaysRef.current[zona.id] = poly
       }
 
-      // Etiqueta de nombre en el centroide
+      // Etiqueta de nombre en el centroide (SVG con fondo blanco + borde coloreado)
       const centro = polygonCentroid(zona.poligono)
+      const labelColor = zona.activa ? zona.color : '#9ca3af'
+      const labelFw = isHighlighted ? '700' : '600'
+      const labelFs = isHighlighted ? 12 : 11
+      const labelOp = zona.activa ? (hasSelection && !isHighlighted ? 0.45 : 1) : 0.35
+      const labelIcon = crearIconoEtiqueta(zona.nombre, labelColor, labelFw, labelFs)
       const existingLabel = labelsRef.current[zona.id]
       if (existingLabel) {
         existingLabel.setOptions({
           position: centro,
-          label: {
-            text: zona.nombre,
-            color: zona.activa ? zona.color : '#9ca3af',
-            fontWeight: isHighlighted ? '800' : '600',
-            fontSize: isHighlighted ? '12px' : '11px',
-          },
-          opacity: zona.activa ? (hasSelection && !isHighlighted ? 0.4 : 1) : 0.4,
+          icon: labelIcon,
+          opacity: labelOp,
         })
         existingLabel.setMap(mapaTarget)
       } else {
         const label = new google.maps.Marker({
           position: centro,
           map: mapaTarget,
-          label: {
-            text: zona.nombre,
-            color: zona.activa ? zona.color : '#9ca3af',
-            fontWeight: '600',
-            fontSize: '11px',
-          },
-          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 0 },
+          icon: labelIcon,
+          opacity: labelOp,
           clickable: false,
           zIndex: 10,
         })
