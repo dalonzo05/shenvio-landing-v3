@@ -438,8 +438,9 @@ export default function ZonasPage() {
     setDraftPrioridad(zona.prioridad)
     setDraftTipo(zona.tipo ?? 'zona')
 
-    if (overlaysRef.current[zona.id]) overlaysRef.current[zona.id].setMap(null)
-    if (labelsRef.current[zona.id]) labelsRef.current[zona.id].setMap(null)
+    // Eliminar el overlay del ref para que al volver a idle se cree uno fresco (sin estado residual)
+    if (overlaysRef.current[zona.id]) { overlaysRef.current[zona.id].setMap(null); delete overlaysRef.current[zona.id] }
+    if (labelsRef.current[zona.id]) { labelsRef.current[zona.id].setMap(null); delete labelsRef.current[zona.id] }
 
     if (mapRef.current) {
       const poly = new google.maps.Polygon({
@@ -517,6 +518,7 @@ export default function ZonasPage() {
       return
     }
 
+    // Leer el polígono del editable ANTES de removerlo del mapa
     let finalPoligono: Coord[] | null = null
     if (mode === 'editando' && editPolyRef.current) {
       const path = editPolyRef.current.getPath()
@@ -534,6 +536,13 @@ export default function ZonasPage() {
       return
     }
 
+    // ── Limpiar el polígono editable del mapa ANTES del await ─────────────────
+    // Firestore dispara el onSnapshot local al mismo tiempo que resuelve el await,
+    // por lo que si limpiamos después, el efecto de overlays ya corrió con el
+    // polígono editable (y sus vertex handles) todavía en el mapa.
+    if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
+    if (editPolyRef.current) { editPolyRef.current.setEditable(false); editPolyRef.current.setMap(null); editPolyRef.current = null }
+
     try {
       setSaving(true); setMsg(null)
       const uid = auth.currentUser?.uid ?? ''
@@ -544,8 +553,6 @@ export default function ZonasPage() {
         await actualizarZona(selectedId, { nombre: draftNombre.trim(), color: draftColor, poligono: finalPoligono, prioridad: draftPrioridad, tipo: draftTipo })
         setMsg({ type: 'success', text: `${draftTipo === 'macrozona' ? 'Macrozona' : 'Zona'} "${draftNombre.trim()}" actualizada.` })
       }
-      if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
-      if (editPolyRef.current) { editPolyRef.current.setEditable(false); editPolyRef.current.setMap(null); editPolyRef.current = null }
       setDibujando(false); setDraftPoligono(null); setDraftNombre(''); setDraftColor('#3b82f6')
       setDraftPrioridad(1); setDraftTipo('zona'); setSelectedId(null); setMode('idle')
     } catch (err) {
