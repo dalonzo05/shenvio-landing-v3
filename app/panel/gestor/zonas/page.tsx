@@ -114,6 +114,7 @@ export default function ZonasPage() {
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: false,
+        clickableIcons: false,
         zoomControlOptions: { position: google.maps.ControlPosition.RIGHT_CENTER },
       })
       mapRef.current = map
