@@ -56,6 +56,7 @@ export default function ZonasPage() {
   const [filtroTipo, setFiltroTipo] = useState<'todas' | 'zona' | 'macrozona'>('todas')
   const [satelite, setSatelite] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [leyendaVisible, setLeyendaVisible] = useState(true)
 
   // form
   const [draftNombre, setDraftNombre] = useState('')
@@ -1001,18 +1002,35 @@ export default function ZonasPage() {
 
           {/* Leyenda */}
           {mode === 'idle' && zonas.filter((z) => z.activa).length > 0 && (
-            <div className="absolute bottom-4 right-4 max-w-[180px] rounded-xl border border-gray-200 bg-white/95 p-2.5 shadow-sm backdrop-blur-sm">
-              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500">Leyenda</p>
-              {zonas.filter((z) => z.activa).map((z) => (
-                <div
-                  key={z.id}
-                  onClick={() => handleClickCard(z)}
-                  className={`flex cursor-pointer items-center gap-1.5 rounded-lg px-1.5 py-0.5 transition ${clickedId === z.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+            <div className="absolute bottom-4 right-4 max-w-[190px] rounded-xl border border-gray-200 bg-white/95 shadow-sm backdrop-blur-sm overflow-hidden">
+              {/* Cabecera con toggle */}
+              <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-gray-100">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Leyenda</p>
+                <button
+                  onClick={() => setLeyendaVisible((v) => !v)}
+                  className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition"
+                  title={leyendaVisible ? 'Ocultar leyenda' : 'Mostrar leyenda'}
                 >
-                  <div className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: z.color }} />
-                  <span className="truncate text-[11px] text-gray-700">{z.nombre}</span>
+                  {leyendaVisible ? <EyeOff size={12} /> : <Eye size={12} />}
+                </button>
+              </div>
+              {/* Entradas filtradas por tipo */}
+              {leyendaVisible && (
+                <div className="p-2">
+                  {zonas
+                    .filter((z) => z.activa && (filtroTipo === 'todas' || z.tipo === filtroTipo))
+                    .map((z) => (
+                      <div
+                        key={z.id}
+                        onClick={() => handleClickCard(z)}
+                        className={`flex cursor-pointer items-center gap-1.5 rounded-lg px-1.5 py-0.5 transition ${clickedId === z.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                      >
+                        <div className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: z.color }} />
+                        <span className="truncate text-[11px] text-gray-700">{z.nombre}</span>
+                      </div>
+                    ))}
                 </div>
-              ))}
+              )}
             </div>
           )}
         </div>
