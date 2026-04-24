@@ -406,7 +406,7 @@ export default function ZonasPage() {
 
   const limpiarDraft = useCallback(() => {
     if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
-    if (editPolyRef.current) { editPolyRef.current.setEditable(false); editPolyRef.current.setMap(null); editPolyRef.current = null }
+    if (editPolyRef.current) { const _p = editPolyRef.current; editPolyRef.current = null; try { _p.setEditable(false); _p.getPath().clear(); } catch {} _p.setMap(null) }
     // Limpiar WIP de dibujo manual
     wipRef.current = []
     wipPolyRef.current?.setMap(null); wipPolyRef.current = null
@@ -467,11 +467,11 @@ export default function ZonasPage() {
   handleEditarZonaRef.current = handleEditarZona
 
   const handleCancelar = useCallback(() => {
-    if (selectedId && overlaysRef.current[selectedId]) overlaysRef.current[selectedId].setMap(mapRef.current)
-    if (selectedId && labelsRef.current[selectedId]) labelsRef.current[selectedId].setMap(mapRef.current)
+    // El overlay fue eliminado del ref al entrar a editar; el efecto de overlays
+    // lo recreará limpio (sin handles) cuando mode vuelva a 'idle'.
     limpiarDraft()
     setMode('idle')
-  }, [selectedId, limpiarDraft])
+  }, [limpiarDraft])
 
   const handleStartDraw = useCallback(() => {
     // Limpiar WIP anterior
@@ -541,7 +541,7 @@ export default function ZonasPage() {
     // por lo que si limpiamos después, el efecto de overlays ya corrió con el
     // polígono editable (y sus vertex handles) todavía en el mapa.
     if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
-    if (editPolyRef.current) { editPolyRef.current.setEditable(false); editPolyRef.current.setMap(null); editPolyRef.current = null }
+    if (editPolyRef.current) { const _p = editPolyRef.current; editPolyRef.current = null; try { _p.setEditable(false); _p.getPath().clear(); } catch {} _p.setMap(null) }
 
     try {
       setSaving(true); setMsg(null)
