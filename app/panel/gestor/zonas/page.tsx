@@ -406,7 +406,7 @@ export default function ZonasPage() {
 
   const limpiarDraft = useCallback(() => {
     if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
-    if (editPolyRef.current) { editPolyRef.current.setMap(null); editPolyRef.current = null }
+    if (editPolyRef.current) { editPolyRef.current.setEditable(false); editPolyRef.current.setMap(null); editPolyRef.current = null }
     // Limpiar WIP de dibujo manual
     wipRef.current = []
     wipPolyRef.current?.setMap(null); wipPolyRef.current = null
@@ -545,7 +545,7 @@ export default function ZonasPage() {
         setMsg({ type: 'success', text: `${draftTipo === 'macrozona' ? 'Macrozona' : 'Zona'} "${draftNombre.trim()}" actualizada.` })
       }
       if (draftPolyRef.current) { draftPolyRef.current.setMap(null); draftPolyRef.current = null }
-      if (editPolyRef.current) { editPolyRef.current.setMap(null); editPolyRef.current = null }
+      if (editPolyRef.current) { editPolyRef.current.setEditable(false); editPolyRef.current.setMap(null); editPolyRef.current = null }
       setDibujando(false); setDraftPoligono(null); setDraftNombre(''); setDraftColor('#3b82f6')
       setDraftPrioridad(1); setDraftTipo('zona'); setSelectedId(null); setMode('idle')
     } catch (err) {
