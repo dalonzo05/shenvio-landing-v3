@@ -7,10 +7,12 @@ import {
   onSnapshot,
   doc,
   updateDoc,
+  setDoc,
   getDocs,
   getDoc,
   query,
   serverTimestamp,
+  increment,
   Timestamp,
   where,
 } from 'firebase/firestore'
@@ -390,6 +392,20 @@ export function SolicitudDrawer({
         updatedAt: serverTimestamp(),
         [`historial.${nuevo}At`]: serverTimestamp(),
       })
+
+      // Incrementar totalViajes solo cuando la orden se marca como entregada
+      if (nuevo === 'entregado') {
+        const celular = solicitud.entrega?.celular?.replace(/\D/g, '')
+        const comercioUid = solicitud.userId
+        if (celular && comercioUid) {
+          const clienteDocId = `${comercioUid}_${celular}`
+          await setDoc(
+            doc(db, 'clientes_envio', clienteDocId),
+            { totalViajes: increment(1), updatedAt: serverTimestamp() },
+            { merge: true }
+          )
+        }
+      }
     } catch { setErr('No se pudo cambiar el estado.') }
   }
 

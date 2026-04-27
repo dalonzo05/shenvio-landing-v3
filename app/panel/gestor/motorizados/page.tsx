@@ -1,12 +1,13 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   collection,
   onSnapshot,
   doc,
   addDoc,
   updateDoc,
+  setDoc,
   query,
   where,
   orderBy,
@@ -17,7 +18,12 @@ import {
   Timestamp,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
-import { X, Bike, Plus, TrendingUp, AlertCircle } from 'lucide-react'
+import { getMapsLoader } from '@/lib/googleMaps'
+import { getZonasActivas } from '@/fb/zonas'
+import { clasificarPuntoEnZona } from '@/lib/zonas'
+import type { ZonaGeografica } from '@/lib/zonas'
+import { X, Bike, Plus, TrendingUp, AlertCircle, MapPin, KeyRound } from 'lucide-react'
+import { createAuthUser } from '@/fb/createAuthUser'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -40,6 +46,12 @@ type Motorizado = {
   tiempoPromedioAceptacion?: number
   ultimaUbicacionOperativa?: { lat: number; lng: number; timestamp?: any }
   scoreDesempeño?: number
+  ubicacionBase?: { lat: number; lng: number } | null
+  direccionBase?: string | null
+  zonaBaseId?: string | null
+  zonaBaseNombre?: string | null
+  macroZonaBaseId?: string | null
+  macroZonaBaseNombre?: string | null
 }
 
 type Stats = {
@@ -135,6 +147,29 @@ export default function MotorizadosPage() {
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
 
+  // Crear acceso Auth (en drawer, cualquier motorizado)
+  const [caEmail, setCaEmail] = useState('')
+  const [caPassword, setCaPassword] = useState('')
+  const [caSaving, setCaSaving] = useState(false)
+  const [caMsg, setCaMsg] = useState<string | null>(null)
+
+  // Ubicación base
+  const [eUbicacionBase,        setEUbicacionBase]        = useState<{ lat: number; lng: number } | null>(null)
+  const [eDireccionBase,        setEDireccionBase]        = useState<string | null>(null)
+  const [eZonaBaseId,           setEZonaBaseId]           = useState<string | null>(null)
+  const [eZonaBaseNombre,       setEZonaBaseNombre]       = useState<string | null>(null)
+  const [eMacroZonaBaseId,      setEMacroZonaBaseId]      = useState<string | null>(null)
+  const [eMacroZonaBaseNombre,  setEMacroZonaBaseNombre]  = useState<string | null>(null)
+  const [zonasActivas,          setZonasActivas]          = useState<ZonaGeografica[]>([])
+  const [warningFueraDeMacrozona, setWarningFueraDeMacrozona] = useState(false)
+
+  // Map refs
+  const mapContainerRef      = useRef<HTMLDivElement | null>(null)
+  const gMapRef              = useRef<google.maps.Map | null>(null)
+  const markerRef            = useRef<google.maps.Marker | null>(null)
+  const autocompleteInputRef = useRef<HTMLInputElement | null>(null)
+  const zonasActivasRef      = useRef<ZonaGeografica[]>([])
+
   // Stats in drawer
   const [stats, setStats] = useState<Stats | null>(null)
   const [loadingStats, setLoadingStats] = useState(false)
@@ -150,11 +185,158 @@ export default function MotorizadosPage() {
     return () => unsub()
   }, [])
 
+  // Mantener ref de zonas en sync para evitar stale closures en listeners de mapa
+  useEffect(() => { zonasActivasRef.current = zonasActivas }, [zonasActivas])
+
+  // Inicializar mapa de ubicación base al abrir el drawer
+  useEffect(() => {
+    if (!drawerOpen) return
+
+    // Cargar zonas una vez por sesión
+    if (zonasActivasRef.current.length === 0) {
+      getZonasActivas().then((zs) => {
+        setZonasActivas(zs)
+        zonasActivasRef.current = zs
+      })
+    }
+
+    // Si el mapa ya existe, solo reposicionar
+    if (gMapRef.current) {
+      const center = eUbicacionBase ?? { lat: 12.1364, lng: -86.2514 }
+      gMapRef.current.setCenter(center)
+      gMapRef.current.setZoom(eUbicacionBase ? 15 : 13)
+      markerRef.current?.setPosition(center)
+      markerRef.current?.setVisible(!!eUbicacionBase)
+      if (autocompleteInputRef.current) {
+        autocompleteInputRef.current.value = eDireccionBase ?? ''
+      }
+      return
+    }
+
+    // Primera apertura: crear el mapa
+    getMapsLoader().load().then(() => {
+      if (!mapContainerRef.current || gMapRef.current) return
+
+      const center = eUbicacionBase ?? { lat: 12.1364, lng: -86.2514 }
+
+      const map = new google.maps.Map(mapContainerRef.current, {
+        center,
+        zoom: eUbicacionBase ? 15 : 13,
+        mapTypeControl: false,
+        streetViewControl: false,
+        fullscreenControl: false,
+        clickableIcons: false,
+      })
+      gMapRef.current = map
+
+      const marker = new google.maps.Marker({
+        position: center,
+        map,
+        draggable: true,
+        visible: !!eUbicacionBase,
+      })
+      markerRef.current = marker
+
+      function geocodeYClasificar(coord: { lat: number; lng: number }) {
+        const geocoder = new google.maps.Geocoder()
+        geocoder.geocode({ location: coord }, (results, status) => {
+          const address =
+            status === 'OK' && results?.[0]
+              ? results[0].formatted_address
+              : `${coord.lat.toFixed(5)}, ${coord.lng.toFixed(5)}`
+          if (autocompleteInputRef.current) autocompleteInputRef.current.value = address
+          const zona      = clasificarPuntoEnZona(coord, zonasActivasRef.current, 'zona')
+          const macroZona = clasificarPuntoEnZona(coord, zonasActivasRef.current, 'macrozona')
+          setEUbicacionBase(coord)
+          setEDireccionBase(address)
+          setEZonaBaseId(zona?.id ?? null)
+          setEZonaBaseNombre(zona?.nombre ?? null)
+          setEMacroZonaBaseId(macroZona?.id ?? null)
+          setEMacroZonaBaseNombre(macroZona?.nombre ?? null)
+          setWarningFueraDeMacrozona(!macroZona)
+        })
+      }
+
+      marker.addListener('dragend', () => {
+        const pos = marker.getPosition()
+        if (!pos) return
+        geocodeYClasificar({ lat: pos.lat(), lng: pos.lng() })
+      })
+
+      map.addListener('click', (e: google.maps.MapMouseEvent) => {
+        if (!e.latLng) return
+        const coord = { lat: e.latLng.lat(), lng: e.latLng.lng() }
+        marker.setPosition(coord)
+        marker.setVisible(true)
+        geocodeYClasificar(coord)
+      })
+
+      if (autocompleteInputRef.current) {
+        const ac = new google.maps.places.Autocomplete(autocompleteInputRef.current, {
+          fields: ['geometry', 'formatted_address'],
+          componentRestrictions: { country: 'ni' },
+        })
+        ac.addListener('place_changed', () => {
+          const place = ac.getPlace()
+          if (!place.geometry?.location) return
+          const coord = { lat: place.geometry.location.lat(), lng: place.geometry.location.lng() }
+          map.setCenter(coord)
+          map.setZoom(16)
+          marker.setPosition(coord)
+          marker.setVisible(true)
+          const address = place.formatted_address ?? autocompleteInputRef.current?.value ?? ''
+          const zona      = clasificarPuntoEnZona(coord, zonasActivasRef.current, 'zona')
+          const macroZona = clasificarPuntoEnZona(coord, zonasActivasRef.current, 'macrozona')
+          setEUbicacionBase(coord)
+          setEDireccionBase(address)
+          setEZonaBaseId(zona?.id ?? null)
+          setEZonaBaseNombre(zona?.nombre ?? null)
+          setEMacroZonaBaseId(macroZona?.id ?? null)
+          setEMacroZonaBaseNombre(macroZona?.nombre ?? null)
+          setWarningFueraDeMacrozona(!macroZona)
+        })
+      }
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drawerOpen])
+
   // Summary counts
   const totalCount = motorizados.length
   const disponibles = motorizados.filter((m) => m.activo !== false && m.estado === 'disponible').length
   const ocupados = motorizados.filter((m) => m.activo !== false && m.estado === 'ocupado').length
   const inactivos = motorizados.filter((m) => m.activo === false).length
+
+  async function crearAccesoMotorizado() {
+    if (!selected) return
+    if (!caEmail.trim()) { setCaMsg('❌ El correo es obligatorio'); return }
+    if (caPassword.length < 6) { setCaMsg('❌ Mínimo 6 caracteres'); return }
+    setCaSaving(true); setCaMsg(null)
+    try {
+      const authUid = await createAuthUser(caEmail.trim(), caPassword)
+      await setDoc(doc(db, 'usuarios', authUid), {
+        name: selected.nombre,
+        email: caEmail.trim(),
+        rol: 'motorizado',
+        activo: selected.activo !== false,
+        creadoPorGestor: true,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+      await updateDoc(doc(db, 'motorizado', selected.id), {
+        authUid,
+      })
+      setSelected((prev) => prev ? { ...prev, authUid } : prev)
+      setEAuthUid(authUid)
+      setCaMsg('✅ Acceso creado')
+      setCaEmail(''); setCaPassword('')
+    } catch (e: any) {
+      const code = e?.code
+      if (code === 'auth/email-already-in-use') setCaMsg('❌ Ese correo ya está registrado')
+      else setCaMsg('❌ Error al crear el acceso')
+    } finally {
+      setCaSaving(false)
+    }
+  }
 
   function openEdit(m: Motorizado) {
     setIsNew(false)
@@ -165,8 +347,21 @@ export default function MotorizadosPage() {
     setEActivo(m.activo !== false)
     setEEstado(m.estado || 'disponible')
     setETieneBolso(m.tieneBolso ?? false)
+    setEUbicacionBase(m.ubicacionBase ?? null)
+    setEDireccionBase(m.direccionBase ?? null)
+    setEZonaBaseId(m.zonaBaseId ?? null)
+    setEZonaBaseNombre(m.zonaBaseNombre ?? null)
+    setEMacroZonaBaseId(m.macroZonaBaseId ?? null)
+    setEMacroZonaBaseNombre(m.macroZonaBaseNombre ?? null)
+    setWarningFueraDeMacrozona(false)
+    if (gMapRef.current && autocompleteInputRef.current) {
+      autocompleteInputRef.current.value = m.direccionBase ?? ''
+    }
     setMsg(null)
     setStats(null)
+    setCaEmail('')
+    setCaPassword('')
+    setCaMsg(null)
     setDrawerOpen(true)
     // Load stats
     setLoadingStats(true)
@@ -182,8 +377,19 @@ export default function MotorizadosPage() {
     setEActivo(true)
     setEEstado('disponible')
     setETieneBolso(false)
+    setEUbicacionBase(null)
+    setEDireccionBase(null)
+    setEZonaBaseId(null)
+    setEZonaBaseNombre(null)
+    setEMacroZonaBaseId(null)
+    setEMacroZonaBaseNombre(null)
+    setWarningFueraDeMacrozona(false)
+    if (autocompleteInputRef.current) autocompleteInputRef.current.value = ''
     setMsg(null)
     setStats(null)
+    setCaEmail('')
+    setCaPassword('')
+    setCaMsg(null)
     setDrawerOpen(true)
   }
 
@@ -196,6 +402,14 @@ export default function MotorizadosPage() {
     if (!eName.trim()) { setMsg('❌ El nombre es obligatorio.'); return }
     setSaving(true); setMsg(null)
     try {
+      const ubicacionBasePayload = {
+        ubicacionBase:        eUbicacionBase        ?? null,
+        direccionBase:        eDireccionBase        ?? null,
+        zonaBaseId:           eZonaBaseId           ?? null,
+        zonaBaseNombre:       eZonaBaseNombre       ?? null,
+        macroZonaBaseId:      eMacroZonaBaseId      ?? null,
+        macroZonaBaseNombre:  eMacroZonaBaseNombre  ?? null,
+      }
       if (isNew) {
         await addDoc(collection(db, 'motorizado'), {
           nombre: eName.trim(),
@@ -205,6 +419,7 @@ export default function MotorizadosPage() {
           authUid: eAuthUid.trim() || null,
           tieneBolso: eTieneBolso,
           createdAt: serverTimestamp(),
+          ...ubicacionBasePayload,
         })
         setMsg('✅ Motorizado creado')
         setIsNew(false)
@@ -216,6 +431,7 @@ export default function MotorizadosPage() {
           activo: eActivo,
           authUid: eAuthUid.trim() || null,
           tieneBolso: eTieneBolso,
+          ...ubicacionBasePayload,
         })
         setMsg('✅ Guardado')
       }
@@ -278,6 +494,7 @@ export default function MotorizadosPage() {
                 <th className="px-4 py-3">Teléfono</th>
                 <th className="px-4 py-3">Estado</th>
                 <th className="px-4 py-3">Activo</th>
+                <th className="px-4 py-3">Zona base</th>
                 <th className="px-4 py-3" />
               </tr>
             </thead>
@@ -314,6 +531,11 @@ export default function MotorizadosPage() {
                       <span className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full border ${activo ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-100 text-gray-500 border-gray-200'}`}>
                         {activo ? 'Activo' : 'Inactivo'}
                       </span>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-gray-500">
+                      {m.zonaBaseNombre ?? m.macroZonaBaseNombre ?? (
+                        <span className="text-gray-300">Sin zona</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <button onClick={() => openEdit(m)} className="text-[#004aad] text-xs font-semibold hover:underline">
@@ -431,6 +653,51 @@ export default function MotorizadosPage() {
             </section>
           )}
 
+          {/* ── Acceso al sistema ── */}
+          {!isNew && (
+            <section className={`rounded-xl border p-4 space-y-3 ${selected?.authUid ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}`}>
+              <div className="flex items-center gap-2">
+                <KeyRound className={`h-4 w-4 ${selected?.authUid ? 'text-green-600' : 'text-amber-600'}`} />
+                <h3 className={`text-xs font-bold uppercase tracking-wide ${selected?.authUid ? 'text-green-700' : 'text-amber-700'}`}>
+                  Acceso al sistema
+                </h3>
+                <span className={`ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full border ${selected?.authUid ? 'bg-green-100 text-green-700 border-green-300' : 'bg-amber-100 text-amber-700 border-amber-300'}`}>
+                  {selected?.authUid ? 'Con acceso' : 'Sin acceso'}
+                </span>
+              </div>
+
+              {selected?.authUid ? (
+                <p className="text-xs text-green-700 font-mono break-all">{selected.authUid}</p>
+              ) : (
+                <>
+                  <p className="text-xs text-amber-700">Este motorizado no tiene cuenta. Podés crearle acceso a la app con un correo y contraseña.</p>
+                  <div className="space-y-2">
+                    <div>
+                      <label className={S.label}>Correo <span className="text-red-500">*</span></label>
+                      <input type="email" value={caEmail} onChange={(e) => setCaEmail(e.target.value)} placeholder="motorizado@ejemplo.com" className={S.input} />
+                    </div>
+                    <div>
+                      <label className={S.label}>Contraseña <span className="text-red-500">*</span></label>
+                      <input type="password" value={caPassword} onChange={(e) => setCaPassword(e.target.value)} placeholder="Mínimo 6 caracteres" className={S.input} />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={crearAccesoMotorizado}
+                      disabled={caSaving}
+                      className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition disabled:opacity-40"
+                    >
+                      {caSaving ? 'Creando acceso…' : 'Crear acceso'}
+                    </button>
+                    {caMsg && (
+                      <span className={`text-xs font-semibold ${caMsg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>{caMsg}</span>
+                    )}
+                  </div>
+                </>
+              )}
+            </section>
+          )}
+
           {/* Datos */}
           <section className="space-y-3">
             <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wide">Datos del motorizado</h3>
@@ -442,11 +709,13 @@ export default function MotorizadosPage() {
               <label className={S.label}>Teléfono</label>
               <input value={ePhone} onChange={(e) => setEPhone(e.target.value)} placeholder="8888-8888" className={S.input} />
             </div>
-            <div>
-              <label className={S.label}>UID de Firebase Auth <span className="text-gray-400 font-normal normal-case">(opcional)</span></label>
-              <input value={eAuthUid} onChange={(e) => setEAuthUid(e.target.value)} placeholder="abc123xyz..." className={S.input} />
-              <p className="text-xs text-gray-400 mt-1">Se asigna cuando el motorizado tenga cuenta creada en la app.</p>
-            </div>
+            {!isNew && (
+              <div>
+                <label className={S.label}>UID de Firebase Auth <span className="text-gray-400 font-normal normal-case">(opcional)</span></label>
+                <input value={eAuthUid} onChange={(e) => setEAuthUid(e.target.value)} placeholder="abc123xyz..." className={S.input} />
+                <p className="text-xs text-gray-400 mt-1">Vincula la cuenta de Firebase Auth con este motorizado.</p>
+              </div>
+            )}
           </section>
 
           {/* Estado */}
@@ -510,6 +779,76 @@ export default function MotorizadosPage() {
                 <div className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${eTieneBolso ? 'translate-x-5' : 'translate-x-0.5'}`} />
               </div>
             </button>
+          </section>
+
+          {/* Ubicación base */}
+          <section className="space-y-3">
+            <div className="flex items-center gap-2">
+              <MapPin className="h-4 w-4 text-[#004aad]" />
+              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wide">Ubicación base / inicio de jornada</h3>
+            </div>
+
+            <div>
+              <label className={S.label}>Dirección</label>
+              <input
+                ref={autocompleteInputRef}
+                type="text"
+                placeholder="Buscar dirección…"
+                className={S.input}
+                defaultValue={eDireccionBase ?? ''}
+              />
+              <p className="text-xs text-gray-400 mt-1">También podés hacer clic en el mapa o arrastrar el marcador.</p>
+            </div>
+
+            <div
+              ref={mapContainerRef}
+              className="w-full rounded-xl overflow-hidden border border-gray-200"
+              style={{ height: '250px' }}
+            />
+
+            {(eZonaBaseNombre || eMacroZonaBaseNombre) && (
+              <div className="flex flex-wrap gap-2">
+                {eZonaBaseNombre && (
+                  <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                    <MapPin className="h-3 w-3" />{eZonaBaseNombre}
+                  </span>
+                )}
+                {eMacroZonaBaseNombre && (
+                  <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+                    {eMacroZonaBaseNombre}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {warningFueraDeMacrozona && eUbicacionBase && (
+              <div className="flex items-start gap-2 bg-yellow-50 border border-yellow-200 rounded-xl px-3 py-2.5">
+                <AlertCircle className="h-4 w-4 text-yellow-500 shrink-0 mt-0.5" />
+                <p className="text-xs text-yellow-700 font-semibold">
+                  La ubicación está fuera de todas las macrozonas activas. Podés guardar igual.
+                </p>
+              </div>
+            )}
+
+            {eUbicacionBase && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEUbicacionBase(null)
+                  setEDireccionBase(null)
+                  setEZonaBaseId(null)
+                  setEZonaBaseNombre(null)
+                  setEMacroZonaBaseId(null)
+                  setEMacroZonaBaseNombre(null)
+                  setWarningFueraDeMacrozona(false)
+                  if (autocompleteInputRef.current) autocompleteInputRef.current.value = ''
+                  markerRef.current?.setVisible(false)
+                }}
+                className="text-xs text-red-500 font-semibold hover:underline"
+              >
+                Quitar ubicación base
+              </button>
+            )}
           </section>
 
         </div>

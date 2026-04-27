@@ -56,8 +56,6 @@ function LoginContent() {
     const redirectLoggedUser = async () => {
       if (loading) return
       if (!authUser) return
-      if (!authUser.emailVerified) return
-
       try {
         if (next && next.startsWith('/panel')) {
           router.replace(next)

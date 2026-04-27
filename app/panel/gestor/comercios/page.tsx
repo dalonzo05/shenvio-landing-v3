@@ -11,9 +11,12 @@ import {
   setDoc,
   serverTimestamp,
   updateDoc,
+  deleteField,
+  deleteDoc,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
 import { upsertCompanyByUid, type BankAccount, type CompanyPayload } from '@/fb/data'
+import { createAuthUser } from '@/fb/createAuthUser'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { Search, X, ChevronDown, ChevronUp, Building2, Phone, MapPin, CreditCard, Star, Lock } from 'lucide-react'
 
@@ -123,6 +126,7 @@ type Comercio = {
   email: string
   userName?: string
   activo?: boolean
+  sinAuth?: boolean
   // from comercios/{uid}
   name?: string
   phone?: string
@@ -184,6 +188,12 @@ export default function ComerciosPage() {
   const [ncError, setNcError] = useState('')
   const [ncLoading, setNcLoading] = useState(false)
 
+  // Crear acceso (en drawer)
+  const [caEmail, setCaEmail] = useState('')
+  const [caPassword, setCaPassword] = useState('')
+  const [caSaving, setCaSaving] = useState(false)
+  const [caMsg, setCaMsg] = useState<string | null>(null)
+
   // Punto modal
   const [puntoModal, setPuntoModal] = useState(false)
   const [editingPuntoKey, setEditingPuntoKey] = useState<string | null>(null)
@@ -214,6 +224,7 @@ export default function ComerciosPage() {
           email: u.email || '',
           userName: u.name,
           activo: u.activo,
+          sinAuth: u.sinAuth ?? false,
           name: comData.name || u.name || '',
           phone: comData.phone || '',
           address: comData.address || '',
@@ -266,6 +277,9 @@ export default function ComerciosPage() {
     setNotaMsg(null)
     setERequiereBolso(c.requiereBolso ?? false)
     setBolsoMsg(null)
+    setCaEmail('')
+    setCaPassword('')
+    setCaMsg(null)
     setDrawerOpen(true)
   }
 
@@ -292,7 +306,14 @@ export default function ComerciosPage() {
         address: eAddress.trim(),
         accounts: accountsClean,
       }
-      await upsertCompanyByUid(selected.uid, payload)
+      await Promise.all([
+        upsertCompanyByUid(selected.uid, payload),
+        updateDoc(doc(db, 'usuarios', selected.uid), {
+          name: eName.trim(),
+          phone: ePhone.trim(),
+          updatedAt: serverTimestamp(),
+        }),
+      ])
       setMsg('✅ Perfil guardado')
       // Update local list
       setComerciosList((prev) =>
@@ -381,7 +402,7 @@ export default function ComerciosPage() {
     if (!confirm('¿Eliminar este punto de retiro?')) return
     try {
       await updateDoc(doc(db, 'comercios', selected.uid), {
-        [`puntosRetiro.${key}`]: null,
+        [`puntosRetiro.${key}`]: deleteField(),
         updatedAt: serverTimestamp(),
       })
       setEPuntos((prev) => prev.filter((p) => p.key !== key))
@@ -459,10 +480,58 @@ export default function ComerciosPage() {
       })
       setShowNew(false)
       setNcNombre(''); setNcTelefono(''); setNcEmail(''); setNcDireccion(''); setNcError('')
-    } catch (e) {
+    } catch {
       setNcError('Error al crear el comercio')
     } finally {
       setNcLoading(false)
+    }
+  }
+
+  async function crearAccesoComercio() {
+    if (!selected) return
+    if (!caEmail.trim()) { setCaMsg('❌ El correo es obligatorio'); return }
+    setCaSaving(true); setCaMsg(null)
+    try {
+      const tempPassword = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2).toUpperCase() + '!9'
+      const authUid = await createAuthUser(caEmail.trim(), tempPassword)
+      const [usuarioSnap, comercioSnap] = await Promise.all([
+        getDoc(doc(db, 'usuarios', selected.uid)),
+        getDoc(doc(db, 'comercios', selected.uid)),
+      ])
+      const usuarioData = usuarioSnap.exists() ? usuarioSnap.data() : {}
+      const comercioData = comercioSnap.exists() ? comercioSnap.data() : {}
+      const esMigracion = selected.sinAuth && selected.uid !== authUid
+      await Promise.all([
+        // Crear nuevos docs con el authUid real
+        setDoc(doc(db, 'usuarios', authUid), {
+          ...usuarioData,
+          email: caEmail.trim(),
+          sinAuth: false,
+          updatedAt: serverTimestamp(),
+        }),
+        setDoc(doc(db, 'comercios', authUid), {
+          ...comercioData,
+          updatedAt: serverTimestamp(),
+        }),
+        // Limpiar docs viejos
+        esMigracion ? deleteDoc(doc(db, 'usuarios', selected.uid)) : Promise.resolve(),
+        esMigracion ? deleteDoc(doc(db, 'comercios', selected.uid)) : Promise.resolve(),
+      ])
+      await fetch('/api/send-welcome', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nombre: selected.name || selected.email,
+          email: caEmail.trim(),
+        }),
+      })
+      closeDrawer()
+    } catch (e: any) {
+      const code = e?.code
+      if (code === 'auth/email-already-in-use') setCaMsg('❌ Ese correo ya está registrado')
+      else if (code === 'auth/invalid-email') setCaMsg('❌ Correo inválido')
+      else setCaMsg('❌ Error al crear el acceso')
+      setCaSaving(false)
     }
   }
 
@@ -602,6 +671,47 @@ export default function ComerciosPage() {
 
             {/* Drawer body */}
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
+
+              {/* ── Acceso al sistema ── */}
+              <section className={`rounded-xl border p-4 space-y-3 ${selected.sinAuth ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'}`}>
+                <div className="flex items-center gap-2">
+                  <Lock className={`h-4 w-4 ${selected.sinAuth ? 'text-amber-600' : 'text-green-600'}`} />
+                  <h3 className={`text-xs font-bold uppercase tracking-wide ${selected.sinAuth ? 'text-amber-700' : 'text-green-700'}`}>
+                    Acceso al sistema
+                  </h3>
+                  <span className={`ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full border ${selected.sinAuth ? 'bg-amber-100 text-amber-700 border-amber-300' : 'bg-green-100 text-green-700 border-green-300'}`}>
+                    {selected.sinAuth ? 'Sin acceso' : 'Con acceso'}
+                  </span>
+                </div>
+
+                {selected.sinAuth ? (
+                  <>
+                    <p className="text-xs text-amber-700">Este comercio no tiene cuenta. Ingresá su correo y le enviaremos un link para que cree su contraseña.</p>
+                    <div className="space-y-2">
+                      <div>
+                        <label className={S.label}>Correo <span className="text-red-500">*</span></label>
+                        <input type="email" value={caEmail} onChange={(e) => setCaEmail(e.target.value)} placeholder="correo@ejemplo.com" className={S.input} />
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={crearAccesoComercio}
+                        disabled={caSaving}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition disabled:opacity-40"
+                      >
+                        {caSaving ? 'Creando acceso…' : 'Crear acceso'}
+                      </button>
+                      {caMsg && (
+                        <span className={`text-xs font-semibold ${caMsg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>{caMsg}</span>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-xs text-green-700">
+                    Acceso activo · <span className="font-semibold">{selected.email}</span>
+                  </p>
+                )}
+              </section>
 
               {/* ── Perfil empresa ── */}
               <section>

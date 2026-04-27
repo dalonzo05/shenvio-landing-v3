@@ -178,7 +178,7 @@ type FiltroRapido = 'todos' | 'con_riesgo' | 'pendiente_cobro' | 'entregadas_hoy
 
 const TRANSICIONES_VALIDAS: Record<EstadoSolicitud, EstadoSolicitud[]> = {
   pendiente_confirmacion: ['confirmada', 'rechazada', 'cancelada'],
-  confirmada: ['asignada', 'cancelada'],
+  confirmada: ['cancelada'],
   asignada: ['en_camino_retiro', 'confirmada', 'cancelada'],
   en_camino_retiro: ['retirado', 'cancelada'],
   retirado: ['en_camino_entrega'],
@@ -1194,6 +1194,10 @@ export default function GestorSolicitudesPage() {
         setToast({ type: 'error', message: `No se puede pasar de "${labelActual}" a "${labelNuevo}"` })
         return
       }
+      if (nuevo === 'asignada' && !solicitud.asignacion?.motorizadoId) {
+        setToast({ type: 'error', message: 'No se puede marcar como asignada sin motorizado.' })
+        return
+      }
     }
     try {
       await updateDoc(doc(db, 'solicitudes_envio', id), {
@@ -1572,7 +1576,7 @@ export default function GestorSolicitudesPage() {
                     </th>
 
                     <th className="px-3 py-2 border-r border-gray-200 bg-gray-50">
-                      <div className="text-xs text-gray-500">Editable hasta entregar</div>
+                      <div className="text-xs text-gray-500">Estado operativo</div>
                     </th>
 
                     <th className="px-3 py-2 border-r border-gray-200 bg-gray-50">
@@ -1723,7 +1727,7 @@ export default function GestorSolicitudesPage() {
                             )
                           })()}
 
-                          {/* Fila 3: dropdown de estado (sin label) */}
+                          {/* Fila 3: dropdown de estado */}
                           <div className="mt-1.5">
                             {(esEntregada || s.estado === 'rechazada' || s.estado === 'cancelada') ? (
                               <div className="inline-flex items-center gap-1 rounded border border-gray-200 bg-gray-50 px-2 py-1 text-[10px] text-gray-500">
@@ -1736,12 +1740,28 @@ export default function GestorSolicitudesPage() {
                                 className="w-full rounded border border-gray-200 bg-white px-2 py-1 text-[11px] outline-none focus:border-blue-300"
                               >
                                 <option value={s.estado} disabled>{statusLabel(s.estado)}</option>
-                                {(TRANSICIONES_VALIDAS[s.estado] ?? []).map((key) => {
-                                  const e = ESTADOS.find((x) => x.key === key)
-                                  return e ? <option key={e.key} value={e.key}>{e.label}</option> : null
-                                })}
+                                {(TRANSICIONES_VALIDAS[s.estado] ?? [])
+                                  .filter((key) => !(key === 'asignada' && !s.asignacion?.motorizadoId))
+                                  .map((key) => {
+                                    const e = ESTADOS.find((x) => x.key === key)
+                                    return e ? <option key={e.key} value={e.key}>{e.label}</option> : null
+                                  })}
                               </select>
                             )}
+                            {(() => {
+                              const ayudaMap: Partial<Record<EstadoSolicitud, string>> = {
+                                confirmada: 'Lista para asignar',
+                                asignada: 'Esperando aceptación',
+                                en_camino_retiro: 'Va a retiro',
+                                retirado: 'Producto retirado',
+                                en_camino_entrega: 'Va a entrega',
+                                entregado: 'Finalizada',
+                              }
+                              const ayuda = ayudaMap[s.estado]
+                              return ayuda ? (
+                                <div className="mt-0.5 text-[10px] text-gray-400">{ayuda}</div>
+                              ) : null
+                            })()}
                           </div>
                         </td>
 
@@ -2085,7 +2105,7 @@ export default function GestorSolicitudesPage() {
 
                   <div className="mt-3">
                     <label className="block text-[11px] font-medium uppercase tracking-wide text-gray-500 mb-1">
-                      Corregir estado
+                      Estado operativo
                     </label>
 
                     {esEntregada ? (
@@ -2099,13 +2119,29 @@ export default function GestorSolicitudesPage() {
                         onChange={(e) => cambiarEstado(s.id, e.target.value as EstadoSolicitud)}
                         className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-300"
                       >
-                        {ESTADOS.map((estado) => (
-                          <option key={estado.key} value={estado.key}>
-                            {estado.label}
-                          </option>
-                        ))}
+                        <option value={s.estado} disabled>{statusLabel(s.estado)}</option>
+                        {(TRANSICIONES_VALIDAS[s.estado] ?? [])
+                          .filter((key) => !(key === 'asignada' && !s.asignacion?.motorizadoId))
+                          .map((key) => {
+                            const e = ESTADOS.find((x) => x.key === key)
+                            return e ? <option key={e.key} value={e.key}>{e.label}</option> : null
+                          })}
                       </select>
                     )}
+                    {(() => {
+                      const ayudaMap: Partial<Record<EstadoSolicitud, string>> = {
+                        confirmada: 'Lista para asignar',
+                        asignada: 'Esperando aceptación',
+                        en_camino_retiro: 'Va a retiro',
+                        retirado: 'Producto retirado',
+                        en_camino_entrega: 'Va a entrega',
+                        entregado: 'Finalizada',
+                      }
+                      const ayuda = ayudaMap[s.estado]
+                      return ayuda ? (
+                        <div className="mt-1 text-xs text-gray-400">{ayuda}</div>
+                      ) : null
+                    })()}
                   </div>
 
                   <div className="mt-3 space-y-2 text-sm">

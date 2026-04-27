@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import {
   collection,
   doc,
@@ -14,6 +15,8 @@ import {
   where,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
+import { getZonasActivas } from '@/fb/zonas'
+import { clasificarOrdenCompleto } from '@/lib/zonas'
 import { Search, X, Users, Phone, MapPin, Package, ChevronRight, Edit3 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -91,6 +94,8 @@ export default function GestorClientesPage() {
   const [comercios, setComercios] = useState<ComercioRef[]>([])
   const [loading, setLoading] = useState(true)
   const [query2, setQuery2] = useState('')
+  const [sortBy, setSortBy] = useState<'az' | 'viajes' | 'recientes'>('az')
+  const [filterTipo, setFilterTipo] = useState<'todos' | 'exacto' | 'referencial' | 'sinubicacion'>('todos')
 
   // Drawer state
   const [selected, setSelected] = useState<ClienteEnvio | null>(null)
@@ -104,6 +109,13 @@ export default function GestorClientesPage() {
   // Viajes history
   const [viajes, setViajes] = useState<SolicitudResumen[]>([])
   const [loadingViajes, setLoadingViajes] = useState(false)
+
+  // Zone data (computed lazily on drawer open)
+  const [zonaEntrega, setZonaEntrega] = useState<string | null>(null)
+  const [macroZonaEntrega, setMacroZonaEntrega] = useState<string | null>(null)
+  const [loadingZona, setLoadingZona] = useState(false)
+
+  const router = useRouter()
 
   // Load all clientes_envio
   useEffect(() => {
@@ -152,8 +164,24 @@ export default function GestorClientesPage() {
       }
     }
 
-    return Array.from(byPhone.values())
-  }, [clientes, query2])
+    let result = Array.from(byPhone.values())
+
+    // Filter by tipo ubicación
+    if (filterTipo === 'exacto') result = result.filter((c) => c.tipoUbicacion === 'exacto')
+    else if (filterTipo === 'referencial') result = result.filter((c) => c.tipoUbicacion === 'referencial')
+    else if (filterTipo === 'sinubicacion') result = result.filter((c) => !c.coord)
+
+    // Sort
+    if (sortBy === 'viajes') result.sort((a, b) => (b.totalViajes ?? 0) - (a.totalViajes ?? 0))
+    else if (sortBy === 'recientes') result.sort((a, b) => {
+      const ta = a.updatedAt?.toMillis?.() ?? 0
+      const tb = b.updatedAt?.toMillis?.() ?? 0
+      return tb - ta
+    })
+    else result.sort((a, b) => (a.nombre || '').localeCompare(b.nombre || ''))
+
+    return result
+  }, [clientes, query2, sortBy, filterTipo])
 
   // All docs for same celular (for drawer)
   const allDocsForSelected = useMemo(() => {
@@ -186,11 +214,23 @@ export default function GestorClientesPage() {
     setEditDireccion(c.direccion || '')
     setEditNota(c.nota || '')
     setSaveMsg(null)
+    setZonaEntrega(null)
+    setMacroZonaEntrega(null)
+    if (c.coord) {
+      setLoadingZona(true)
+      getZonasActivas().then((zonas) => {
+        const r = clasificarOrdenCompleto(null, c.coord!, zonas)
+        setZonaEntrega(r.zonaEntregaNombre)
+        setMacroZonaEntrega(r.macroZonaEntregaNombre)
+      }).catch(() => {}).finally(() => setLoadingZona(false))
+    }
   }
 
   const closeDrawer = () => {
     setSelected(null)
     setViajes([])
+    setZonaEntrega(null)
+    setMacroZonaEntrega(null)
   }
 
   const handleSave = async () => {
@@ -228,8 +268,8 @@ export default function GestorClientesPage() {
         </div>
       </div>
 
-      {/* Search */}
-      <div style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
+      {/* Search + Filtros */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
         <div style={{ flex: 1, position: 'relative' }}>
           <Search size={16} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: '#9ca3af', pointerEvents: 'none' }} />
           <input
@@ -239,6 +279,58 @@ export default function GestorClientesPage() {
             style={{ width: '100%', paddingLeft: 38, padding: '10px 12px 10px 38px', border: '1px solid #e5e7eb', borderRadius: 10, fontSize: 14, color: '#111827', outline: 'none', background: '#fff', boxSizing: 'border-box', fontFamily: 'inherit' }}
           />
         </div>
+      </div>
+
+      {/* Chips de ordenamiento + filtro */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+        {/* Ordenar */}
+        <span style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em', marginRight: 2 }}>Ordenar:</span>
+        {([
+          { key: 'az', label: 'A–Z' },
+          { key: 'viajes', label: '↑ Más viajes' },
+          { key: 'recientes', label: '🕐 Más recientes' },
+        ] as { key: typeof sortBy; label: string }[]).map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            onClick={() => setSortBy(opt.key)}
+            style={{
+              fontSize: 12, fontWeight: 700, padding: '5px 12px', borderRadius: 20,
+              border: `1.5px solid ${sortBy === opt.key ? '#004aad' : '#e5e7eb'}`,
+              background: sortBy === opt.key ? '#eff6ff' : '#fff',
+              color: sortBy === opt.key ? '#004aad' : '#6b7280',
+              cursor: 'pointer',
+            }}
+          >
+            {opt.label}
+          </button>
+        ))}
+
+        <div style={{ width: 1, height: 18, background: '#e5e7eb', margin: '0 4px' }} />
+
+        {/* Filtrar por tipo */}
+        <span style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em', marginRight: 2 }}>Ubicación:</span>
+        {([
+          { key: 'todos', label: 'Todos' },
+          { key: 'exacto', label: '🎯 Exacta' },
+          { key: 'referencial', label: '📍 Referencial' },
+          { key: 'sinubicacion', label: 'Sin coord' },
+        ] as { key: typeof filterTipo; label: string }[]).map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            onClick={() => setFilterTipo(opt.key)}
+            style={{
+              fontSize: 12, fontWeight: 700, padding: '5px 12px', borderRadius: 20,
+              border: `1.5px solid ${filterTipo === opt.key ? '#7c3aed' : '#e5e7eb'}`,
+              background: filterTipo === opt.key ? '#fdf4ff' : '#fff',
+              color: filterTipo === opt.key ? '#7c3aed' : '#6b7280',
+              cursor: 'pointer',
+            }}
+          >
+            {opt.label}
+          </button>
+        ))}
       </div>
 
       {/* Table */}
@@ -257,8 +349,8 @@ export default function GestorClientesPage() {
         ) : (
           <>
             {/* Table header */}
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 2fr 1.4fr 60px 30px', gap: 0, padding: '10px 16px', background: '#f9fafb', borderBottom: '1px solid #e5e7eb' }}>
-              {['Nombre', 'Teléfono', 'Dirección', 'Comercio(s)', 'Viajes', ''].map((h, i) => (
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1.6fr 1.4fr 60px 90px 80px 30px', gap: 0, padding: '10px 16px', background: '#f9fafb', borderBottom: '1px solid #e5e7eb' }}>
+              {['Nombre', 'Teléfono', 'Dirección', 'Comercio(s)', 'Viajes', 'Tipo', 'Último viaje', ''].map((h, i) => (
                 <div key={i} style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</div>
               ))}
             </div>
@@ -273,7 +365,7 @@ export default function GestorClientesPage() {
                   type="button"
                   onClick={() => openDrawer(c)}
                   style={{
-                    display: 'grid', gridTemplateColumns: '2fr 1.2fr 2fr 1.4fr 60px 30px',
+                    display: 'grid', gridTemplateColumns: '2fr 1.2fr 1.6fr 1.4fr 60px 90px 80px 30px',
                     gap: 0, padding: '12px 16px', width: '100%', textAlign: 'left',
                     border: 'none', borderBottom: '1px solid #f3f4f6', background: '#fff',
                     cursor: 'pointer', alignItems: 'center',
@@ -318,6 +410,20 @@ export default function GestorClientesPage() {
                     ) : (
                       <span style={{ fontSize: 12, color: '#d1d5db' }}>—</span>
                     )}
+                  </div>
+
+                  {/* Tipo Ubicación */}
+                  <div>
+                    {c.tipoUbicacion === 'exacto'
+                      ? <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: '#f0fdf4', color: '#16a34a' }}>🎯 Exacto</span>
+                      : c.tipoUbicacion === 'referencial'
+                      ? <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: '#fffbe6', color: '#d97706' }}>📍 Ref.</span>
+                      : <span style={{ fontSize: 11, color: '#d1d5db' }}>—</span>}
+                  </div>
+
+                  {/* Último viaje */}
+                  <div style={{ fontSize: 11, color: '#9ca3af' }}>
+                    {formatDate(c.updatedAt)}
                   </div>
 
                   {/* Arrow */}
@@ -382,6 +488,74 @@ export default function GestorClientesPage() {
                     <div style={{ fontSize: 10, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: 2 }}>Con coord</div>
                   </div>
                 )}
+              </div>
+
+              {/* ── Ubicación + Zona + Acciones ── */}
+              <div style={{ marginBottom: 20, background: '#f9fafb', border: '1px solid #f3f4f6', borderRadius: 12, padding: '12px 14px' }}>
+
+                {/* Badges: tipo ubicación + cliente frecuente */}
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+                  {selected.tipoUbicacion === 'exacto' && (
+                    <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 8px', borderRadius: 6, background: '#f0fdf4', color: '#16a34a', border: '1px solid #bbf7d0' }}>🎯 Ubicación exacta</span>
+                  )}
+                  {selected.tipoUbicacion === 'referencial' && (
+                    <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 8px', borderRadius: 6, background: '#fffbe6', color: '#d97706', border: '1px solid #fde68a' }}>📍 Ubicación referencial</span>
+                  )}
+                  {(selected.totalViajes ?? 0) >= 5 && (
+                    <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 8px', borderRadius: 6, background: '#fdf4ff', color: '#7c3aed', border: '1px solid #e9d5ff' }}>⭐ Cliente frecuente</span>
+                  )}
+                  {!selected.tipoUbicacion && !selected.coord && (
+                    <span style={{ fontSize: 11, color: '#9ca3af' }}>Sin ubicación guardada</span>
+                  )}
+                </div>
+
+                {/* Coordenadas */}
+                {selected.coord && (
+                  <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 8px', fontFamily: 'monospace' }}>
+                    {selected.coord.lat.toFixed(6)}, {selected.coord.lng.toFixed(6)}
+                  </p>
+                )}
+
+                {/* Zona */}
+                {selected.coord && (
+                  <div style={{ fontSize: 12, color: '#374151', marginBottom: 10 }}>
+                    {loadingZona ? (
+                      <span style={{ color: '#9ca3af' }}>Calculando zona...</span>
+                    ) : (
+                      <>
+                        {zonaEntrega && <span>Zona: <strong>{zonaEntrega}</strong></span>}
+                        {macroZonaEntrega && <span style={{ marginLeft: zonaEntrega ? 12 : 0 }}>Macro: <strong>{macroZonaEntrega}</strong></span>}
+                        {!zonaEntrega && !macroZonaEntrega && <span style={{ color: '#9ca3af' }}>Sin zona asignada</span>}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* Botones de acción */}
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {selected.coord && (
+                    <a
+                      href={`https://www.google.com/maps?q=${selected.coord.lat},${selected.coord.lng}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ fontSize: 12, fontWeight: 700, padding: '6px 12px', borderRadius: 8, background: '#fff', border: '1px solid #e5e7eb', color: '#374151', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                    >
+                      🗺️ Ver en mapa
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const params = new URLSearchParams({ clienteId: selected.id })
+                      if (selected.comercioUid) params.set('comercioId', selected.comercioUid)
+                      closeDrawer()
+                      router.push(`/panel/gestor/ingresar-orden?${params.toString()}`)
+                    }}
+                    style={{ fontSize: 12, fontWeight: 700, padding: '6px 14px', borderRadius: 8, background: '#004aad', border: 'none', color: '#fff', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                  >
+                    🚀 Crear orden
+                  </button>
+                </div>
               </div>
 
               {/* Comercios asociados */}

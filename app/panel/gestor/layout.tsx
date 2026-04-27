@@ -123,7 +123,7 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
   }
 
   return (
-    <div className="flex h-screen w-full bg-gray-50">
+    <div className="flex h-screen w-full bg-gray-50" style={{ '--sidebar-width': collapsed ? '84px' : '250px' } as React.CSSProperties}>
       <aside
         className={`relative border-r border-gray-200 bg-white transition-all duration-300 ease-in-out ${
           collapsed ? 'w-[84px]' : 'w-[250px]'
@@ -147,7 +147,7 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
 
           <button
             onClick={() => setCollapsed((v) => !v)}
-            className="absolute -right-3 top-5 z-20 flex h-7 w-7 items-center justify-center rounded-full border border-gray-200 bg-white shadow-sm hover:bg-gray-50"
+            className="absolute -right-3 top-1/2 -translate-y-1/2 z-20 flex h-7 w-7 items-center justify-center rounded-full border border-gray-200 bg-white shadow-sm hover:bg-gray-50"
             title={collapsed ? 'Expandir menú' : 'Colapsar menú'}
           >
             {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}

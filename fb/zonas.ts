@@ -7,7 +7,6 @@ import {
   getDocs,
   onSnapshot,
   query,
-  where,
   orderBy,
   serverTimestamp,
 } from 'firebase/firestore'
@@ -38,13 +37,11 @@ function docToZona(id: string, data: any): ZonaGeografica {
  */
 export async function getZonasActivas(): Promise<ZonaGeografica[]> {
   try {
-    const q = query(
-      collection(db, COLECCION),
-      where('activa', '==', true),
-      orderBy('prioridad', 'desc')
-    )
+    const q = query(collection(db, COLECCION), orderBy('prioridad', 'desc'))
     const snap = await getDocs(q)
-    return snap.docs.map((d) => docToZona(d.id, d.data()))
+    return snap.docs
+      .map((d) => docToZona(d.id, d.data()))
+      .filter((z) => z.activa)
   } catch (err) {
     console.error('[fb/zonas] getZonasActivas error:', err)
     return []

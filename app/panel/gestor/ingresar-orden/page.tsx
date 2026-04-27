@@ -6,7 +6,6 @@ import {
   collection,
   doc,
   getDocs,
-  increment,
   onSnapshot,
   query,
   serverTimestamp,
@@ -17,8 +16,11 @@ import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
+import { useSearchParams } from 'next/navigation'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import ComercioSearchModal, { ComercioModalItem } from '@/app/Components/ComercioSearchModal'
+import StepIndicator from './_components/StepIndicator'
+import StickyOrderHeader from './_components/StickyOrderHeader'
 
 type LatLng = { lat: number; lng: number }
 type TipoUbicacion = 'referencial' | 'exacto'
@@ -307,7 +309,7 @@ async function guardarClienteEntrega(uid: string, data: Omit<ClienteGuardado, 'i
     celular: data.celular.trim(),
     comercioUid: uid,
     updatedAt: serverTimestamp(),
-    totalViajes: increment(1),
+    // totalViajes se incrementa solo cuando la orden pasa a 'entregado' en SolicitudDrawer
   }
   if (data.direccion?.trim()) payload.direccion = data.direccion.trim()
   if (data.nota?.trim()) payload.nota = data.nota.trim()
@@ -1280,11 +1282,57 @@ export default function GestorIngresarOrdenPage() {
   // ── Modal buscador de clientes ──
   const [showClienteModal, setShowClienteModal] = useState(false)
 
+  // ── Cliente + Comercio preseleccionados desde URL params ──
+  const searchParams = useSearchParams()
+  const pendingClienteId = searchParams.get('clienteId')
+  const pendingComercioId = searchParams.get('comercioId')
+  const [clienteSeleccionadoId, setClienteSeleccionadoId] = useState<string | null>(null)
+  const [clienteSeleccionadoNombre, setClienteSeleccionadoNombre] = useState<string | null>(null)
+  const [clienteSeleccionadoViajes, setClienteSeleccionadoViajes] = useState<number>(0)
+  const didAutoLoadCliente = useRef(false)
+  const didAutoLoadComercio = useRef(false)
+
+  // ── Auto-load comercio desde URL param ──
+  useEffect(() => {
+    if (!pendingComercioId) return
+    if (didAutoLoadComercio.current) return
+    if (comercios.length === 0) return
+    const match = comercios.find((c) => c.uid === pendingComercioId)
+    if (!match) return
+    didAutoLoadComercio.current = true
+    setSelectedOwnerUid(match.uid)
+  }, [comercios, pendingComercioId])
+
+  // ── Auto-load cliente desde URL param ──
+  useEffect(() => {
+    if (!pendingClienteId) return
+    if (didAutoLoadCliente.current) return
+    if (poolPuntos.length === 0) return
+    const match = poolPuntos.find((p) => p.id === pendingClienteId)
+    if (!match) return
+    didAutoLoadCliente.current = true
+    handleSelectEntrega(match)
+    setClienteSeleccionadoId(match.id)
+    setClienteSeleccionadoNombre(match.nombre || null)
+    setClienteSeleccionadoViajes(match.totalViajes ?? 0)
+  }, [poolPuntos, pendingClienteId])
+
+  // ── Saltar al paso 2 cuando comercio + cliente están ambos pre-cargados ──
+  useEffect(() => {
+    if (!pendingClienteId || !pendingComercioId) return
+    if (!clienteSeleccionadoId) return
+    if (!selectedOwnerUid) return
+    setPaso(2)
+  }, [clienteSeleccionadoId, selectedOwnerUid, pendingClienteId, pendingComercioId])
+
   // ── Map lock + saved coord states ──
   const [retiroLocked, setRetiroLocked] = useState(false)
   const [entregaLocked, setEntregaLocked] = useState(false)
   const [retiroSavedCoord, setRetiroSavedCoord] = useState<LatLng | null>(null)
   const [entregaSavedCoord, setEntregaSavedCoord] = useState<LatLng | null>(null)
+
+  // ── Flujo por pasos ──
+  const [paso, setPaso] = useState(1)
 
   // ── Manual price calculation ──
   const [calcResult, setCalcResult] = useState<{ km: number; precio: number } | null>(null)
@@ -1611,13 +1659,6 @@ export default function GestorIngresarOrdenPage() {
         createdAt: serverTimestamp(),
         creadoInternamente: true,
         creadoPorGestorUid: gestorUid,
-        ownerSnapshot: {
-          uid: selectedOwner.uid,
-          email: selectedOwner.email || '',
-          nombre: selectedOwner.nombre || '',
-          companyName: selectedOwner.companyName || '',
-          phone: selectedOwner.phone || '',
-        },
       })
 
       // Guardar cliente de entrega vinculado al comercio
@@ -1664,6 +1705,12 @@ export default function GestorIngresarOrdenPage() {
       setEsProgramado(false); setTipoProgramado('retiro'); setFechaRetiro(''); setHoraRetiro(''); setFechaEntrega(''); setHoraEntrega('')
       try { sessionStorage.removeItem('draftEnvio') } catch {}
       setDraft(null)
+      setClienteSeleccionadoId(null)
+      setClienteSeleccionadoNombre(null)
+      setClienteSeleccionadoViajes(0)
+      didAutoLoadCliente.current = false
+      didAutoLoadComercio.current = false
+      setPaso(2)
     } catch (err) {
       console.error(err)
       setMsg({ type: 'error', text: 'No se pudo guardar la orden. Intenta de nuevo.' })
@@ -1737,29 +1784,77 @@ export default function GestorIngresarOrdenPage() {
     }
   }
 
+  // ── Validación por paso ──
+  const puedeAvanzar = (desde: number): boolean => {
+    if (desde === 1) return !!selectedOwnerUid
+    if (desde === 2) {
+      return !!(
+        retiro.nombre.trim() &&
+        retiro.celular.trim() &&
+        validarCelular(retiro.celular) &&
+        retiro.direccion.trim()
+      )
+    }
+    if (desde === 3) {
+      return !!(
+        entrega.nombre.trim() &&
+        entrega.celular.trim() &&
+        validarCelular(entrega.celular) &&
+        entrega.direccion.trim()
+      )
+    }
+    if (desde === 4) {
+      if (tipoCliente === 'contado' && !quienPagaDelivery) return false
+      if (cobroCE && (montoCE === '' || Number(montoCE) <= 0)) return false
+      if (esProgramado && (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && !fechaRetiro) return false
+      if (esProgramado && (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && !fechaEntrega) return false
+      return true
+    }
+    return true
+  }
+
   // ─── Render ───────────────────────────────────────────────────────────────
+
+  const todayISO = new Date().toISOString().split('T')[0]
 
   return (
     <div
       style={{
-        maxWidth: 760,
-        margin: '0 auto',
-        padding: '0 0 48px',
         fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        background: '#f9fafb',
+        minHeight: '100vh',
       }}
     >
-      <div style={{ marginBottom: 24 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 800, color: '#111827', margin: '0 0 4px', letterSpacing: -0.5 }}>
-          Ingresar orden
-        </h1>
-        <p style={{ fontSize: 14, color: '#6b7280', margin: 0 }}>
-          Crea una solicitud interna para un comercio que pidió por WhatsApp u otro canal.
-        </p>
-      </div>
 
-      {/* ── Dueño de la orden ── */}
-      <SectionCard title="Dueño de la orden" icon="🏪">
-        <Field label="Comercio / cliente" required hint="La orden se guardará y cobrará a este comercio.">
+      {/* ── Header sticky ── */}
+      <StickyOrderHeader
+        precio={precioEfectivo}
+        distanciaKm={distanciaEfectiva}
+        zonaRetiro={zonaPreview?.zonaRetiroNombre ?? zonaPreview?.macroZonaRetiroNombre}
+        zonaEntrega={zonaPreview?.zonaEntregaNombre ?? zonaPreview?.macroZonaEntregaNombre}
+        comercioNombre={selectedOwnerData?.name || selectedOwner?.companyName || selectedOwner?.nombre}
+        camposFaltantes={camposFaltantes.length}
+        formularioCompleto={formularioCompleto}
+      />
+
+      {/* Spacer para compensar el header fixed */}
+      <div style={{ height: 54 }} />
+
+      {/* ── Contenido del paso ── */}
+      <div style={{ maxWidth: 760, margin: '0 auto', padding: '0 16px 140px' }}>
+        {/* Step indicator */}
+        <StepIndicator paso={paso} setPaso={setPaso} puedeAvanzar={puedeAvanzar} />
+
+        {/* ════ PASO 1: COMERCIO ════ */}
+        {paso === 1 && (
+          <div>
+            <div style={{ marginBottom: 20 }}>
+              <h2 style={{ fontSize: 20, fontWeight: 800, color: '#111827', margin: '0 0 4px' }}>Dueño de la orden</h2>
+              <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>¿A qué comercio pertenece este pedido?</p>
+            </div>
+
+            <SectionCard title="Comercio / cliente" icon="🏪">
+              <Field label="Comercio / cliente" required hint="La orden se guardará y cobrará a este comercio.">
           <div style={{ display: 'flex', gap: 8 }}>
             {selectedOwner ? (
               <div style={{ ...S.input, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f9fafb' }}>
@@ -1833,69 +1928,30 @@ export default function GestorIngresarOrdenPage() {
         )}
       </SectionCard>
 
-      {/* ── Banner cotización ── */}
-      <div
-        style={{
-          ...S.sectionCard,
-          marginBottom: 16,
-          background: tieneCotizacion ? '#f0fdf4' : '#f8fafc',
-          border: `1px solid ${tieneCotizacion ? '#bbf7d0' : '#e2e8f0'}`,
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap' as const, gap: 10 }}>
-          <div>
-            <p style={{ fontSize: 13, fontWeight: 700, color: tieneCotizacion ? '#16a34a' : '#374151', margin: '0 0 2px' }}>
-              {tieneCotizacion ? '✅ Cotización detectada desde calculadora' : 'ℹ️ Sin cotización previa'}
-            </p>
-            <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>
-              {tieneCotizacion
-                ? `Precio base: ${precioSugerido ? `C$ ${precioSugerido}` : '—'} · El sistema recalculará si marcás nuevos puntos`
-                : 'Marcá los puntos en el mapa para calcular el precio automáticamente'}
-            </p>
+          {/* ── Indicador: cliente preseleccionado para entrega ── */}
+          {clienteSeleccionadoId && (
+            <div style={{ marginTop: 12, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 18 }}>📬</span>
+              <div>
+                <p style={{ fontSize: 13, fontWeight: 700, color: '#16a34a', margin: 0 }}>
+                  Entrega preseleccionada: {clienteSeleccionadoNombre}
+                </p>
+                <p style={{ fontSize: 11, color: '#16a34a', margin: '2px 0 0', opacity: 0.8 }}>
+                  Los datos de entrega se cargarán automáticamente en el paso 3
+                </p>
+              </div>
+            </div>
+          )}
           </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const }}>
-            {tieneCotizacion && (
-              <button type="button" onClick={handleQuitarCotizacion} style={S.btnOutline}>
-                Quitar cotización
-              </button>
-            )}
-            <button type="button" onClick={handleInvertir} style={S.btnOutline}>
-              ↕ Invertir
-            </button>
-          </div>
-        </div>
-      </div>
+        )}
 
-      {/* ── Tipo cliente ── */}
-      <div style={{ ...S.sectionCard, marginBottom: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' as const, gap: 10 }}>
+        {/* ════ PASO 2: RETIRO ════ */}
+        {paso === 2 && (
           <div>
-            <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>Tipo de cliente</p>
-            <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>Define cómo se cobra el delivery</p>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {(['contado', 'credito'] as TipoCliente[]).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setTipoCliente(t)}
-                style={{
-                  padding: '8px 16px',
-                  borderRadius: 10,
-                  fontSize: 13,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  border: `1px solid ${tipoCliente === t ? '#004aad' : '#e5e7eb'}`,
-                  background: tipoCliente === t ? '#004aad' : '#fff',
-                  color: tipoCliente === t ? '#fff' : '#374151',
-                }}
-              >
-                {t === 'contado' ? '💵 Contado' : '🗓 Crédito'}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
+            <div style={{ marginBottom: 20 }}>
+              <h2 style={{ fontSize: 20, fontWeight: 800, color: '#111827', margin: '0 0 4px' }}>Punto de retiro</h2>
+              <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>¿Dónde se recoge el paquete?</p>
+            </div>
 
       {/* ── RETIRO ── */}
       <SectionCard title="Punto de retiro" icon="📦">
@@ -2056,8 +2112,48 @@ export default function GestorIngresarOrdenPage() {
           )}
         </div>
       </SectionCard>
+          </div>
+        )}
 
-      {/* ── ENTREGA ── */}
+        {/* ════ PASO 3: ENTREGA ════ */}
+        {paso === 3 && (
+          <div>
+            <div style={{ marginBottom: 20 }}>
+              <h2 style={{ fontSize: 20, fontWeight: 800, color: '#111827', margin: '0 0 4px' }}>Punto de entrega</h2>
+              <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>¿A quién se entrega y dónde?</p>
+            </div>
+
+            {/* ── Banner: cliente preseleccionado ── */}
+            {clienteSeleccionadoId && (
+              <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 12, padding: '10px 14px', marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: '#16a34a' }}>
+                      ✔ Cliente: {clienteSeleccionadoNombre}
+                    </span>
+                    {clienteSeleccionadoViajes >= 5 && (
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 6, background: '#fdf4ff', color: '#7c3aed', border: '1px solid #e9d5ff' }}>⭐ Frecuente</span>
+                    )}
+                  </div>
+                  <p style={{ fontSize: 11, color: '#16a34a', margin: '3px 0 0', opacity: 0.8 }}>Datos cargados automáticamente</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setClienteSeleccionadoId(null)
+                    setClienteSeleccionadoNombre(null)
+                    setClienteSeleccionadoViajes(0)
+                    setEntrega({ nombre: '', celular: '', direccion: '', nota: '', coord: null, tipoUbicacion: 'referencial' })
+                    setEntregaSavedCoord(null)
+                    setEntregaLocked(false)
+                  }}
+                  style={{ fontSize: 11, color: '#6b7280', background: 'none', border: '1px solid #d1d5db', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontWeight: 600 }}
+                >
+                  Quitar
+                </button>
+              </div>
+            )}
+
       <SectionCard title="Punto de entrega" icon="🏠">
         {/* Nombre del destinatario + botón para abrir modal buscador */}
         <div>
@@ -2175,10 +2271,51 @@ export default function GestorIngresarOrdenPage() {
             <textarea value={entrega.nota} onChange={(e) => setEntrega((prev) => ({ ...prev, nota: e.target.value }))} placeholder="Ej: Solo disponible entre 2-4pm, preguntar por María, portón verde..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 70, marginTop: 8 }} rows={2} />
           )}
         </div>
-      </SectionCard>
 
-      {/* ── PRECIO ── */}
-      {(retiro.coord || entrega.coord) && (
+        {/* ── Actualizar datos del cliente ── */}
+        {clienteSeleccionadoId && (
+          <div style={{ borderTop: '1px solid #f3f4f6', paddingTop: 14, marginTop: 4 }}>
+            <p style={{ fontSize: 12, color: '#9ca3af', margin: '0 0 8px' }}>¿Modificaste la dirección o ubicación?</p>
+            <button
+              type="button"
+              onClick={async () => {
+                if (!clienteSeleccionadoId || !entrega.celular.trim()) return
+                try {
+                  const payload: Record<string, any> = {
+                    nombre: entrega.nombre.trim(),
+                    celular: entrega.celular.trim(),
+                    updatedAt: serverTimestamp(),
+                  }
+                  if (entrega.direccion.trim()) payload.direccion = entrega.direccion.trim()
+                  if (entrega.nota.trim()) payload.nota = entrega.nota.trim()
+                  if (entrega.coord) payload.coord = entrega.coord
+                  if (entrega.tipoUbicacion) payload.tipoUbicacion = entrega.tipoUbicacion
+                  await setDoc(doc(db, 'clientes_envio', clienteSeleccionadoId), payload, { merge: true })
+                  setMsg({ type: 'success', text: 'Datos del cliente actualizados.' })
+                } catch {
+                  setMsg({ type: 'error', text: 'No se pudieron actualizar los datos del cliente.' })
+                }
+              }}
+              style={{ fontSize: 12, fontWeight: 700, padding: '7px 14px', borderRadius: 8, background: '#fff', border: '1px solid #e5e7eb', color: '#374151', cursor: 'pointer' }}
+            >
+              💾 Actualizar datos del cliente
+            </button>
+          </div>
+        )}
+      </SectionCard>
+          </div>
+        )}
+
+        {/* ════ PASO 4: PAGO & EXTRAS ════ */}
+        {paso === 4 && (
+          <div>
+            <div style={{ marginBottom: 20 }}>
+              <h2 style={{ fontSize: 20, fontWeight: 800, color: '#111827', margin: '0 0 4px' }}>Pago y detalles</h2>
+              <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>Tipo de cliente, cobros, paquete y programación.</p>
+            </div>
+
+            {/* Precio estimado */}
+            {(retiro.coord || entrega.coord) && (
         <div style={{ ...S.sectionCard, background: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <h3 style={{ fontSize: 14, fontWeight: 700, color: '#374151', margin: 0, textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>
@@ -2244,10 +2381,7 @@ export default function GestorIngresarOrdenPage() {
       )}
 
       {/* ── ENVÍO PROGRAMADO ── */}
-      {(() => {
-        const todayISO = new Date().toISOString().split('T')[0]
-        return (
-          <SectionCard title="Programar envío" icon="📅">
+            <SectionCard title="Programar envío" icon="📅">
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <button type="button" onClick={() => setEsProgramado(v => !v)} style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${esProgramado ? '#004aad' : '#d1d5db'}`, background: esProgramado ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
@@ -2308,8 +2442,37 @@ export default function GestorIngresarOrdenPage() {
               )}
             </div>
           </SectionCard>
-        )
-      })()}
+
+            {/* Tipo de cliente */}
+            <div style={{ ...S.sectionCard, marginBottom: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' as const, gap: 10 }}>
+                <div>
+                  <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>Tipo de cliente</p>
+                  <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>Define cómo se cobra el delivery</p>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {(['contado', 'credito'] as TipoCliente[]).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setTipoCliente(t)}
+                      style={{
+                        padding: '8px 16px',
+                        borderRadius: 10,
+                        fontSize: 13,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        border: `1px solid ${tipoCliente === t ? '#004aad' : '#e5e7eb'}`,
+                        background: tipoCliente === t ? '#004aad' : '#fff',
+                        color: tipoCliente === t ? '#fff' : '#374151',
+                      }}
+                    >
+                      {t === 'contado' ? '💵 Contado' : '🗓 Crédito'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
 
       {/* ── PAQUETE ── */}
       <SectionCard title="Datos del paquete" icon="📦">
@@ -2514,123 +2677,201 @@ export default function GestorIngresarOrdenPage() {
         </div>
       </SectionCard>
 
-      {/* ── RESUMEN ── */}
-      <div style={{ ...S.sectionCard, background: '#f8fafc', border: '1px solid #e2e8f0', marginTop: 0 }}>
-        <p style={{ fontSize: 13, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>
-          Resumen de cobros
-        </p>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {cobroCE && montoCE !== '' && (
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 13, color: '#6b7280' }}>Producto</span>
-              <span style={{ fontSize: 15, fontWeight: 700, color: '#7c3aed' }}>C$ {montoProducto}</span>
+          </div>
+        )}
+
+        {/* ════ PASO 5: CONFIRMACIÓN ════ */}
+        {paso === 5 && (
+          <div>
+            <div style={{ marginBottom: 20 }}>
+              <h2 style={{ fontSize: 20, fontWeight: 800, color: '#111827', margin: '0 0 4px' }}>Confirmar orden</h2>
+              <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>Revisá el resumen antes de crear la orden.</p>
             </div>
-          )}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: 13, color: '#6b7280' }}>
-              Delivery {precioEfectivo ? (calcResult ? '(calculado)' : '(cotización previa)') : '(a confirmar por gestor)'}
-            </span>
-            <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>
-              {precioEfectivo ? `C$ ${precioEfectivo}` : '—'}
-            </span>
-          </div>
-          {cobroCE && tipoCliente === 'contado' && quienPagaDelivery === 'entrega' && montoDelivery > 0 && (
-            <>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ fontSize: 12, color: '#374151' }}>
-                  {deducirDelivery === 'deducir_del_cobro'
-                    ? 'Total que pagará el destinatario'
-                    : 'Total que cobrará el motorizado'}
-                </span>
-                <span style={{ fontSize: 13, fontWeight: 700 }}>C$ {destinatarioPagaTotal}</span>
+
+            {/* Mapa de ruta */}
+            {(retiro.coord || entrega.coord) && (
+              <div style={{ ...S.sectionCard, marginBottom: 16 }}>
+                <h3 style={{ fontSize: 13, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Ruta</h3>
+                <RoutePreviewMap origen={retiro.coord} destino={entrega.coord} />
+                {calcResult && (
+                  <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap' as const }}>
+                    <span style={{ fontSize: 13, color: '#6b7280' }}>Distancia: <strong>{calcResult.km.toFixed(2)} km</strong></span>
+                    <span style={{ fontSize: 13, color: '#004aad', fontWeight: 700 }}>Precio: {calcResult.precio === -1 ? 'Consultar' : `C$ ${calcResult.precio}`}</span>
+                  </div>
+                )}
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ fontSize: 12, color: '#16a34a' }}>Se depositará al comercio</span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: '#16a34a' }}>C$ {montoADepositarComercio}</span>
+            )}
+
+            {/* Comercio */}
+            <div style={{ ...S.sectionCard, marginBottom: 16 }}>
+              <h3 style={{ fontSize: 12, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 10px' }}>Comercio</h3>
+              <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: 0 }}>{selectedOwner?.companyName || selectedOwner?.nombre || '—'}</p>
+              {selectedOwner?.email && <p style={{ fontSize: 12, color: '#6b7280', margin: '2px 0 0' }}>{selectedOwner.email}</p>}
+            </div>
+
+            {/* Retiro / Entrega lado a lado */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+              <div style={{ ...S.sectionCard, marginBottom: 0 }}>
+                <h3 style={{ fontSize: 12, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 10px' }}>📦 Retiro</h3>
+                <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{retiro.nombre || '—'}</p>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>{retiro.celular || '—'}</p>
+                <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>{retiro.direccion || '—'}</p>
+                {retiro.coord && <p style={{ fontSize: 11, color: '#16a34a', margin: '4px 0 0', fontWeight: 600 }}>✓ Ubicación marcada</p>}
               </div>
-            </>
-          )}
-          <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: 14, fontWeight: 700, color: '#111827' }}>Total estimado</span>
-            <span style={{ fontSize: 20, fontWeight: 900, color: '#111827' }}>
-              {cobroCE && tipoCliente === 'contado' && quienPagaDelivery === 'entrega' && montoDelivery > 0
-                ? `C$ ${destinatarioPagaTotal}`
-                : precioEfectivo
-                  ? `C$ ${precioEfectivo}`
-                  : '—'}
-            </span>
+              <div style={{ ...S.sectionCard, marginBottom: 0 }}>
+                <h3 style={{ fontSize: 12, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 10px' }}>🏠 Entrega</h3>
+                <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{entrega.nombre || '—'}</p>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>{entrega.celular || '—'}</p>
+                <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>{entrega.direccion || '—'}</p>
+                {entrega.coord && <p style={{ fontSize: 11, color: '#16a34a', margin: '4px 0 0', fontWeight: 600 }}>✓ Ubicación marcada</p>}
+              </div>
+            </div>
+
+            {/* Resumen de cobros */}
+            <div style={{ ...S.sectionCard, background: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: 16 }}>
+              <h3 style={{ fontSize: 12, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 12px' }}>Cobros</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: 13, color: '#6b7280' }}>Tipo cliente</span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#111827' }}>{tipoCliente === 'contado' ? '💵 Contado' : '🗓 Crédito'}</span>
+                </div>
+                {cobroCE && montoCE !== '' && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 13, color: '#6b7280' }}>Producto (cobro contra entrega)</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed' }}>C$ {montoProducto}</span>
+                  </div>
+                )}
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: 13, color: '#6b7280' }}>Delivery {precioEfectivo ? (calcResult ? '(calculado)' : '(cotización)') : '(a confirmar)'}</span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#004aad' }}>{precioEfectivo ? `C$ ${precioEfectivo}` : '—'}</span>
+                </div>
+                {tipoCliente === 'contado' && quienPagaDelivery && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 13, color: '#6b7280' }}>Quién paga delivery</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>
+                      {quienPagaDelivery === 'recoleccion' ? 'En retiro' : quienPagaDelivery === 'entrega' ? 'Destinatario' : 'Transferencia'}
+                    </span>
+                  </div>
+                )}
+                <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: '#111827' }}>Total estimado</span>
+                  <span style={{ fontSize: 22, fontWeight: 900, color: '#111827' }}>
+                    {cobroCE && tipoCliente === 'contado' && quienPagaDelivery === 'entrega' && montoDelivery > 0
+                      ? `C$ ${destinatarioPagaTotal}`
+                      : precioEfectivo ? `C$ ${precioEfectivo}` : '—'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Detalles extras */}
+            {(fragil || grande || esProgramado || detalle || numeroOrden || zonaPreview) && (
+              <div style={{ ...S.sectionCard, marginBottom: 16 }}>
+                <h3 style={{ fontSize: 12, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 10px' }}>Detalles</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {fragil && <p style={{ fontSize: 13, color: '#dc2626', margin: 0 }}>🥚 Paquete frágil</p>}
+                  {grande && <p style={{ fontSize: 13, color: '#d46b08', margin: 0 }}>📦 Paquete grande/voluminoso</p>}
+                  {notaPaquete && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>Paquete: {notaPaquete}</p>}
+                  {esProgramado && fechaRetiro && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📅 Retiro programado: {fechaRetiro} {horaRetiro && `a las ${horaRetiro}`}</p>}
+                  {esProgramado && fechaEntrega && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📅 Entrega programada: {fechaEntrega} {horaEntrega && `a las ${horaEntrega}`}</p>}
+                  {numeroOrden && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>Ref: {numeroOrden}</p>}
+                  {detalle && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>Nota: {detalle}</p>}
+                  {zonaPreview?.zonaEntregaNombre && <p style={{ fontSize: 12, color: '#1d4ed8', margin: 0 }}>Zona de entrega: {zonaPreview.zonaEntregaNombre}</p>}
+                </div>
+              </div>
+            )}
+
+            {/* Campos faltantes */}
+            {!formularioCompleto && (
+              <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 14, padding: '14px 16px', marginBottom: 16 }}>
+                <p style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', margin: '0 0 8px' }}>⚠️ Campos pendientes:</p>
+                <ul style={{ margin: 0, padding: '0 0 0 18px' }}>
+                  {camposFaltantes.map((f) => (
+                    <li key={f} style={{ fontSize: 13, color: '#92400e', marginBottom: 2 }}>{f}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {msg && (
+              <div style={{ marginBottom: 16, borderRadius: 14, padding: '14px 16px', fontSize: 13, fontWeight: 600, background: msg.type === 'success' ? '#f0fdf4' : msg.type === 'error' ? '#fef2f2' : '#eff6ff', border: `1px solid ${msg.type === 'success' ? '#bbf7d0' : msg.type === 'error' ? '#fecaca' : '#bfdbfe'}`, color: msg.type === 'success' ? '#16a34a' : msg.type === 'error' ? '#dc2626' : '#2563eb' }}>
+                {msg.text}
+              </div>
+            )}
           </div>
-        </div>
+        )}
       </div>
 
-      {/* ── Campos faltantes ── */}
-      {!formularioCompleto && (!msg || msg.type !== 'success') && (
-        <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 14, padding: '14px 16px', marginTop: 16 }}>
-          <p style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', margin: '0 0 8px' }}>⚠️ Completar antes de enviar:</p>
-          <ul style={{ margin: 0, padding: '0 0 0 18px' }}>
-            {camposFaltantes.map((f) => (
-              <li key={f} style={{ fontSize: 13, color: '#92400e', marginBottom: 2 }}>
-                {f}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {msg && (
-        <div
-          style={{
-            marginTop: 16,
-            borderRadius: 14,
-            padding: '14px 16px',
-            fontSize: 13,
-            fontWeight: 600,
-            background: msg.type === 'success' ? '#f0fdf4' : msg.type === 'error' ? '#fef2f2' : '#eff6ff',
-            border: `1px solid ${msg.type === 'success' ? '#bbf7d0' : msg.type === 'error' ? '#fecaca' : '#bfdbfe'}`,
-            color: msg.type === 'success' ? '#16a34a' : msg.type === 'error' ? '#dc2626' : '#2563eb',
-          }}
-        >
-          {msg.text}
-        </div>
-      )}
-
-      {/* Preview de zona */}
-      {zonaPreview && (
-        <div style={{ marginTop: 12, borderRadius: 10, border: '1px solid #bfdbfe', background: '#eff6ff', padding: '8px 12px', fontSize: 12, color: '#1d4ed8', display: 'flex', gap: 8, flexWrap: 'wrap' as const }}>
-          <span>📍 Zona retiro: <strong>{zonaPreview.zonaRetiroNombre ?? 'Sin zona'}</strong></span>
-          <span style={{ color: '#93c5fd' }}>·</span>
-          <span>📦 Zona entrega: <strong>{zonaPreview.zonaEntregaNombre ?? 'Sin zona'}</strong></span>
-          {(zonaPreview.macroZonaRetiroNombre || zonaPreview.macroZonaEntregaNombre) && (
-            <>
-              <span style={{ color: '#93c5fd' }}>·</span>
-              <span>🗺 Macro retiro: <strong>{zonaPreview.macroZonaRetiroNombre ?? '—'}</strong></span>
-              <span style={{ color: '#93c5fd' }}>·</span>
-              <span>🗺 Macro entrega: <strong>{zonaPreview.macroZonaEntregaNombre ?? '—'}</strong></span>
-            </>
+      {/* ── Nav buttons (fixed footer) ── */}
+      <div
+        style={{
+          position: 'fixed',
+          bottom: 0,
+          left: 'var(--sidebar-width, 250px)',
+          right: 0,
+          zIndex: 40,
+          background: 'rgba(255,255,255,0.97)',
+          backdropFilter: 'blur(8px)',
+          borderTop: '1px solid #e5e7eb',
+          padding: '12px 16px',
+          boxShadow: '0 -4px 16px rgba(0,0,0,0.06)',
+          transition: 'left 300ms ease-in-out',
+        }}
+      >
+        <div style={{ maxWidth: 760, margin: '0 auto', display: 'flex', gap: 10, alignItems: 'center' }}>
+          {paso > 1 && (
+            <button
+              type="button"
+              onClick={() => setPaso(p => p - 1)}
+              style={{ ...S.btnOutline, padding: '12px 20px', fontSize: 14, fontWeight: 700, height: 48 }}
+            >
+              ← Atrás
+            </button>
+          )}
+          {paso < 5 && (
+            <button
+              type="button"
+              disabled={!puedeAvanzar(paso)}
+              onClick={() => {
+                if (puedeAvanzar(paso)) setPaso(p => p + 1)
+              }}
+              style={{
+                flex: 1,
+                height: 48,
+                background: puedeAvanzar(paso) ? '#004aad' : '#d1d5db',
+                border: 'none',
+                borderRadius: 12,
+                color: '#fff',
+                fontSize: 15,
+                fontWeight: 700,
+                cursor: puedeAvanzar(paso) ? 'pointer' : 'not-allowed',
+                transition: 'background 0.15s',
+              }}
+            >
+              Siguiente →
+            </button>
+          )}
+          {paso === 5 && (
+            <button
+              type="button"
+              onClick={handleGuardar}
+              disabled={saving || !formularioCompleto}
+              style={{
+                flex: 1,
+                height: 48,
+                background: formularioCompleto ? '#004aad' : '#9ca3af',
+                border: 'none',
+                borderRadius: 12,
+                color: '#fff',
+                fontSize: 15,
+                fontWeight: 800,
+                cursor: formularioCompleto ? 'pointer' : 'not-allowed',
+              }}
+            >
+              {saving ? 'Guardando...' : formularioCompleto ? '✓ Crear orden' : '⚠️ Completar info'}
+            </button>
           )}
         </div>
-      )}
-
-      <div style={{ marginTop: 20 }}>
-        <button
-          type="button"
-          onClick={handleGuardar}
-          disabled={saving}
-          style={{
-            background: formularioCompleto ? '#004aad' : '#9ca3af',
-            border: 'none',
-            borderRadius: 14,
-            padding: '16px 20px',
-            color: '#fff',
-            fontSize: 15,
-            fontWeight: 800,
-            cursor: formularioCompleto ? 'pointer' : 'not-allowed',
-            width: '100%',
-            transition: 'background 0.15s',
-          }}
-        >
-          {saving ? 'Guardando...' : formularioCompleto ? '✓ Crear orden interna' : '⚠️ Completar info para enviar'}
-        </button>
       </div>
 
       {/* ── MODAL BUSCADOR DE COMERCIOS ── */}

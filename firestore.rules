@@ -68,20 +68,15 @@ service cloud.firestore {
         && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['rol', 'activo']))
         || isAdminOrGestor();
 
-      allow delete: if false;
+      allow delete: if isAdminOrGestor();
     }
 
     match /comercios/{userId} {
-      allow read: if (
-          isOwner(userId)
-          && request.auth.token.email_verified == true
-        ) || isAdminOrGestor() || isMotorizadoRole();
+      allow read: if isOwner(userId) || isAdminOrGestor() || isMotorizadoRole();
 
-      allow write: if (isOwner(userId)
-        && request.auth.token.email_verified == true)
-        || isAdminOrGestor();
+      allow write: if isOwner(userId) || isAdminOrGestor();
 
-      allow delete: if false;
+      allow delete: if isAdminOrGestor();
     }
 
     match /motorizado/{docId} {

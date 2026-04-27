@@ -86,6 +86,7 @@ export default function ZonasPage() {
   const [satelite, setSatelite] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [leyendaVisible, setLeyendaVisible] = useState(true)
+  const [mapZoom, setMapZoom] = useState(13)
 
   // form
   const [draftNombre, setDraftNombre] = useState('')
@@ -117,6 +118,8 @@ export default function ZonasPage() {
   useEffect(() => { modoTestRef.current = modoTest }, [modoTest])
   const modeRef = useRef(mode)
   useEffect(() => { modeRef.current = mode }, [mode])
+  const filtroTipoRef = useRef(filtroTipo)
+  useEffect(() => { filtroTipoRef.current = filtroTipo }, [filtroTipo])
 
   // Refs para scroll-to-card
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({})
@@ -147,6 +150,9 @@ export default function ZonasPage() {
         zoomControlOptions: { position: google.maps.ControlPosition.RIGHT_CENTER },
       })
       mapRef.current = map
+
+      // Actualizar zoom state al hacer zoom in/out
+      map.addListener('zoom_changed', () => setMapZoom(map.getZoom() ?? 13))
 
       // ── Helper: actualiza preview del polígono WIP ───────────────────────────
       function actualizarWip() {
@@ -202,7 +208,12 @@ export default function ZonasPage() {
         if (modeRef.current !== 'idle') return
 
         const coord: Coord = { lat: e.latLng.lat(), lng: e.latLng.lng() }
-        const zonaGanadora = clasificarPuntoEnZona(coord, zonasRef.current)
+        const tipoActivo = filtroTipoRef.current
+        const zonaGanadora = clasificarPuntoEnZona(
+          coord,
+          zonasRef.current,
+          tipoActivo === 'todas' ? undefined : tipoActivo
+        )
 
         if (modoTestRef.current) {
           // Modo prueba: mostrar resultado sin seleccionar
@@ -400,12 +411,15 @@ export default function ZonasPage() {
       }
 
       // Etiqueta de nombre en el centroide (SVG con fondo blanco + borde coloreado)
+      // Las etiquetas de zona pequeña solo se muestran a partir de zoom 14
       const centro = polygonCentroid(zona.poligono)
       const labelColor = zona.activa ? zona.color : '#9ca3af'
       const labelFw = isHighlighted ? '700' : '600'
       const labelFs = isHighlighted ? 12 : 11
       const labelOp = zona.activa ? (hasSelection && !isHighlighted ? 0.45 : 1) : 0.35
       const labelIcon = crearIconoEtiqueta(zona.nombre, labelColor, labelFw, labelFs)
+      const mostrarEtiqueta = zona.tipo === 'macrozona' || mapZoom >= 14
+      const mapaEtiqueta = mostrarEtiqueta ? mapaTarget : null
       const existingLabel = labelsRef.current[zona.id]
       if (existingLabel) {
         existingLabel.setOptions({
@@ -413,11 +427,11 @@ export default function ZonasPage() {
           icon: labelIcon,
           opacity: labelOp,
         })
-        existingLabel.setMap(mapaTarget)
+        existingLabel.setMap(mapaEtiqueta)
       } else {
         const label = new google.maps.Marker({
           position: centro,
-          map: mapaTarget,
+          map: mapaEtiqueta,
           icon: labelIcon,
           opacity: labelOp,
           clickable: false,
@@ -426,7 +440,7 @@ export default function ZonasPage() {
         labelsRef.current[zona.id] = label
       }
     })
-  }, [zonas, mapReady, mode, selectedId, clickedId, filtroTipo])
+  }, [zonas, mapReady, mode, selectedId, clickedId, filtroTipo, mapZoom])
 
   // ── Handlers ─────────────────────────────────────────────────────────────────
 
@@ -1027,9 +1041,9 @@ export default function ZonasPage() {
 
           {/* Leyenda */}
           {mode === 'idle' && zonas.filter((z) => z.activa).length > 0 && (
-            <div className="absolute bottom-4 right-4 max-w-[190px] rounded-xl border border-gray-200 bg-white/95 shadow-sm backdrop-blur-sm overflow-hidden">
+            <div className="absolute bottom-4 right-4 max-w-[190px] rounded-xl border border-gray-200 bg-white/95 shadow-sm backdrop-blur-sm overflow-hidden flex flex-col" style={{ maxHeight: 'calc(100% - 2rem)' }}>
               {/* Cabecera con toggle */}
-              <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-gray-100">
+              <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-gray-100 shrink-0">
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Leyenda</p>
                 <button
                   onClick={() => setLeyendaVisible((v) => !v)}
@@ -1041,7 +1055,7 @@ export default function ZonasPage() {
               </div>
               {/* Entradas filtradas por tipo */}
               {leyendaVisible && (
-                <div className="p-2">
+                <div className="overflow-y-auto p-2">
                   {zonas
                     .filter((z) => z.activa && (filtroTipo === 'todas' || z.tipo === filtroTipo))
                     .map((z) => (
