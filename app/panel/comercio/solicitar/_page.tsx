@@ -21,6 +21,7 @@ import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
+import StepIndicator from './_components/StepIndicator'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -298,7 +299,6 @@ function MiniMap({
     let mounted = true
     getMapsLoader().load().then((google) => {
       if (!mounted || !containerRef.current) return
-      // Use coordRef to get the latest coord at the time Google Maps finishes loading
       const initCoord = coordRef.current
       const center = initCoord || { lat: 12.1364, lng: -86.2514 }
       mapRef.current = new google.maps.Map(containerRef.current, {
@@ -313,7 +313,6 @@ function MiniMap({
       })
       geocoderRef.current = new google.maps.Geocoder()
 
-      // Places Autocomplete on search input
       if (searchRef.current) {
         const autocomplete = new google.maps.places.Autocomplete(searchRef.current, {
           componentRestrictions: { country: 'ni' },
@@ -330,7 +329,6 @@ function MiniMap({
         })
       }
 
-      // Initial marker — use coordRef to get latest coord even if it arrived after render
       if (initCoord) {
         markerRef.current = new google.maps.Marker({
           map: mapRef.current,
@@ -357,7 +355,6 @@ function MiniMap({
     return () => { mounted = false }
   }, [])
 
-  // Update marker when coord changes externally
   useEffect(() => {
     if (!mapRef.current || !window.google) return
     const google = window.google
@@ -478,7 +475,6 @@ function RoutePreviewMap({
           { featureType: 'transit', stylers: [{ visibility: 'off' }] },
         ],
       })
-      // Draw markers immediately after map is ready
       drawMarkers(google, o, d)
     })
     return () => { mounted = false }
@@ -732,7 +728,6 @@ export default function SolicitarEnvioPage() {
         }))
       }
       if (d.destinoCoord) setEntrega(prev => ({ ...prev, coord: d.destinoCoord, tipoUbicacion: d.destinoTipo || 'referencial' }))
-      // Initialize lastCalcKey so price clears if coords change after draft is loaded
       if (d.origenCoord && d.destinoCoord) {
         const o = d.origenCoord, de = d.destinoCoord
         lastCalcKey.current = `${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${de.lat.toFixed(5)},${de.lng.toFixed(5)}`
@@ -747,6 +742,7 @@ export default function SolicitarEnvioPage() {
   }, [draft])
 
   // ── States ──
+  const [paso, setPaso] = useState(1)
   const [retiro, setRetiro] = useState<RetiroState>(blankRetiro())
   const [entrega, setEntrega] = useState<EntregaState>(blankEntrega())
   const [tipoCliente, setTipoCliente] = useState<TipoCliente>('contado')
@@ -758,20 +754,16 @@ export default function SolicitarEnvioPage() {
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
 
-  // Notas motorizado por punto
   const [showNotaRetiro, setShowNotaRetiro] = useState(false)
   const [notaRetiro, setNotaRetiro] = useState('')
   const [showNotaEntrega, setShowNotaEntrega] = useState(false)
   const [notaEntrega, setNotaEntrega] = useState('')
 
-  // Número de orden
   const [numeroOrden, setNumeroOrden] = useState('')
 
-  // Geocode addresses from map
   const [geocodeRetiro, setGeoRetiro] = useState('')
   const [geocodeEntrega, setGeoEntrega] = useState('')
 
-  // Envío programado
   const [esProgramado, setEsProgramado] = useState(false)
   const [tipoProgramado, setTipoProgramado] = useState<'retiro' | 'entrega' | 'ambos'>('retiro')
   const [fechaRetiro, setFechaRetiro] = useState('')
@@ -779,15 +771,12 @@ export default function SolicitarEnvioPage() {
   const [fechaEntrega, setFechaEntrega] = useState('')
   const [horaEntrega, setHoraEntrega] = useState('')
 
-  // Paquete
   const [fragil, setFragil] = useState(false)
   const [grande, setGrande] = useState(false)
   const [notaPaquete, setNotaPaquete] = useState('')
 
-  // Modal buscador de clientes
   const [showClienteModal, setShowClienteModal] = useState(false)
 
-  // Guardar retiro como favorito
   const [showGuardarFav, setShowGuardarFav] = useState(false)
   const [newFavLabel, setNewFavLabel] = useState('')
   const [savingNewFav, setSavingNewFav] = useState(false)
@@ -833,7 +822,6 @@ export default function SolicitarEnvioPage() {
   const [calcError, setCalcError] = useState<string | null>(null)
   const lastCalcKey = useRef<string | null>(null)
 
-  // Clear calc result when coords change
   useEffect(() => {
     if (!retiro.coord || !entrega.coord) {
       setCalcResult(null)
@@ -845,23 +833,39 @@ export default function SolicitarEnvioPage() {
     if (lastCalcKey.current && key !== lastCalcKey.current) {
       setCalcResult(null)
       setCalcError(null)
-      // Invalidate draft price when coords differ from what was originally calculated
-      setDraft(prev => prev ? { ...prev, precioCordobas: null } : prev)
+      setDraft((prev: any) => prev ? { ...prev, precioCordobas: null } : prev)
     }
   }, [retiro.coord, entrega.coord])
 
-  // Detect if user changed a coord from the original draft
-  const coordsModificadas = useMemo(() => {
-    if (!draft) return false
+  const coordsModificadasInfo = useMemo(() => {
+    if (!draft) return { retiro: false, entrega: false }
     const TOL = 0.0002
-    const diffO = draft.origenCoord && retiro.coord
+    const retiroCambio = draft.origenCoord && retiro.coord
       ? Math.abs(retiro.coord.lat - draft.origenCoord.lat) > TOL || Math.abs(retiro.coord.lng - draft.origenCoord.lng) > TOL
       : false
-    const diffD = draft.destinoCoord && entrega.coord
+    const entregaCambio = draft.destinoCoord && entrega.coord
       ? Math.abs(entrega.coord.lat - draft.destinoCoord.lat) > TOL || Math.abs(entrega.coord.lng - draft.destinoCoord.lng) > TOL
       : false
-    return diffO || diffD
+    return { retiro: retiroCambio, entrega: entregaCambio }
   }, [draft, retiro.coord, entrega.coord])
+
+  const coordsModificadas = coordsModificadasInfo.retiro || coordsModificadasInfo.entrega
+
+  // Reactive zone classification
+  const [zonaInfo, setZonaInfo] = useState<{ retiroNombre: string | null; entregaNombre: string | null }>({ retiroNombre: null, entregaNombre: null })
+  useEffect(() => {
+    if (!retiro.coord && !entrega.coord) { setZonaInfo({ retiroNombre: null, entregaNombre: null }); return }
+    let cancelled = false
+    getZonasActivas().then(zonasActivas => {
+      if (cancelled) return
+      const r = clasificarOrdenCompleto(retiro.coord || null, entrega.coord || null, zonasActivas)
+      setZonaInfo({
+        retiroNombre: r.zonaRetiroNombre || r.macroZonaRetiroNombre || null,
+        entregaNombre: r.zonaEntregaNombre || r.macroZonaEntregaNombre || null,
+      })
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [retiro.coord, entrega.coord])
 
   const handleCalcular = async () => {
     const o = retiro.coord
@@ -881,11 +885,9 @@ export default function SolicitarEnvioPage() {
       .finally(() => setCalcLoading(false))
   }
 
-  // Effective price: from manual calc > draft > null
   const precioEfectivo = calcResult?.precio ?? precioSugerido
   const distanciaEfectiva = calcResult?.km ?? draft?.distanciaKm ?? null
 
-  // Auto-select first favorite on load
   useEffect(() => {
     if (!puntosFavoritos.length) return
     const first = puntosFavoritos.find(f => f.key !== '__otro__')
@@ -894,7 +896,6 @@ export default function SolicitarEnvioPage() {
     }
   }, [puntosFavoritos])
 
-  // ── Favorites ──
   const seleccionarFavorito = (fav: PuntoFavorito) => {
     if (fav.key === '__otro__') {
       setRetiro(prev => ({ ...blankRetiro(), favKey: '__otro__' }))
@@ -910,7 +911,6 @@ export default function SolicitarEnvioPage() {
     })
   }
 
-  // ── Guardar retiro como favorito ──
   const handleGuardarComoFavorito = async () => {
     if (!newFavLabel.trim() || !uid) return
     setSavingNewFav(true)
@@ -918,7 +918,7 @@ export default function SolicitarEnvioPage() {
       await guardarPuntoFavorito(uid, newFavLabel, retiro, geocodeRetiro)
       setShowGuardarFav(false)
       setNewFavLabel('')
-      setMsg({ type: 'success', text: `⭐ "${newFavLabel}" guardado como favorito. Ya aparecerá en la lista.` })
+      setMsg({ type: 'success', text: `⭐ "${newFavLabel}" guardado como favorito.` })
     } catch (e) {
       console.error(e)
     } finally {
@@ -926,7 +926,6 @@ export default function SolicitarEnvioPage() {
     }
   }
 
-  // ── Inversion ──
   const handleInvertir = () => {
     const r = { ...retiro }
     const e = { ...entrega }
@@ -939,10 +938,9 @@ export default function SolicitarEnvioPage() {
     setDraft(null)
     setCalcResult(null)
     lastCalcKey.current = null
-    setMsg({ type: 'info', text: 'Cotización quitada. El sistema calculará el precio con los puntos del mapa.' })
+    setMsg({ type: 'info', text: 'Cotización quitada. Calculá el precio con los puntos del mapa.' })
   }
 
-  // ── Entrega autocomplete ──
   const handleSelectEntrega = (c: ClienteGuardado) => {
     setEntrega({
       nombre: c.nombre || '',
@@ -973,6 +971,33 @@ export default function SolicitarEnvioPage() {
 
   const formularioCompleto = camposFaltantes.length === 0
 
+  // Per-step validation
+  const puedeAvanzar = (desde: number): boolean => {
+    if (desde === 1) {
+      return retiro.nombre.trim() !== '' && validarCelular(retiro.celular) && retiro.direccion.trim() !== ''
+    }
+    if (desde === 2) {
+      return entrega.nombre.trim() !== '' && validarCelular(entrega.celular) && entrega.direccion.trim() !== ''
+    }
+    if (desde === 3) {
+      if (tipoCliente === 'credito') return true
+      return quienPagaDelivery !== ''
+    }
+    return true
+  }
+
+  const handleSiguiente = () => {
+    if (puedeAvanzar(paso)) {
+      setPaso(p => Math.min(p + 1, 4))
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }
+
+  const handleAtras = () => {
+    setPaso(p => Math.max(p - 1, 1))
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   // ── Price summary ──
   const montoProducto = cobroCE && montoCE !== '' ? Number(montoCE) : 0
   const montoDelivery = precioEfectivo ?? 0
@@ -994,13 +1019,12 @@ export default function SolicitarEnvioPage() {
   // ── Save ──
   const handleGuardar = async () => {
     setMsg(null)
-    if (!formularioCompleto) { setMsg({ type: 'error', text: `Completá los campos requeridos: ${camposFaltantes.join(', ')}.` }); return }
+    if (!formularioCompleto) { setMsg({ type: 'error', text: `Completá: ${camposFaltantes.join(', ')}.` }); return }
     try {
       setSaving(true)
       const user = auth.currentUser
       if (!user) { setMsg({ type: 'error', text: 'No hay sesión iniciada.' }); return }
 
-      // Clasificar zonas antes de guardar la orden
       const zonasActivas = await getZonasActivas()
       const {
         zonaRetiroId, zonaRetiroNombre,
@@ -1094,6 +1118,7 @@ export default function SolicitarEnvioPage() {
       })
 
       setMsg({ type: 'success', text: '✅ Solicitud enviada. El gestor la confirmará pronto.' })
+      setPaso(1)
 
       const firstFav = puntosFavoritos.find(f => f.key !== '__otro__')
       if (firstFav) seleccionarFavorito(firstFav)
@@ -1120,617 +1145,774 @@ export default function SolicitarEnvioPage() {
   const esOtro = retiro.favKey === '__otro__'
   const todayISO = new Date().toISOString().split('T')[0]
 
+  // ── Step validation hints ──
+  const paso1Valido = puedeAvanzar(1)
+  const paso2Valido = puedeAvanzar(2)
+  const paso3Valido = puedeAvanzar(3)
+
   return (
     <div style={{ maxWidth: 640, margin: '0 auto', padding: '0 0 48px', fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
 
-      <div style={{ marginBottom: 24 }}>
-        <h1 style={{ fontSize: 26, fontWeight: 800, color: '#111827', margin: '0 0 4px', letterSpacing: -0.5 }}>Solicitar envío</h1>
-        <p style={{ fontSize: 14, color: '#6b7280', margin: 0 }}>Completá los datos y marcá los puntos en el mapa para calcular el precio.</p>
+      {/* ── Header ── */}
+      <div style={{ marginBottom: 8 }}>
+        <h1 style={{ fontSize: 24, fontWeight: 800, color: '#111827', margin: '0 0 2px', letterSpacing: -0.5 }}>Solicitar envío</h1>
+        <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>Completá los datos en 4 pasos.</p>
       </div>
 
-      {/* Cotización banner */}
-      <div style={{
-        ...S.sectionCard, marginBottom: 16,
-        background: tieneCotizacion ? (coordsModificadas ? '#fffbe6' : '#f0fdf4') : '#f8fafc',
-        border: `1px solid ${tieneCotizacion ? (coordsModificadas ? '#ffe58f' : '#bbf7d0') : '#e2e8f0'}`,
-      }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap' as const, gap: 10 }}>
-          <div>
-            <p style={{ fontSize: 13, fontWeight: 700, color: tieneCotizacion ? (coordsModificadas ? '#d46b08' : '#16a34a') : '#374151', margin: '0 0 2px' }}>
-              {tieneCotizacion
-                ? (coordsModificadas ? '⚠️ Modificaste el punto de retiro o entrega' : '✅ Cotización detectada desde calculadora')
-                : 'ℹ️ Sin cotización previa'}
-            </p>
-            <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>
-              {tieneCotizacion
-                ? (coordsModificadas
-                    ? <>El precio de la cotización original ya no aplica. Recalculá para obtener el nuevo precio. <a href="/panel/calculadora" style={{ color: '#d46b08', fontWeight: 700, textDecoration: 'underline' }}>Volver a la calculadora →</a></>
-
-                    : `Precio base: ${precioSugerido ? `C$ ${precioSugerido}` : '—'} · Podés recalcular marcando los puntos en el mapa`)
-                : 'Marcá ambos puntos en el mapa y presioná "Calcular precio"'}
-            </p>
-          </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const }}>
-            {tieneCotizacion && <button type="button" onClick={handleQuitarCotizacion} style={S.btnOutline}>Quitar cotización</button>}
-            <button type="button" onClick={handleInvertir} style={S.btnOutline}>↕ Invertir</button>
-          </div>
-        </div>
-      </div>
-
-      {/* Viaje anterior */}
-      {viajeAnterior && !calcResult && (
-        <div style={{ ...S.sectionCard, marginBottom: 16, background: '#fefce8', border: '1px solid #fef08a' }}>
-          <p style={{ fontSize: 13, fontWeight: 700, color: '#854d0e', margin: '0 0 2px' }}>🔍 ¡Hemos encontrado este viaje anteriormente!</p>
-          <p style={{ fontSize: 12, color: '#713f12', margin: 0 }}>El costo registrado fue <strong>C$ {viajeAnterior.precio}</strong>. Calculá el precio para confirmar.</p>
-        </div>
-      )}
-
-      {/* Tipo cliente */}
-      <div style={{ ...S.sectionCard, marginBottom: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' as const, gap: 10 }}>
-          <div>
-            <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>Tipo de cliente</p>
-            <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>Define cómo se cobra el delivery</p>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {(['contado', 'credito'] as TipoCliente[]).map(t => (
-              <button key={t} type="button" onClick={() => setTipoCliente(t)} style={{ padding: '8px 16px', borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: `1px solid ${tipoCliente === t ? '#004aad' : '#e5e7eb'}`, background: tipoCliente === t ? '#004aad' : '#fff', color: tipoCliente === t ? '#fff' : '#374151' }}>
-                {t === 'contado' ? '💵 Contado' : '📅 Crédito'}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* ── RETIRO ── */}
-      <SectionCard title="Punto de retiro" icon="📦">
-        {puntosFavoritos.length > 1 && (
-          <div>
-            <label style={S.label}>Lugar favorito</label>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const }}>
-              {puntosFavoritos.map(fav => (
-                <button key={fav.key} type="button" onClick={() => seleccionarFavorito(fav)} style={{ padding: '8px 14px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1px solid ${retiro.favKey === fav.key ? '#004aad' : '#e5e7eb'}`, background: retiro.favKey === fav.key ? '#eff6ff' : '#fff', color: retiro.favKey === fav.key ? '#004aad' : '#374151' }}>
-                  {fav.key === '__otro__' ? 'Otro' : fav.label}
-                </button>
-              ))}
-            </div>
-            <p style={S.hint}>Configurá tus puntos favoritos en <strong>Ajustes</strong>.</p>
-          </div>
-        )}
-
-        {/* Banner verde si hay favorito con coord */}
-        {!esOtro && retiro.coord && (
-          <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '10px 14px' }}>
-            <p style={{ fontSize: 12, fontWeight: 600, color: '#16a34a', margin: 0 }}>🎯 Ubicación guardada en ajustes — se usará para calcular el precio</p>
-          </div>
-        )}
-
-        <Field label="Nombre / empresa" required>
-          <input value={retiro.nombre} onChange={e => setRetiro(prev => ({ ...prev, nombre: e.target.value, favKey: '__otro__' }))} placeholder="Ej: Tienda San Juan" style={S.input} />
-        </Field>
-
-        <Field label="Celular" required>
-          <input
-            value={retiro.celular}
-            onChange={e => setRetiro(prev => ({ ...prev, celular: formatCelular(e.target.value) }))}
-            placeholder="Ej: 88888888"
-            maxLength={8}
-            style={{ ...S.input, borderColor: retiro.celular && !validarCelular(retiro.celular) ? '#dc2626' : '#e5e7eb' }}
-          />
-          {retiro.celular && !validarCelular(retiro.celular) && (
-            <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos</p>
-          )}
-        </Field>
-
-        <Field label="Dirección escrita" required hint="Descripción para que el motorizado llegue.">
-          <input value={retiro.direccion} onChange={e => setRetiro(prev => ({ ...prev, direccion: e.target.value }))} placeholder="Ej: Del semáforo 1c al sur, portón azul" style={S.input} />
-        </Field>
-
-        {/* Mapa — estático si favorito con coord, interactivo si "Otro" o sin coord */}
-        {!esOtro && retiro.coord ? (
-          <StaticMiniMap
-            key={`${retiro.coord.lat}-${retiro.coord.lng}`}
-            coord={retiro.coord}
-            color="#004aad"
-            label="R"
-          />
-        ) : (
-          <div>
-            <label style={{ ...S.label, marginBottom: 8 }}>
-              Ubicación en el mapa
-              {retiro.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
-            </label>
-            {draft?.origenCoord && retiro.coord && (
-              <p style={{ fontSize: 11, color: '#2563eb', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '5px 10px', margin: '0 0 8px', lineHeight: 1.4 }}>
-                📍 Punto pre-marcado desde la calculadora. Revisá el pin en el mapa y ajustá si es necesario.
-              </p>
-            )}
-            <MiniMap
-              coord={retiro.coord}
-              color="#004aad"
-              label="R"
-              onSelect={(c) => setRetiro(prev => ({ ...prev, coord: c }))}
-              onGeocode={(addr) => setGeoRetiro(addr)}
-            />
-          </div>
-        )}
-
-        <UbicacionTipo value={retiro.tipoUbicacion} onChange={v => setRetiro(prev => ({ ...prev, tipoUbicacion: v }))} />
-
-        <NotaMotorizado
-          show={showNotaRetiro}
-          onToggle={() => setShowNotaRetiro(v => !v)}
-          value={notaRetiro}
-          onChange={setNotaRetiro}
-          label="¿Hay instrucciones adicionales para el motorizado en el retiro?"
-        />
-
-        {/* Guardar como favorito — solo en "Otro" con nombre */}
-        {esOtro && retiro.nombre.trim() && (
-          <div>
-            {!showGuardarFav ? (
-              <button
-                type="button"
-                onClick={() => { setNewFavLabel(retiro.nombre); setShowGuardarFav(true) }}
-                style={{ ...S.btnOutline, color: '#d46b08', borderColor: '#fed7aa', fontSize: 12 }}
-              >
-                ⭐ Guardar como punto favorito
-              </button>
-            ) : (
-              <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '14px 16px' }}>
-                <p style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', margin: '0 0 10px' }}>⭐ Guardar como punto favorito</p>
-                <label style={S.label}>Nombre del lugar <span style={{ color: '#dc2626' }}>*</span></label>
-                <input
-                  value={newFavLabel}
-                  onChange={e => setNewFavLabel(e.target.value)}
-                  placeholder='Ej: Tienda principal, Bodega norte, Casa mamá...'
-                  style={{ ...S.input, marginBottom: 8 }}
-                />
-                <p style={{ fontSize: 11, color: '#9ca3af', margin: '0 0 10px' }}>
-                  Se guardará con la dirección, celular y punto del mapa actual. Aparecerá en futuros envíos.
-                </p>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button
-                    type="button"
-                    onClick={handleGuardarComoFavorito}
-                    disabled={savingNewFav || !newFavLabel.trim()}
-                    style={{ padding: '8px 16px', borderRadius: 10, border: 'none', background: '#d46b08', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
-                  >
-                    {savingNewFav ? 'Guardando...' : '⭐ Guardar'}
-                  </button>
-                  <button type="button" onClick={() => { setShowGuardarFav(false); setNewFavLabel('') }} style={S.btnOutline}>
-                    Cancelar
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </SectionCard>
-
-      {/* ── ENTREGA ── */}
-      <SectionCard title="Punto de entrega" icon="🏠">
-        <div>
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
-            <div style={{ flex: 1 }}>
-              <AutocompleteInput
-                label="Nombre del destinatario"
-                value={entrega.nombre}
-                onChange={v => setEntrega(prev => ({ ...prev, nombre: v }))}
-                onSelect={handleSelectEntrega}
-                placeholder="Ej: María García"
-                clientes={clientesEntrega}
-                required
-              />
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowClienteModal(true)}
-              style={{
-                ...S.btnOutline,
-                padding: '10px 14px',
-                fontSize: 13,
-                fontWeight: 700,
-                whiteSpace: 'nowrap' as const,
-                borderColor: '#004aad',
-                color: '#004aad',
-                background: '#eff6ff',
-                height: 42,
-              }}
-            >
-              🔍 Buscar
-            </button>
-          </div>
-        </div>
-
-        <div>
-          <AutocompleteInput
-            label="Celular"
-            value={entrega.celular}
-            onChange={v => setEntrega(prev => ({ ...prev, celular: formatCelular(v) }))}
-            onSelect={handleSelectEntrega}
-            placeholder="Ej: 77777777"
-            clientes={clientesEntrega}
-            required
-          />
-          {entrega.celular && !validarCelular(entrega.celular) && (
-            <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos</p>
-          )}
-        </div>
-
-        <Field label="Dirección escrita" required hint="Descripción detallada para que el motorizado llegue.">
-          <input value={entrega.direccion} onChange={e => setEntrega(prev => ({ ...prev, direccion: e.target.value }))} placeholder="Ej: Frente al parque, portón negro, casa esquinera" style={S.input} />
-        </Field>
-
-        <div>
-          <label style={{ ...S.label, marginBottom: 8 }}>
-            Ubicación en el mapa
-            {entrega.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
-          </label>
-          <MiniMap
-            coord={entrega.coord}
-            color="#16a34a"
-            label="E"
-            onSelect={(c) => setEntrega(prev => ({ ...prev, coord: c }))}
-            onGeocode={(addr) => setGeoEntrega(addr)}
-          />
-        </div>
-
-        <UbicacionTipo value={entrega.tipoUbicacion} onChange={v => setEntrega(prev => ({ ...prev, tipoUbicacion: v }))} />
-
-        <NotaMotorizado
-          show={showNotaEntrega}
-          onToggle={() => setShowNotaEntrega(v => !v)}
-          value={notaEntrega}
-          onChange={setNotaEntrega}
-          label="¿Hay instrucciones adicionales para el motorizado en la entrega?"
-        />
-      </SectionCard>
-
-      {/* ── ENVÍO PROGRAMADO ── */}
-      <SectionCard title="Programar envío" icon="📅">
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <button
-              type="button"
-              onClick={() => setEsProgramado(v => !v)}
-              style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${esProgramado ? '#004aad' : '#d1d5db'}`, background: esProgramado ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
-            >
-              {esProgramado && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
-            </button>
-            <label
-              style={{ fontSize: 14, fontWeight: 600, color: '#111827', cursor: 'pointer' }}
-              onClick={() => setEsProgramado(v => !v)}
-            >
-              ¿Es un envío programado?
-            </label>
-          </div>
-
-          {esProgramado && (
-            <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {/* ¿Qué programar? */}
-              <div>
-                <label style={S.label}>¿Qué programar?</label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {([
-                    { value: 'retiro', label: '📦 Retiro', desc: 'Cuándo pasa el motorizado a retirar' },
-                    { value: 'entrega', label: '🏠 Entrega', desc: 'Cuándo debe entregarse' },
-                    { value: 'ambos', label: '↕ Ambos', desc: 'Programar retiro y entrega por separado' },
-                  ] as { value: 'retiro' | 'entrega' | 'ambos'; label: string; desc: string }[]).map(opt => (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      onClick={() => setTipoProgramado(opt.value)}
-                      title={opt.desc}
-                      style={{ flex: 1, padding: '8px 10px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1px solid ${tipoProgramado === opt.value ? '#004aad' : '#e5e7eb'}`, background: tipoProgramado === opt.value ? '#eff6ff' : '#fff', color: tipoProgramado === opt.value ? '#004aad' : '#374151' }}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Fecha/hora de retiro */}
-              {(tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && (
-                <div>
-                  {tipoProgramado === 'ambos' && <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 8px' }}>📦 Fecha de retiro</p>}
-                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' as const }}>
-                    <div style={{ flex: 1, minWidth: 140 }}>
-                      <label style={S.label}>Fecha <span style={{ color: '#dc2626' }}>*</span></label>
-                      <input type="date" value={fechaRetiro} onChange={e => setFechaRetiro(e.target.value)} min={todayISO} style={S.input} />
-                    </div>
-                    <div style={{ flex: 1, minWidth: 140 }}>
-                      <label style={S.label}>Hora (opcional)</label>
-                      <input type="time" value={horaRetiro} onChange={e => setHoraRetiro(e.target.value)} style={S.input} />
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Fecha/hora de entrega */}
-              {(tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && (
-                <div>
-                  {tipoProgramado === 'ambos' && <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 8px' }}>🏠 Fecha de entrega</p>}
-                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' as const }}>
-                    <div style={{ flex: 1, minWidth: 140 }}>
-                      <label style={S.label}>Fecha <span style={{ color: '#dc2626' }}>*</span></label>
-                      <input type="date" value={fechaEntrega} onChange={e => setFechaEntrega(e.target.value)} min={tipoProgramado === 'ambos' && fechaRetiro ? fechaRetiro : todayISO} style={S.input} />
-                    </div>
-                    <div style={{ flex: 1, minWidth: 140 }}>
-                      <label style={S.label}>Hora (opcional)</label>
-                      <input type="time" value={horaEntrega} onChange={e => setHoraEntrega(e.target.value)} style={S.input} />
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              <p style={{ ...S.hint, marginTop: 0 }}>
-                El gestor intentará asignar el motorizado para esa franja horaria. La solicitud quedará como <strong>programada</strong>.
-              </p>
-            </div>
-          )}
-        </div>
-      </SectionCard>
-
-      {/* ── PRECIO ESTIMADO ── */}
-      {(retiro.coord || entrega.coord || precioSugerido) && (
-        <div style={{ ...S.sectionCard, background: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <h3 style={{ fontSize: 14, fontWeight: 700, color: '#374151', margin: 0, textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Precio estimado</h3>
-            {calcLoading && <span style={{ fontSize: 12, color: '#6b7280' }}>⏳ Calculando...</span>}
-          </div>
-
-          {/* Route preview — visible siempre que haya ambos puntos */}
-          {retiro.coord && entrega.coord && (
-            <div style={{ marginBottom: 14 }}>
-              <RoutePreviewMap origen={retiro.coord} destino={entrega.coord} />
-            </div>
-          )}
-
-          {calcError && <p style={{ fontSize: 13, color: '#dc2626', margin: '0 0 10px' }}>⚠️ {calcError}</p>}
-
-          {calcResult ? (
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#fff', border: '1px solid #bfdbfe', borderRadius: 12, padding: '14px 16px' }}>
-              <div>
-                <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>Calculado automáticamente</p>
-                <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>
-                  {calcResult.precio === -1 ? 'Consultar' : `C$ ${calcResult.precio}`}
-                </p>
-                <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{calcResult.km.toFixed(2)} km · sujeto a confirmación del gestor</p>
-              </div>
-              <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ ...S.btnOutline, fontSize: 11 }}>
-                Recalcular
-              </button>
-            </div>
-          ) : precioSugerido ? (
-            <div>
-              <div style={{ background: '#fff', border: '1px solid #bbf7d0', borderRadius: 12, padding: '14px 16px', marginBottom: 10 }}>
-                <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>Desde cotización previa</p>
-                <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0 }}>C$ {precioSugerido}</p>
-                {distanciaEfectiva && <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{distanciaEfectiva.toFixed(2)} km</p>}
-              </div>
-              {retiro.coord && entrega.coord && (
-                <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ width: '100%', padding: '10px', borderRadius: 10, border: '1px solid #bfdbfe', background: '#eff6ff', color: '#004aad', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
-                  🧮 Recalcular con los puntos del mapa
-                </button>
-              )}
-            </div>
-          ) : retiro.coord && entrega.coord ? (
-            <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '14px 16px', textAlign: 'center' as const }}>
-              <p style={{ fontSize: 13, color: '#d46b08', fontWeight: 600, margin: '0 0 12px' }}>
-                Tenés ambos puntos marcados. Calculá el precio estimado.
-              </p>
-              <button
-                type="button"
-                onClick={handleCalcular}
-                disabled={calcLoading}
-                style={{ padding: '10px 20px', borderRadius: 10, border: 'none', background: '#d46b08', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}
-              >
-                🧮 Calcular precio estimado
-              </button>
-            </div>
-          ) : (
-            <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '12px 14px', textAlign: 'center' as const }}>
-              <p style={{ fontSize: 13, color: '#d46b08', fontWeight: 600, margin: 0 }}>
-                {!retiro.coord && !entrega.coord ? 'Marcá ambos puntos en el mapa para calcular el precio' :
-                 !retiro.coord ? 'Falta marcar el punto de retiro' :
-                 'Falta marcar el punto de entrega'}
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── PAQUETE ── */}
-      <SectionCard title="Datos del paquete" icon="📦">
-        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' as const }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <button
-              type="button"
-              onClick={() => setFragil(v => !v)}
-              style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${fragil ? '#dc2626' : '#d1d5db'}`, background: fragil ? '#dc2626' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
-            >
-              {fragil && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
-            </button>
-            <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', cursor: 'pointer' }} onClick={() => setFragil(v => !v)}>
-              🥚 Paquete frágil
-            </label>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <button
-              type="button"
-              onClick={() => setGrande(v => !v)}
-              style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${grande ? '#d46b08' : '#d1d5db'}`, background: grande ? '#d46b08' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
-            >
-              {grande && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
-            </button>
-            <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', cursor: 'pointer' }} onClick={() => setGrande(v => !v)}>
-              📦 Paquete grande / voluminoso
-            </label>
-          </div>
-        </div>
-
-        {(fragil || grande) && (
-          <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>
-            {fragil && grande
-              ? '⚠️ Manejo con cuidado y espacio para paquete de gran tamaño.'
-              : fragil
-              ? '⚠️ El motorizado sabrá que debe manejar el paquete con especial cuidado.'
-              : '📦 El motorizado sabrá que es un paquete de gran tamaño.'}
-            {' '}El precio podría ajustarse según confirmación del gestor.
-          </p>
-        )}
-
-        {(fragil || grande) && (
-          <Field
-            label={grande ? 'Descripción / dimensiones' : 'Descripción del contenido (opcional)'}
-            hint={grande ? 'Ayudá al motorizado a entender el tamaño o tipo de paquete.' : 'Ej: vidrio, cerámica, electrónico, líquidos...'}
-          >
-            <input
-              value={notaPaquete}
-              onChange={e => setNotaPaquete(e.target.value)}
-              placeholder={grande ? 'Ej: Caja 60×40cm, televisor 32", mueble desmontado...' : 'Ej: botella de vidrio, pantalla de celular, jarrón...'}
-              style={S.input}
-            />
-          </Field>
-        )}
-
-        {!fragil && !grande && (
-          <p style={{ fontSize: 12, color: '#9ca3af', margin: 0 }}>Marcá si el paquete requiere cuidado especial o es de gran tamaño. El gestor lo tendrá en cuenta al confirmar el precio.</p>
-        )}
-      </SectionCard>
-
-      {/* ── PAGOS ── */}
-      <SectionCard title="Pagos" icon="💰">
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <button type="button" onClick={() => setCobroCE(!cobroCE)} style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${cobroCE ? '#004aad' : '#d1d5db'}`, background: cobroCE ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
-              {cobroCE && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
-            </button>
-            <label style={{ fontSize: 14, fontWeight: 600, color: '#111827', cursor: 'pointer' }} onClick={() => setCobroCE(!cobroCE)}>
-              Hay cobro contra entrega (el motorizado cobra el producto)
-            </label>
-          </div>
-          {cobroCE && (
-            <div style={{ marginLeft: 30 }}>
-              <label style={S.label}>Monto del producto (C$) <span style={{ color: '#dc2626' }}>*</span></label>
-              <input type="number" value={montoCE} onChange={e => setMontoCE(e.target.value === '' ? '' : Number(e.target.value))} placeholder="Ej: 1500" style={{ ...S.input, maxWidth: 200 }} />
-            </div>
-          )}
-        </div>
-
-        {tipoCliente === 'credito' ? (
-          <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '12px 14px' }}>
-            <p style={{ fontSize: 13, fontWeight: 700, color: '#2563eb', margin: '0 0 2px' }}>📅 Cliente con crédito semanal</p>
-            <p style={{ fontSize: 12, color: '#3b82f6', margin: 0 }}>El delivery se cobra al comercio semanalmente.</p>
-          </div>
-        ) : (
-          <div>
-            <label style={S.label}>¿Quién paga el delivery? <span style={{ color: '#dc2626' }}>*</span></label>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {[
-                { value: 'recoleccion', label: '🏁 Se paga en la recolección', desc: 'El motorizado cobra el delivery al retirar' },
-                { value: 'entrega', label: '🏠 Lo paga el destinatario (entrega)', desc: 'El motorizado cobra el delivery al entregar' },
-                { value: 'transferencia', label: '🏦 Ya se pagó por transferencia', desc: 'El delivery fue pagado previamente' },
-              ].map(opt => (
-                <button key={opt.value} type="button" onClick={() => setQuienPagaDelivery(opt.value as QuienPagaDelivery)} style={{ textAlign: 'left' as const, padding: '12px 14px', borderRadius: 10, cursor: 'pointer', border: `1px solid ${quienPagaDelivery === opt.value ? '#004aad' : '#e5e7eb'}`, background: quienPagaDelivery === opt.value ? '#eff6ff' : '#fff' }}>
-                  <p style={{ fontSize: 13, fontWeight: 700, color: quienPagaDelivery === opt.value ? '#004aad' : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
-                  <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>{opt.desc}</p>
-                </button>
-              ))}
-            </div>
-            {cobroCE && quienPagaDelivery === 'entrega' && (
-              <div style={{ marginTop: 12, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 10, padding: '12px 14px' }}>
-                <label style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', display: 'block', marginBottom: 8 }}>¿Deducir el delivery del cobro del producto?</label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {[{ value: 'no_deducir', label: 'No deducir' }, { value: 'deducir_del_cobro', label: 'Sí, deducir' }].map(opt => (
-                    <button key={opt.value} type="button" onClick={() => setDeducirDelivery(opt.value as DeducirDelivery)} style={{ padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: `1px solid ${deducirDelivery === opt.value ? '#d46b08' : '#e5e7eb'}`, background: deducirDelivery === opt.value ? '#d46b08' : '#fff', color: deducirDelivery === opt.value ? '#fff' : '#374151' }}>
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-                {montoCE !== '' && montoDelivery > 0 && (
-                  <p style={{ fontSize: 11, color: '#d46b08', margin: '8px 0 0' }}>
-                    {deducirDelivery === 'deducir_del_cobro'
-                      ? `El destinatario pagará C$ ${montoProducto}. Se te depositará C$ ${montoADepositarComercio}.`
-                      : `El destinatario pagará C$ ${montoProducto + montoDelivery}. Se te depositará C$ ${montoProducto}.`}
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        <Field label="Número de orden / referencia" hint="Código interno para identificar el pedido (opcional).">
-          <input value={numeroOrden} onChange={e => setNumeroOrden(e.target.value)} placeholder="Ej: #ORD-001 o número de pedido de WhatsApp" style={S.input} />
-        </Field>
-
-        <div>
-          <label style={S.label}>Instrucciones adicionales <span style={{ color: '#9ca3af', fontWeight: 400 }}>(opcional)</span></label>
-          <textarea value={detalle} onChange={e => setDetalle(e.target.value)} placeholder="Ej: Entregar entre 2-4pm. Llamar antes de llegar. Portón negro." style={{ ...S.input, resize: 'vertical' as const, minHeight: 80 }} rows={3} />
-        </div>
-      </SectionCard>
-
-      {/* Resumen */}
-      <div style={{ ...S.sectionCard, background: '#f8fafc', border: '1px solid #e2e8f0', marginTop: 0 }}>
-        <p style={{ fontSize: 13, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Resumen de cobros</p>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {cobroCE && montoCE !== '' && (
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 13, color: '#6b7280' }}>Producto</span>
-              <span style={{ fontSize: 15, fontWeight: 700, color: '#7c3aed' }}>C$ {montoProducto}</span>
-            </div>
-          )}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: 13, color: '#6b7280' }}>
-              Delivery {precioEfectivo ? (calcResult ? '(calculado)' : '(cotización previa)') : '(a confirmar por gestor)'}
+      {/* ── Sticky mini status bar ── */}
+      {(precioEfectivo || distanciaEfectiva || retiro.nombre || entrega.nombre) && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' as const,
+          background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12,
+          padding: '10px 14px', marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+        }}>
+          {retiro.nombre && (
+            <span style={{ fontSize: 12, color: '#374151', fontWeight: 600 }}>
+              📦 {retiro.nombre.length > 18 ? retiro.nombre.slice(0, 18) + '…' : retiro.nombre}
             </span>
-            <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>{precioEfectivo ? `C$ ${precioEfectivo}` : '—'}</span>
-          </div>
-          {cobroCE && tipoCliente === 'contado' && quienPagaDelivery === 'entrega' && montoDelivery > 0 && (
-            <>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ fontSize: 12, color: '#374151' }}>{deducirDelivery === 'deducir_del_cobro' ? 'Total que pagará el destinatario' : 'Total que cobrará el motorizado'}</span>
-                <span style={{ fontSize: 13, fontWeight: 700 }}>C$ {destinatarioPagaTotal}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ fontSize: 12, color: '#16a34a' }}>Se te depositará</span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: '#16a34a' }}>C$ {montoADepositarComercio}</span>
-              </div>
-            </>
           )}
-          <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: 14, fontWeight: 700, color: '#111827' }}>Total estimado</span>
-            <span style={{ fontSize: 20, fontWeight: 900, color: '#111827' }}>
-              {cobroCE && tipoCliente === 'contado' && quienPagaDelivery === 'entrega' && montoDelivery > 0
-                ? `C$ ${destinatarioPagaTotal}`
-                : precioEfectivo ? `C$ ${precioEfectivo}` : '—'}
+          {retiro.nombre && entrega.nombre && <span style={{ color: '#d1d5db', fontSize: 14 }}>→</span>}
+          {entrega.nombre && (
+            <span style={{ fontSize: 12, color: '#374151', fontWeight: 600 }}>
+              🏠 {entrega.nombre.length > 18 ? entrega.nombre.slice(0, 18) + '…' : entrega.nombre}
             </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Campos faltantes */}
-      {!formularioCompleto && (!msg || msg.type !== 'success') && (
-        <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 14, padding: '14px 16px', marginTop: 16 }}>
-          <p style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', margin: '0 0 8px' }}>⚠️ Completar antes de enviar:</p>
-          <ul style={{ margin: 0, padding: '0 0 0 18px' }}>
-            {camposFaltantes.map(f => <li key={f} style={{ fontSize: 13, color: '#92400e', marginBottom: 2 }}>{f}</li>)}
-          </ul>
+          )}
+          {/* Zonas */}
+          {(zonaInfo.retiroNombre || zonaInfo.entregaNombre) && (
+            <span style={{ fontSize: 11, color: '#6b7280', background: '#f3f4f6', borderRadius: 6, padding: '2px 7px' }}>
+              {zonaInfo.retiroNombre && zonaInfo.entregaNombre
+                ? `${zonaInfo.retiroNombre} → ${zonaInfo.entregaNombre}`
+                : zonaInfo.retiroNombre || zonaInfo.entregaNombre}
+            </span>
+          )}
+          {distanciaEfectiva && (
+            <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 'auto' }}>📏 {distanciaEfectiva.toFixed(1)} km</span>
+          )}
+          {precioEfectivo && (
+            <span style={{ fontSize: 13, fontWeight: 800, color: '#004aad' }}>
+              {precioEfectivo === -1 ? 'Consultar' : `C$ ${precioEfectivo}`}
+            </span>
+          )}
+          <span style={{
+            fontSize: 11, fontWeight: 700, padding: '3px 8px', borderRadius: 20,
+            background: formularioCompleto ? '#f0fdf4' : '#fffbe6',
+            color: formularioCompleto ? '#16a34a' : '#d46b08',
+            border: `1px solid ${formularioCompleto ? '#bbf7d0' : '#ffe58f'}`,
+          }}>
+            {formularioCompleto ? '✅ Lista' : `⚠️ ${camposFaltantes.length} pendiente${camposFaltantes.length > 1 ? 's' : ''}`}
+          </span>
         </div>
       )}
 
-      {msg && (
-        <div style={{ marginTop: 16, borderRadius: 14, padding: '14px 16px', fontSize: 13, fontWeight: 600, background: msg.type === 'success' ? '#f0fdf4' : msg.type === 'error' ? '#fef2f2' : '#eff6ff', border: `1px solid ${msg.type === 'success' ? '#bbf7d0' : msg.type === 'error' ? '#fecaca' : '#bfdbfe'}`, color: msg.type === 'success' ? '#16a34a' : msg.type === 'error' ? '#dc2626' : '#2563eb' }}>
+      {/* ── Success message ── */}
+      {msg?.type === 'success' && (
+        <div style={{ marginBottom: 16, borderRadius: 14, padding: '14px 16px', fontSize: 13, fontWeight: 600, background: '#f0fdf4', border: '1px solid #bbf7d0', color: '#16a34a' }}>
           {msg.text}
         </div>
       )}
 
-      <div style={{ marginTop: 20 }}>
-        <button type="button" onClick={handleGuardar} disabled={saving} style={{ background: formularioCompleto ? '#004aad' : '#9ca3af', border: 'none', borderRadius: 14, padding: '16px 20px', color: '#fff', fontSize: 15, fontWeight: 800, cursor: formularioCompleto ? 'pointer' : 'not-allowed', width: '100%', transition: 'background 0.15s' }}>
-          {saving ? 'Guardando...' : formularioCompleto ? '✓ Enviar solicitud' : '⚠️ Completar info para enviar'}
-        </button>
-      </div>
+      {/* ── Step Indicator ── */}
+      <StepIndicator paso={paso} setPaso={setPaso} puedeAvanzar={puedeAvanzar} />
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* PASO 1: RETIRO                                                  */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {paso === 1 && (
+        <div>
+          <SectionCard title="Punto de retiro" icon="📦">
+            {puntosFavoritos.length > 1 && (
+              <div>
+                <label style={S.label}>Lugar favorito</label>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const }}>
+                  {puntosFavoritos.map(fav => (
+                    <button key={fav.key} type="button" onClick={() => seleccionarFavorito(fav)} style={{ padding: '8px 14px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1px solid ${retiro.favKey === fav.key ? '#004aad' : '#e5e7eb'}`, background: retiro.favKey === fav.key ? '#eff6ff' : '#fff', color: retiro.favKey === fav.key ? '#004aad' : '#374151' }}>
+                      {fav.key === '__otro__' ? 'Otro' : fav.label}
+                    </button>
+                  ))}
+                </div>
+                <p style={S.hint}>Configurá tus puntos favoritos en <strong>Ajustes</strong>.</p>
+              </div>
+            )}
+
+            {!esOtro && retiro.coord && (
+              <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '10px 14px' }}>
+                <p style={{ fontSize: 12, fontWeight: 600, color: '#16a34a', margin: 0 }}>🎯 Ubicación guardada — se usará para calcular el precio</p>
+              </div>
+            )}
+
+            <Field label="Nombre / empresa" required>
+              <input value={retiro.nombre} onChange={e => setRetiro(prev => ({ ...prev, nombre: e.target.value, favKey: '__otro__' }))} placeholder="Ej: Tienda San Juan" style={S.input} />
+            </Field>
+
+            <Field label="Celular" required>
+              <input
+                value={retiro.celular}
+                onChange={e => setRetiro(prev => ({ ...prev, celular: formatCelular(e.target.value) }))}
+                placeholder="Ej: 88888888"
+                maxLength={8}
+                style={{ ...S.input, borderColor: retiro.celular && !validarCelular(retiro.celular) ? '#dc2626' : '#e5e7eb' }}
+              />
+              {retiro.celular && !validarCelular(retiro.celular) && (
+                <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos</p>
+              )}
+            </Field>
+
+            <Field label="Dirección escrita" required hint="Descripción para que el motorizado llegue.">
+              <input value={retiro.direccion} onChange={e => setRetiro(prev => ({ ...prev, direccion: e.target.value }))} placeholder="Ej: Del semáforo 1c al sur, portón azul" style={S.input} />
+            </Field>
+
+            {!esOtro && retiro.coord ? (
+              <StaticMiniMap
+                key={`${retiro.coord.lat}-${retiro.coord.lng}`}
+                coord={retiro.coord}
+                color="#004aad"
+                label="R"
+              />
+            ) : (
+              <div>
+                <label style={{ ...S.label, marginBottom: 8 }}>
+                  Ubicación en el mapa
+                  {retiro.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
+                </label>
+                {draft?.origenCoord && retiro.coord && (
+                  <p style={{ fontSize: 11, color: '#2563eb', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '5px 10px', margin: '0 0 8px', lineHeight: 1.4 }}>
+                    📍 Punto pre-marcado desde la calculadora. Ajustá si es necesario.
+                  </p>
+                )}
+                <MiniMap
+                  coord={retiro.coord}
+                  color="#004aad"
+                  label="R"
+                  onSelect={(c) => setRetiro(prev => ({ ...prev, coord: c }))}
+                  onGeocode={(addr) => setGeoRetiro(addr)}
+                />
+              </div>
+            )}
+
+            <UbicacionTipo value={retiro.tipoUbicacion} onChange={v => setRetiro(prev => ({ ...prev, tipoUbicacion: v }))} />
+
+            <NotaMotorizado
+              show={showNotaRetiro}
+              onToggle={() => setShowNotaRetiro(v => !v)}
+              value={notaRetiro}
+              onChange={setNotaRetiro}
+              label="¿Hay instrucciones adicionales para el motorizado en el retiro?"
+            />
+
+            {esOtro && retiro.nombre.trim() && (
+              <div>
+                {!showGuardarFav ? (
+                  <button
+                    type="button"
+                    onClick={() => { setNewFavLabel(retiro.nombre); setShowGuardarFav(true) }}
+                    style={{ ...S.btnOutline, color: '#d46b08', borderColor: '#fed7aa', fontSize: 12 }}
+                  >
+                    ⭐ Guardar como punto favorito
+                  </button>
+                ) : (
+                  <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '14px 16px' }}>
+                    <p style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', margin: '0 0 10px' }}>⭐ Guardar como punto favorito</p>
+                    <label style={S.label}>Nombre del lugar <span style={{ color: '#dc2626' }}>*</span></label>
+                    <input
+                      value={newFavLabel}
+                      onChange={e => setNewFavLabel(e.target.value)}
+                      placeholder='Ej: Tienda principal, Bodega norte...'
+                      style={{ ...S.input, marginBottom: 8 }}
+                    />
+                    <p style={{ fontSize: 11, color: '#9ca3af', margin: '0 0 10px' }}>
+                      Aparecerá en futuros envíos como punto rápido.
+                    </p>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        type="button"
+                        onClick={handleGuardarComoFavorito}
+                        disabled={savingNewFav || !newFavLabel.trim()}
+                        style={{ padding: '8px 16px', borderRadius: 10, border: 'none', background: '#d46b08', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
+                      >
+                        {savingNewFav ? 'Guardando...' : '⭐ Guardar'}
+                      </button>
+                      <button type="button" onClick={() => { setShowGuardarFav(false); setNewFavLabel('') }} style={S.btnOutline}>
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </SectionCard>
+
+          {/* Nav buttons */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+            <button
+              type="button"
+              onClick={handleSiguiente}
+              disabled={!paso1Valido}
+              style={{ padding: '14px 28px', borderRadius: 14, border: 'none', background: paso1Valido ? '#004aad' : '#e5e7eb', color: paso1Valido ? '#fff' : '#9ca3af', fontSize: 15, fontWeight: 800, cursor: paso1Valido ? 'pointer' : 'not-allowed', width: '100%' }}
+            >
+              {paso1Valido ? 'Siguiente →' : '⚠️ Completá los datos de retiro'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* PASO 2: ENTREGA                                                 */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {paso === 2 && (
+        <div>
+          <SectionCard title="Punto de entrega" icon="🏠">
+            <div>
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+                <div style={{ flex: 1 }}>
+                  <AutocompleteInput
+                    label="Nombre del destinatario"
+                    value={entrega.nombre}
+                    onChange={v => setEntrega(prev => ({ ...prev, nombre: v }))}
+                    onSelect={handleSelectEntrega}
+                    placeholder="Ej: María García"
+                    clientes={clientesEntrega}
+                    required
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowClienteModal(true)}
+                  style={{
+                    ...S.btnOutline,
+                    padding: '10px 14px',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    whiteSpace: 'nowrap' as const,
+                    borderColor: '#004aad',
+                    color: '#004aad',
+                    background: '#eff6ff',
+                    height: 42,
+                  }}
+                >
+                  🔍 Buscar
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <AutocompleteInput
+                label="Celular"
+                value={entrega.celular}
+                onChange={v => setEntrega(prev => ({ ...prev, celular: formatCelular(v) }))}
+                onSelect={handleSelectEntrega}
+                placeholder="Ej: 77777777"
+                clientes={clientesEntrega}
+                required
+              />
+              {entrega.celular && !validarCelular(entrega.celular) && (
+                <p style={{ fontSize: 11, color: '#dc2626', margin: '4px 0 0', fontWeight: 600 }}>⚠️ Debe ser 8 dígitos</p>
+              )}
+            </div>
+
+            <Field label="Dirección escrita" required hint="Descripción detallada para que el motorizado llegue.">
+              <input value={entrega.direccion} onChange={e => setEntrega(prev => ({ ...prev, direccion: e.target.value }))} placeholder="Ej: Frente al parque, portón negro" style={S.input} />
+            </Field>
+
+            <div>
+              <label style={{ ...S.label, marginBottom: 8 }}>
+                Ubicación en el mapa
+                {entrega.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
+              </label>
+              <MiniMap
+                coord={entrega.coord}
+                color="#16a34a"
+                label="E"
+                onSelect={(c) => setEntrega(prev => ({ ...prev, coord: c }))}
+                onGeocode={(addr) => setGeoEntrega(addr)}
+              />
+            </div>
+
+            <UbicacionTipo value={entrega.tipoUbicacion} onChange={v => setEntrega(prev => ({ ...prev, tipoUbicacion: v }))} />
+
+            <NotaMotorizado
+              show={showNotaEntrega}
+              onToggle={() => setShowNotaEntrega(v => !v)}
+              value={notaEntrega}
+              onChange={setNotaEntrega}
+              label="¿Hay instrucciones adicionales para el motorizado en la entrega?"
+            />
+          </SectionCard>
+
+          {/* Paquete */}
+          <SectionCard title="Datos del paquete" icon="📦">
+            <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' as const }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <button type="button" onClick={() => setFragil(v => !v)} style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${fragil ? '#dc2626' : '#d1d5db'}`, background: fragil ? '#dc2626' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
+                  {fragil && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+                </button>
+                <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', cursor: 'pointer' }} onClick={() => setFragil(v => !v)}>🥚 Paquete frágil</label>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <button type="button" onClick={() => setGrande(v => !v)} style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${grande ? '#d46b08' : '#d1d5db'}`, background: grande ? '#d46b08' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
+                  {grande && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+                </button>
+                <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', cursor: 'pointer' }} onClick={() => setGrande(v => !v)}>📦 Grande / voluminoso</label>
+              </div>
+            </div>
+            {(fragil || grande) && (
+              <Field
+                label={grande ? 'Descripción / dimensiones' : 'Descripción del contenido (opcional)'}
+                hint={grande ? 'Ayudá al motorizado a entender el tamaño.' : 'Ej: vidrio, cerámica, electrónico...'}
+              >
+                <input value={notaPaquete} onChange={e => setNotaPaquete(e.target.value)} placeholder={grande ? 'Ej: Caja 60×40cm, televisor 32"...' : 'Ej: botella de vidrio, pantalla...'} style={S.input} />
+              </Field>
+            )}
+            {!fragil && !grande && (
+              <p style={{ fontSize: 12, color: '#9ca3af', margin: 0 }}>Marcá si el paquete requiere cuidado especial o es de gran tamaño.</p>
+            )}
+          </SectionCard>
+
+          {/* Programar envío */}
+          <SectionCard title="Programar envío" icon="📅">
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <button type="button" onClick={() => setEsProgramado(v => !v)} style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${esProgramado ? '#004aad' : '#d1d5db'}`, background: esProgramado ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
+                  {esProgramado && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+                </button>
+                <label style={{ fontSize: 14, fontWeight: 600, color: '#111827', cursor: 'pointer' }} onClick={() => setEsProgramado(v => !v)}>
+                  ¿Es un envío programado?
+                </label>
+              </div>
+
+              {esProgramado && (
+                <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  <div>
+                    <label style={S.label}>¿Qué programar?</label>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      {([
+                        { value: 'retiro', label: '📦 Retiro' },
+                        { value: 'entrega', label: '🏠 Entrega' },
+                        { value: 'ambos', label: '↕ Ambos' },
+                      ] as { value: 'retiro' | 'entrega' | 'ambos'; label: string }[]).map(opt => (
+                        <button key={opt.value} type="button" onClick={() => setTipoProgramado(opt.value)} style={{ flex: 1, padding: '8px 10px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1px solid ${tipoProgramado === opt.value ? '#004aad' : '#e5e7eb'}`, background: tipoProgramado === opt.value ? '#eff6ff' : '#fff', color: tipoProgramado === opt.value ? '#004aad' : '#374151' }}>
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {(tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && (
+                    <div>
+                      {tipoProgramado === 'ambos' && <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 8px' }}>📦 Fecha de retiro</p>}
+                      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' as const }}>
+                        <div style={{ flex: 1, minWidth: 140 }}>
+                          <label style={S.label}>Fecha <span style={{ color: '#dc2626' }}>*</span></label>
+                          <input type="date" value={fechaRetiro} onChange={e => setFechaRetiro(e.target.value)} min={todayISO} style={S.input} />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 140 }}>
+                          <label style={S.label}>Hora (opcional)</label>
+                          <input type="time" value={horaRetiro} onChange={e => setHoraRetiro(e.target.value)} style={S.input} />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {(tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && (
+                    <div>
+                      {tipoProgramado === 'ambos' && <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 8px' }}>🏠 Fecha de entrega</p>}
+                      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' as const }}>
+                        <div style={{ flex: 1, minWidth: 140 }}>
+                          <label style={S.label}>Fecha <span style={{ color: '#dc2626' }}>*</span></label>
+                          <input type="date" value={fechaEntrega} onChange={e => setFechaEntrega(e.target.value)} min={tipoProgramado === 'ambos' && fechaRetiro ? fechaRetiro : todayISO} style={S.input} />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 140 }}>
+                          <label style={S.label}>Hora (opcional)</label>
+                          <input type="time" value={horaEntrega} onChange={e => setHoraEntrega(e.target.value)} style={S.input} />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </SectionCard>
+
+          {/* Nav buttons */}
+          <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+            <button type="button" onClick={handleAtras} style={{ ...S.btnOutline, padding: '14px 20px', borderRadius: 14, fontSize: 14, fontWeight: 700, flex: '0 0 auto' }}>
+              ← Atrás
+            </button>
+            <button
+              type="button"
+              onClick={handleSiguiente}
+              disabled={!paso2Valido}
+              style={{ padding: '14px 28px', borderRadius: 14, border: 'none', background: paso2Valido ? '#004aad' : '#e5e7eb', color: paso2Valido ? '#fff' : '#9ca3af', fontSize: 15, fontWeight: 800, cursor: paso2Valido ? 'pointer' : 'not-allowed', flex: 1 }}
+            >
+              {paso2Valido ? 'Siguiente →' : '⚠️ Completá los datos de entrega'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* PASO 3: PAGO                                                    */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {paso === 3 && (
+        <div>
+          {/* Tipo cliente */}
+          <div style={{ ...S.sectionCard, marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' as const, gap: 10 }}>
+              <div>
+                <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>Tipo de cliente</p>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>Define cómo se cobra el delivery</p>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {(['contado', 'credito'] as TipoCliente[]).map(t => (
+                  <button key={t} type="button" onClick={() => setTipoCliente(t)} style={{ padding: '8px 16px', borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: `1px solid ${tipoCliente === t ? '#004aad' : '#e5e7eb'}`, background: tipoCliente === t ? '#004aad' : '#fff', color: tipoCliente === t ? '#fff' : '#374151' }}>
+                    {t === 'contado' ? '💵 Contado' : '📅 Crédito'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <SectionCard title="Pagos" icon="💰">
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                <button type="button" onClick={() => setCobroCE(!cobroCE)} style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${cobroCE ? '#004aad' : '#d1d5db'}`, background: cobroCE ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
+                  {cobroCE && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+                </button>
+                <label style={{ fontSize: 14, fontWeight: 600, color: '#111827', cursor: 'pointer' }} onClick={() => setCobroCE(!cobroCE)}>
+                  Hay cobro contra entrega (el motorizado cobra el producto)
+                </label>
+              </div>
+              {cobroCE && (
+                <div style={{ marginLeft: 30 }}>
+                  <label style={S.label}>Monto del producto (C$) <span style={{ color: '#dc2626' }}>*</span></label>
+                  <input type="number" value={montoCE} onChange={e => setMontoCE(e.target.value === '' ? '' : Number(e.target.value))} placeholder="Ej: 1500" style={{ ...S.input, maxWidth: 200 }} />
+                </div>
+              )}
+            </div>
+
+            {tipoCliente === 'credito' ? (
+              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '12px 14px' }}>
+                <p style={{ fontSize: 13, fontWeight: 700, color: '#2563eb', margin: '0 0 2px' }}>📅 Cliente con crédito semanal</p>
+                <p style={{ fontSize: 12, color: '#3b82f6', margin: 0 }}>El delivery se cobra al comercio semanalmente.</p>
+              </div>
+            ) : (
+              <div>
+                <label style={S.label}>¿Quién paga el delivery? <span style={{ color: '#dc2626' }}>*</span></label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {[
+                    { value: 'recoleccion', label: '🏁 Se paga en la recolección', desc: 'El motorizado cobra el delivery al retirar' },
+                    { value: 'entrega', label: '🏠 Lo paga el destinatario (entrega)', desc: 'El motorizado cobra el delivery al entregar' },
+                    { value: 'transferencia', label: '🏦 Ya se pagó por transferencia', desc: 'El delivery fue pagado previamente' },
+                  ].map(opt => (
+                    <button key={opt.value} type="button" onClick={() => setQuienPagaDelivery(opt.value as QuienPagaDelivery)} style={{ textAlign: 'left' as const, padding: '12px 14px', borderRadius: 10, cursor: 'pointer', border: `1px solid ${quienPagaDelivery === opt.value ? '#004aad' : '#e5e7eb'}`, background: quienPagaDelivery === opt.value ? '#eff6ff' : '#fff' }}>
+                      <p style={{ fontSize: 13, fontWeight: 700, color: quienPagaDelivery === opt.value ? '#004aad' : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
+                      <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>{opt.desc}</p>
+                    </button>
+                  ))}
+                </div>
+                {cobroCE && quienPagaDelivery === 'entrega' && (
+                  <div style={{ marginTop: 12, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 10, padding: '12px 14px' }}>
+                    <label style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', display: 'block', marginBottom: 10 }}>¿Deducir el delivery del cobro del producto?</label>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {([
+                        {
+                          value: 'no_deducir',
+                          label: 'No deducir',
+                          desc: montoCE !== '' && montoDelivery > 0
+                            ? `El destinatario pagará C$ ${montoProducto + montoDelivery} (producto + delivery). Se te depositará C$ ${montoProducto}.`
+                            : 'El destinatario paga el producto y el delivery por separado. Se te deposita el monto del producto.',
+                        },
+                        {
+                          value: 'deducir_del_cobro',
+                          label: 'Sí, deducir',
+                          desc: montoCE !== '' && montoDelivery > 0
+                            ? `El destinatario paga solo C$ ${montoProducto} (el delivery sale de ahí). Se te depositará C$ ${montoADepositarComercio}.`
+                            : 'El costo del delivery se descuenta del cobro del producto. El destinatario paga menos.',
+                        },
+                      ] as { value: string; label: string; desc: string }[]).map(opt => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setDeducirDelivery(opt.value as DeducirDelivery)}
+                          style={{ textAlign: 'left' as const, padding: '10px 12px', borderRadius: 8, cursor: 'pointer', border: `1.5px solid ${deducirDelivery === opt.value ? '#d46b08' : '#e5e7eb'}`, background: deducirDelivery === opt.value ? '#fff7ed' : '#fff' }}
+                        >
+                          <p style={{ fontSize: 13, fontWeight: 700, color: deducirDelivery === opt.value ? '#d46b08' : '#374151', margin: '0 0 3px' }}>
+                            {deducirDelivery === opt.value ? '● ' : '○ '}{opt.label}
+                          </p>
+                          <p style={{ fontSize: 11, color: deducirDelivery === opt.value ? '#92400e' : '#6b7280', margin: 0, lineHeight: 1.4 }}>
+                            {opt.desc}
+                          </p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <Field label="Número de orden / referencia" hint="Código interno para identificar el pedido (opcional).">
+              <input value={numeroOrden} onChange={e => setNumeroOrden(e.target.value)} placeholder="Ej: #ORD-001 o número de pedido de WhatsApp" style={S.input} />
+            </Field>
+
+            <div>
+              <label style={S.label}>Instrucciones adicionales <span style={{ color: '#9ca3af', fontWeight: 400 }}>(opcional)</span></label>
+              <textarea value={detalle} onChange={e => setDetalle(e.target.value)} placeholder="Ej: Entregar entre 2-4pm. Llamar antes de llegar." style={{ ...S.input, resize: 'vertical' as const, minHeight: 80 }} rows={3} />
+            </div>
+          </SectionCard>
+
+          {/* Nav buttons */}
+          <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+            <button type="button" onClick={handleAtras} style={{ ...S.btnOutline, padding: '14px 20px', borderRadius: 14, fontSize: 14, fontWeight: 700, flex: '0 0 auto' }}>
+              ← Atrás
+            </button>
+            <button
+              type="button"
+              onClick={handleSiguiente}
+              disabled={!paso3Valido}
+              style={{ padding: '14px 28px', borderRadius: 14, border: 'none', background: paso3Valido ? '#004aad' : '#e5e7eb', color: paso3Valido ? '#fff' : '#9ca3af', fontSize: 15, fontWeight: 800, cursor: paso3Valido ? 'pointer' : 'not-allowed', flex: 1 }}
+            >
+              {paso3Valido ? 'Revisar y confirmar →' : '⚠️ Elegí quién paga el delivery'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* PASO 4: CONFIRMAR                                               */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {paso === 4 && (
+        <div>
+          {/* Cotización banner */}
+          {(tieneCotizacion || viajeAnterior) && (
+            <div style={{
+              ...S.sectionCard, marginBottom: 16,
+              background: tieneCotizacion ? (coordsModificadas ? '#fffbe6' : '#f0fdf4') : '#fefce8',
+              border: `1px solid ${tieneCotizacion ? (coordsModificadas ? '#ffe58f' : '#bbf7d0') : '#fef08a'}`,
+            }}>
+              {tieneCotizacion && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap' as const, gap: 8 }}>
+                    <div>
+                      {coordsModificadas ? (
+                        <>
+                          <p style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', margin: '0 0 3px' }}>
+                            ⚠️ Modificaste el punto de{' '}
+                            {coordsModificadasInfo.retiro && coordsModificadasInfo.entrega
+                              ? 'retiro y entrega'
+                              : coordsModificadasInfo.retiro
+                              ? 'retiro'
+                              : 'entrega'}
+                          </p>
+                          <p style={{ fontSize: 12, color: '#92400e', margin: 0 }}>
+                            El precio de la cotización original ya no aplica. Calculá de nuevo con los puntos actuales.
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p style={{ fontSize: 13, fontWeight: 700, color: '#16a34a', margin: '0 0 2px' }}>✅ Cotización desde calculadora</p>
+                          <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>
+                            {precioSugerido ? `Precio base: C$ ${precioSugerido}` : 'Sin precio base'}
+                          </p>
+                        </>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                      <button type="button" onClick={handleQuitarCotizacion} style={S.btnOutline}>Quitar</button>
+                      <button type="button" onClick={handleInvertir} style={S.btnOutline}>↕</button>
+                    </div>
+                  </div>
+                  {coordsModificadas && retiro.coord && entrega.coord && (
+                    <button
+                      type="button"
+                      onClick={handleCalcular}
+                      disabled={calcLoading}
+                      style={{ padding: '10px 16px', borderRadius: 10, border: 'none', background: '#d46b08', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer', width: '100%' }}
+                    >
+                      {calcLoading ? '⏳ Calculando...' : '🧮 Calcular precio con puntos actuales'}
+                    </button>
+                  )}
+                </div>
+              )}
+              {!tieneCotizacion && viajeAnterior && !calcResult && (
+                <>
+                  <p style={{ fontSize: 13, fontWeight: 700, color: '#854d0e', margin: '0 0 2px' }}>🔍 Viaje similar encontrado</p>
+                  <p style={{ fontSize: 12, color: '#713f12', margin: 0 }}>Costo registrado: <strong>C$ {viajeAnterior.precio}</strong>. Calculá para confirmar.</p>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Resumen de puntos */}
+          <div style={{ ...S.sectionCard, marginBottom: 16 }}>
+            <div style={S.sectionHeader}>
+              <span style={{ fontSize: 20 }}>🗺️</span>
+              <h3 style={{ fontSize: 15, fontWeight: 800, color: '#111827', margin: 0 }}>Resumen del envío</h3>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '12px 14px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+                  <p style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: 0 }}>📦 Retiro</p>
+                  {zonaInfo.retiroNombre && (
+                    <span style={{ fontSize: 10, fontWeight: 700, color: '#004aad', background: '#dbeafe', borderRadius: 6, padding: '2px 7px' }}>{zonaInfo.retiroNombre}</span>
+                  )}
+                </div>
+                <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{retiro.nombre}</p>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>📱 {retiro.celular}</p>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>📍 {retiro.direccion}</p>
+              </div>
+              <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '12px 14px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+                  <p style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: 0 }}>🏠 Entrega</p>
+                  {zonaInfo.entregaNombre && (
+                    <span style={{ fontSize: 10, fontWeight: 700, color: '#16a34a', background: '#dcfce7', borderRadius: 6, padding: '2px 7px' }}>{zonaInfo.entregaNombre}</span>
+                  )}
+                </div>
+                <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{entrega.nombre}</p>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>📱 {entrega.celular}</p>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>📍 {entrega.direccion}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Route preview map */}
+          {(retiro.coord || entrega.coord) && (
+            <div style={{ ...S.sectionCard, marginBottom: 16 }}>
+              <div style={S.sectionHeader}>
+                <span style={{ fontSize: 20 }}>📍</span>
+                <h3 style={{ fontSize: 15, fontWeight: 800, color: '#111827', margin: 0 }}>Vista de ruta</h3>
+              </div>
+              <RoutePreviewMap origen={retiro.coord} destino={entrega.coord} />
+              <div style={{ display: 'flex', gap: 16, marginTop: 10 }}>
+                <span style={{ fontSize: 12, color: '#004aad' }}>● Retiro</span>
+                <span style={{ fontSize: 12, color: '#16a34a' }}>● Entrega</span>
+              </div>
+            </div>
+          )}
+
+          {/* Precio */}
+          <div style={{ ...S.sectionCard, background: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <h3 style={{ fontSize: 14, fontWeight: 700, color: '#374151', margin: 0, textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Precio estimado</h3>
+              {calcLoading && <span style={{ fontSize: 12, color: '#6b7280' }}>⏳ Calculando...</span>}
+            </div>
+
+            {calcError && <p style={{ fontSize: 13, color: '#dc2626', margin: '0 0 10px' }}>⚠️ {calcError}</p>}
+
+            {calcResult ? (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#fff', border: '1px solid #bfdbfe', borderRadius: 12, padding: '14px 16px' }}>
+                <div>
+                  <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>Calculado</p>
+                  <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>
+                    {calcResult.precio === -1 ? 'Consultar' : `C$ ${calcResult.precio}`}
+                  </p>
+                  <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{calcResult.km.toFixed(2)} km · sujeto a confirmación</p>
+                </div>
+                <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ ...S.btnOutline, fontSize: 11 }}>
+                  Recalcular
+                </button>
+              </div>
+            ) : precioSugerido ? (
+              <div>
+                <div style={{ background: '#fff', border: '1px solid #bbf7d0', borderRadius: 12, padding: '14px 16px', marginBottom: 10 }}>
+                  <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>Desde cotización previa</p>
+                  <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0 }}>C$ {precioSugerido}</p>
+                  {distanciaEfectiva && <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{distanciaEfectiva.toFixed(2)} km</p>}
+                </div>
+                {retiro.coord && entrega.coord && (
+                  <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ width: '100%', padding: '10px', borderRadius: 10, border: '1px solid #bfdbfe', background: '#eff6ff', color: '#004aad', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                    🧮 Recalcular con los puntos del mapa
+                  </button>
+                )}
+              </div>
+            ) : retiro.coord && entrega.coord ? (
+              <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '14px 16px', textAlign: 'center' as const }}>
+                <p style={{ fontSize: 13, color: '#d46b08', fontWeight: 600, margin: '0 0 12px' }}>
+                  Calculá el precio estimado antes de enviar.
+                </p>
+                <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ padding: '10px 20px', borderRadius: 10, border: 'none', background: '#d46b08', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>
+                  🧮 Calcular precio estimado
+                </button>
+              </div>
+            ) : (
+              <p style={{ fontSize: 13, color: '#9ca3af', margin: 0 }}>Marcá los puntos en el mapa (pasos 1 y 2) para poder calcular.</p>
+            )}
+          </div>
+
+          {/* Resumen de cobros */}
+          <div style={{ ...S.sectionCard, background: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: 16 }}>
+            <p style={{ fontSize: 13, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Resumen de cobros</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {cobroCE && montoCE !== '' && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 13, color: '#6b7280' }}>Producto</span>
+                  <span style={{ fontSize: 15, fontWeight: 700, color: '#7c3aed' }}>C$ {montoProducto}</span>
+                </div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 13, color: '#6b7280' }}>
+                  Delivery {precioEfectivo ? (calcResult ? '(calculado)' : '(cotización)') : '(a confirmar)'}
+                </span>
+                <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>{precioEfectivo ? `C$ ${precioEfectivo}` : '—'}</span>
+              </div>
+              {cobroCE && tipoCliente === 'contado' && quienPagaDelivery === 'entrega' && montoDelivery > 0 && (
+                <>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 12, color: '#374151' }}>{deducirDelivery === 'deducir_del_cobro' ? 'Total destinatario' : 'Total motorizado cobrará'}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700 }}>C$ {destinatarioPagaTotal}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 12, color: '#16a34a' }}>Se te depositará</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: '#16a34a' }}>C$ {montoADepositarComercio}</span>
+                  </div>
+                </>
+              )}
+              <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 14, fontWeight: 700, color: '#111827' }}>Total estimado</span>
+                <span style={{ fontSize: 20, fontWeight: 900, color: '#111827' }}>
+                  {cobroCE && tipoCliente === 'contado' && quienPagaDelivery === 'entrega' && montoDelivery > 0
+                    ? `C$ ${destinatarioPagaTotal}`
+                    : precioEfectivo ? `C$ ${precioEfectivo}` : '—'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Campos faltantes */}
+          {!formularioCompleto && (
+            <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 14, padding: '14px 16px', marginBottom: 16 }}>
+              <p style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', margin: '0 0 8px' }}>⚠️ Completar antes de enviar:</p>
+              <ul style={{ margin: 0, padding: '0 0 0 18px' }}>
+                {camposFaltantes.map(f => <li key={f} style={{ fontSize: 13, color: '#92400e', marginBottom: 2 }}>{f}</li>)}
+              </ul>
+            </div>
+          )}
+
+          {msg && msg.type !== 'success' && (
+            <div style={{ marginBottom: 16, borderRadius: 14, padding: '14px 16px', fontSize: 13, fontWeight: 600, background: msg.type === 'error' ? '#fef2f2' : '#eff6ff', border: `1px solid ${msg.type === 'error' ? '#fecaca' : '#bfdbfe'}`, color: msg.type === 'error' ? '#dc2626' : '#2563eb' }}>
+              {msg.text}
+            </div>
+          )}
+
+          {/* Nav buttons */}
+          <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+            <button type="button" onClick={handleAtras} style={{ ...S.btnOutline, padding: '14px 20px', borderRadius: 14, fontSize: 14, fontWeight: 700, flex: '0 0 auto' }}>
+              ← Atrás
+            </button>
+            <button
+              type="button"
+              onClick={handleGuardar}
+              disabled={saving}
+              style={{
+                padding: '14px 28px', borderRadius: 14, border: 'none',
+                background: formularioCompleto ? '#004aad' : '#9ca3af',
+                color: '#fff', fontSize: 15, fontWeight: 800,
+                cursor: formularioCompleto ? 'pointer' : 'not-allowed', flex: 1,
+              }}
+            >
+              {saving ? 'Guardando...' : formularioCompleto ? '✓ Crear orden' : '⚠️ Completar info'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── MODAL BUSCADOR DE CLIENTES ── */}
       <ClienteSearchModal

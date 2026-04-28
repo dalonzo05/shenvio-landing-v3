@@ -16,6 +16,7 @@ import {
   ChevronRight,
   LogOut,
   Wallet,
+  MoreHorizontal,
 } from 'lucide-react'
 
 export default function ComercioLayout({ children }: { children: React.ReactNode }) {
@@ -23,6 +24,7 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
   const pathname = usePathname()
   const [loading, setLoading] = useState(true)
   const [collapsed, setCollapsed] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   const { profile, signOut } = useUser()
 
   useEffect(() => {
@@ -47,7 +49,8 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
 
   return (
     <div className="flex h-screen w-full bg-gray-50">
-      <aside className={`relative border-r border-gray-200 bg-white transition-all duration-300 ease-in-out ${collapsed ? 'w-[84px]' : 'w-[250px]'}`}>
+      {/* Sidebar — solo desktop */}
+      <aside className={`hidden md:flex relative border-r border-gray-200 bg-white transition-all duration-300 ease-in-out flex-col ${collapsed ? 'w-[84px]' : 'w-[250px]'}`}>
         <div className="flex h-full flex-col">
           {/* Header */}
           <div className={`border-b border-gray-200 px-4 py-4 ${collapsed ? 'flex justify-center' : ''}`}>
@@ -105,8 +108,72 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
         </div>
       </aside>
 
+      {/* Top bar — solo móvil */}
+      <div className="md:hidden fixed top-0 inset-x-0 z-50 flex items-center justify-between bg-white border-b border-gray-200 px-4 h-12">
+        <span className="text-lg font-black tracking-tight text-[#004aad]">STORKHUB</span>
+        <span className="text-xs font-medium text-gray-400">Panel comercio</span>
+      </div>
+
+      {/* Bottom tab bar — solo móvil */}
+      <div className="md:hidden fixed bottom-0 inset-x-0 z-50 bg-white border-t border-gray-200 flex items-stretch h-16">
+        <BottomTab href="/panel/comercio" icon={<Home size={20} />} label="Inicio" active={pathname === '/panel/comercio'} />
+        <BottomTab href="/panel/comercio/mis-ordenes" icon={<Package size={20} />} label="Órdenes" active={pathname.startsWith('/panel/comercio/mis-ordenes')} />
+        <BottomTab href="/panel/comercio/solicitar" icon={<Send size={20} />} label="Solicitar" active={pathname.startsWith('/panel/comercio/solicitar')} />
+        <BottomTab href="/panel/comercio/calculadora" icon={<Calculator size={20} />} label="Calcular" active={pathname.startsWith('/panel/comercio/calculadora')} />
+        <button
+          onClick={() => setMenuOpen(true)}
+          className="flex flex-1 flex-col items-center justify-center gap-1 text-gray-500"
+        >
+          <MoreHorizontal size={20} />
+          <span className="text-[10px] font-semibold">Más</span>
+        </button>
+      </div>
+
+      {/* Bottom sheet "Más" — solo móvil */}
+      {menuOpen && (
+        <div className="md:hidden">
+          <div
+            onClick={() => setMenuOpen(false)}
+            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 200 }}
+          />
+          <div style={{
+            position: 'fixed', bottom: 0, left: 0, right: 0,
+            background: '#fff', borderRadius: '24px 24px 0 0',
+            padding: '16px 20px 40px', zIndex: 201,
+          }}>
+            <div style={{ width: 36, height: 4, borderRadius: 9999, background: '#e5e7eb', margin: '0 auto 20px' }} />
+            {profile?.name && (
+              <p style={{ fontSize: 13, fontWeight: 700, color: '#6b7280', margin: '0 0 16px', padding: '0 4px' }}>{profile.name}</p>
+            )}
+            <Link
+              href="/panel/comercio/depositos"
+              onClick={() => setMenuOpen(false)}
+              style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 4px', color: '#111827', textDecoration: 'none', fontWeight: 600, fontSize: 15, borderBottom: '1px solid #f3f4f6' }}
+            >
+              <Wallet size={20} style={{ color: '#6b7280', flexShrink: 0 }} />
+              Depósitos
+            </Link>
+            <Link
+              href="/panel/comercio/ajustes"
+              onClick={() => setMenuOpen(false)}
+              style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 4px', color: '#111827', textDecoration: 'none', fontWeight: 600, fontSize: 15, borderBottom: '1px solid #f3f4f6' }}
+            >
+              <Settings size={20} style={{ color: '#6b7280', flexShrink: 0 }} />
+              Ajustes
+            </Link>
+            <button
+              onClick={() => { setMenuOpen(false); signOut() }}
+              style={{ display: 'flex', alignItems: 'center', gap: 14, width: '100%', padding: '14px 4px', border: 'none', background: 'transparent', cursor: 'pointer', color: '#dc2626', fontWeight: 600, fontSize: 15, marginTop: 4 }}
+            >
+              <LogOut size={20} style={{ flexShrink: 0 }} />
+              Cerrar sesión
+            </button>
+          </div>
+        </div>
+      )}
+
       <main className="min-w-0 flex-1 overflow-hidden">
-        <div className="h-full overflow-auto p-4">{children}</div>
+        <div className="h-full overflow-auto p-4 md:pt-4 pt-12 md:pb-4 pb-20">{children}</div>
       </main>
     </div>
   )
@@ -125,6 +192,20 @@ function NavItem({ href, icon, label, active, collapsed }: {
     >
       <span className="shrink-0">{icon}</span>
       {!collapsed && <span>{label}</span>}
+    </Link>
+  )
+}
+
+function BottomTab({ href, icon, label, active }: {
+  href: string; icon: React.ReactNode; label: string; active: boolean
+}) {
+  return (
+    <Link
+      href={href}
+      className={`flex flex-1 flex-col items-center justify-center gap-1 transition-colors ${active ? 'text-[#004aad]' : 'text-gray-400'}`}
+    >
+      {icon}
+      <span className={`text-[10px] font-semibold ${active ? 'text-[#004aad]' : 'text-gray-400'}`}>{label}</span>
     </Link>
   )
 }
