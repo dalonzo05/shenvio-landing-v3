@@ -135,6 +135,7 @@ type Comercio = {
   puntosRetiro?: Record<string, any>
   notaInterna?: string
   requiereBolso?: boolean
+  tipoCliente?: 'contado' | 'credito'
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
@@ -178,6 +179,11 @@ export default function ComerciosPage() {
   const [eRequiereBolso, setERequiereBolso] = useState(false)
   const [savingBolso, setSavingBolso] = useState(false)
   const [bolsoMsg, setBolsoMsg] = useState<string | null>(null)
+
+  // Tipo cliente
+  const [eTipoCliente, setETipoCliente] = useState<'contado' | 'credito'>('contado')
+  const [savingTipoCliente, setSavingTipoCliente] = useState(false)
+  const [tipoClienteMsg, setTipoClienteMsg] = useState<string | null>(null)
 
   // Nuevo comercio modal
   const [showNew, setShowNew] = useState(false)
@@ -232,6 +238,7 @@ export default function ComerciosPage() {
           puntosRetiro: comData.puntosRetiro || {},
           notaInterna: comData.notaInterna || '',
           requiereBolso: comData.requiereBolso ?? false,
+          tipoCliente: comData.tipoCliente || 'contado',
         }
       })
       list.sort((a, b) => (a.name || '').localeCompare(b.name || ''))
@@ -277,9 +284,12 @@ export default function ComerciosPage() {
     setNotaMsg(null)
     setERequiereBolso(c.requiereBolso ?? false)
     setBolsoMsg(null)
+    setETipoCliente(c.tipoCliente || 'contado')
+    setTipoClienteMsg(null)
     setCaEmail('')
     setCaPassword('')
     setCaMsg(null)
+    setCaSaving(false)
     setDrawerOpen(true)
   }
 
@@ -431,6 +441,26 @@ export default function ComerciosPage() {
     }
   }
 
+  async function saveTipoCliente() {
+    if (!selected) return
+    setSavingTipoCliente(true); setTipoClienteMsg(null)
+    try {
+      await setDoc(
+        doc(db, 'comercios', selected.uid),
+        { tipoCliente: eTipoCliente, updatedAt: serverTimestamp() },
+        { merge: true }
+      )
+      setComerciosList((prev) =>
+        prev.map((c) => c.uid === selected.uid ? { ...c, tipoCliente: eTipoCliente } : c)
+      )
+      setTipoClienteMsg('✅ Guardado')
+    } catch {
+      setTipoClienteMsg('❌ No se pudo guardar')
+    } finally {
+      setSavingTipoCliente(false)
+    }
+  }
+
   async function saveNota() {
     if (!selected) return
     setSavingNota(true); setNotaMsg(null)
@@ -502,29 +532,31 @@ export default function ComerciosPage() {
       const comercioData = comercioSnap.exists() ? comercioSnap.data() : {}
       const esMigracion = selected.sinAuth && selected.uid !== authUid
       await Promise.all([
-        // Crear nuevos docs con el authUid real
         setDoc(doc(db, 'usuarios', authUid), {
           ...usuarioData,
           email: caEmail.trim(),
           sinAuth: false,
+          activo: true,
           updatedAt: serverTimestamp(),
         }),
         setDoc(doc(db, 'comercios', authUid), {
           ...comercioData,
           updatedAt: serverTimestamp(),
         }),
-        // Limpiar docs viejos
         esMigracion ? deleteDoc(doc(db, 'usuarios', selected.uid)) : Promise.resolve(),
         esMigracion ? deleteDoc(doc(db, 'comercios', selected.uid)) : Promise.resolve(),
       ])
-      await fetch('/api/send-welcome', {
+      // Sacar el entry viejo del estado local para evitar el flash de duplicado
+      setComerciosList((prev) => prev.filter((c) => c.uid !== selected.uid))
+      // El correo es no-crítico: si falla, el acceso ya fue creado igualmente
+      fetch('/api/send-welcome', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           nombre: selected.name || selected.email,
           email: caEmail.trim(),
         }),
-      })
+      }).catch(() => {})
       closeDrawer()
     } catch (e: any) {
       const code = e?.code
@@ -587,6 +619,7 @@ export default function ComerciosPage() {
                 <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wide">Teléfono</th>
                 <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wide">Cuentas</th>
                 <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wide">Puntos</th>
+                <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wide">Pago</th>
                 <th className="text-left px-4 py-3 font-semibold text-gray-600 text-xs uppercase tracking-wide">Estado</th>
                 <th className="px-4 py-3" />
               </tr>
@@ -622,6 +655,11 @@ export default function ComerciosPage() {
                       {countPuntos(c) > 0 ? (
                         <><Star className="h-3 w-3" />{countPuntos(c)} punto{countPuntos(c) !== 1 ? 's' : ''}</>
                       ) : '—'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-full ${c.tipoCliente === 'credito' ? 'bg-purple-50 text-purple-700 border border-purple-200' : 'bg-gray-50 text-gray-600 border border-gray-200'}`}>
+                      {c.tipoCliente === 'credito' ? '🗓 Crédito' : '💵 Contado'}
                     </span>
                   </td>
                   <td className="px-4 py-3">
@@ -865,6 +903,44 @@ export default function ComerciosPage() {
                   {bolsoMsg && (
                     <span className={`text-xs font-semibold ${bolsoMsg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>
                       {bolsoMsg}
+                    </span>
+                  )}
+                </div>
+              </section>
+
+              {/* ── Tipo de cliente ── */}
+              <section className="bg-purple-50 border border-purple-200 rounded-xl p-4 space-y-3">
+                <h3 className="text-xs font-bold text-purple-700 uppercase tracking-wide">Tipo de cliente</h3>
+                <p className="text-xs text-purple-600">Define cómo se cobra el delivery en todas las órdenes de este comercio.</p>
+                <div className="flex gap-2">
+                  {(['contado', 'credito'] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setETipoCliente(t)}
+                      className={`flex-1 py-2.5 rounded-xl text-sm font-bold border transition ${
+                        eTipoCliente === t
+                          ? t === 'credito'
+                            ? 'bg-purple-600 border-purple-600 text-white'
+                            : 'bg-gray-700 border-gray-700 text-white'
+                          : 'bg-white border-gray-200 text-gray-500'
+                      }`}
+                    >
+                      {t === 'contado' ? '💵 Contado' : '🗓 Crédito semanal'}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={saveTipoCliente}
+                    disabled={savingTipoCliente}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-purple-600 text-white hover:bg-purple-700 transition disabled:opacity-40"
+                  >
+                    {savingTipoCliente ? 'Guardando…' : 'Guardar tipo'}
+                  </button>
+                  {tipoClienteMsg && (
+                    <span className={`text-xs font-semibold ${tipoClienteMsg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>
+                      {tipoClienteMsg}
                     </span>
                   )}
                 </div>

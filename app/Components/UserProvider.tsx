@@ -147,8 +147,12 @@ export function UserProvider({ children }: { children: ReactNode }) {
     setLoading(true)
     try {
       await signInWithEmailAndPassword(auth, email, password)
-    } finally {
+      // On success, loading stays true — onAuthStateChanged will set it false
+      // only after all Firestore operations complete, preventing a premature
+      // role check while the upsert write is still pending.
+    } catch (err) {
       setLoading(false)
+      throw err
     }
   }
 

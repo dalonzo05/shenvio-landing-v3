@@ -6,6 +6,7 @@ import {
   addDoc,
   collection,
   doc,
+  getDocs,
   onSnapshot,
   orderBy,
   query,
@@ -13,31 +14,15 @@ import {
   where,
 } from 'firebase/firestore'
 import { db, auth } from '@/fb/config'
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type LatLng = google.maps.LatLngLiteral
-type PlaceLite = { label: string; lat: number; lng: number; ts: number }
-type Cotizacion = {
-  id: string
-  origen: string
-  destino: string
-  distanciaKm: number
-  precioCordobas: number
-  origenCoord?: LatLng
-  destinoCoord?: LatLng
-  createdAt?: Date | null
-  fuente?: string
-}
-
-type PuntoFavorito = {
-  key: string
-  label: string
-  nombre?: string
-  celular?: string
-  direccion?: string
-  coord?: LatLng
-}
+import { getZonasActivas } from '@/fb/zonas'
+import { clasificarOrdenCompleto, ZonaGeografica } from '@/lib/zonas'
+import { SearchInput } from './calculadora/SearchInput'
+import { RecentDropdown } from './calculadora/RecentDropdown'
+import { FavoritosRetiro } from './calculadora/FavoritosRetiro'
+import { ResultadoCotizacion } from './calculadora/ResultadoCotizacion'
+import { HistorialCotizaciones } from './calculadora/HistorialCotizaciones'
+import { BuscadorComercio } from './calculadora/BuscadorComercio'
+import type { PlaceLite, Cotizacion, PuntoFavorito, PuntoComercio } from './calculadora/types'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -46,9 +31,9 @@ const TTL_MS = 10 * 60 * 1000
 const RECENT_MAX = 6
 const RECENT_TTL = 7 * 24 * 60 * 60 * 1000
 const RKEY = { origen: 'recent:origen', destino: 'recent:destino' } as const
-const CENTER_NI: LatLng = { lat: 12.1364, lng: -86.2514 }
+const DUPLICATE_WINDOW_MS = 60_000
 
-// ─── Tariff ──────────────────────────────────────────────────────────────────
+// ─── Tariff ───────────────────────────────────────────────────────────────────
 
 function tarifa(km: number): number {
   if (km < 2) return 70; if (km < 4) return 80; if (km < 6) return 90
@@ -63,7 +48,7 @@ function tarifa(km: number): number {
   return -1
 }
 
-// ─── Recent places ───────────────────────────────────────────────────────────
+// ─── Recent places ────────────────────────────────────────────────────────────
 
 function loadRecents(kind: keyof typeof RKEY): PlaceLite[] {
   try {
@@ -91,7 +76,7 @@ function clearRecents(kind: keyof typeof RKEY) {
 
 async function guardarCotizacion(
   uid: string,
-  data: { origen: string; destino: string; km: number; precio: number; origenCoord: LatLng; destinoCoord: LatLng; fuente: string }
+  data: { origen: string; destino: string; km: number; precio: number; origenCoord: google.maps.LatLngLiteral; destinoCoord: google.maps.LatLngLiteral; fuente: string; zonaOrigen?: string | null; zonaDestino?: string | null }
 ) {
   await addDoc(collection(db, 'cotizaciones'), {
     userId: uid,
@@ -102,130 +87,17 @@ async function guardarCotizacion(
     origenCoord: data.origenCoord,
     destinoCoord: data.destinoCoord,
     fuente: data.fuente,
+    ...(data.zonaOrigen != null && { zonaOrigen: data.zonaOrigen }),
+    ...(data.zonaDestino != null && { zonaDestino: data.zonaDestino }),
     createdAt: serverTimestamp(),
   })
 }
 
-// ─── Format ───────────────────────────────────────────────────────────────────
-
-function timeAgo(date: Date): string {
-  const s = Math.floor((Date.now() - date.getTime()) / 1000)
-  if (s < 60) return `hace ${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `hace ${m} min`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `hace ${h}h`
-  const d = Math.floor(h / 24)
-  if (d < 7) return `hace ${d} días`
-  return date.toLocaleDateString('es-NI', { day: 'numeric', month: 'short' })
-}
-
-// ─── SearchInput ─────────────────────────────────────────────────────────────
-// FIX: use React.RefObject<HTMLInputElement | null> to match useRef(null) type
-
-function SearchInput({
-  inputRef,
-  placeholder,
-  onFocusEmpty,
-  onInputChange,
-  onKeyDown,
-  icon,
-  color,
-  onClear,
-  onMyLocation,
-  locating,
-}: {
-  inputRef: React.RefObject<HTMLInputElement | null>
-  placeholder: string
-  onFocusEmpty: () => void
-  onInputChange: () => void
-  onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void
-  icon: string
-  color: string
-  onClear: () => void
-  onMyLocation?: () => void
-  locating?: boolean
-}) {
-  return (
-    <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-      <div style={{ position: 'absolute', left: 12, fontSize: 16, pointerEvents: 'none', zIndex: 1 }}>{icon}</div>
-      <input
-        ref={inputRef}
-        type="text"
-        placeholder={placeholder}
-        onFocus={onFocusEmpty}
-        onInput={onInputChange}
-        onKeyDown={onKeyDown}
-        style={{
-          width: '100%',
-          border: `1px solid ${color}33`,
-          borderRadius: 12,
-          padding: '11px 88px 11px 38px',
-          fontSize: 14,
-          color: '#111827',
-          outline: 'none',
-          background: '#fff',
-          boxSizing: 'border-box' as const,
-          fontFamily: 'inherit',
-          transition: 'box-shadow 0.15s, border-color 0.15s',
-        }}
-        onFocusCapture={(e) => {
-          e.currentTarget.style.boxShadow = `0 0 0 3px ${color}22`
-          e.currentTarget.style.borderColor = color
-        }}
-        onBlurCapture={(e) => {
-          e.currentTarget.style.boxShadow = '0 0 0 0px transparent'
-          e.currentTarget.style.borderColor = `${color}33`
-        }}
-      />
-      <div style={{ position: 'absolute', right: 8, display: 'flex', gap: 4 }}>
-        {onMyLocation && (
-          <button
-            type="button"
-            onClick={onMyLocation}
-            disabled={locating}
-            title="Usar mi ubicación"
-            style={{ padding: '6px 8px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#fff', cursor: 'pointer', fontSize: 13 }}
-          >
-            {locating ? '⏳' : '📍'}
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={onClear}
-          title="Limpiar"
-          style={{ padding: '6px 8px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#fff', cursor: 'pointer', fontSize: 13, color: '#9ca3af' }}
-        >
-          ✕
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ─── RecentDropdown ───────────────────────────────────────────────────────────
-
-function RecentDropdown({ items, onSelect, onClear }: { items: PlaceLite[]; onSelect: (p: PlaceLite) => void; onClear: () => void }) {
-  if (!items.length) return null
-  return (
-    <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 50, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.10)', marginTop: 4, overflow: 'hidden' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 14px', borderBottom: '1px solid #f3f4f6' }}>
-        <span style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Recientes</span>
-        <button type="button" onClick={onClear} style={{ fontSize: 11, color: '#9ca3af', border: 'none', background: 'none', cursor: 'pointer', textDecoration: 'underline' }}>Borrar</button>
-      </div>
-      {items.map((p, i) => (
-        <button key={i} type="button" onMouseDown={() => onSelect(p)} style={{ display: 'block', width: '100%', textAlign: 'left' as const, padding: '10px 14px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#374151', borderBottom: '1px solid #f9fafb' }}>
-          🕐 {p.label}
-        </button>
-      ))}
-    </div>
-  )
-}
-
 // ─── Main component ───────────────────────────────────────────────────────────
 
-const CalculadoraPrecio: React.FC = () => {
-  // FIX: typed as HTMLInputElement | null to match useRef(null)
+const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean }> = ({
+  showBuscadorComercio = false,
+}) => {
   const origenInputRef = useRef<HTMLInputElement | null>(null)
   const destinoInputRef = useRef<HTMLInputElement | null>(null)
   const origenWrapRef = useRef<HTMLDivElement>(null)
@@ -233,8 +105,8 @@ const CalculadoraPrecio: React.FC = () => {
   const origenACRef = useRef<google.maps.places.Autocomplete | null>(null)
   const destinoACRef = useRef<google.maps.places.Autocomplete | null>(null)
 
-  const [origenCoord, setOrigenCoord] = useState<LatLng | null>(null)
-  const [destinoCoord, setDestinoCoord] = useState<LatLng | null>(null)
+  const [origenCoord, setOrigenCoord] = useState<google.maps.LatLngLiteral | null>(null)
+  const [destinoCoord, setDestinoCoord] = useState<google.maps.LatLngLiteral | null>(null)
   const [distancia, setDistancia] = useState<number | null>(null)
   const [precio, setPrecio] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
@@ -249,14 +121,58 @@ const CalculadoraPrecio: React.FC = () => {
   const [cotizaciones, setCotizaciones] = useState<Cotizacion[]>([])
   const [loadingCot, setLoadingCot] = useState(true)
 
-  // Favoritos del comercio (sincronizados con ajustes/solicitar)
+  const [zonas, setZonas] = useState<ZonaGeografica[]>([])
+  const [zonasResult, setZonasResult] = useState<{
+    zonaRetiroNombre: string | null
+    zonaEntregaNombre: string | null
+    macroZonaRetiroNombre: string | null
+    macroZonaEntregaNombre: string | null
+  } | null>(null)
+
   const [puntosFavoritos, setPuntosFavoritos] = useState<PuntoFavorito[]>([])
   const [origenFavData, setOrigenFavData] = useState<PuntoFavorito | null>(null)
+
+  const [puntosComercio, setPuntosComercio] = useState<PuntoComercio[]>([])
+  const [loadingPuntosComercio, setLoadingPuntosComercio] = useState(false)
+  const [selectedBuscadorComercio, setSelectedBuscadorComercio] = useState<{ uid: string; direccion: string } | null>(null)
 
   useEffect(() => {
     const u = auth.currentUser
     if (u) setUid(u.uid)
   }, [])
+
+  useEffect(() => {
+    getZonasActivas().then(setZonas)
+  }, [])
+
+  // Cargar puntos de comercios para el buscador del gestor
+  useEffect(() => {
+    if (!showBuscadorComercio || zonas.length === 0) return
+    setLoadingPuntosComercio(true)
+    getDocs(collection(db, 'comercios')).then((snap) => {
+      const puntos: PuntoComercio[] = []
+      snap.docs.forEach((d) => {
+        const data = d.data() as any
+        const comercioNombre: string = data.name || data.nombre || data.companyName || d.id
+        const puntosRetiro: Record<string, any> = data.puntosRetiro || {}
+        Object.entries(puntosRetiro).forEach(([key, raw]: [string, any]) => {
+          if (!raw?.coord?.lat || !raw?.coord?.lng) return
+          const zr = clasificarOrdenCompleto(raw.coord, null, zonas)
+          puntos.push({
+            comercioUid: d.id,
+            comercioNombre,
+            puntoKey: key,
+            puntoNombre: raw.nombre || key,
+            direccion: raw.direccion || '',
+            coord: raw.coord,
+            zonaRetiro: zr.zonaRetiroNombre ?? zr.macroZonaRetiroNombre ?? null,
+          })
+        })
+      })
+      setPuntosComercio(puntos)
+      setLoadingPuntosComercio(false)
+    }).catch(() => setLoadingPuntosComercio(false))
+  }, [showBuscadorComercio, zonas])
 
   useEffect(() => {
     setRecOrigen(loadRecents('origen'))
@@ -281,6 +197,8 @@ const CalculadoraPrecio: React.FC = () => {
           destinoCoord: raw.destinoCoord,
           createdAt: raw.createdAt?.toDate?.() ?? null,
           fuente: raw.fuente,
+          zonaOrigen: raw.zonaOrigen ?? null,
+          zonaDestino: raw.zonaDestino ?? null,
         }
       }))
       setLoadingCot(false)
@@ -288,7 +206,7 @@ const CalculadoraPrecio: React.FC = () => {
     return () => unsub()
   }, [uid])
 
-  // Favoritos del comercio — usa la misma estructura que ajustes y solicitar
+  // Favoritos del comercio
   useEffect(() => {
     if (!uid) return
     const unsub = onSnapshot(doc(db, 'comercios', uid), (snap) => {
@@ -296,8 +214,6 @@ const CalculadoraPrecio: React.FC = () => {
       const data = snap.data() as any
       const container = data?.puntosRetiro || {}
       const items: PuntoFavorito[] = []
-
-      // Puntos con nombre libre (nueva estructura desde ajustes)
       Object.entries(container).forEach(([key, raw]: [string, any]) => {
         if (raw && typeof raw === 'object' && (raw.nombre || raw.direccion)) {
           items.push({
@@ -310,7 +226,6 @@ const CalculadoraPrecio: React.FC = () => {
           })
         }
       })
-
       setPuntosFavoritos(items)
     })
     return () => unsub()
@@ -348,6 +263,7 @@ const CalculadoraPrecio: React.FC = () => {
             const coord = { lat: loc.lat(), lng: loc.lng() }
             setOrigenCoord(coord)
             setOrigenFavData(null)
+            setSelectedBuscadorComercio(null)
             const label = origenInputRef.current?.value || 'Origen'
             saveRecent('origen', { label, ...coord })
             setRecOrigen(loadRecents('origen'))
@@ -377,7 +293,7 @@ const CalculadoraPrecio: React.FC = () => {
   }, [])
 
   useEffect(() => {
-    setDistancia(null); setPrecio(null); setError(null)
+    setDistancia(null); setPrecio(null); setError(null); setZonasResult(null)
   }, [origenCoord, destinoCoord])
 
   // My location
@@ -388,6 +304,8 @@ const CalculadoraPrecio: React.FC = () => {
       async (pos) => {
         const { latitude: lat, longitude: lng } = pos.coords
         setOrigenCoord({ lat, lng })
+        setOrigenFavData(null)
+        setSelectedBuscadorComercio(null)
         const google = await getMapsLoader().load()
         new google.maps.Geocoder().geocode({ location: { lat, lng } }, (results, status) => {
           const label = status === 'OK' && results?.[0] ? results[0].formatted_address : 'Tu ubicación'
@@ -408,8 +326,20 @@ const CalculadoraPrecio: React.FC = () => {
     setOrigenCoord(dc); setDestinoCoord(oc)
     if (origenInputRef.current) origenInputRef.current.value = dt
     if (destinoInputRef.current) destinoInputRef.current.value = ot
-    setDistancia(null); setPrecio(null)
+    setDistancia(null); setPrecio(null); setZonasResult(null)
+    // Limpiar favorito de origen porque ya no es válido tras el intercambio
+    setOrigenFavData(null)
+    setSelectedBuscadorComercio(null)
   }
+
+  // Devuelve true si ya existe una cotización idéntica guardada recientemente
+  const isDuplicate = (origenText: string, destinoText: string): boolean =>
+    cotizaciones.some(cot =>
+      cot.origen === origenText &&
+      cot.destino === destinoText &&
+      cot.createdAt != null &&
+      Date.now() - cot.createdAt.getTime() < DUPLICATE_WINDOW_MS
+    )
 
   const calcular = async () => {
     setError(null); setDistancia(null); setPrecio(null)
@@ -420,6 +350,8 @@ const CalculadoraPrecio: React.FC = () => {
     const o = `${origenCoord.lat},${origenCoord.lng}`
     const d = `${destinoCoord.lat},${destinoCoord.lng}`
     const cacheKey = `${CACHE_PREFIX}${o}-${d}`
+    const origenText = origenInputRef.current?.value || ''
+    const destinoText = destinoInputRef.current?.value || ''
 
     try {
       const raw = sessionStorage.getItem(cacheKey)
@@ -428,12 +360,20 @@ const CalculadoraPrecio: React.FC = () => {
         if (Date.now() - cached.ts < TTL_MS) {
           const p = tarifa(cached.km)
           setDistancia(cached.km); setPrecio(p)
-          await guardarCotizacion(uid, { origen: origenInputRef.current?.value || '', destino: destinoInputRef.current?.value || '', km: cached.km, precio: p, origenCoord, destinoCoord, fuente: 'cache' })
+          const zr = zonas.length > 0 ? clasificarOrdenCompleto(origenCoord, destinoCoord, zonas) : null
+          setZonasResult(zr)
+          const zonaOrigen = zr?.zonaRetiroNombre ?? zr?.macroZonaRetiroNombre ?? null
+          const zonaDestino = zr?.zonaEntregaNombre ?? zr?.macroZonaEntregaNombre ?? null
+          if (p === -1) {
+            setError('La distancia supera el rango tarifario. Consultá por WhatsApp.')
+          } else if (!isDuplicate(origenText, destinoText)) {
+            await guardarCotizacion(uid, { origen: origenText, destino: destinoText, km: cached.km, precio: p, origenCoord, destinoCoord, fuente: 'cache', zonaOrigen, zonaDestino })
+          }
           return
         }
         sessionStorage.removeItem(cacheKey)
       }
-    } catch {}
+    } catch (e) { console.warn('[calculadora] error leyendo cache:', e) }
 
     setLoading(true)
     try {
@@ -446,10 +386,18 @@ const CalculadoraPrecio: React.FC = () => {
       const km = metros / 1000
       const p = tarifa(km)
       setDistancia(km); setPrecio(p)
+      const zr = zonas.length > 0 ? clasificarOrdenCompleto(origenCoord, destinoCoord, zonas) : null
+      setZonasResult(zr)
+      const zonaOrigen = zr?.zonaRetiroNombre ?? zr?.macroZonaRetiroNombre ?? null
+      const zonaDestino = zr?.zonaEntregaNombre ?? zr?.macroZonaEntregaNombre ?? null
       sessionStorage.setItem(cacheKey, JSON.stringify({ km, ts: Date.now() }))
-      await guardarCotizacion(uid, { origen: origenInputRef.current?.value || '', destino: destinoInputRef.current?.value || '', km, precio: p, origenCoord, destinoCoord, fuente: 'api' })
+      if (p === -1) {
+        setError('La distancia supera el rango tarifario. Consultá por WhatsApp.')
+      } else if (!isDuplicate(origenText, destinoText)) {
+        await guardarCotizacion(uid, { origen: origenText, destino: destinoText, km, precio: p, origenCoord, destinoCoord, fuente: 'api', zonaOrigen, zonaDestino })
+      }
     } catch (e) {
-      console.error(e)
+      console.error('[calculadora] error al calcular:', e)
       setError('Error al calcular. Intentá de nuevo.')
     } finally {
       setLoading(false)
@@ -457,7 +405,8 @@ const CalculadoraPrecio: React.FC = () => {
   }
 
   const limpiar = () => {
-    setOrigenCoord(null); setDestinoCoord(null); setDistancia(null); setPrecio(null); setError(null)
+    setOrigenCoord(null); setDestinoCoord(null); setDistancia(null); setPrecio(null)
+    setError(null); setZonasResult(null); setOrigenFavData(null); setSelectedBuscadorComercio(null)
     if (origenInputRef.current) origenInputRef.current.value = ''
     if (destinoInputRef.current) destinoInputRef.current.value = ''
     setShowSug({ o: false, d: false })
@@ -468,7 +417,7 @@ const CalculadoraPrecio: React.FC = () => {
         if (k?.startsWith(CACHE_PREFIX)) keys.push(k)
       }
       keys.forEach(k => sessionStorage.removeItem(k))
-    } catch {}
+    } catch (e) { console.warn('[calculadora] error limpiando cache:', e) }
   }
 
   const usarCotizacion = (cot: Cotizacion) => {
@@ -477,6 +426,8 @@ const CalculadoraPrecio: React.FC = () => {
     if (cot.origenCoord) setOrigenCoord(cot.origenCoord)
     if (cot.destinoCoord) setDestinoCoord(cot.destinoCoord)
     setDistancia(cot.distanciaKm); setPrecio(cot.precioCordobas)
+    setOrigenFavData(null)
+    setSelectedBuscadorComercio(null)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
@@ -488,8 +439,8 @@ const CalculadoraPrecio: React.FC = () => {
         distanciaKm: cot.distanciaKm, precioCordobas: cot.precioCordobas,
         origenTipo: 'referencial', destinoTipo: 'referencial',
       }))
-    } catch {}
-    window.location.href = '/panel/solicitar'
+    } catch (e) { console.warn('[calculadora] error guardando draftEnvio:', e) }
+    window.location.href = '/panel/gestor/ingresar-orden'
   }
 
   const solicitarActual = () => {
@@ -503,18 +454,23 @@ const CalculadoraPrecio: React.FC = () => {
         origenFavKey: origenFavData?.key || '',
         origenNombre: origenFavData?.nombre || '',
         origenCelular: origenFavData?.celular || '',
-        origenDireccion: origenFavData?.direccion || '',
+        origenDireccion: selectedBuscadorComercio?.direccion || origenFavData?.direccion || '',
       }))
-    } catch {}
-    window.location.href = '/panel/solicitar'
+    } catch (e) { console.warn('[calculadora] error guardando draftEnvio:', e) }
+    const base = '/panel/gestor/ingresar-orden'
+    const url = selectedBuscadorComercio?.uid
+      ? `${base}?comercioId=${encodeURIComponent(selectedBuscadorComercio.uid)}`
+      : base
+    window.location.href = url
   }
 
-  // Favoritos for map
+  // Favoritos para el mapa
   const favoritosMapa: FavoritoMapa[] = useMemo(() =>
     puntosFavoritos.filter(f => f.coord).map(f => ({ key: f.key, label: f.label, coord: f.coord! })),
     [puntosFavoritos]
   )
 
+  // BUG FIX: puntosFavoritos agregado a dependencias para que el closure sea fresco
   const handleSelectFavoritoMapa = useCallback((fav: FavoritoMapa, tipo: 'origen' | 'destino') => {
     if (tipo === 'origen') {
       setOrigenCoord(fav.coord)
@@ -529,7 +485,7 @@ const CalculadoraPrecio: React.FC = () => {
       saveRecent('destino', { label: fav.label, ...fav.coord })
       setRecDestino(loadRecents('destino'))
     }
-  }, [])
+  }, [puntosFavoritos])
 
   const handleFocus = (which: 'o' | 'd') => {
     const val = which === 'o' ? origenInputRef.current?.value : destinoInputRef.current?.value
@@ -548,19 +504,39 @@ const CalculadoraPrecio: React.FC = () => {
   const puedeCalcular = !!origenCoord && !!destinoCoord && !loading
 
   return (
-    <div style={{ fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
+    <div className="space-y-4">
 
+      {/* Buscador de comercios (solo gestor) */}
+      {showBuscadorComercio && (
+        <BuscadorComercio
+          puntos={puntosComercio}
+          loading={loadingPuntosComercio}
+          onSelect={(p) => {
+            setOrigenCoord(p.coord)
+            setOrigenFavData(null)
+            setSelectedBuscadorComercio({ uid: p.comercioUid, direccion: p.direccion || p.puntoNombre })
+            if (origenInputRef.current) {
+              origenInputRef.current.value = p.puntoNombre || p.direccion
+            }
+            saveRecent('origen', { label: p.puntoNombre || p.direccion, ...p.coord })
+            setRecOrigen(loadRecents('origen'))
+            setShowSug({ o: false, d: false })
+          }}
+        />
+      )}
+
+      {/* Error */}
       {error && (
-        <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12, padding: '12px 16px', marginBottom: 16, color: '#dc2626', fontSize: 13, fontWeight: 600 }}>
+        <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-red-600 text-[13px] font-semibold">
           ⚠️ {error}
         </div>
       )}
 
-      {/* Search inputs */}
-      <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: 16, marginBottom: 16, boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'stretch' }}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div ref={origenWrapRef} style={{ position: 'relative' }}>
+      {/* Inputs + Favoritos */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm">
+        <div className="flex gap-2.5 items-stretch">
+          <div className="flex-1 flex flex-col gap-2">
+            <div ref={origenWrapRef} className="relative">
               <SearchInput
                 inputRef={origenInputRef}
                 placeholder="Punto de retiro..."
@@ -568,21 +544,31 @@ const CalculadoraPrecio: React.FC = () => {
                 onInputChange={() => handleInput('o')}
                 onKeyDown={handleKeyDown}
                 icon="📦"
-                color="#004aad"
-                onClear={() => { if (origenInputRef.current) origenInputRef.current.value = ''; setOrigenCoord(null); setShowSug({ o: true, d: false }) }}
+                variant="blue"
+                onClear={() => {
+                  if (origenInputRef.current) origenInputRef.current.value = ''
+                  setOrigenCoord(null)
+                  setOrigenFavData(null)
+                  setShowSug({ o: true, d: false })
+                }}
                 onMyLocation={useMyLocation}
                 locating={locating}
               />
               {showSug.o && (
                 <RecentDropdown
                   items={recOrigen}
-                  onSelect={(p) => { setOrigenCoord({ lat: p.lat, lng: p.lng }); if (origenInputRef.current) origenInputRef.current.value = p.label; setShowSug({ o: false, d: false }) }}
+                  onSelect={(p) => {
+                    setOrigenCoord({ lat: p.lat, lng: p.lng })
+                    setOrigenFavData(null)
+                    if (origenInputRef.current) origenInputRef.current.value = p.label
+                    setShowSug({ o: false, d: false })
+                  }}
                   onClear={() => { clearRecents('origen'); setRecOrigen([]); setShowSug(s => ({ ...s, o: false })) }}
                 />
               )}
             </div>
 
-            <div ref={destinoWrapRef} style={{ position: 'relative' }}>
+            <div ref={destinoWrapRef} className="relative">
               <SearchInput
                 inputRef={destinoInputRef}
                 placeholder="Punto de entrega..."
@@ -590,77 +576,73 @@ const CalculadoraPrecio: React.FC = () => {
                 onInputChange={() => handleInput('d')}
                 onKeyDown={handleKeyDown}
                 icon="🏠"
-                color="#16a34a"
-                onClear={() => { if (destinoInputRef.current) destinoInputRef.current.value = ''; setDestinoCoord(null); setShowSug({ o: false, d: true }) }}
+                variant="green"
+                onClear={() => {
+                  if (destinoInputRef.current) destinoInputRef.current.value = ''
+                  setDestinoCoord(null)
+                  setShowSug({ o: false, d: true })
+                }}
               />
               {showSug.d && (
                 <RecentDropdown
                   items={recDestino}
-                  onSelect={(p) => { setDestinoCoord({ lat: p.lat, lng: p.lng }); if (destinoInputRef.current) destinoInputRef.current.value = p.label; setShowSug({ o: false, d: false }) }}
+                  onSelect={(p) => {
+                    setDestinoCoord({ lat: p.lat, lng: p.lng })
+                    if (destinoInputRef.current) destinoInputRef.current.value = p.label
+                    setShowSug({ o: false, d: false })
+                  }}
                   onClear={() => { clearRecents('destino'); setRecDestino([]); setShowSug(s => ({ ...s, d: false })) }}
                 />
               )}
             </div>
           </div>
 
-          <button type="button" onClick={swap} title="Intercambiar" style={{ padding: '0 12px', borderRadius: 12, border: '1px solid #e5e7eb', background: '#fff', cursor: 'pointer', fontSize: 18, color: '#6b7280', display: 'flex', alignItems: 'center' }}>
+          <button
+            type="button"
+            onClick={swap}
+            title="Intercambiar"
+            className="px-3 rounded-xl border border-gray-200 bg-white cursor-pointer text-lg text-gray-500 flex items-center hover:bg-gray-50 transition-colors"
+          >
             ⇅
           </button>
         </div>
 
-        {/* Puntos favoritos del comercio */}
-        {puntosFavoritos.length > 0 && (
-          <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #f3f4f6' }}>
-            <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 8px' }}>Mis lugares</p>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const }}>
-              {puntosFavoritos.map((fav) => (
-                <div key={fav.key} style={{ display: 'flex', gap: 4 }}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOrigenCoord(fav.coord || null)
-                      setOrigenFavData(fav)
-                      if (origenInputRef.current) origenInputRef.current.value = fav.nombre || fav.label
-                      if (fav.coord) saveRecent('origen', { label: fav.nombre || fav.label, ...fav.coord })
-                      setRecOrigen(loadRecents('origen'))
-                    }}
-                    title={`Usar como retiro: ${fav.direccion || ''}`}
-                    style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #bfdbfe', background: '#eff6ff', color: '#2563eb', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
-                  >
-                    {fav.label} → R
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDestinoCoord(fav.coord || null)
-                      if (destinoInputRef.current) destinoInputRef.current.value = fav.nombre || fav.label
-                      if (fav.coord) saveRecent('destino', { label: fav.nombre || fav.label, ...fav.coord })
-                      setRecDestino(loadRecents('destino'))
-                    }}
-                    title={`Usar como entrega: ${fav.direccion || ''}`}
-                    style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #bbf7d0', background: '#f0fdf4', color: '#16a34a', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
-                  >
-                    E
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+        <FavoritosRetiro
+          favoritos={puntosFavoritos}
+          onUsarRetiro={(fav) => {
+            setOrigenCoord(fav.coord || null)
+            setOrigenFavData(fav)
+            if (origenInputRef.current) origenInputRef.current.value = fav.nombre || fav.label
+            if (fav.coord) saveRecent('origen', { label: fav.nombre || fav.label, ...fav.coord })
+            setRecOrigen(loadRecents('origen'))
+          }}
+          onUsarEntrega={(fav) => {
+            setDestinoCoord(fav.coord || null)
+            if (destinoInputRef.current) destinoInputRef.current.value = fav.nombre || fav.label
+            if (fav.coord) saveRecent('destino', { label: fav.nombre || fav.label, ...fav.coord })
+            setRecDestino(loadRecents('destino'))
+          }}
+        />
       </div>
 
-      {/* Map */}
-      <div style={{ marginBottom: 16 }}>
+      {/* Mapa */}
+      <div className="rounded-2xl overflow-hidden border border-gray-200">
         <MapaSeleccion
           origen={origenCoord}
           destino={destinoCoord}
           onSetOrigen={(c) => {
             setOrigenCoord(c)
-            if (c && origenInputRef.current?.value) { saveRecent('origen', { label: origenInputRef.current.value, lat: c.lat, lng: c.lng }); setRecOrigen(loadRecents('origen')) }
+            if (c && origenInputRef.current?.value) {
+              saveRecent('origen', { label: origenInputRef.current.value, lat: c.lat, lng: c.lng })
+              setRecOrigen(loadRecents('origen'))
+            }
           }}
           onSetDestino={(c) => {
             setDestinoCoord(c)
-            if (c && destinoInputRef.current?.value) { saveRecent('destino', { label: destinoInputRef.current.value, lat: c.lat, lng: c.lng }); setRecDestino(loadRecents('destino')) }
+            if (c && destinoInputRef.current?.value) {
+              saveRecent('destino', { label: destinoInputRef.current.value, lat: c.lat, lng: c.lng })
+              setRecDestino(loadRecents('destino'))
+            }
           }}
           onSetOrigenInput={(d) => { if (origenInputRef.current) origenInputRef.current.value = d }}
           onSetDestinoInput={(d) => { if (destinoInputRef.current) destinoInputRef.current.value = d }}
@@ -670,103 +652,54 @@ const CalculadoraPrecio: React.FC = () => {
         />
       </div>
 
-      {/* Result */}
+      {/* Resultado */}
       {distancia !== null && (
-        <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: '16px 20px', marginBottom: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' as const, gap: 12 }}>
-            <div>
-              <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>Precio estimado</p>
-              {precio === -1
-                ? <p style={{ fontSize: 22, fontWeight: 900, color: '#d97706', margin: 0 }}>Consultar por WhatsApp</p>
-                : <p style={{ fontSize: 32, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {precio}</p>
-              }
-              <p style={{ fontSize: 13, color: '#6b7280', margin: '4px 0 0' }}>Distancia: <strong>{distancia.toFixed(2)} km</strong> · Precio sujeto a confirmación</p>
-            </div>
-            {precio !== -1 && (
-              <button type="button" onClick={solicitarActual} style={{ background: '#004aad', border: 'none', borderRadius: 12, padding: '12px 20px', color: '#fff', fontSize: 14, fontWeight: 800, cursor: 'pointer', whiteSpace: 'nowrap' as const }}>
-                Solicitar este envío →
-              </button>
-            )}
-          </div>
-        </div>
+        <ResultadoCotizacion
+          distancia={distancia}
+          precio={precio}
+          zonasResult={zonasResult}
+          onSolicitar={solicitarActual}
+        />
       )}
 
       {/* Hint */}
       {origenCoord && destinoCoord && distancia === null && !loading && !error && (
-        <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '12px 16px', marginBottom: 16, fontSize: 13, color: '#d46b08', fontWeight: 600 }}>
+        <div className="bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3 text-[13px] text-amber-700 font-semibold">
           ✓ Tenés los dos puntos listos. Tocá <strong>Calcular precio</strong>.
         </div>
       )}
 
-      {/* Actions */}
-      <div style={{ display: 'flex', gap: 10, marginBottom: 24 }}>
+      {/* Acciones */}
+      <div className="flex gap-2.5">
         <button
           type="button"
           onClick={calcular}
           disabled={!puedeCalcular}
-          style={{ flex: 1, background: puedeCalcular ? '#004aad' : '#e5e7eb', border: 'none', borderRadius: 12, padding: '14px 20px', color: puedeCalcular ? '#fff' : '#9ca3af', fontSize: 15, fontWeight: 800, cursor: puedeCalcular ? 'pointer' : 'not-allowed', transition: 'all 0.15s' }}
+          className={`flex-1 rounded-xl py-3.5 px-5 text-[15px] font-extrabold transition-all ${
+            puedeCalcular
+              ? 'bg-[#004aad] text-white cursor-pointer hover:bg-[#003d91]'
+              : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+          }`}
         >
           {loading ? 'Calculando...' : '📏 Calcular precio'}
         </button>
-        <button type="button" onClick={limpiar} style={{ padding: '14px 16px', borderRadius: 12, border: '1px solid #e5e7eb', background: '#fff', color: '#6b7280', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
+        <button
+          type="button"
+          onClick={limpiar}
+          className="px-4 py-3.5 rounded-xl border border-gray-200 bg-white text-gray-600 text-sm font-semibold cursor-pointer hover:bg-gray-50 transition-colors"
+        >
           Limpiar
         </button>
       </div>
 
-      {/* Últimas cotizaciones - real time */}
-      <div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <h3 style={{ fontSize: 15, fontWeight: 800, color: '#111827', margin: 0 }}>Últimas cotizaciones</h3>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#16a34a', boxShadow: '0 0 0 2px #bbf7d0' }} />
-            <span style={{ fontSize: 11, color: '#16a34a', fontWeight: 600 }}>En vivo</span>
-          </div>
-        </div>
+      {/* Historial */}
+      <HistorialCotizaciones
+        cotizaciones={cotizaciones}
+        loading={loadingCot}
+        onUsarDeNuevo={usarCotizacion}
+        onSolicitar={solicitarEnvio}
+      />
 
-        {loadingCot ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {[1, 2, 3].map(i => <div key={i} style={{ background: '#f9fafb', borderRadius: 14, height: 80, border: '1px solid #e5e7eb' }} />)}
-          </div>
-        ) : cotizaciones.length === 0 ? (
-          <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 14, padding: '24px 16px', textAlign: 'center' as const }}>
-            <p style={{ fontSize: 24, margin: '0 0 8px' }}>🗺️</p>
-            <p style={{ fontSize: 14, fontWeight: 600, color: '#374151', margin: '0 0 4px' }}>Todavía no hay cotizaciones</p>
-            <p style={{ fontSize: 13, color: '#9ca3af', margin: 0 }}>Calculá tu primera ruta arriba</p>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {cotizaciones.map((cot) => (
-              <div key={cot.id} style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: '14px 16px', boxShadow: '0 1px 2px rgba(0,0,0,0.04)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 10 }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#004aad', flexShrink: 0 }} />
-                      <span style={{ fontSize: 12, color: '#374151', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{cot.origen}</span>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#16a34a', flexShrink: 0 }} />
-                      <span style={{ fontSize: 12, color: '#374151', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{cot.destino}</span>
-                    </div>
-                    {cot.createdAt && <p style={{ fontSize: 11, color: '#d1d5db', margin: '6px 0 0' }}>{timeAgo(cot.createdAt)}</p>}
-                  </div>
-                  <div style={{ textAlign: 'right' as const, flexShrink: 0 }}>
-                    <p style={{ fontSize: 20, fontWeight: 900, color: '#004aad', margin: '0 0 2px', letterSpacing: -0.5 }}>C$ {cot.precioCordobas}</p>
-                    <p style={{ fontSize: 11, color: '#9ca3af', margin: 0 }}>{cot.distanciaKm?.toFixed(1)} km</p>
-                  </div>
-                </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button type="button" onClick={() => usarCotizacion(cot)} style={{ padding: '7px 14px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#fff', color: '#374151', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-                    Usar de nuevo
-                  </button>
-                  <button type="button" onClick={() => solicitarEnvio(cot)} style={{ padding: '7px 14px', borderRadius: 8, border: 'none', background: '#004aad', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
-                    Solicitar envío →
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   )
 }

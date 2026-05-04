@@ -23,6 +23,7 @@ import {
   AlertTriangle,
   DollarSign,
   Map,
+  Calculator,
 } from 'lucide-react'
 
 export default function GestorLayout({ children }: { children: React.ReactNode }) {
@@ -153,7 +154,7 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
             {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           </button>
 
-          <nav className="flex-1 space-y-2 p-3">
+          <nav className="flex-1 space-y-2 overflow-y-auto p-3">
             <NavItem
               href="/panel/gestor"
               icon={<LayoutDashboard size={18} />}
@@ -215,6 +216,14 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               icon={<Map size={18} />}
               label="Zonas"
               active={pathname.startsWith('/panel/gestor/zonas')}
+              collapsed={collapsed}
+            />
+
+            <NavItem
+              href="/panel/gestor/calculadora"
+              icon={<Calculator size={18} />}
+              label="Calculadora"
+              active={pathname.startsWith('/panel/gestor/calculadora')}
               collapsed={collapsed}
             />
 

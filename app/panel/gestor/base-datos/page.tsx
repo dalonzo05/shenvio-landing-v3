@@ -31,6 +31,9 @@ import {
   Truck,
   AlertTriangle,
   CheckCheck,
+  Filter,
+  Search,
+  Download,
 } from 'lucide-react'
 
 // ─── Shared Types ─────────────────────────────────────────────────────────────
@@ -129,6 +132,19 @@ type Solicitud = {
 
 type Motorizado = { id: string; nombre: string; telefono?: string; estado?: string; authUid?: string }
 
+// ─── Column filter types ──────────────────────────────────────────────────────
+
+type FilterOp = 'contains' | 'equals' | 'empty' | 'not_empty' | 'range'
+type ColumnFilter = { op: FilterOp; value?: string; min?: string; max?: string }
+type ColumnFilters = Partial<Record<string, ColumnFilter>>
+
+type ThFilterConfig = {
+  colKey: string
+  label: string
+  filterType: 'text' | 'number' | 'date' | 'select'
+  selectOptions?: string[]
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getWeekNumber(date: Date): number {
@@ -203,6 +219,82 @@ function estadoClass(e?: EstadoSolicitud): string {
 }
 
 function roundTo10(n: any): number { return Math.round(Number(n) / 10) * 10 }
+
+function getColValue(s: Solicitud, colKey: string, comercioNames: Record<string, string>): string | number | null {
+  switch (colKey) {
+    case 'estado': return s.estado ?? null
+    case 'semana': return s.registro?.semana ?? (s.createdAt ? getWeekNumber(s.createdAt.toDate()) : null)
+    case 'motorizado': return s.asignacion?.motorizadoNombre ?? null
+    case 'fecha': return s.createdAt?.toDate().toISOString().split('T')[0] ?? null
+    case 'comercio': return s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : null) || null
+    case 'telefono': return s.ownerSnapshot?.phone ?? null
+    case 'retiro': return s.recoleccion?.direccionEscrita ?? null
+    case 'entrega_dir': return s.entrega?.direccionEscrita ?? null
+    case 'zona': return s.registro?.zona ?? null
+    case 'ceProducto': return s.cobroContraEntrega?.monto ?? null
+    case 'fDeposito': {
+      const ts = s.registro?.deposito?.confirmadoComercioAt || s.registro?.deposito?.confirmadoStorkhubAt
+      if (!ts) return null
+      return typeof (ts as any).toDate === 'function' ? (ts as any).toDate().toISOString().split('T')[0] : null
+    }
+    case 'depositado': {
+      const dep = s.registro?.deposito
+      if (dep?.confirmadoComercio && dep?.confirmadoStorkhub) return 'Todo'
+      if (dep?.confirmadoComercio || dep?.confirmadoStorkhub) return 'Parcial'
+      return 'Pendiente'
+    }
+    case 'delivery': return getPrecio(s)
+    case 'pago': {
+      const qp = s.pagoDelivery?.quienPaga
+      const cd = s.cobroDelivery
+      const recibio = s.cobrosMotorizado?.delivery?.recibio
+      if (qp === 'credito_semanal') return 'Crédito'
+      if (cd?.estado === 'pagado') return 'Sí'
+      if (qp === 'transferencia') return 'Trans. pend.'
+      if (recibio === true) return 'Sí'
+      if (recibio === false) return 'No'
+      return null
+    }
+    case 'fCobro': {
+      const cd = s.cobroDelivery
+      const at = cd?.pagadoAt || (s.cobrosMotorizado?.delivery?.recibio === true ? s.cobrosMotorizado?.delivery?.at : null)
+      if (!at) return null
+      return typeof (at as any).toDate === 'function' ? (at as any).toDate().toISOString().split('T')[0] : null
+    }
+    case 'formaPago': {
+      const cd = s.cobroDelivery
+      if (cd?.formaPago) {
+        const m: Record<string, string> = { efectivo: 'Efectivo', transferencia: 'Transferencia' }
+        return m[cd.formaPago] ?? cd.formaPago
+      }
+      const map: Record<string, string> = { recoleccion: 'Efectivo', entrega: 'Efectivo', transferencia: 'Transferencia', credito_semanal: 'Crédito' }
+      return s.pagoDelivery?.quienPaga ? (map[s.pagoDelivery.quienPaga] ?? null) : null
+    }
+    case 'distancia': return s.cotizacion?.distanciaKm ?? null
+    default: return null
+  }
+}
+
+function applyFilter(f: ColumnFilter, val: string | number | null): boolean {
+  const { op, value, min, max } = f
+  if (op === 'empty') return val === null || val === undefined || val === ''
+  if (op === 'not_empty') return val !== null && val !== undefined && val !== ''
+  const str = val === null || val === undefined ? '' : String(val).toLowerCase()
+  if (op === 'contains') return str.includes((value ?? '').toLowerCase())
+  if (op === 'equals') return str === (value ?? '').toLowerCase()
+  if (op === 'range') {
+    const n = Number(val)
+    if (!Number.isFinite(n)) {
+      if (min && str < min) return false
+      if (max && str > max) return false
+      return true
+    }
+    if (min !== undefined && min !== '' && n < Number(min)) return false
+    if (max !== undefined && max !== '' && n > Number(max)) return false
+    return true
+  }
+  return true
+}
 
 // ─── Drawer de detalle ────────────────────────────────────────────────────────
 
@@ -647,10 +739,13 @@ function BoolCell({ value, onToggle, labelTrue = 'Sí', labelFalse = 'No' }: {
 export default function BaseDatosPage() {
   const [solicitudes, setSolicitudes] = useState<Solicitud[]>([])
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
-  const [tabMotorizado, setTabMotorizado] = useState<string>('todos')
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [colFilters, setColFilters] = useState<ColumnFilters>({})
+  const [openFilterCol, setOpenFilterCol] = useState<string | null>(null)
+  const [sortCol, setSortCol] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
 
   const [desde, setDesde] = useState<string>(() => { const d = new Date(); d.setDate(d.getDate() - 30); return d.toISOString().split('T')[0] })
   const [hasta, setHasta] = useState<string>(() => new Date().toISOString().split('T')[0])
@@ -701,22 +796,61 @@ export default function BaseDatosPage() {
     await updateDoc(doc(db, 'solicitudes_envio', id), { [`registro.${path}`]: value })
   }
 
-  const filtered = solicitudes.filter((s) => {
-    // Solo viajes entregados
-    if (s.estado !== 'entregado') return false
+  const handleSort = (key: string) => {
+    if (sortCol === key) setSortDir(prev => prev === 'asc' ? 'desc' : 'asc')
+    else { setSortCol(key); setSortDir('asc') }
+  }
 
-    if (tabMotorizado !== 'todos') {
-      if (s.asignacion?.motorizadoId !== tabMotorizado && s.asignacion?.motorizadoAuthUid !== tabMotorizado) return false
+  const handleApplyFilter = (key: string, f: ColumnFilter | undefined) => {
+    setColFilters(prev => {
+      const next = { ...prev }
+      if (!f) delete next[key]
+      else next[key] = f
+      return next
+    })
+  }
+
+  const clearAllFilters = () => {
+    setColFilters({})
+    setSearch('')
+    const d = new Date(); d.setDate(d.getDate() - 30)
+    setDesde(d.toISOString().split('T')[0])
+    setHasta(new Date().toISOString().split('T')[0])
+  }
+
+  const activeFilterCount = Object.keys(colFilters).length
+
+  const filtered = useMemo(() => {
+    let result = solicitudes.filter((s) => {
+      if (s.estado !== 'entregado') return false
+      if (search.trim()) {
+        const q = search.toLowerCase()
+        const comercio = (s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : '') || '').toLowerCase()
+        const entrega = (s.entrega?.nombreApellido || '').toLowerCase()
+        const zona = (s.registro?.zona || '').toLowerCase()
+        if (!comercio.includes(q) && !entrega.includes(q) && !zona.includes(q)) return false
+      }
+      for (const [colKey, f] of Object.entries(colFilters)) {
+        if (!f) continue
+        if (!applyFilter(f, getColValue(s, colKey, comercioNames))) return false
+      }
+      return true
+    })
+
+    if (sortCol) {
+      result = [...result].sort((a, b) => {
+        const va = getColValue(a, sortCol, comercioNames)
+        const vb = getColValue(b, sortCol, comercioNames)
+        const sa = va === null ? '' : String(va)
+        const sb = vb === null ? '' : String(vb)
+        const na = Number(va), nb = Number(vb)
+        if (Number.isFinite(na) && Number.isFinite(nb)) return sortDir === 'asc' ? na - nb : nb - na
+        return sortDir === 'asc' ? sa.localeCompare(sb) : sb.localeCompare(sa)
+      })
     }
-    if (search.trim()) {
-      const q = search.toLowerCase()
-      const comercio = (s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : '') || '').toLowerCase()
-      const entrega = (s.entrega?.nombreApellido || '').toLowerCase()
-      const zona = (s.registro?.zona || '').toLowerCase()
-      if (!comercio.includes(q) && !entrega.includes(q) && !zona.includes(q)) return false
-    }
-    return true
-  })
+
+    return result
+  }, [solicitudes, search, colFilters, sortCol, sortDir, comercioNames])
 
   const totales = filtered.reduce(
     (acc, s) => { acc.precio += getPrecio(s) || 0; acc.totalDelivery += s.cobroContraEntrega?.monto || 0; acc.depositado += s.registro?.deposito?.monto || 0; acc.cs += s.registro?.csRecaudado || 0; acc.usd += s.registro?.usdRecaudado || 0; return acc },
@@ -761,12 +895,24 @@ export default function BaseDatosPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-xl font-bold text-gray-900">Base de datos</h1>
+        <h1 className="text-xl font-bold text-gray-900">Registro de entregas</h1>
         <p className="text-sm text-gray-500">Viajes entregados · estados de cuenta y cobros por comercio</p>
       </div>
 
-      {/* Filtros */}
-      <div className="flex flex-wrap items-center gap-3">
+      {/* Barra superior */}
+      <div className="flex flex-wrap items-center gap-2">
+        {/* Búsqueda global */}
+        <div className="flex items-center gap-2 rounded-lg border bg-white px-3 py-2">
+          <Search size={13} className="text-gray-400 shrink-0" />
+          <input
+            type="text"
+            placeholder="Buscar comercio, cliente, zona..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-48 text-xs focus:outline-none"
+          />
+        </div>
+        {/* Rango de fecha */}
         <div className="flex items-center gap-2 rounded-lg border bg-white px-3 py-2">
           <span className="text-xs text-gray-500">Desde</span>
           <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)} className="text-xs focus:outline-none" />
@@ -775,23 +921,30 @@ export default function BaseDatosPage() {
           <span className="text-xs text-gray-500">Hasta</span>
           <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)} className="text-xs focus:outline-none" />
         </div>
-        <input type="text" placeholder="Buscar comercio, cliente, zona..." value={search} onChange={(e) => setSearch(e.target.value)} className="rounded-lg border bg-white px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-200" />
+        {/* Badge filtros activos */}
+        {activeFilterCount > 0 && (
+          <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700">
+            <Filter size={10} />
+            {activeFilterCount} filtro{activeFilterCount > 1 ? 's' : ''} activo{activeFilterCount > 1 ? 's' : ''}
+          </span>
+        )}
+        {/* Contador */}
         <span className="text-xs text-gray-400">{filtered.length} registros</span>
+        {/* Limpiar filtros */}
+        <button
+          onClick={clearAllFilters}
+          className="flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 transition"
+        >
+          <X size={12} /> Limpiar
+        </button>
+        {/* Exportar CSV */}
         <button
           onClick={exportCSV}
           disabled={filtered.length === 0}
           className="ml-auto flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 transition disabled:opacity-40"
         >
-          ⬇ Exportar CSV
+          <Download size={12} /> Exportar CSV
         </button>
-      </div>
-
-      {/* Tabs motorizados */}
-      <div className="flex gap-1 overflow-x-auto">
-        <TabBtn active={tabMotorizado === 'todos'} onClick={() => setTabMotorizado('todos')}>Todos</TabBtn>
-        {motorizados.map((m) => (
-          <TabBtn key={m.id} active={tabMotorizado === m.id} onClick={() => setTabMotorizado(m.id)}>{m.nombre}</TabBtn>
-        ))}
       </div>
 
       {/* Tabla */}
@@ -803,12 +956,62 @@ export default function BaseDatosPage() {
         ) : (
           <table className="min-w-max w-full text-xs">
             <thead>
-              <tr className="border-b bg-gray-50 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                <Th>#</Th><Th>Estado</Th><Th>Semana</Th><Th>Motorizado</Th><Th>Fecha</Th>
-                <Th>Comercio</Th><Th>Teléfono</Th><Th>Retiro</Th><Th>Entrega</Th><Th>Zona</Th>
-                <Th>C/E Producto</Th><Th>F. Depósito</Th><Th>Depositado</Th>
-                <Th>Delivery</Th><Th>Pagó</Th><Th>F. Cobro</Th><Th>Forma Pago</Th>
-                <Th>Dist.</Th>
+              <tr className="border-b bg-gray-50 text-left">
+                {/* # sin filtro */}
+                <th className="whitespace-nowrap px-3 py-2">
+                  <span className="font-semibold uppercase tracking-wide text-[11px] text-gray-500">#</span>
+                </th>
+                <Th config={{ colKey: 'estado', label: 'Estado', filterType: 'select', selectOptions: ['entregado', 'cancelada', 'asignada', 'confirmada', 'pendiente_confirmacion', 'retirado', 'en_camino_retiro', 'en_camino_entrega'] }}
+                    filter={colFilters['estado']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'semana', label: 'Semana', filterType: 'number' }}
+                    filter={colFilters['semana']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'motorizado', label: 'Motorizado', filterType: 'select', selectOptions: motorizados.map(m => m.nombre) }}
+                    filter={colFilters['motorizado']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'fecha', label: 'Fecha', filterType: 'date' }}
+                    filter={colFilters['fecha']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'comercio', label: 'Comercio', filterType: 'text' }}
+                    filter={colFilters['comercio']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'telefono', label: 'Teléfono', filterType: 'text' }}
+                    filter={colFilters['telefono']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'retiro', label: 'Retiro', filterType: 'text' }}
+                    filter={colFilters['retiro']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'entrega_dir', label: 'Entrega', filterType: 'text' }}
+                    filter={colFilters['entrega_dir']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'zona', label: 'Zona', filterType: 'text' }}
+                    filter={colFilters['zona']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'ceProducto', label: 'C/E Producto', filterType: 'number' }}
+                    filter={colFilters['ceProducto']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'fDeposito', label: 'F. Depósito', filterType: 'date' }}
+                    filter={colFilters['fDeposito']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'depositado', label: 'Depositado', filterType: 'select', selectOptions: ['Pendiente', 'Parcial', 'Todo'] }}
+                    filter={colFilters['depositado']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'delivery', label: 'Delivery', filterType: 'number' }}
+                    filter={colFilters['delivery']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'pago', label: 'Pagó', filterType: 'select', selectOptions: ['Sí', 'No', 'Crédito', 'Trans. pend.'] }}
+                    filter={colFilters['pago']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'fCobro', label: 'F. Cobro', filterType: 'date' }}
+                    filter={colFilters['fCobro']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'formaPago', label: 'Forma Pago', filterType: 'select', selectOptions: ['Efectivo', 'Transferencia', 'Crédito'] }}
+                    filter={colFilters['formaPago']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'distancia', label: 'Dist.', filterType: 'number' }}
+                    filter={colFilters['distancia']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -983,18 +1186,189 @@ export default function BaseDatosPage() {
   )
 }
 
-function Th({ children }: { children: React.ReactNode }) {
-  return <th className="whitespace-nowrap px-3 py-2">{children}</th>
-}
-
 function Td({ children, colSpan }: { children?: React.ReactNode; colSpan?: number }) {
   return <td className="whitespace-nowrap px-3 py-2" colSpan={colSpan}>{children}</td>
 }
 
-function TabBtn({ children, active, onClick }: { children: React.ReactNode; active: boolean; onClick: () => void }) {
+// ─── Column filter dropdown ───────────────────────────────────────────────────
+
+function ColumnFilterDropdown({
+  label,
+  filter,
+  onApply,
+  onClose,
+  filterType,
+  selectOptions,
+}: {
+  label: string
+  filter?: ColumnFilter
+  onApply: (f: ColumnFilter | undefined) => void
+  onClose: () => void
+  filterType: 'text' | 'number' | 'date' | 'select'
+  selectOptions?: string[]
+}) {
+  const defaultOp: FilterOp = filterType === 'select' ? 'equals' : filterType === 'number' || filterType === 'date' ? 'range' : 'contains'
+  const [op, setOp] = React.useState<FilterOp>(filter?.op ?? defaultOp)
+  const [value, setValue] = React.useState(filter?.value ?? '')
+  const [min, setMin] = React.useState(filter?.min ?? '')
+  const [max, setMax] = React.useState(filter?.max ?? '')
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose()
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [onClose])
+
+  const ops: { value: FilterOp; label: string }[] =
+    filterType === 'select'
+      ? [{ value: 'equals', label: 'Igual a' }, { value: 'empty', label: 'Vacío' }, { value: 'not_empty', label: 'No vacío' }]
+      : filterType === 'number' || filterType === 'date'
+      ? [{ value: 'range', label: 'Rango' }, { value: 'equals', label: 'Igual a' }, { value: 'empty', label: 'Vacío' }, { value: 'not_empty', label: 'No vacío' }]
+      : [{ value: 'contains', label: 'Contiene' }, { value: 'equals', label: 'Igual a' }, { value: 'empty', label: 'Vacío' }, { value: 'not_empty', label: 'No vacío' }]
+
+  const handleApply = () => {
+    if (op === 'empty' || op === 'not_empty') { onApply({ op }); return }
+    if (op === 'range') { onApply({ op, min: min || undefined, max: max || undefined }); return }
+    onApply({ op, value })
+  }
+
   return (
-    <button onClick={onClick} className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition ${active ? 'bg-[#004aad] text-white' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
-      {children}
-    </button>
+    <div
+      ref={ref}
+      className="absolute left-0 top-full z-[60] mt-1 w-60 rounded-xl border border-gray-200 bg-white p-3 shadow-2xl"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="mb-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">{label}</div>
+
+      <select
+        value={op}
+        onChange={(e) => setOp(e.target.value as FilterOp)}
+        className="mb-2 w-full rounded-lg border px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-200"
+      >
+        {ops.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+
+      {(op === 'contains' || op === 'equals') && filterType !== 'select' && (
+        <input
+          autoFocus
+          type={filterType === 'number' ? 'number' : 'text'}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleApply() }}
+          placeholder="Valor..."
+          className="mb-2 w-full rounded-lg border px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-200"
+        />
+      )}
+      {op === 'equals' && filterType === 'select' && selectOptions && (
+        <select
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          className="mb-2 w-full rounded-lg border px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-200"
+        >
+          <option value="">— Seleccionar —</option>
+          {selectOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
+      )}
+      {op === 'range' && (
+        <div className="mb-2 flex gap-1.5">
+          <input
+            type={filterType === 'date' ? 'date' : 'number'}
+            value={min}
+            onChange={(e) => setMin(e.target.value)}
+            placeholder="Desde"
+            className="w-full rounded-lg border px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-200"
+          />
+          <input
+            type={filterType === 'date' ? 'date' : 'number'}
+            value={max}
+            onChange={(e) => setMax(e.target.value)}
+            placeholder="Hasta"
+            className="w-full rounded-lg border px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-200"
+          />
+        </div>
+      )}
+
+      <div className="flex gap-1.5">
+        <button
+          onClick={handleApply}
+          className="flex-1 rounded-lg bg-[#004aad] px-2 py-1.5 text-xs font-semibold text-white hover:bg-[#003d94] transition"
+        >
+          Aplicar
+        </button>
+        <button
+          onClick={() => { onApply(undefined); onClose() }}
+          className="rounded-lg border px-2 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition"
+        >
+          Limpiar
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Filterable table header ──────────────────────────────────────────────────
+
+function Th({
+  config,
+  filter,
+  openFilterCol,
+  sortCol,
+  sortDir,
+  onOpenFilter,
+  onApplyFilter,
+  onCloseFilter,
+  onSort,
+}: {
+  config: ThFilterConfig
+  filter?: ColumnFilter
+  openFilterCol?: string | null
+  sortCol?: string | null
+  sortDir?: 'asc' | 'desc'
+  onOpenFilter?: (key: string) => void
+  onApplyFilter?: (key: string, f: ColumnFilter | undefined) => void
+  onCloseFilter?: () => void
+  onSort?: (key: string) => void
+}) {
+  const active = !!filter
+  const isOpen = openFilterCol === config.colKey
+
+  return (
+    <th
+      className={`whitespace-nowrap px-3 py-2 transition-colors ${active ? 'bg-blue-50' : ''}`}
+      style={{ position: 'relative' }}
+    >
+      <div className="flex items-center gap-0.5">
+        <button
+          onClick={() => onSort?.(config.colKey)}
+          className={`flex items-center gap-0.5 font-semibold uppercase tracking-wide text-[11px] hover:text-gray-900 transition ${active ? 'text-blue-700' : 'text-gray-500'}`}
+        >
+          {config.label}
+          {sortCol === config.colKey && (
+            <span className="ml-0.5 text-[10px]">{sortDir === 'asc' ? '↑' : '↓'}</span>
+          )}
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onOpenFilter?.(isOpen ? '' : config.colKey) }}
+          title={`Filtrar por ${config.label}`}
+          className={`ml-0.5 flex items-center rounded p-0.5 transition hover:bg-gray-200 ${active ? 'bg-blue-100 text-blue-600' : 'text-gray-400'}`}
+        >
+          <Filter size={9} />
+        </button>
+      </div>
+      {isOpen && (
+        <ColumnFilterDropdown
+          label={config.label}
+          filter={filter}
+          filterType={config.filterType}
+          selectOptions={config.selectOptions}
+          onApply={(f) => { onApplyFilter?.(config.colKey, f); onCloseFilter?.() }}
+          onClose={() => onCloseFilter?.()}
+        />
+      )}
+    </th>
   )
 }

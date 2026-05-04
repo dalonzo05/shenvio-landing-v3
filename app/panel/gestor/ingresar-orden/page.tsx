@@ -43,6 +43,7 @@ type ComercioData = {
   address?: string
   puntosRetiro?: Record<string, any>
   requiereBolso?: boolean
+  tipoCliente?: 'contado' | 'credito'
 }
 
 type ClienteGuardado = {
@@ -96,6 +97,7 @@ type DraftEnvio = {
   precioCordobas?: number | null
   origenTipo?: TipoUbicacion
   destinoTipo?: TipoUbicacion
+  origenDireccion?: string
 }
 
 // ─── Cache & Tariff ──────────────────────────────────────────────────────────
@@ -1222,6 +1224,7 @@ export default function GestorIngresarOrdenPage() {
           ...prev,
           coord: d.origenCoord || null,
           tipoUbicacion: d.origenTipo || 'referencial',
+          ...(d.origenDireccion ? { direccion: d.origenDireccion } : {}),
         }))
       }
       if (d.destinoCoord) {
@@ -1291,6 +1294,7 @@ export default function GestorIngresarOrdenPage() {
   const [clienteSeleccionadoViajes, setClienteSeleccionadoViajes] = useState<number>(0)
   const didAutoLoadCliente = useRef(false)
   const didAutoLoadComercio = useRef(false)
+  const didAutoAdvanceFromCalc = useRef(false)
 
   // ── Auto-load comercio desde URL param ──
   useEffect(() => {
@@ -1324,6 +1328,16 @@ export default function GestorIngresarOrdenPage() {
     if (!selectedOwnerUid) return
     setPaso(2)
   }, [clienteSeleccionadoId, selectedOwnerUid, pendingClienteId, pendingComercioId])
+
+  // ── Saltar al paso 2 cuando viene solo comercioId desde la calculadora ──
+  useEffect(() => {
+    if (!pendingComercioId || pendingClienteId) return
+    if (!selectedOwnerUid) return
+    if (didAutoAdvanceFromCalc.current) return
+    try { if (!sessionStorage.getItem('draftEnvio')) return } catch {}
+    didAutoAdvanceFromCalc.current = true
+    setPaso(2)
+  }, [selectedOwnerUid, pendingComercioId, pendingClienteId])
 
   // ── Map lock + saved coord states ──
   const [retiroLocked, setRetiroLocked] = useState(false)
@@ -1390,6 +1404,14 @@ export default function GestorIngresarOrdenPage() {
     setRetiroLocked(false)
     setRetiroSavedCoord(null)
   }, [selectedOwnerUid])
+
+  useEffect(() => {
+    if (selectedOwnerData?.tipoCliente) {
+      setTipoCliente(selectedOwnerData.tipoCliente)
+    } else if (!selectedOwnerUid) {
+      setTipoCliente('contado')
+    }
+  }, [selectedOwnerData, selectedOwnerUid])
 
   useEffect(() => {
     if (didAutoSelect.current) return
@@ -2443,34 +2465,16 @@ export default function GestorIngresarOrdenPage() {
             </div>
           </SectionCard>
 
-            {/* Tipo de cliente */}
-            <div style={{ ...S.sectionCard, marginBottom: 16 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' as const, gap: 10 }}>
+            {/* Tipo de cliente (definido en el perfil del comercio) */}
+            <div style={{ ...S.sectionCard, marginBottom: 16, background: tipoCliente === 'credito' ? '#f5f3ff' : '#f9fafb', border: `1px solid ${tipoCliente === 'credito' ? '#ddd6fe' : '#e5e7eb'}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
                 <div>
-                  <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>Tipo de cliente</p>
-                  <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>Define cómo se cobra el delivery</p>
+                  <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>Tipo de pago</p>
+                  <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>Configurado en el perfil del comercio</p>
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {(['contado', 'credito'] as TipoCliente[]).map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => setTipoCliente(t)}
-                      style={{
-                        padding: '8px 16px',
-                        borderRadius: 10,
-                        fontSize: 13,
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                        border: `1px solid ${tipoCliente === t ? '#004aad' : '#e5e7eb'}`,
-                        background: tipoCliente === t ? '#004aad' : '#fff',
-                        color: tipoCliente === t ? '#fff' : '#374151',
-                      }}
-                    >
-                      {t === 'contado' ? '💵 Contado' : '🗓 Crédito'}
-                    </button>
-                  ))}
-                </div>
+                <span style={{ padding: '6px 14px', borderRadius: 10, fontSize: 13, fontWeight: 700, background: tipoCliente === 'credito' ? '#7c3aed' : '#374151', color: '#fff' }}>
+                  {tipoCliente === 'credito' ? '🗓 Crédito semanal' : '💵 Contado'}
+                </span>
               </div>
             </div>
 

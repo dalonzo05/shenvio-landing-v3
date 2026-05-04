@@ -702,6 +702,7 @@ export default function SolicitarEnvioPage() {
       const u = usuarioSnap.exists() ? (usuarioSnap.data() as any) : null
       setOwnerCompanyName(c?.name || c?.companyName || u?.name || u?.nombre || '')
       setComercioRequiereBolso(c?.requiereBolso ?? false)
+      if (c?.tipoCliente) setTipoCliente(c.tipoCliente)
     })
   }, [uid])
 
@@ -1554,20 +1555,16 @@ export default function SolicitarEnvioPage() {
       {/* ═══════════════════════════════════════════════════════════════ */}
       {paso === 3 && (
         <div>
-          {/* Tipo cliente */}
-          <div style={{ ...S.sectionCard, marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' as const, gap: 10 }}>
+          {/* Tipo cliente (definido en el perfil del comercio) */}
+          <div style={{ ...S.sectionCard, marginBottom: 16, background: tipoCliente === 'credito' ? '#f5f3ff' : '#f9fafb', border: `1px solid ${tipoCliente === 'credito' ? '#ddd6fe' : '#e5e7eb'}` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
               <div>
-                <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>Tipo de cliente</p>
-                <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>Define cómo se cobra el delivery</p>
+                <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>Tipo de pago</p>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>Configurado en el perfil de tu comercio</p>
               </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                {(['contado', 'credito'] as TipoCliente[]).map(t => (
-                  <button key={t} type="button" onClick={() => setTipoCliente(t)} style={{ padding: '8px 16px', borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: `1px solid ${tipoCliente === t ? '#004aad' : '#e5e7eb'}`, background: tipoCliente === t ? '#004aad' : '#fff', color: tipoCliente === t ? '#fff' : '#374151' }}>
-                    {t === 'contado' ? '💵 Contado' : '📅 Crédito'}
-                  </button>
-                ))}
-              </div>
+              <span style={{ padding: '6px 14px', borderRadius: 10, fontSize: 13, fontWeight: 700, background: tipoCliente === 'credito' ? '#7c3aed' : '#374151', color: '#fff' }}>
+                {tipoCliente === 'credito' ? '🗓 Crédito semanal' : '💵 Contado'}
+              </span>
             </div>
           </div>
 

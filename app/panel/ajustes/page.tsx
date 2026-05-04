@@ -166,6 +166,7 @@ export default function AjustesPage() {
   const [phone, setPhone] = useState('')
   const [address, setAddress] = useState('')
   const [accounts, setAccounts] = useState<BankAccount[]>([{ bank: '', number: '', holder: '', currency: 'NIO' }])
+  const [tipoCliente, setTipoCliente] = useState<'contado' | 'credito'>('contado')
 
   // Seguridad
   const [pwdCurrent, setPwdCurrent] = useState('')
@@ -210,6 +211,7 @@ export default function AjustesPage() {
         setPhone(c.phone ?? '')
         setAddress(c.address ?? '')
         setAccounts(Array.isArray(c.accounts) && c.accounts.length ? (c.accounts as BankAccount[]) : [{ bank: '', number: '', holder: '', currency: 'NIO' }])
+        if (c.tipoCliente) setTipoCliente(c.tipoCliente)
       }
     })()
   }, [authUser, profile?.name])
@@ -403,6 +405,24 @@ export default function AjustesPage() {
           <div style={{ gridColumn: '1 / -1' }}>
             <label style={S.label}>Dirección</label>
             <input value={address} readOnly style={{ ...S.input, background: '#f9fafb', color: '#6b7280', cursor: 'default' }} />
+          </div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label style={S.label}>Tipo de cliente</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                padding: '8px 16px', borderRadius: 10, fontSize: 14, fontWeight: 700,
+                background: tipoCliente === 'credito' ? '#7c3aed' : '#374151',
+                color: '#fff',
+              }}>
+                {tipoCliente === 'credito' ? '🗓 Crédito semanal' : '💵 Contado'}
+              </span>
+              <span style={{ fontSize: 12, color: '#9ca3af' }}>
+                {tipoCliente === 'credito'
+                  ? 'El delivery se cobra semanalmente a tu cuenta.'
+                  : 'El delivery se paga en cada envío.'}
+              </span>
+            </div>
           </div>
         </div>
 

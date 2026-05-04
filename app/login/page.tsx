@@ -23,11 +23,13 @@ async function getRedirectByRole(uid: string) {
   const ref = doc(db, 'usuarios', uid)
   const snap = await getDocFromServer(ref)
 
-  if (!snap.exists()) return '/panel'
+  if (!snap.exists()) {
+    throw new Error('No tenés acceso al sistema. Contacta al administrador.')
+  }
 
   const data = snap.data()
 
-  if (!data?.activo) {
+  if (data?.activo === false) {
     throw new Error('Tu usuario está inactivo. Contacta al administrador.')
   }
 
@@ -36,14 +38,15 @@ async function getRedirectByRole(uid: string) {
   if (rol === 'admin' || rol === 'gestor') return '/panel/gestor'
   if (rol === 'motorizado') return '/panel/motorizado'
   if (rol === 'Comercio') return '/panel/comercio'
-  return '/panel'
+
+  throw new Error('No tenés un rol asignado. Contacta al administrador.')
 }
 
 function LoginContent() {
   const router = useRouter()
   const search = useSearchParams()
   const next = search.get('next')
-  const { authUser, loading, signIn, resetPassword, resendVerification } = useUser()
+  const { authUser, loading, signIn } = useUser()
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -109,20 +112,19 @@ function LoginContent() {
       return
     }
     try {
-      await resetPassword(e)
-      alert('Te enviamos un enlace para restablecer tu contraseña.')
-    } catch (err: unknown) {
-      setError((err as Error)?.message || 'No se pudo enviar el correo de recuperación.')
-    }
-  }
-
-  const handleResend = async () => {
-    setError(null)
-    try {
-      await resendVerification()
-      alert('Si tu cuenta no estaba verificada, te enviamos un correo de verificación.')
-    } catch (err: unknown) {
-      setError((err as Error)?.message || 'No se pudo reenviar el correo.')
+      const res = await fetch('/api/send-reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: e }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setError(data.error || 'No se pudo enviar el correo de recuperación.')
+        return
+      }
+      alert('Te enviamos un enlace para restablecer tu contraseña. Revisá tu bandeja de entrada.')
+    } catch {
+      setError('No se pudo enviar el correo de recuperación.')
     }
   }
 
@@ -199,12 +201,9 @@ function LoginContent() {
             {submitting ? 'Ingresando…' : 'Iniciar sesión'}
           </button>
 
-          <div className="flex items-center justify-between text-sm text-gray-600 pt-2">
+          <div className="flex items-center justify-center text-sm text-gray-600 pt-2">
             <button type="button" onClick={handleForgot} className="hover:underline">
               Olvidé mi contraseña
-            </button>
-            <button type="button" onClick={handleResend} className="hover:underline">
-              Reenviar verificación
             </button>
           </div>
         </form>

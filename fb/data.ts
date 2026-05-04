@@ -8,7 +8,7 @@ export const idFromEmail = (email: string) =>
 
 /* ===== Tipos ===== */
 export type BankAccount = { bank: string; number: string; holder: string; currency: string } // 'NIO' | 'USD'
-export type CompanyPayload = { name?: string; phone?: string; address?: string; accounts?: BankAccount[] }
+export type CompanyPayload = { name?: string; phone?: string; address?: string; accounts?: BankAccount[]; tipoCliente?: 'contado' | 'credito' }
 
 /* ===== Helper: quitar undefined (mantiene FieldValue) ===== */
 function cleanUndefined(value: any): any {

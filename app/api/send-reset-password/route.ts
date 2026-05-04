@@ -1,25 +1,71 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { Resend } from 'resend'
 import { adminAuth } from '@/fb/admin'
+import { getFirestore, FieldValue } from 'firebase-admin/firestore'
+import { getApps, initializeApp, cert } from 'firebase-admin/app'
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
-export async function POST(req: NextRequest) {
-  const { nombre, email } = await req.json()
+function getAdminDb() {
+  const adminApp =
+    getApps().find((a) => a.name === 'admin') ??
+    initializeApp(
+      { credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON!)) },
+      'admin'
+    )
+  return getFirestore(adminApp)
+}
 
-  if (!email || !nombre) {
-    return NextResponse.json({ error: 'Faltan datos' }, { status: 400 })
+const MAX_ATTEMPTS = 3
+const WINDOW_MS = 24 * 60 * 60 * 1000 // 24 horas
+
+export async function POST(req: NextRequest) {
+  const { email } = await req.json()
+
+  if (!email) {
+    return NextResponse.json({ error: 'Correo requerido.' }, { status: 400 })
   }
 
-  const firebaseLink = await adminAuth.generatePasswordResetLink(email)
+  // Buscar usuario en Firebase Auth
+  let uid: string
+  try {
+    const user = await adminAuth.getUserByEmail(email.trim())
+    uid = user.uid
+  } catch {
+    // No revelar si el correo existe o no
+    return NextResponse.json({ ok: true })
+  }
+
+  // Leer doc de Firestore para obtener nombre y rate limit
+  const db = getAdminDb()
+  const ref = db.collection('usuarios').doc(uid)
+  const snap = await ref.get()
+  const data = snap.data() ?? {}
+  const nombre: string = data.name || data.nombre || ''
+
+  const ahora = Date.now()
+  const intentos: number[] = (data.resetAttempts ?? []).filter(
+    (ts: number) => ahora - ts < WINDOW_MS
+  )
+
+  if (intentos.length >= MAX_ATTEMPTS) {
+    return NextResponse.json(
+      { error: `Límite alcanzado. Podés volver a intentarlo en ${Math.ceil((intentos[0] + WINDOW_MS - ahora) / 3600000)} hora(s).` },
+      { status: 429 }
+    )
+  }
+
+  // Generar link personalizado
+  const firebaseLink = await adminAuth.generatePasswordResetLink(email.trim())
   const oobCode = new URL(firebaseLink).searchParams.get('oobCode')
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'https://shenvios.com'
   const resetLink = `${appUrl}/crear-password?oobCode=${oobCode}`
 
-  const { error } = await resend.emails.send({
+  // Enviar correo
+  const { error: mailError } = await resend.emails.send({
     from: 'StorkHub <noreply@shenvios.com>',
-    to: email,
-    subject: 'Tu cuenta en StorkHub está lista',
+    to: email.trim(),
+    subject: 'Restablecé tu contraseña de StorkHub',
     html: `
 <!DOCTYPE html>
 <html lang="es">
@@ -40,13 +86,10 @@ export async function POST(req: NextRequest) {
         <tr>
           <td style="padding:36px 40px 32px;">
             <p style="margin:0 0 8px;font-size:22px;font-weight:600;color:#18181b;line-height:1.3;">
-              ¡Hola, ${nombre}!
-            </p>
-            <p style="margin:0 0 6px;font-size:15px;color:#52525b;line-height:1.6;">
-              Estamos felices de que trabajes con nosotros. Tu cuenta en StorkHub ya está lista y te esperamos en el panel para gestionar tus envíos de forma rápida y sencilla.
+              ¡Hola${nombre ? `, ${nombre}` : ''}!
             </p>
             <p style="margin:0 0 28px;font-size:15px;color:#52525b;line-height:1.6;">
-              Para empezar, creá tu contraseña con el botón de abajo.
+              Recibimos una solicitud para restablecer la contraseña de tu cuenta en StorkHub. Hacé clic en el botón de abajo para crear una nueva contraseña y seguir gestionando tus envíos sin interrupciones.
             </p>
 
             <!-- CTA Button -->
@@ -55,7 +98,7 @@ export async function POST(req: NextRequest) {
                 <td style="background:#004aad;border-radius:6px;">
                   <a href="${resetLink}"
                      style="display:inline-block;padding:13px 28px;color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;letter-spacing:-0.1px;">
-                    Crear contraseña
+                    Restablecer contraseña
                   </a>
                 </td>
               </tr>
@@ -77,7 +120,7 @@ export async function POST(req: NextRequest) {
         <tr>
           <td style="padding:24px 40px 32px;">
             <p style="margin:0 0 12px;font-size:13px;color:#71717a;line-height:1.6;">
-              Este enlace es válido por <strong>24 horas</strong>. Si no esperabas este correo, podés ignorarlo — tu cuenta no tendrá acceso hasta que establezcas una contraseña.
+              Este enlace es válido por <strong>1 hora</strong>. Si no solicitaste este cambio, podés ignorar este correo — tu contraseña actual seguirá siendo la misma.
             </p>
             <p style="margin:0;font-size:13px;color:#a1a1aa;">
               Equipo StorkHub &middot; <a href="https://shenvios.com" style="color:#a1a1aa;text-decoration:none;">shenvios.com</a>
@@ -93,9 +136,15 @@ export async function POST(req: NextRequest) {
     `,
   })
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  if (mailError) {
+    return NextResponse.json({ error: 'No se pudo enviar el correo.' }, { status: 500 })
   }
+
+  // Guardar intento en Firestore
+  await ref.set(
+    { resetAttempts: FieldValue.arrayUnion(ahora) },
+    { merge: true }
+  )
 
   return NextResponse.json({ ok: true })
 }

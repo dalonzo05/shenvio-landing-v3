@@ -23,6 +23,6 @@ export default function PanelLayout({ children }: { children: React.ReactNode })
   if (loading || !authUser || !authUser.emailVerified) return null
 
   return (
-    <div className="min-h-screen bg-gray-50">{children}</div>
+    <div className="h-screen overflow-hidden bg-gray-50">{children}</div>
   )
 }
