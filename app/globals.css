@@ -61,3 +61,22 @@ body {
   from { opacity: 0.5; transform: translateX(-10%); }
   to   { opacity: 1;   transform: translateX(10%); }
 }
+
+/* ─── Notificaciones de nuevos envíos ───────────────────────────────────── */
+@keyframes toast-enter {
+  from { opacity: 0; transform: translateX(100%) scale(0.95); }
+  to   { opacity: 1; transform: translateX(0)    scale(1);    }
+}
+@keyframes toast-exit {
+  from { opacity: 1; transform: translateX(0)    scale(1);    }
+  to   { opacity: 0; transform: translateX(100%) scale(0.95); }
+}
+@keyframes toast-progress {
+  from { width: 100%; }
+  to   { width: 0%;   }
+}
+@keyframes pulse-ring {
+  0%   { transform: scale(1);   opacity: 1; }
+  70%  { transform: scale(1.8); opacity: 0; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
