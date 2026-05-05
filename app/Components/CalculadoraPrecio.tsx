@@ -95,8 +95,9 @@ async function guardarCotizacion(
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean }> = ({
+const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBase?: string }> = ({
   showBuscadorComercio = false,
+  solicitudBase = '/panel/gestor/ingresar-orden',
 }) => {
   const origenInputRef = useRef<HTMLInputElement | null>(null)
   const destinoInputRef = useRef<HTMLInputElement | null>(null)
@@ -134,7 +135,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean }> = ({
 
   const [puntosComercio, setPuntosComercio] = useState<PuntoComercio[]>([])
   const [loadingPuntosComercio, setLoadingPuntosComercio] = useState(false)
-  const [selectedBuscadorComercio, setSelectedBuscadorComercio] = useState<{ uid: string; direccion: string } | null>(null)
+  const [selectedBuscadorComercio, setSelectedBuscadorComercio] = useState<{ uid: string; direccion: string; zonaRetiro: string | null; puntoNombre: string } | null>(null)
 
   useEffect(() => {
     const u = auth.currentUser
@@ -440,7 +441,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean }> = ({
         origenTipo: 'referencial', destinoTipo: 'referencial',
       }))
     } catch (e) { console.warn('[calculadora] error guardando draftEnvio:', e) }
-    window.location.href = '/panel/gestor/ingresar-orden'
+    window.location.href = solicitudBase
   }
 
   const solicitarActual = () => {
@@ -457,10 +458,9 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean }> = ({
         origenDireccion: selectedBuscadorComercio?.direccion || origenFavData?.direccion || '',
       }))
     } catch (e) { console.warn('[calculadora] error guardando draftEnvio:', e) }
-    const base = '/panel/gestor/ingresar-orden'
     const url = selectedBuscadorComercio?.uid
-      ? `${base}?comercioId=${encodeURIComponent(selectedBuscadorComercio.uid)}`
-      : base
+      ? `${solicitudBase}?comercioId=${encodeURIComponent(selectedBuscadorComercio.uid)}`
+      : solicitudBase
     window.location.href = url
   }
 
@@ -508,21 +508,34 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean }> = ({
 
       {/* Buscador de comercios (solo gestor) */}
       {showBuscadorComercio && (
-        <BuscadorComercio
-          puntos={puntosComercio}
-          loading={loadingPuntosComercio}
-          onSelect={(p) => {
-            setOrigenCoord(p.coord)
-            setOrigenFavData(null)
-            setSelectedBuscadorComercio({ uid: p.comercioUid, direccion: p.direccion || p.puntoNombre })
-            if (origenInputRef.current) {
-              origenInputRef.current.value = p.puntoNombre || p.direccion
-            }
-            saveRecent('origen', { label: p.puntoNombre || p.direccion, ...p.coord })
-            setRecOrigen(loadRecents('origen'))
-            setShowSug({ o: false, d: false })
-          }}
-        />
+        <div>
+          <BuscadorComercio
+            puntos={puntosComercio}
+            loading={loadingPuntosComercio}
+            onSelect={(p) => {
+              setOrigenCoord(p.coord)
+              setOrigenFavData(null)
+              setSelectedBuscadorComercio({ uid: p.comercioUid, direccion: p.direccion || p.puntoNombre, zonaRetiro: p.zonaRetiro, puntoNombre: p.puntoNombre })
+              if (origenInputRef.current) {
+                origenInputRef.current.value = p.puntoNombre || p.direccion
+              }
+              saveRecent('origen', { label: p.puntoNombre || p.direccion, ...p.coord })
+              setRecOrigen(loadRecents('origen'))
+              setShowSug({ o: false, d: false })
+            }}
+          />
+          {selectedBuscadorComercio && (
+            <div className="flex items-center gap-2 -mt-2 mb-2 px-1">
+              <span className="text-[11px] text-gray-500">📦 Punto de retiro:</span>
+              <span className="text-[11px] font-semibold text-gray-700">{selectedBuscadorComercio.puntoNombre}</span>
+              {selectedBuscadorComercio.zonaRetiro && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold">
+                  {selectedBuscadorComercio.zonaRetiro}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {/* Error */}

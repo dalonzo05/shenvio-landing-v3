@@ -21,6 +21,7 @@ import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSe
 import ComercioSearchModal, { ComercioModalItem } from '@/app/Components/ComercioSearchModal'
 import StepIndicator from './_components/StepIndicator'
 import StickyOrderHeader from './_components/StickyOrderHeader'
+import StaleCalcWarning from '@/app/Components/calculadora/StaleCalcWarning'
 
 type LatLng = { lat: number; lng: number }
 type TipoUbicacion = 'referencial' | 'exacto'
@@ -1226,6 +1227,7 @@ export default function GestorIngresarOrdenPage() {
           tipoUbicacion: d.origenTipo || 'referencial',
           ...(d.origenDireccion ? { direccion: d.origenDireccion } : {}),
         }))
+        draftRetiroCoord.current = d.origenCoord
       }
       if (d.destinoCoord) {
         setEntrega((prev) => ({
@@ -1233,6 +1235,7 @@ export default function GestorIngresarOrdenPage() {
           coord: d.destinoCoord || null,
           tipoUbicacion: d.destinoTipo || 'referencial',
         }))
+        draftEntregaCoord.current = d.destinoCoord
       }
     } catch {}
   }, [])
@@ -1354,7 +1357,13 @@ export default function GestorIngresarOrdenPage() {
   const [calcError, setCalcError] = useState<string | null>(null)
   const lastCalcKey = useRef<string | null>(null)
 
-  // Limpiar precio cuando cambia alguna coordenada (evita precio desactualizado)
+  const [draftRetiroStale, setDraftRetiroStale] = useState(false)
+  const [draftEntregaStale, setDraftEntregaStale] = useState(false)
+  // Guardados en el useEffect del draft (arriba) cuando se aplican los coords originales
+  const draftRetiroCoord = useRef<{ lat: number; lng: number } | null>(null)
+  const draftEntregaCoord = useRef<{ lat: number; lng: number } | null>(null)
+
+  // Limpiar calcResult cuando cambia alguna coordenada
   const isFirstCoordRender = useRef(true)
   useEffect(() => {
     if (isFirstCoordRender.current) { isFirstCoordRender.current = false; return }
@@ -1364,6 +1373,18 @@ export default function GestorIngresarOrdenPage() {
       lastCalcKey.current = null
     }
   }, [retiro.coord, entrega.coord])
+
+  // Detectar si el usuario movió algún punto respecto al draft original
+  // Solo actúa cuando el ref del draft tiene valor (draft fue aplicado) y el coord es no-nulo
+  useEffect(() => {
+    if (!draftRetiroCoord.current || !retiro.coord) return
+    if (!coordsMatch(retiro.coord, draftRetiroCoord.current)) setDraftRetiroStale(true)
+  }, [retiro.coord])
+
+  useEffect(() => {
+    if (!draftEntregaCoord.current || !entrega.coord) return
+    if (!coordsMatch(entrega.coord, draftEntregaCoord.current)) setDraftEntregaStale(true)
+  }, [entrega.coord])
 
   const handleCalcularPrecio = () => {
     const o = retiro.coord
@@ -1378,8 +1399,13 @@ export default function GestorIngresarOrdenPage() {
     setCalcError(null)
     calcularDistancia(o, d)
       .then((result) => {
-        if (result) setCalcResult(result)
-        else setCalcError('No se pudo calcular la distancia entre estos puntos.')
+        if (result) {
+          setCalcResult(result)
+          setDraftRetiroStale(false)
+          setDraftEntregaStale(false)
+          draftRetiroCoord.current = retiro.coord
+          draftEntregaCoord.current = entrega.coord
+        } else setCalcError('No se pudo calcular la distancia entre estos puntos.')
       })
       .catch(() => setCalcError('Error al calcular distancia.'))
       .finally(() => setCalcLoading(false))
@@ -1403,6 +1429,9 @@ export default function GestorIngresarOrdenPage() {
     setRetiro(blankRetiro())
     setRetiroLocked(false)
     setRetiroSavedCoord(null)
+    // El sistema reseteó el retiro — el ref de draft debe seguir ese cambio
+    // para que el stale watcher no lo detecte como modificación del usuario
+    draftRetiroCoord.current = null
   }, [selectedOwnerUid])
 
   useEffect(() => {
@@ -1420,6 +1449,9 @@ export default function GestorIngresarOrdenPage() {
     if (first) {
       seleccionarFavorito(first)
       didAutoSelect.current = true
+      // El sistema auto-seleccionó el primer favorito — actualizamos el baseline
+      // para que solo cambios posteriores del usuario se detecten como stale
+      draftRetiroCoord.current = first.coord || null
     }
   }, [puntosFavoritos])
 
@@ -1499,6 +1531,8 @@ export default function GestorIngresarOrdenPage() {
     try { sessionStorage.removeItem('draftEnvio') } catch {}
     setDraft(null)
     setCalcResult(null)
+    setDraftRetiroStale(false)
+    setDraftEntregaStale(false)
     lastCalcKey.current = null
     setMsg({ type: 'info', text: 'Cotización quitada. El sistema calculará el precio con los puntos del mapa.' })
   }
@@ -2350,7 +2384,7 @@ export default function GestorIngresarOrdenPage() {
                 disabled={calcLoading}
                 style={{ background: '#004aad', border: 'none', borderRadius: 10, padding: '8px 16px', color: '#fff', fontSize: 13, fontWeight: 700, cursor: calcLoading ? 'not-allowed' : 'pointer', opacity: calcLoading ? 0.7 : 1 }}
               >
-                {calcLoading ? '⏳ Calculando...' : calcResult ? '🔄 Recalcular' : '🧮 Calcular precio'}
+                {calcLoading ? '⏳ Calculando...' : calcResult ? '🔄 Recalcular' : (draftRetiroStale || draftEntregaStale) ? '🔄 Recalcular viaje' : '🧮 Calcular precio'}
               </button>
             )}
           </div>
@@ -2378,6 +2412,13 @@ export default function GestorIngresarOrdenPage() {
               </div>
               <span style={{ fontSize: 32 }}>🧮</span>
             </div>
+          ) : (draftRetiroStale || draftEntregaStale) && precioSugerido ? (
+            <StaleCalcWarning
+              retiroStale={draftRetiroStale}
+              entregaStale={draftEntregaStale}
+              precioAnterior={precioSugerido}
+              distanciaAnteriorKm={draft?.distanciaKm}
+            />
           ) : precioSugerido ? (
             <div style={{ background: '#fff', border: '1px solid #bbf7d0', borderRadius: 12, padding: '14px 16px' }}>
               <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>

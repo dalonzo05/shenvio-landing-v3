@@ -119,7 +119,25 @@ export type SolicitudDetalle = {
   macroZonaRetiroNombre?: string | null
   macroZonaEntregaId?: string | null
   macroZonaEntregaNombre?: string | null
+  rechazo?: {
+    motivoCodigo?: string
+    motivoTexto?: string
+    detalle?: string | null
+    rechazadoPorUid?: string | null
+    rechazadoAt?: any
+    visibleParaComercio?: boolean
+  }
 }
+
+const MOTIVOS_RECHAZO = [
+  { codigo: 'fuera_cobertura', label: 'Fuera de cobertura' },
+  { codigo: 'direccion_incompleta', label: 'Dirección incompleta o poco clara' },
+  { codigo: 'precio_no_aceptado', label: 'Precio no aceptado' },
+  { codigo: 'sin_motorizado_disponible', label: 'Sin motorizado disponible' },
+  { codigo: 'pedido_duplicado', label: 'Pedido duplicado' },
+  { codigo: 'problema_comercio_cliente', label: 'Problema con la información del comercio o cliente' },
+  { codigo: 'otro', label: 'Otro motivo' },
+]
 
 type Motorizado = MotorizadoConRanking
 
@@ -264,6 +282,10 @@ export function SolicitudDrawer({
   const [ordenesActivas, setOrdenesActivas] = useState<OrdenActivaRanking[]>([])
   const [loadingOrdenes, setLoadingOrdenes] = useState(false)
   const [comercioRequiereBolso, setComercioRequiereBolso] = useState<boolean | null>(null)
+  const [showRechazarModal, setShowRechazarModal] = useState(false)
+  const [motivoCodigo, setMotivoCodigo] = useState('')
+  const [motivoTexto, setMotivoTexto] = useState('')
+  const [detalleRechazo, setDetalleRechazo] = useState('')
 
   useEffect(() => {
     const t = setInterval(() => setTick(Date.now()), 1000)
@@ -414,6 +436,36 @@ export function SolicitudDrawer({
     try {
       await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() } as any)
     } catch { setErr('No se pudo rebotar.') }
+  }
+
+  const rechazarSolicitud = async () => {
+    if (!solicitud) return
+    if (!motivoCodigo) { setErr('Debes seleccionar un motivo.'); return }
+    if (motivoCodigo === 'otro' && !detalleRechazo.trim()) {
+      setErr('El detalle es obligatorio cuando el motivo es "Otro".')
+      return
+    }
+    try {
+      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+        estado: 'rechazada',
+        rechazo: {
+          motivoCodigo,
+          motivoTexto,
+          detalle: detalleRechazo.trim() || null,
+          rechazadoPorUid: auth.currentUser?.uid || null,
+          rechazadoAt: serverTimestamp(),
+          visibleParaComercio: true,
+        },
+        asignacion: null,
+        updatedAt: serverTimestamp(),
+        'historial.rechazadaAt': serverTimestamp(),
+      })
+      setShowRechazarModal(false)
+      setMotivoCodigo('')
+      setMotivoTexto('')
+      setDetalleRechazo('')
+      setErr(null)
+    } catch { setErr('No se pudo rechazar la orden.') }
   }
 
   const retiroMaps = solicitud ? getBestMapsUrl(solicitud, 'recoleccion') : null
@@ -799,6 +851,24 @@ export function SolicitudDrawer({
                   </Section>
                 )}
 
+              {/* Tarjeta de rechazo */}
+              {estado === 'rechazada' && solicitud?.rechazo && (
+                <Section title="Rechazo" accent="red">
+                  <div className="rounded-xl border border-red-200 bg-red-50 p-3 space-y-1">
+                    <p className="text-sm font-semibold text-red-700">Orden rechazada</p>
+                    {solicitud.rechazo.motivoTexto && (
+                      <p className="text-xs text-red-600">Motivo: {solicitud.rechazo.motivoTexto}</p>
+                    )}
+                    {solicitud.rechazo.detalle && (
+                      <p className="text-xs text-red-600">Detalle: {solicitud.rechazo.detalle}</p>
+                    )}
+                    {solicitud.rechazo.rechazadoAt && (
+                      <p className="text-xs text-gray-400">{formatDateTime(solicitud.rechazo.rechazadoAt)}</p>
+                    )}
+                  </div>
+                </Section>
+              )}
+
               {/* Decisión rápida */}
               <Section title="Decisión rápida" accent="blue">
                 <div className="space-y-3">
@@ -909,7 +979,7 @@ export function SolicitudDrawer({
 
                     {estado === 'pendiente_confirmacion' && (
                       <button
-                        onClick={() => cambiarEstado('rechazada')}
+                        onClick={() => { setShowRechazarModal(true); setErr(null) }}
                         className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-700 hover:bg-red-100 transition"
                       >
                         <XCircle size={15} /> Rechazar orden
@@ -967,6 +1037,70 @@ export function SolicitudDrawer({
           )}
         </div>
       </div>
+
+      {/* Modal de rechazo */}
+      {showRechazarModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-[2px] p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-gray-200 bg-white shadow-xl">
+            <div className="border-b border-gray-100 px-5 py-4">
+              <h2 className="text-sm font-bold text-gray-900">Rechazar orden</h2>
+              <p className="text-xs text-gray-400 mt-0.5">Selecciona el motivo del rechazo. Será visible para el comercio.</p>
+            </div>
+            <div className="p-5 space-y-4">
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-500 mb-1.5">
+                  Motivo <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={motivoCodigo}
+                  onChange={(e) => {
+                    const found = MOTIVOS_RECHAZO.find((m) => m.codigo === e.target.value)
+                    setMotivoCodigo(e.target.value)
+                    setMotivoTexto(found?.label ?? '')
+                  }}
+                  className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-800 focus:border-[#004aad] focus:outline-none"
+                >
+                  <option value="">— Seleccionar motivo —</option>
+                  {MOTIVOS_RECHAZO.map((m) => (
+                    <option key={m.codigo} value={m.codigo}>{m.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-500 mb-1.5">
+                  Detalle {motivoCodigo === 'otro' && <span className="text-red-500">*</span>}
+                  {motivoCodigo && motivoCodigo !== 'otro' && <span className="text-gray-400 normal-case font-normal"> (opcional)</span>}
+                </label>
+                <textarea
+                  value={detalleRechazo}
+                  onChange={(e) => setDetalleRechazo(e.target.value)}
+                  rows={3}
+                  placeholder={motivoCodigo === 'otro' ? 'Describe el motivo…' : 'Información adicional (opcional)'}
+                  className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-800 placeholder-gray-300 focus:border-[#004aad] focus:outline-none resize-none"
+                />
+              </div>
+              {err && (
+                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{err}</p>
+              )}
+            </div>
+            <div className="flex gap-2 border-t border-gray-100 px-5 py-4">
+              <button
+                onClick={() => { setShowRechazarModal(false); setMotivoCodigo(''); setMotivoTexto(''); setDetalleRechazo(''); setErr(null) }}
+                className="flex-1 rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={rechazarSolicitud}
+                disabled={!motivoCodigo}
+                className="flex-1 rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Confirmar rechazo
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
 }

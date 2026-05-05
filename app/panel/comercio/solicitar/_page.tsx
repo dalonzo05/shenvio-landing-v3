@@ -22,6 +22,8 @@ import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import StepIndicator from './_components/StepIndicator'
+import StickyOrderHeader from './_components/StickyOrderHeader'
+import StickyBottomNav from './_components/StickyBottomNav'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1147,63 +1149,27 @@ export default function SolicitarEnvioPage() {
   const todayISO = new Date().toISOString().split('T')[0]
 
   // ── Step validation hints ──
-  const paso1Valido = puedeAvanzar(1)
-  const paso2Valido = puedeAvanzar(2)
-  const paso3Valido = puedeAvanzar(3)
+
 
   return (
-    <div style={{ maxWidth: 640, margin: '0 auto', padding: '0 0 48px', fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
+    <div style={{ maxWidth: 640, margin: '0 auto', padding: '52px 0 80px', fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
+
+      {/* ── Sticky header fijo en la parte superior ── */}
+      <StickyOrderHeader
+        precio={precioEfectivo}
+        distanciaKm={distanciaEfectiva}
+        zonaRetiro={zonaInfo.retiroNombre}
+        zonaEntrega={zonaInfo.entregaNombre}
+        retiroNombre={retiro.nombre || null}
+        camposFaltantes={camposFaltantes.length}
+        formularioCompleto={formularioCompleto}
+      />
 
       {/* ── Header ── */}
       <div style={{ marginBottom: 8 }}>
         <h1 style={{ fontSize: 24, fontWeight: 800, color: '#111827', margin: '0 0 2px', letterSpacing: -0.5 }}>Solicitar envío</h1>
         <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>Completá los datos en 4 pasos.</p>
       </div>
-
-      {/* ── Sticky mini status bar ── */}
-      {(precioEfectivo || distanciaEfectiva || retiro.nombre || entrega.nombre) && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' as const,
-          background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12,
-          padding: '10px 14px', marginBottom: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
-        }}>
-          {retiro.nombre && (
-            <span style={{ fontSize: 12, color: '#374151', fontWeight: 600 }}>
-              📦 {retiro.nombre.length > 18 ? retiro.nombre.slice(0, 18) + '…' : retiro.nombre}
-            </span>
-          )}
-          {retiro.nombre && entrega.nombre && <span style={{ color: '#d1d5db', fontSize: 14 }}>→</span>}
-          {entrega.nombre && (
-            <span style={{ fontSize: 12, color: '#374151', fontWeight: 600 }}>
-              🏠 {entrega.nombre.length > 18 ? entrega.nombre.slice(0, 18) + '…' : entrega.nombre}
-            </span>
-          )}
-          {/* Zonas */}
-          {(zonaInfo.retiroNombre || zonaInfo.entregaNombre) && (
-            <span style={{ fontSize: 11, color: '#6b7280', background: '#f3f4f6', borderRadius: 6, padding: '2px 7px' }}>
-              {zonaInfo.retiroNombre && zonaInfo.entregaNombre
-                ? `${zonaInfo.retiroNombre} → ${zonaInfo.entregaNombre}`
-                : zonaInfo.retiroNombre || zonaInfo.entregaNombre}
-            </span>
-          )}
-          {distanciaEfectiva && (
-            <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 'auto' }}>📏 {distanciaEfectiva.toFixed(1)} km</span>
-          )}
-          {precioEfectivo && (
-            <span style={{ fontSize: 13, fontWeight: 800, color: '#004aad' }}>
-              {precioEfectivo === -1 ? 'Consultar' : `C$ ${precioEfectivo}`}
-            </span>
-          )}
-          <span style={{
-            fontSize: 11, fontWeight: 700, padding: '3px 8px', borderRadius: 20,
-            background: formularioCompleto ? '#f0fdf4' : '#fffbe6',
-            color: formularioCompleto ? '#16a34a' : '#d46b08',
-            border: `1px solid ${formularioCompleto ? '#bbf7d0' : '#ffe58f'}`,
-          }}>
-            {formularioCompleto ? '✅ Lista' : `⚠️ ${camposFaltantes.length} pendiente${camposFaltantes.length > 1 ? 's' : ''}`}
-          </span>
-        </div>
-      )}
 
       {/* ── Success message ── */}
       {msg?.type === 'success' && (
@@ -1342,17 +1308,6 @@ export default function SolicitarEnvioPage() {
             )}
           </SectionCard>
 
-          {/* Nav buttons */}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
-            <button
-              type="button"
-              onClick={handleSiguiente}
-              disabled={!paso1Valido}
-              style={{ padding: '14px 28px', borderRadius: 14, border: 'none', background: paso1Valido ? '#004aad' : '#e5e7eb', color: paso1Valido ? '#fff' : '#9ca3af', fontSize: 15, fontWeight: 800, cursor: paso1Valido ? 'pointer' : 'not-allowed', width: '100%' }}
-            >
-              {paso1Valido ? 'Siguiente →' : '⚠️ Completá los datos de retiro'}
-            </button>
-          </div>
         </div>
       )}
 
@@ -1533,20 +1488,6 @@ export default function SolicitarEnvioPage() {
             </div>
           </SectionCard>
 
-          {/* Nav buttons */}
-          <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
-            <button type="button" onClick={handleAtras} style={{ ...S.btnOutline, padding: '14px 20px', borderRadius: 14, fontSize: 14, fontWeight: 700, flex: '0 0 auto' }}>
-              ← Atrás
-            </button>
-            <button
-              type="button"
-              onClick={handleSiguiente}
-              disabled={!paso2Valido}
-              style={{ padding: '14px 28px', borderRadius: 14, border: 'none', background: paso2Valido ? '#004aad' : '#e5e7eb', color: paso2Valido ? '#fff' : '#9ca3af', fontSize: 15, fontWeight: 800, cursor: paso2Valido ? 'pointer' : 'not-allowed', flex: 1 }}
-            >
-              {paso2Valido ? 'Siguiente →' : '⚠️ Completá los datos de entrega'}
-            </button>
-          </div>
         </div>
       )}
 
@@ -1656,20 +1597,6 @@ export default function SolicitarEnvioPage() {
             </div>
           </SectionCard>
 
-          {/* Nav buttons */}
-          <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
-            <button type="button" onClick={handleAtras} style={{ ...S.btnOutline, padding: '14px 20px', borderRadius: 14, fontSize: 14, fontWeight: 700, flex: '0 0 auto' }}>
-              ← Atrás
-            </button>
-            <button
-              type="button"
-              onClick={handleSiguiente}
-              disabled={!paso3Valido}
-              style={{ padding: '14px 28px', borderRadius: 14, border: 'none', background: paso3Valido ? '#004aad' : '#e5e7eb', color: paso3Valido ? '#fff' : '#9ca3af', fontSize: 15, fontWeight: 800, cursor: paso3Valido ? 'pointer' : 'not-allowed', flex: 1 }}
-            >
-              {paso3Valido ? 'Revisar y confirmar →' : '⚠️ Elegí quién paga el delivery'}
-            </button>
-          </div>
         </div>
       )}
 
@@ -1889,27 +1816,19 @@ export default function SolicitarEnvioPage() {
             </div>
           )}
 
-          {/* Nav buttons */}
-          <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
-            <button type="button" onClick={handleAtras} style={{ ...S.btnOutline, padding: '14px 20px', borderRadius: 14, fontSize: 14, fontWeight: 700, flex: '0 0 auto' }}>
-              ← Atrás
-            </button>
-            <button
-              type="button"
-              onClick={handleGuardar}
-              disabled={saving}
-              style={{
-                padding: '14px 28px', borderRadius: 14, border: 'none',
-                background: formularioCompleto ? '#004aad' : '#9ca3af',
-                color: '#fff', fontSize: 15, fontWeight: 800,
-                cursor: formularioCompleto ? 'pointer' : 'not-allowed', flex: 1,
-              }}
-            >
-              {saving ? 'Guardando...' : formularioCompleto ? '✓ Crear orden' : '⚠️ Completar info'}
-            </button>
-          </div>
         </div>
       )}
+
+      {/* ── Sticky bottom nav ── */}
+      <StickyBottomNav
+        paso={paso}
+        puedeAvanzar={puedeAvanzar(paso)}
+        formularioCompleto={formularioCompleto}
+        saving={saving}
+        onAtras={handleAtras}
+        onSiguiente={handleSiguiente}
+        onGuardar={handleGuardar}
+      />
 
       {/* ── MODAL BUSCADOR DE CLIENTES ── */}
       <ClienteSearchModal

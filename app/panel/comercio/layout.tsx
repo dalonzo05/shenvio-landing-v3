@@ -48,7 +48,7 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
   if (loading) return <div className="w-full px-6 py-6 text-sm text-gray-600">Cargando...</div>
 
   return (
-    <div className="flex h-screen w-full bg-gray-50">
+    <div className="flex h-screen w-full bg-gray-50" style={{ '--sidebar-width': collapsed ? '84px' : '250px' } as React.CSSProperties}>
       {/* Sidebar — solo desktop */}
       <aside className={`hidden md:flex relative border-r border-gray-200 bg-white transition-all duration-300 ease-in-out flex-col ${collapsed ? 'w-[84px]' : 'w-[250px]'}`}>
         <div className="flex h-full flex-col">
@@ -67,7 +67,7 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
           {/* Toggle button */}
           <button
             onClick={() => setCollapsed((v) => !v)}
-            className="absolute -right-3 top-5 z-20 flex h-7 w-7 items-center justify-center rounded-full border border-gray-200 bg-white shadow-sm hover:bg-gray-50"
+            className="absolute -right-3 top-1/2 -translate-y-1/2 z-20 flex h-7 w-7 items-center justify-center rounded-full border border-gray-200 bg-white shadow-sm hover:bg-gray-50"
             title={collapsed ? 'Expandir menú' : 'Colapsar menú'}
           >
             {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}

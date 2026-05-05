@@ -144,14 +144,17 @@ export default function GestorClientesPage() {
 
   // Filtered + deduplicated (group by celular, show best doc per celular)
   const filtered = useMemo(() => {
+    // Solo clientes con al menos 1 viaje entregado
+    const conViajes = clientes.filter((c) => (c.totalViajes ?? 0) > 0)
+
     const q = query2.trim().toLowerCase()
     const matching = q
-      ? clientes.filter((c) =>
+      ? conViajes.filter((c) =>
           (c.nombre || '').toLowerCase().includes(q) ||
           (c.celular || '').includes(q) ||
           (c.direccion || '').toLowerCase().includes(q)
         )
-      : clientes
+      : conViajes
 
     // Group by celular — if same celular has multiple docs (per comercio), show the one with highest viajes
     const byPhone = new Map<string, ClienteEnvio>()

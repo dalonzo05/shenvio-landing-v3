@@ -35,6 +35,12 @@ type Solicitud = {
     retiro?: { url: string; pathStorage: string }
     entrega?: { url: string; pathStorage: string }
   }
+  rechazo?: {
+    motivoTexto?: string
+    detalle?: string | null
+    rechazadoAt?: any
+    visibleParaComercio?: boolean
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -48,6 +54,7 @@ const estadoLabel: Record<string, string> = {
   en_camino_entrega: 'En camino a entrega',
   entregado: 'Entregada ✓',
   cancelada: 'Cancelada',
+  rechazada: 'Solicitud rechazada',
 }
 
 const estadoCls: Record<string, string> = {
@@ -59,6 +66,7 @@ const estadoCls: Record<string, string> = {
   en_camino_entrega: 'bg-purple-50 text-purple-700',
   entregado: 'bg-green-50 text-green-700',
   cancelada: 'bg-red-50 text-red-600',
+  rechazada: 'bg-red-50 text-red-700',
 }
 
 function tsToDate(v: any): Date | null {
@@ -178,6 +186,22 @@ export default function OrdenDetallePage() {
           </div>
         )}
       </div>
+
+      {/* Rechazo */}
+      {orden.estado === 'rechazada' && (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 space-y-1.5">
+          <p className="text-sm font-bold text-red-700">Tu solicitud fue rechazada</p>
+          {orden.rechazo?.visibleParaComercio && orden.rechazo?.motivoTexto && (
+            <p className="text-sm text-red-600">Motivo: {orden.rechazo.motivoTexto}</p>
+          )}
+          {orden.rechazo?.visibleParaComercio && orden.rechazo?.detalle && (
+            <p className="text-sm text-red-600">Detalle: {orden.rechazo.detalle}</p>
+          )}
+          <p className="text-xs text-red-400 mt-1">
+            Si tienes dudas, comunícate con el equipo de soporte.
+          </p>
+        </div>
+      )}
 
       {/* Cobros */}
       <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-3">
