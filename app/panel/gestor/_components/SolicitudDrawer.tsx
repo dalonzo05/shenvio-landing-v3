@@ -438,6 +438,19 @@ export function SolicitudDrawer({
     } catch { setErr('No se pudo rebotar.') }
   }
 
+  const reactivarOrden = async () => {
+    if (!solicitud) return
+    try {
+      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+        estado: 'pendiente_confirmacion',
+        rechazo: null,
+        asignacion: null,
+        updatedAt: serverTimestamp(),
+      } as any)
+      setErr(null)
+    } catch { setErr('No se pudo reactivar la orden.') }
+  }
+
   const rechazarSolicitud = async () => {
     if (!solicitud) return
     if (!motivoCodigo) { setErr('Debes seleccionar un motivo.'); return }
@@ -869,7 +882,30 @@ export function SolicitudDrawer({
                 </Section>
               )}
 
-              {/* Decisión rápida */}
+              {/* Reactivar — solo para estados terminales recuperables */}
+              {(estado === 'rechazada' || estado === 'cancelada') && (
+                <Section title="Acciones" accent="gray">
+                  <div className="space-y-2">
+                    <p className="text-xs text-gray-500">
+                      {estado === 'rechazada'
+                        ? 'Esta orden fue rechazada. Puedes reactivarla para volver a evaluarla.'
+                        : 'Esta orden fue cancelada. Puedes reactivarla para volver a procesarla.'}
+                    </p>
+                    <button
+                      onClick={reactivarOrden}
+                      className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-700 hover:bg-amber-100 transition"
+                    >
+                      <RotateCcw size={15} /> Reactivar orden
+                    </button>
+                    {err && (
+                      <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{err}</div>
+                    )}
+                  </div>
+                </Section>
+              )}
+
+              {/* Decisión rápida — oculta para estados terminales */}
+              {estado !== 'rechazada' && estado !== 'cancelada' && estado !== 'entregado' && (
               <Section title="Decisión rápida" accent="blue">
                 <div className="space-y-3">
                   <div>
@@ -1032,6 +1068,7 @@ export function SolicitudDrawer({
                   )}
                 </div>
               </Section>
+              )}
 
             </div>
           )}
