@@ -7,7 +7,6 @@ import {
   doc,
   getDoc,
   getDocs,
-  increment,
   limit,
   onSnapshot,
   orderBy,
@@ -24,6 +23,7 @@ import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSe
 import StepIndicator from './_components/StepIndicator'
 import StickyOrderHeader from './_components/StickyOrderHeader'
 import StickyBottomNav from './_components/StickyBottomNav'
+import ToastOrdenCreada from './_components/ToastOrdenCreada'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -42,6 +42,7 @@ type ClienteGuardado = {
   coord?: LatLng
   tipoUbicacion?: TipoUbicacion
   totalViajes?: number
+  totalEntregados?: number
 }
 
 type PuntoFavorito = {
@@ -167,7 +168,7 @@ async function guardarClienteEntrega(uid: string, data: Omit<ClienteGuardado, 'i
     celular: data.celular.trim(),
     comercioUid: uid,
     updatedAt: serverTimestamp(),
-    totalViajes: increment(1),
+    // totalViajes se incrementa solo cuando la orden pasa a 'entregado' en SolicitudDrawer
   }
   if (data.direccion?.trim()) payload.direccion = data.direccion.trim()
   if (data.coord) payload.coord = data.coord
@@ -756,6 +757,7 @@ export default function SolicitarEnvioPage() {
   const [detalle, setDetalle] = useState('')
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
+  const [showOrdenToast, setShowOrdenToast] = useState(false)
 
   const [showNotaRetiro, setShowNotaRetiro] = useState(false)
   const [notaRetiro, setNotaRetiro] = useState('')
@@ -785,7 +787,7 @@ export default function SolicitarEnvioPage() {
   const [savingNewFav, setSavingNewFav] = useState(false)
 
   // ── Trip history detection ──
-  const [viajeAnterior, setViajeAnterior] = useState<{ precio: number } | null>(null)
+  const [viajeAnterior, setViajeAnterior] = useState<{ precio: number; tipo: 'entregado' | 'cotizacion' } | null>(null)
   useEffect(() => {
     if (!uid || !retiro.coord || !entrega.coord) { setViajeAnterior(null); return }
     const o = retiro.coord
@@ -800,17 +802,20 @@ export default function SolicitarEnvioPage() {
         getDocs(query(collection(db, 'solicitudes_envio'), where('userId', '==', uid), orderBy('createdAt', 'desc'), limit(20))),
       ])
       if (cancelled) return
+      // Primero buscar en solicitudes realmente entregadas (viaje similar real)
+      for (const d2 of solSnap.docs) {
+        const r = d2.data() as any
+        if (r.estado !== 'entregado') continue
+        if (matchCoord(r.recoleccion?.coord, o) && matchCoord(r.entrega?.coord, d)) {
+          const p = r.confirmacion?.precioFinalCordobas ?? r.cotizacion?.precioCordobas ?? r.pagoDelivery?.montoSugerido
+          if (typeof p === 'number') { setViajeAnterior({ precio: p, tipo: 'entregado' }); return }
+        }
+      }
+      // Fallback: cotización previa guardada (no es un viaje realizado)
       for (const d2 of cotSnap.docs) {
         const r = d2.data() as any
         if (matchCoord(r.origenCoord, o) && matchCoord(r.destinoCoord, d) && typeof r.precioCordobas === 'number') {
-          setViajeAnterior({ precio: r.precioCordobas }); return
-        }
-      }
-      for (const d2 of solSnap.docs) {
-        const r = d2.data() as any
-        if (matchCoord(r.recoleccion?.coord, o) && matchCoord(r.entrega?.coord, d)) {
-          const p = r.confirmacion?.precioFinalCordobas ?? r.cotizacion?.precioCordobas ?? r.pagoDelivery?.montoSugerido
-          if (typeof p === 'number') { setViajeAnterior({ precio: p }); return }
+          setViajeAnterior({ precio: r.precioCordobas, tipo: 'cotizacion' }); return
         }
       }
       setViajeAnterior(null)
@@ -888,7 +893,7 @@ export default function SolicitarEnvioPage() {
       .finally(() => setCalcLoading(false))
   }
 
-  const precioEfectivo = calcResult?.precio ?? precioSugerido
+  const precioEfectivo = calcResult?.precio ?? precioSugerido ?? (viajeAnterior?.tipo === 'entregado' ? viajeAnterior.precio : null)
   const distanciaEfectiva = calcResult?.km ?? draft?.distanciaKm ?? null
 
   useEffect(() => {
@@ -1057,7 +1062,10 @@ export default function SolicitarEnvioPage() {
               origenTextoGoogle: null,
               destinoTextoGoogle: null,
             }
-          : { origenTextoGoogle: null, destinoTextoGoogle: null, origenCoord: null, destinoCoord: null, distanciaKm: null, precioSugerido: null },
+          : {
+              origenTextoGoogle: null, destinoTextoGoogle: null, origenCoord: null, destinoCoord: null, distanciaKm: null, precioSugerido: null,
+              ...(viajeAnterior?.tipo === 'entregado' ? { fuentePrecio: 'viaje_anterior' } : {}),
+            },
         recoleccion: {
           favoritoKey: retiro.favKey,
           nombreApellido: retiro.nombre.trim(),
@@ -1121,6 +1129,7 @@ export default function SolicitarEnvioPage() {
       })
 
       setMsg({ type: 'success', text: '✅ Solicitud enviada. El gestor la confirmará pronto.' })
+      setShowOrdenToast(true)
       setPaso(1)
 
       const firstFav = puntosFavoritos.find(f => f.key !== '__otro__')
@@ -1563,7 +1572,7 @@ export default function SolicitarEnvioPage() {
                           value: 'deducir_del_cobro',
                           label: 'Sí, deducir',
                           desc: montoCE !== '' && montoDelivery > 0
-                            ? `El destinatario paga solo C$ ${montoProducto} (el delivery sale de ahí). Se te depositará C$ ${montoADepositarComercio}.`
+                            ? `El destinatario paga solo C$ ${montoProducto} (el delivery sale de ahí). Se te depositará C$ ${Math.max(montoProducto - montoDelivery, 0)}.`
                             : 'El costo del delivery se descuenta del cobro del producto. El destinatario paga menos.',
                         },
                       ] as { value: string; label: string; desc: string }[]).map(opt => (
@@ -1657,10 +1666,26 @@ export default function SolicitarEnvioPage() {
                 </div>
               )}
               {!tieneCotizacion && viajeAnterior && !calcResult && (
-                <>
-                  <p style={{ fontSize: 13, fontWeight: 700, color: '#854d0e', margin: '0 0 2px' }}>🔍 Viaje similar encontrado</p>
-                  <p style={{ fontSize: 12, color: '#713f12', margin: 0 }}>Costo registrado: <strong>C$ {viajeAnterior.precio}</strong>. Calculá para confirmar.</p>
-                </>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap' as const, gap: 8 }}>
+                  <div>
+                    {viajeAnterior.tipo === 'entregado' ? (
+                      <>
+                        <p style={{ fontSize: 13, fontWeight: 700, color: '#15803d', margin: '0 0 2px' }}>🔍 Viaje similar encontrado</p>
+                        <p style={{ fontSize: 12, color: '#166534', margin: 0 }}>Precio cargado automáticamente: <strong>C$ {viajeAnterior.precio}</strong> · Basado en un viaje anterior entregado. Sujeto a confirmación del gestor.</p>
+                      </>
+                    ) : (
+                      <>
+                        <p style={{ fontSize: 13, fontWeight: 700, color: '#854d0e', margin: '0 0 2px' }}>📋 Cotización previa encontrada</p>
+                        <p style={{ fontSize: 12, color: '#713f12', margin: 0 }}>Costo de referencia: <strong>C$ {viajeAnterior.precio}</strong>. Calculá para confirmar el precio actual.</p>
+                      </>
+                    )}
+                  </div>
+                  {retiro.coord && entrega.coord && (
+                    <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ ...S.btnOutline, fontSize: 11, flexShrink: 0 }}>
+                      {calcLoading ? '⏳' : '🧮 Recalcular'}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -1747,6 +1772,19 @@ export default function SolicitarEnvioPage() {
                   </button>
                 )}
               </div>
+            ) : viajeAnterior?.tipo === 'entregado' ? (
+              <div>
+                <div style={{ background: '#fff', border: '1px solid #bbf7d0', borderRadius: 12, padding: '14px 16px', marginBottom: 10 }}>
+                  <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>Desde viaje anterior entregado</p>
+                  <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0 }}>C$ {viajeAnterior.precio}</p>
+                  <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>Sujeto a confirmación del gestor</p>
+                </div>
+                {retiro.coord && entrega.coord && (
+                  <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ width: '100%', padding: '10px', borderRadius: 10, border: '1px solid #bfdbfe', background: '#eff6ff', color: '#004aad', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                    🧮 Recalcular con los puntos del mapa
+                  </button>
+                )}
+              </div>
             ) : retiro.coord && entrega.coord ? (
               <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '14px 16px', textAlign: 'center' as const }}>
                 <p style={{ fontSize: 13, color: '#d46b08', fontWeight: 600, margin: '0 0 12px' }}>
@@ -1773,7 +1811,13 @@ export default function SolicitarEnvioPage() {
               )}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: 13, color: '#6b7280' }}>
-                  Delivery {precioEfectivo ? (calcResult ? '(calculado)' : '(cotización)') : '(a confirmar)'}
+                  Delivery {precioEfectivo
+                    ? calcResult
+                      ? '(calculado)'
+                      : precioSugerido
+                      ? '(cotización)'
+                      : '(viaje anterior)'
+                    : '(a confirmar)'}
                 </span>
                 <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>{precioEfectivo ? `C$ ${precioEfectivo}` : '—'}</span>
               </div>
@@ -1853,10 +1897,16 @@ export default function SolicitarEnvioPage() {
           coord: c.coord,
           tipoUbicacion: c.tipoUbicacion,
           totalViajes: c.totalViajes,
+          totalEntregados: c.totalEntregados,
           comercioUid: uid || undefined,
         }))}
         comercioUidActual={uid || undefined}
         comercios={[]}
+      />
+
+      <ToastOrdenCreada
+        show={showOrdenToast}
+        onDismiss={() => setShowOrdenToast(false)}
       />
     </div>
   )

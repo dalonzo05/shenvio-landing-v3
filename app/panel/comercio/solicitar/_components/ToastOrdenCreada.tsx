@@ -35,9 +35,10 @@ export default function ToastOrdenCreada({
   if (!show) return null
 
   return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
     <div
-      className={`fixed bottom-6 right-4 z-50 w-[calc(100vw-2rem)] max-w-sm transition-all duration-300 ${
-        visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3'
+      className={`w-[calc(100vw-2rem)] max-w-sm pointer-events-auto transition-all duration-300 ${
+        visible ? 'opacity-100 scale-100' : 'opacity-0 scale-95'
       }`}
     >
       <div className="rounded-2xl border border-green-200 bg-white shadow-xl shadow-green-100/50 overflow-hidden">
@@ -62,6 +63,7 @@ export default function ToastOrdenCreada({
           </button>
         </div>
       </div>
+    </div>
     </div>
   )
 }

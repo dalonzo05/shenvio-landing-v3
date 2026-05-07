@@ -58,6 +58,7 @@ type ClienteGuardado = {
   tipoUbicacion?: TipoUbicacion
   comercioUid?: string
   totalViajes?: number
+  totalEntregados?: number
 }
 
 type PuntoFavorito = {
@@ -2960,6 +2961,7 @@ export default function GestorIngresarOrdenPage() {
           tipoUbicacion: p.tipoUbicacion,
           comercioUid: p.comercioUid,
           totalViajes: p.totalViajes,
+          totalEntregados: p.totalEntregados,
         }))}
         comercioUidActual={selectedOwnerUid || undefined}
         comercios={comercios.map((c) => ({

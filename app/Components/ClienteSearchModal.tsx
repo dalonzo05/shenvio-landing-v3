@@ -10,6 +10,7 @@ export type ClienteModalItem = {
   direccion?: string
   comercioUid?: string
   totalViajes?: number
+  totalEntregados?: number
   coord?: { lat: number; lng: number }
   tipoUbicacion?: string
   nota?: string
@@ -131,12 +132,12 @@ export default function ClienteSearchModal({
         )}
       </div>
 
-      {/* Contador de viajes */}
+      {/* Contador de entregas */}
       <div style={{ flexShrink: 0, textAlign: 'center', minWidth: 44 }}>
-        {c.totalViajes != null && c.totalViajes > 0 ? (
+        {(c.totalEntregados ?? 0) > 0 ? (
           <>
-            <div style={{ fontSize: 18, fontWeight: 900, color: '#004aad', lineHeight: 1 }}>{c.totalViajes}</div>
-            <div style={{ fontSize: 9, color: '#9ca3af', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>viajes</div>
+            <div style={{ fontSize: 18, fontWeight: 900, color: '#004aad', lineHeight: 1 }}>{c.totalEntregados}</div>
+            <div style={{ fontSize: 9, color: '#9ca3af', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>entregas</div>
           </>
         ) : (
           <div style={{ fontSize: 11, color: '#d1d5db' }}>—</div>

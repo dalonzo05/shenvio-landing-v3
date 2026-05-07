@@ -91,7 +91,14 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'estado',
             'updatedAt',
-            'ubicacion'
+            'ubicacion',
+            // Métricas operativas que el motorizado actualiza al aceptar/rechazar/entregar
+            'totalAceptadas',
+            'totalAsignaciones',
+            'tasaAceptacion',
+            'tiempoPromedioAceptacion',
+            'totalRechazos',
+            'ultimaUbicacionOperativa'
           ])
         );
 

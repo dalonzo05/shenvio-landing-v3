@@ -343,12 +343,15 @@ export default function PanelMotorizadoPage() {
     if (!o.id) return;
     setErr(null); setActionId(o.id);
     try {
-      const b = writeBatch(db);
-      b.update(doc(db, 'solicitudes_envio', o.id), { 'asignacion.estadoAceptacion': 'aceptada', 'asignacion.aceptadoAt': serverTimestamp(), updatedAt: serverTimestamp() });
-      if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: 'ocupado', updatedAt: serverTimestamp() });
-      await b.commit();
-      if (o.asignacion?.motorizadoId) {
-        registrarAceptacion(o.asignacion.motorizadoId, o.asignacion.asignadoAt ?? null);
+      await updateDoc(doc(db, 'solicitudes_envio', o.id), {
+        'asignacion.estadoAceptacion': 'aceptada',
+        'asignacion.aceptadoAt': serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
+      if (motorizadoDocId) {
+        await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: 'ocupado', updatedAt: serverTimestamp() });
+        registrarAceptacion(motorizadoDocId, o.asignacion?.asignadoAt ?? null);
       }
     } catch (e) { console.error(e); setErr('No se pudo aceptar.'); }
     finally { setActionId(null); }
@@ -358,13 +361,15 @@ export default function PanelMotorizadoPage() {
     if (!o.id) return;
     setErr(null); setActionId(o.id);
     try {
-      const motorizadoId = o.asignacion?.motorizadoId;
-      const b = writeBatch(db);
-      b.update(doc(db, 'solicitudes_envio', o.id), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() });
-      if (motorizadoId) b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() });
-      await b.commit();
-      if (motorizadoId) {
-        registrarRechazo(motorizadoId);
+      await updateDoc(doc(db, 'solicitudes_envio', o.id), {
+        estado: 'confirmada',
+        asignacion: null,
+        updatedAt: serverTimestamp(),
+      });
+      // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
+      if (motorizadoDocId) {
+        await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: 'disponible', updatedAt: serverTimestamp() });
+        registrarRechazo(motorizadoDocId);
       }
     } catch (e) { console.error(e); setErr('No se pudo rechazar.'); }
     finally { setActionId(null); }
@@ -442,13 +447,14 @@ export default function PanelMotorizadoPage() {
           const uid = (o.ownerSnapshot as any)?.uid || o.userId || ''
           const clienteNombre = o.ownerSnapshot?.nombre ?? ''
           const clienteCompany = o.ownerSnapshot?.companyName ?? ''
-          const motorizadoId = o.asignacion?.motorizadoId
           const semanaRef = doc(db, 'cobros_semanales', `${uid}_${semanaKey}`)
 
+          // La transaction solo actualiza solicitud y cobros_semanales.
+          // El doc del motorizado se actualiza separado usando motorizadoDocId
+          // para garantizar que isOwnMotorizadoDoc() pase siempre.
           await runTransaction(db, async (tx) => {
             const semanaSnap = await tx.get(semanaRef)
             tx.update(doc(db, 'solicitudes_envio', o.id), p)
-            if (motorizadoId) tx.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
             if (!semanaSnap.exists()) {
               const { inicio, fin } = getSemanaRange(semanaKey!)
               tx.set(semanaRef, {
@@ -474,34 +480,38 @@ export default function PanelMotorizadoPage() {
               })
             }
           })
+          if (motorizadoDocId) {
+            await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: 'disponible', updatedAt: serverTimestamp() })
+          }
           await registrarMovimiento('cobro_generado', precioDelivery, uid,
             `Cobro generado al entregar orden ${o.id} (crédito semanal)`,
-            { solicitudId: o.id, motorizadoId: o.asignacion?.motorizadoId })
-          if (o.asignacion?.motorizadoId && o.entrega?.coord) {
-            console.log('[motorizado] Ubicación operativa actualizada en entrega (crédito semanal):', o.entrega.coord);
-            actualizarUbicacionOperativa(o.asignacion.motorizadoId, o.entrega.coord);
+            { solicitudId: o.id, motorizadoId: motorizadoDocId ?? o.asignacion?.motorizadoId })
+          if (motorizadoDocId && o.entrega?.coord) {
+            actualizarUbicacionOperativa(motorizadoDocId, o.entrega.coord);
           }
           return
         }
       }
       // ─────────────────────────────────────────────────────────────────────
 
-      const b = writeBatch(db);
-      b.update(doc(db, 'solicitudes_envio', o.id), p);
-      if (o.asignacion?.motorizadoId) b.update(doc(db, 'motorizado', o.asignacion.motorizadoId), { estado: nuevo === 'entregado' ? 'disponible' : 'ocupado', updatedAt: serverTimestamp() });
-      await b.commit();
-      if (nuevo === 'retirado' && o.asignacion?.motorizadoId && o.recoleccion?.coord) {
-        console.log('[motorizado] Ubicación operativa actualizada en retiro:', o.recoleccion.coord);
-        actualizarUbicacionOperativa(o.asignacion.motorizadoId, o.recoleccion.coord);
+      await updateDoc(doc(db, 'solicitudes_envio', o.id), p);
+      // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
+      if (motorizadoDocId) {
+        await updateDoc(doc(db, 'motorizado', motorizadoDocId), {
+          estado: nuevo === 'entregado' ? 'disponible' : 'ocupado',
+          updatedAt: serverTimestamp(),
+        });
+      }
+      if (nuevo === 'retirado' && motorizadoDocId && o.recoleccion?.coord) {
+        actualizarUbicacionOperativa(motorizadoDocId, o.recoleccion.coord);
       }
       if (nuevo === 'entregado') {
         const precioDelivery = o.confirmacion?.precioFinalCordobas ?? 0
         await registrarMovimiento('cobro_generado', precioDelivery, auth.currentUser?.uid ?? '',
           `Cobro generado al entregar orden ${o.id}`,
-          { solicitudId: o.id, motorizadoId: o.asignacion?.motorizadoId })
-        if (o.asignacion?.motorizadoId && o.entrega?.coord) {
-          console.log('[motorizado] Ubicación operativa actualizada en entrega:', o.entrega.coord);
-          actualizarUbicacionOperativa(o.asignacion.motorizadoId, o.entrega.coord);
+          { solicitudId: o.id, motorizadoId: motorizadoDocId ?? o.asignacion?.motorizadoId })
+        if (motorizadoDocId && o.entrega?.coord) {
+          actualizarUbicacionOperativa(motorizadoDocId, o.entrega.coord);
         }
       }
     } catch (e) { console.error(e); setErr('No se pudo cambiar.'); }

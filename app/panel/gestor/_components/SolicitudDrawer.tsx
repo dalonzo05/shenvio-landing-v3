@@ -431,7 +431,7 @@ export function SolicitudDrawer({
         if (celular && comercioUid) {
           await setDoc(
             doc(db, 'clientes_envio', `${comercioUid}_${celular}`),
-            { totalViajes: increment(1), updatedAt: serverTimestamp() },
+            { totalViajes: increment(1), totalEntregados: increment(1), updatedAt: serverTimestamp() },
             { merge: true }
           )
         }
