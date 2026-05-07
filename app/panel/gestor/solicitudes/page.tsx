@@ -597,18 +597,26 @@ export default function GestorSolicitudesPage() {
     })()
   }, [])
 
-  // Cargar órdenes activas para el ranking de motorizado
+  // Suscripción en tiempo real a órdenes activas para el ranking de motorizado.
+  // Usando onSnapshot para que al rebotar/cancelar una orden asignada, el ranking
+  // recalcule automáticamente sin requerir recarga de página.
   useEffect(() => {
     setLoadingRanking(true)
-    getDocs(
+    const unsub = onSnapshot(
       query(
         collection(db, 'solicitudes_envio'),
         where('estado', 'in', ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'])
-      )
+      ),
+      (snap) => {
+        setOrdenesActivas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
+        setLoadingRanking(false)
+      },
+      (e) => {
+        console.error('[ranking] Error en órdenes activas:', e)
+        setLoadingRanking(false)
+      }
     )
-      .then((snap) => setOrdenesActivas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))))
-      .catch((e) => console.error('[ranking] Error cargando órdenes activas:', e))
-      .finally(() => setLoadingRanking(false))
+    return () => unsub()
   }, [])
 
   useEffect(() => {
