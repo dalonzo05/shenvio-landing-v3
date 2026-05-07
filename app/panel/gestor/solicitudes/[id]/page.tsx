@@ -6,14 +6,25 @@ import { useParams, useRouter } from 'next/navigation'
 import { getMapsLoader } from '@/lib/googleMaps'
 import {
   doc,
+  getDoc,
   onSnapshot,
   updateDoc,
+  setDoc,
   serverTimestamp,
   collection,
   getDocs,
   query,
+  where,
+  increment,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import {
+  rankearMotorizados,
+  type MotorizadoConRanking,
+  type OrdenActivaRanking,
+  type NuevaOrdenRanking,
+  type MotorizadoRankeado,
+} from '@/lib/motorizado-ranking'
 import {
   ArrowLeft,
   ExternalLink,
@@ -32,6 +43,7 @@ import {
   AlertTriangle,
   CheckCheck,
   Bike,
+  Star,
 } from 'lucide-react'
 
 type EstadoSolicitud =
@@ -121,16 +133,50 @@ type Solicitud = {
     entrega?: { url: string; pathStorage: string; uploadedAt?: any; motorizadoUid?: string }
     deposito?: { url: string; pathStorage: string; uploadedAt?: any; motorizadoUid?: string }
   }
+
+  userId?: string
+  requiereBolso?: boolean
+  zonaRetiroId?: string | null
+  zonaRetiroNombre?: string | null
+  zonaEntregaId?: string | null
+  zonaEntregaNombre?: string | null
+  macroZonaRetiroId?: string | null
+  macroZonaRetiroNombre?: string | null
+  macroZonaEntregaId?: string | null
+  macroZonaEntregaNombre?: string | null
+  rechazo?: {
+    motivoCodigo?: string
+    motivoTexto?: string
+    detalle?: string | null
+    rechazadoPorUid?: string | null
+    rechazadoAt?: any
+    visibleParaComercio?: boolean
+  }
+  registro?: {
+    deposito?: {
+      monto?: number | null
+      formaPago?: string | null
+      confirmadoMotorizado?: boolean
+      confirmadoAt?: any
+      confirmadoComercio?: boolean
+      confirmadoComercioAt?: any
+      confirmadoStorkhub?: boolean
+      confirmadoStorkhubAt?: any
+    }
+  }
 }
 
-type Motorizado = {
-  id: string
-  authUid?: string
-  nombre: string
-  telefono?: string
-  estado?: string
-  activo?: boolean
-}
+type Motorizado = MotorizadoConRanking
+
+const MOTIVOS_RECHAZO = [
+  { codigo: 'fuera_cobertura', label: 'Fuera de cobertura' },
+  { codigo: 'direccion_incompleta', label: 'Dirección incompleta o poco clara' },
+  { codigo: 'precio_no_aceptado', label: 'Precio no aceptado' },
+  { codigo: 'sin_motorizado_disponible', label: 'Sin motorizado disponible' },
+  { codigo: 'pedido_duplicado', label: 'Pedido duplicado' },
+  { codigo: 'problema_comercio_cliente', label: 'Problema con la información del comercio o cliente' },
+  { codigo: 'otro', label: 'Otro motivo' },
+]
 
 function tsToDate(ts: any): Date | null {
   if (!ts) return null
@@ -528,6 +574,13 @@ export default function GestorSolicitudDetallePage() {
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
   const [motorizadoSel, setMotorizadoSel] = useState('')
+  const [ordenesActivas, setOrdenesActivas] = useState<OrdenActivaRanking[]>([])
+  const [loadingOrdenes, setLoadingOrdenes] = useState(false)
+  const [comercioRequiereBolso, setComercioRequiereBolso] = useState<boolean | null>(null)
+  const [showRechazarModal, setShowRechazarModal] = useState(false)
+  const [motivoCodigo, setMotivoCodigo] = useState('')
+  const [motivoTexto, setMotivoTexto] = useState('')
+  const [detalleRechazo, setDetalleRechazo] = useState('')
 
   const [tick, setTick] = useState(Date.now())
   useEffect(() => {
@@ -536,23 +589,26 @@ export default function GestorSolicitudDetallePage() {
   }, [])
 
   useEffect(() => {
-    ;(async () => {
-      try {
-        const snap = await getDocs(query(collection(db, 'motorizado')))
-        const list: Motorizado[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as any),
-        }))
-        list.sort((a, b) => {
-          const aDisp = a.estado === 'disponible' ? 1 : 0
-          const bDisp = b.estado === 'disponible' ? 1 : 0
-          return bDisp - aDisp
-        })
-        setMotorizados(list)
-      } catch (e) {
-        console.error(e)
-      }
-    })()
+    getDocs(query(collection(db, 'motorizado'))).then((snap) => {
+      setMotorizados(
+        snap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as any) }))
+          .sort((a, b) => (b.estado === 'disponible' ? 1 : 0) - (a.estado === 'disponible' ? 1 : 0))
+      )
+    }).catch(console.error)
+  }, [])
+
+  useEffect(() => {
+    setLoadingOrdenes(true)
+    getDocs(
+      query(
+        collection(db, 'solicitudes_envio'),
+        where('estado', 'in', ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'])
+      )
+    )
+      .then((snap) => setOrdenesActivas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))))
+      .catch(console.error)
+      .finally(() => setLoadingOrdenes(false))
   }, [])
 
   useEffect(() => {
@@ -572,6 +628,7 @@ export default function GestorSolicitudDetallePage() {
         }
 
         const data = { id: snap.id, ...(snap.data() as any) } as Solicitud
+        setComercioRequiereBolso(null)
         setSolicitud(data)
         setPrecioFinal(data.confirmacion?.precioFinalCordobas ?? '')
         setMotorizadoSel(data.asignacion?.motorizadoId || '')
@@ -587,6 +644,13 @@ export default function GestorSolicitudDetallePage() {
 
     return () => unsub()
   }, [id])
+
+  useEffect(() => {
+    if (!solicitud?.userId) return
+    getDoc(doc(db, 'comercios', solicitud.userId))
+      .then((snap) => setComercioRequiereBolso(snap.exists() ? (snap.data()?.requiereBolso ?? false) : false))
+      .catch(() => setComercioRequiereBolso(false))
+  }, [solicitud?.userId])
 
   const tiempoRestante = useMemo(() => {
     if (!solicitud) return null
@@ -609,6 +673,27 @@ export default function GestorSolicitudDetallePage() {
 
     return null
   }, [solicitud, tick])
+
+  const rankingCalculado = useMemo<MotorizadoRankeado[]>(() => {
+    if (!solicitud || motorizados.length === 0) return []
+    const requiereBolso =
+      solicitud.requiereBolso ??
+      (comercioRequiereBolso !== null ? comercioRequiereBolso : false)
+    const nuevaOrden: NuevaOrdenRanking = {
+      recoleccion: { coord: (solicitud.recoleccion as any)?.coord ?? solicitud.cotizacion?.origenCoord ?? null },
+      entrega: { coord: (solicitud.entrega as any)?.coord ?? solicitud.cotizacion?.destinoCoord ?? null },
+      cotizacion: {
+        origenCoord: solicitud.cotizacion?.origenCoord ?? null,
+        destinoCoord: solicitud.cotizacion?.destinoCoord ?? null,
+      },
+      requiereBolso,
+      zonaRetiroId: solicitud.zonaRetiroId ?? null,
+      zonaEntregaId: solicitud.zonaEntregaId ?? null,
+      macroZonaRetiroId: solicitud.macroZonaRetiroId ?? null,
+      macroZonaEntregaId: solicitud.macroZonaEntregaId ?? null,
+    }
+    return rankearMotorizados(motorizados as MotorizadoConRanking[], ordenesActivas, nuevaOrden)
+  }, [solicitud, motorizados, ordenesActivas, comercioRequiereBolso])
 
   const sem = semaforoForRemaining(tiempoRestante)
 
@@ -684,9 +769,70 @@ export default function GestorSolicitudDetallePage() {
         updatedAt: serverTimestamp(),
         [`historial.${nuevo}At`]: serverTimestamp(),
       })
+
+      if (nuevo === 'entregado') {
+        const celular = solicitud.entrega?.celular?.replace(/\D/g, '')
+        const comercioUid = solicitud.userId
+        if (celular && comercioUid) {
+          await setDoc(
+            doc(db, 'clientes_envio', `${comercioUid}_${celular}`),
+            { totalViajes: increment(1), updatedAt: serverTimestamp() },
+            { merge: true }
+          )
+        }
+      }
     } catch (e) {
       console.error(e)
       setErr('No se pudo cambiar el estado.')
+    }
+  }
+
+  const reactivarOrden = async () => {
+    if (!solicitud) return
+    setErr(null)
+    try {
+      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+        estado: 'pendiente_confirmacion',
+        rechazo: null,
+        asignacion: null,
+        updatedAt: serverTimestamp(),
+      } as any)
+    } catch (e) {
+      console.error(e)
+      setErr('No se pudo reactivar la orden.')
+    }
+  }
+
+  const rechazarSolicitud = async () => {
+    if (!solicitud) return
+    if (!motivoCodigo) { setErr('Debes seleccionar un motivo.'); return }
+    if (motivoCodigo === 'otro' && !detalleRechazo.trim()) {
+      setErr('El detalle es obligatorio cuando el motivo es "Otro".')
+      return
+    }
+    try {
+      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+        estado: 'rechazada',
+        rechazo: {
+          motivoCodigo,
+          motivoTexto,
+          detalle: detalleRechazo.trim() || null,
+          rechazadoPorUid: auth.currentUser?.uid || null,
+          rechazadoAt: serverTimestamp(),
+          visibleParaComercio: true,
+        },
+        asignacion: null,
+        updatedAt: serverTimestamp(),
+        'historial.rechazadaAt': serverTimestamp(),
+      } as any)
+      setShowRechazarModal(false)
+      setMotivoCodigo('')
+      setMotivoTexto('')
+      setDetalleRechazo('')
+      setErr(null)
+    } catch (e) {
+      console.error(e)
+      setErr('No se pudo rechazar la orden.')
     }
   }
 
@@ -776,6 +922,7 @@ export default function GestorSolicitudDetallePage() {
   ]
 
   return (
+    <>
     <div className="w-full p-4 space-y-5">
       <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4">
         <div className="space-y-2">
@@ -1054,12 +1201,52 @@ export default function GestorSolicitudDetallePage() {
         </section>
 
         <aside className="space-y-5">
+
+          {/* Motorizado sugerido — solo en estados relevantes */}
+          {(estado === 'pendiente_confirmacion' || estado === 'confirmada') && rankingCalculado.length > 0 && (
+            <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-5 shadow-sm">
+              <div className="flex items-center gap-2 mb-3">
+                <Star className="h-4 w-4 text-indigo-500" />
+                <h2 className="font-semibold text-indigo-900">Motorizado sugerido</h2>
+              </div>
+              {(() => {
+                const top = rankingCalculado[0]
+                return (
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-sm font-bold text-indigo-900 truncate">{top.nombre}</span>
+                        {top.telefono && (
+                          <span className="text-xs text-indigo-400 shrink-0">{top.telefono}</span>
+                        )}
+                      </div>
+                      <span className="text-xs font-black text-indigo-700 bg-indigo-100 border border-indigo-200 rounded-full px-2.5 py-0.5 shrink-0 ml-2">
+                        {top.scoreResult.score} pts
+                      </span>
+                    </div>
+                    <p className="text-xs text-indigo-700 leading-relaxed">{top.scoreResult.explicacion}</p>
+                    <button
+                      onClick={() => setMotorizadoSel(top.id)}
+                      className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700 transition"
+                    >
+                      <Bike className="h-4 w-4" /> Asignar sugerido
+                    </button>
+                  </div>
+                )
+              })()}
+            </div>
+          )}
+
+          {/* Decisión rápida — oculta para estados terminales */}
+          {estado !== 'rechazada' && estado !== 'cancelada' && estado !== 'entregado' && (
           <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-            <h2 className="font-semibold text-gray-900 mb-4">Decisión rápida</h2>
+            <h2 className="font-semibold text-gray-900 mb-4">
+              Decisión rápida
+            </h2>
 
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium mb-1">Precio final (C$)</label>
+                <label className="block text-xs font-bold uppercase tracking-wide text-gray-400 mb-1.5">Precio final (C$)</label>
                 <input
                   type="number"
                   step={10}
@@ -1068,102 +1255,185 @@ export default function GestorSolicitudDetallePage() {
                     const v = e.target.value === '' ? '' : Number(e.target.value)
                     setPrecioFinal(v === '' ? '' : Number(roundTo10(v)))
                   }}
-                  className="w-full rounded-lg border px-3 py-2"
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300"
                   placeholder="Ej: 130"
                 />
-                <div className="text-xs text-gray-500 mt-1">Se redondea a múltiplos de 10.</div>
+                <div className="text-[10px] text-gray-400 mt-1">Se redondea a múltiplos de 10</div>
               </div>
 
               <div>
-                <label className="block text-sm font-medium mb-1">Motorizado</label>
-                <select
-                  value={motorizadoSel}
-                  onChange={(e) => setMotorizadoSel(e.target.value)}
-                  className="w-full rounded-lg border px-3 py-2"
+                <label className="block text-xs font-bold uppercase tracking-wide text-gray-400 mb-1.5">
+                  Motorizado
+                  {loadingOrdenes && (
+                    <span className="ml-1 text-gray-300 font-normal normal-case">(calculando scores…)</span>
+                  )}
+                </label>
+
+                {/* Opción "No asignar" */}
+                <button
+                  onClick={() => setMotorizadoSel('')}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border mb-2 text-left transition ${
+                    motorizadoSel === ''
+                      ? 'border-gray-400 bg-gray-100 ring-1 ring-gray-300'
+                      : 'border-gray-200 bg-white hover:bg-gray-50'
+                  }`}
                 >
-                  <option value="">-- No asignar todavía --</option>
-                  {motorizados.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.estado === 'disponible' ? '✅ ' : '⛔ '}
-                      {m.nombre}
-                      {m.telefono ? ` · ${m.telefono}` : ''}
-                    </option>
-                  ))}
-                </select>
+                  <span className="text-xs font-semibold text-gray-500 italic">— No asignar todavía —</span>
+                </button>
+
+                {/* Lista rankeada de candidatos */}
+                <div className="space-y-1.5 max-h-[300px] overflow-y-auto pr-0.5">
+                  {(() => {
+                    const scoreMap = new Map(rankingCalculado.map((r) => [r.id, r.scoreResult]))
+                    const ordenMostrar = rankingCalculado.length > 0 ? rankingCalculado : motorizados
+                    return ordenMostrar.map((m, idx) => {
+                      const sr = scoreMap.get(m.id)
+                      const esSeleccionado = motorizadoSel === m.id
+                      const esMejor = idx === 0 && rankingCalculado.length > 0
+                      return (
+                        <button
+                          key={m.id}
+                          onClick={() => setMotorizadoSel(m.id)}
+                          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border text-left transition ${
+                            esSeleccionado
+                              ? 'border-indigo-400 bg-indigo-50 ring-1 ring-indigo-300'
+                              : 'border-gray-200 bg-white hover:bg-gray-50'
+                          }`}
+                        >
+                          <span className={`shrink-0 inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full border ${
+                            m.estado === 'disponible'
+                              ? 'bg-green-50 text-green-700 border-green-200'
+                              : 'bg-yellow-50 text-yellow-700 border-yellow-200'
+                          }`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${m.estado === 'disponible' ? 'bg-green-500' : 'bg-yellow-500'}`} />
+                            {m.estado === 'disponible' ? 'Disp.' : (m.estado || 'Ocup.')}
+                          </span>
+
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              {esMejor && <Star className="h-2.5 w-2.5 text-amber-500 shrink-0" />}
+                              <span className="text-xs font-bold text-gray-900 truncate">{m.nombre}</span>
+                              {m.telefono && <span className="text-[10px] text-gray-400 shrink-0">{m.telefono}</span>}
+                            </div>
+                            {sr?.explicacion && (
+                              <p className="text-[10px] text-gray-500 mt-0.5 leading-snug truncate">{sr.explicacion}</p>
+                            )}
+                          </div>
+
+                          {sr !== undefined && (
+                            <span className={`shrink-0 text-xs font-black px-2 py-1 rounded-full border ${
+                              sr.score >= 70 ? 'bg-green-50 text-green-700 border-green-200'
+                              : sr.score >= 40 ? 'bg-yellow-50 text-yellow-700 border-yellow-200'
+                              : 'bg-red-50 text-red-600 border-red-200'
+                            }`}>
+                              {sr.score}
+                            </span>
+                          )}
+                        </button>
+                      )
+                    })
+                  })()}
+                </div>
+
+                {rankingCalculado.length > 0 && (
+                  <div className="text-[10px] text-gray-400 mt-1.5">
+                    Ordenados por score · 100 = ideal · {rankingCalculado.length} candidatos
+                  </div>
+                )}
               </div>
 
-              <div className="grid grid-cols-1 gap-2">
+              <div className="space-y-2 pt-1">
                 <button
                   onClick={confirmarYAsignar}
-                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#004aad] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003d94]"
+                  className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-[#004aad] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003d94] transition shadow-sm"
                 >
-                  <CheckCircle2 className="h-4 w-4" />
-                  Guardar confirmación / asignación
+                  <CheckCircle2 className="h-4 w-4" /> Guardar confirmación / asignación
                 </button>
 
                 {estado === 'pendiente_confirmacion' && (
                   <button
-                    onClick={() => cambiarEstado('rechazada')}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-700"
+                    onClick={() => { setShowRechazarModal(true); setErr(null) }}
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-700 hover:bg-red-100 transition"
                   >
-                    <XCircle className="h-4 w-4" />
-                    Rechazar orden
+                    <XCircle className="h-4 w-4" /> Rechazar orden
                   </button>
                 )}
 
                 {estado === 'confirmada' && (
                   <button
                     onClick={() => cambiarEstado('cancelada')}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
                   >
-                    <AlertTriangle className="h-4 w-4" />
-                    Cancelar
+                    <AlertTriangle className="h-4 w-4" /> Cancelar
                   </button>
                 )}
 
                 {estado === 'asignada' && (
                   <button
                     onClick={rebotarAsignacion}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
                   >
-                    <RotateCcw className="h-4 w-4" />
-                    Rebotar a confirmada
+                    <RotateCcw className="h-4 w-4" /> Rebotar a confirmada
                   </button>
                 )}
 
                 {estado === 'en_camino_retiro' && (
                   <button
                     onClick={() => cambiarEstado('retirado')}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
                   >
-                    <Package className="h-4 w-4" />
-                    Marcar retirado
+                    <Package className="h-4 w-4" /> Marcar retirado
                   </button>
                 )}
 
                 {estado === 'retirado' && (
                   <button
                     onClick={() => cambiarEstado('en_camino_entrega')}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
                   >
-                    <Truck className="h-4 w-4" />
-                    Pasar a entrega
+                    <Truck className="h-4 w-4" /> Pasar a entrega
                   </button>
                 )}
 
                 {estado === 'en_camino_entrega' && (
                   <button
                     onClick={() => cambiarEstado('entregado')}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-2.5 text-sm font-semibold text-green-700"
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-green-200 bg-green-50 px-4 py-2.5 text-sm font-semibold text-green-700 hover:bg-green-100 transition"
                   >
-                    <CheckCheck className="h-4 w-4" />
-                    Marcar entregado
+                    <CheckCheck className="h-4 w-4" /> Marcar entregado
                   </button>
+                )}
+
+                {err && (
+                  <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{err}</div>
                 )}
               </div>
             </div>
           </div>
+          )}
 
+          {/* Reactivar — solo para estados terminales recuperables */}
+          {(estado === 'rechazada' || estado === 'cancelada') && (
+            <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+              <h2 className="font-semibold text-gray-900 mb-3">Acciones</h2>
+              <p className="text-xs text-gray-500 mb-3">
+                {estado === 'rechazada'
+                  ? 'Esta orden fue rechazada. Puedes reactivarla para volver a evaluarla.'
+                  : 'Esta orden fue cancelada. Puedes reactivarla para volver a procesarla.'}
+              </p>
+              <button
+                onClick={reactivarOrden}
+                className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-700 hover:bg-amber-100 transition"
+              >
+                <RotateCcw className="h-4 w-4" /> Reactivar orden
+              </button>
+              {err && (
+                <div className="mt-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{err}</div>
+              )}
+            </div>
+          )}
+
+          {/* Asignación actual */}
           <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
             <h2 className="font-semibold text-gray-900 mb-4">Asignación actual</h2>
 
@@ -1206,7 +1476,78 @@ export default function GestorSolicitudDetallePage() {
             )}
           </div>
 
-          {solicitud.evidencias && (Object.keys(solicitud.evidencias).length > 0) && (
+          {/* Tarjeta de rechazo */}
+          {estado === 'rechazada' && solicitud.rechazo && (
+            <div className="rounded-2xl border border-red-200 bg-red-50 p-5 shadow-sm">
+              <h2 className="font-semibold text-red-800 mb-3">Rechazo</h2>
+              <div className="space-y-1.5 text-sm">
+                <div className="font-semibold text-red-700">Orden rechazada</div>
+                {solicitud.rechazo.motivoTexto && (
+                  <div className="text-red-600">Motivo: {solicitud.rechazo.motivoTexto}</div>
+                )}
+                {solicitud.rechazo.detalle && (
+                  <div className="text-red-600">Detalle: {solicitud.rechazo.detalle}</div>
+                )}
+                {solicitud.rechazo.rechazadoAt && (
+                  <div className="text-xs text-red-400">{formatDateTime(solicitud.rechazo.rechazadoAt)}</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Depósito */}
+          {(() => {
+            const dep = solicitud.registro?.deposito
+            if (!dep) return null
+            const tieneInfo = dep.confirmadoComercio || dep.confirmadoStorkhub || dep.confirmadoMotorizado
+            if (!tieneInfo) return null
+            return (
+              <div className="rounded-2xl border border-teal-200 bg-white p-5 shadow-sm">
+                <h2 className="font-semibold text-teal-700 mb-4">Depósito</h2>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  {dep.confirmadoStorkhub && (
+                    <>
+                      <div>
+                        <div className="text-gray-500">Storkhub</div>
+                        <div className="font-medium text-green-700">✓ Confirmado</div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Fecha</div>
+                        <div className="font-medium text-gray-900">{formatDateTime(dep.confirmadoStorkhubAt)}</div>
+                      </div>
+                    </>
+                  )}
+                  {dep.confirmadoComercio && (
+                    <>
+                      <div>
+                        <div className="text-gray-500">Comercio</div>
+                        <div className="font-medium text-green-700">✓ Confirmado</div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Fecha</div>
+                        <div className="font-medium text-gray-900">{formatDateTime(dep.confirmadoComercioAt)}</div>
+                      </div>
+                    </>
+                  )}
+                  {dep.confirmadoMotorizado && !dep.confirmadoStorkhub && !dep.confirmadoComercio && (
+                    <>
+                      <div>
+                        <div className="text-gray-500">Confirmado (legacy)</div>
+                        <div className="font-medium text-green-700">✓ Sí</div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Fecha</div>
+                        <div className="font-medium text-gray-900">{formatDateTime(dep.confirmadoAt)}</div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* Evidencias fotográficas */}
+          {solicitud.evidencias && (['retiro', 'entrega', 'deposito'] as const).some((k) => solicitud.evidencias?.[k]) && (
             <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
               <h2 className="font-semibold text-gray-900 mb-4">Evidencias fotográficas</h2>
               <div className="grid grid-cols-3 gap-3">
@@ -1221,7 +1562,7 @@ export default function GestorSolicitudDetallePage() {
                     <button
                       key={key}
                       onClick={() => window.open(ev.url, '_blank')}
-                      className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-2 hover:bg-gray-100 transition-colors cursor-pointer"
+                      className="flex flex-col items-center gap-1.5 rounded-xl border border-gray-200 bg-gray-50 p-2 hover:bg-gray-100 hover:border-gray-300 transition cursor-pointer"
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
@@ -1238,6 +1579,7 @@ export default function GestorSolicitudDetallePage() {
             </div>
           )}
 
+          {/* Atajos */}
           <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
             <h2 className="font-semibold text-gray-900 mb-4">Atajos</h2>
 
@@ -1274,5 +1616,70 @@ export default function GestorSolicitudDetallePage() {
         </aside>
       </div>
     </div>
+
+    {/* Modal de rechazo */}
+    {showRechazarModal && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px] p-4">
+        <div className="w-full max-w-sm rounded-2xl border border-gray-200 bg-white shadow-xl">
+          <div className="border-b border-gray-100 px-5 py-4">
+            <h2 className="text-sm font-bold text-gray-900">Rechazar orden</h2>
+            <p className="text-xs text-gray-400 mt-0.5">Selecciona el motivo del rechazo. Será visible para el comercio.</p>
+          </div>
+          <div className="p-5 space-y-4">
+            <div>
+              <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-500 mb-1.5">
+                Motivo <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={motivoCodigo}
+                onChange={(e) => {
+                  const found = MOTIVOS_RECHAZO.find((m) => m.codigo === e.target.value)
+                  setMotivoCodigo(e.target.value)
+                  setMotivoTexto(found?.label ?? '')
+                }}
+                className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-800 focus:border-[#004aad] focus:outline-none"
+              >
+                <option value="">— Seleccionar motivo —</option>
+                {MOTIVOS_RECHAZO.map((m) => (
+                  <option key={m.codigo} value={m.codigo}>{m.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-500 mb-1.5">
+                Detalle {motivoCodigo === 'otro' && <span className="text-red-500">*</span>}
+                {motivoCodigo && motivoCodigo !== 'otro' && <span className="text-gray-400 normal-case font-normal"> (opcional)</span>}
+              </label>
+              <textarea
+                value={detalleRechazo}
+                onChange={(e) => setDetalleRechazo(e.target.value)}
+                rows={3}
+                placeholder={motivoCodigo === 'otro' ? 'Describe el motivo…' : 'Información adicional (opcional)'}
+                className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-800 placeholder-gray-300 focus:border-[#004aad] focus:outline-none resize-none"
+              />
+            </div>
+            {err && (
+              <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{err}</p>
+            )}
+          </div>
+          <div className="flex gap-2 border-t border-gray-100 px-5 py-4">
+            <button
+              onClick={() => { setShowRechazarModal(false); setMotivoCodigo(''); setMotivoTexto(''); setDetalleRechazo(''); setErr(null) }}
+              className="flex-1 rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={rechazarSolicitud}
+              disabled={!motivoCodigo}
+              className="flex-1 rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Confirmar rechazo
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+  </>
   )
 }
