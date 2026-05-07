@@ -20,6 +20,7 @@ import {
   query,
   serverTimestamp,
   updateDoc,
+  writeBatch,
   where,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
@@ -1023,14 +1024,19 @@ export default function GestorSolicitudesPage() {
     setToast({ type: 'success', message })
   }
 
-  const rebotarAsignacion = async (id: string) => {
+  const rebotarAsignacion = async (id: string, motorizadoId?: string) => {
     setErr(null)
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', id), {
+      const b = writeBatch(db)
+      b.update(doc(db, 'solicitudes_envio', id), {
         estado: 'confirmada',
         asignacion: null,
         updatedAt: serverTimestamp(),
       } as any)
+      if (motorizadoId) {
+        b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
+      }
+      await b.commit()
       setToast({ type: 'success', message: 'Asignación rebotada' })
     } catch (e) {
       console.error(e)
@@ -1857,6 +1863,11 @@ export default function GestorSolicitudesPage() {
                           <div className="text-[11px] text-gray-400 mt-0.5 truncate">
                             {s.tipoCliente === 'credito' ? 'Crédito' : `Contado · ${(s.pagoDelivery as any)?.quienPaga || '—'}`}
                           </div>
+                          {typeof s.cotizacion?.distanciaKm === 'number' && (
+                            <div className="text-[11px] text-gray-400 mt-0.5">
+                              📏 {s.cotizacion.distanciaKm.toFixed(1)} km
+                            </div>
+                          )}
                         </td>
 
                         <td className="px-3 py-2 border-r border-gray-100">
@@ -1949,7 +1960,7 @@ export default function GestorSolicitudesPage() {
                                   Reasignar
                                 </button>
                                 <button
-                                  onClick={() => rebotarAsignacion(s.id)}
+                                  onClick={() => rebotarAsignacion(s.id, s.asignacion?.motorizadoId)}
                                   className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-[11px] font-medium text-gray-700 hover:bg-gray-100"
                                   title="Rebotar asignación"
                                 >
@@ -2218,7 +2229,7 @@ export default function GestorSolicitudesPage() {
                         </button>
 
                         <button
-                          onClick={() => rebotarAsignacion(s.id)}
+                          onClick={() => rebotarAsignacion(s.id, s.asignacion?.motorizadoId)}
                           className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700"
                         >
                           Rebotar
