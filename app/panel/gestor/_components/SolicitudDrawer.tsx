@@ -8,6 +8,7 @@ import {
   doc,
   updateDoc,
   setDoc,
+  writeBatch,
   getDocs,
   getDoc,
   query,
@@ -408,21 +409,28 @@ export function SolicitudDrawer({
 
   const cambiarEstado = async (nuevo: EstadoSolicitud) => {
     if (!solicitud) return
+    const motorizadoId = solicitud.asignacion?.motorizadoId
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+      const b = writeBatch(db)
+      b.update(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: nuevo,
         updatedAt: serverTimestamp(),
         [`historial.${nuevo}At`]: serverTimestamp(),
-      })
+      } as any)
 
-      // Incrementar totalViajes solo cuando la orden se marca como entregada
+      if (motorizadoId) {
+        const nuevoEstadoMoto = nuevo === 'entregado' ? 'disponible' : 'ocupado'
+        b.update(doc(db, 'motorizado', motorizadoId), { estado: nuevoEstadoMoto, updatedAt: serverTimestamp() })
+      }
+
+      await b.commit()
+
       if (nuevo === 'entregado') {
         const celular = solicitud.entrega?.celular?.replace(/\D/g, '')
         const comercioUid = solicitud.userId
         if (celular && comercioUid) {
-          const clienteDocId = `${comercioUid}_${celular}`
           await setDoc(
-            doc(db, 'clientes_envio', clienteDocId),
+            doc(db, 'clientes_envio', `${comercioUid}_${celular}`),
             { totalViajes: increment(1), updatedAt: serverTimestamp() },
             { merge: true }
           )
@@ -433,20 +441,28 @@ export function SolicitudDrawer({
 
   const rebotarAsignacion = async () => {
     if (!solicitud) return
+    const motorizadoId = solicitud.asignacion?.motorizadoId
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() } as any)
+      const b = writeBatch(db)
+      b.update(doc(db, 'solicitudes_envio', solicitud.id), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() } as any)
+      if (motorizadoId) b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
+      await b.commit()
     } catch { setErr('No se pudo rebotar.') }
   }
 
   const reactivarOrden = async () => {
     if (!solicitud) return
+    const motorizadoId = solicitud.asignacion?.motorizadoId
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+      const b = writeBatch(db)
+      b.update(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: 'pendiente_confirmacion',
         rechazo: null,
         asignacion: null,
         updatedAt: serverTimestamp(),
       } as any)
+      if (motorizadoId) b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
+      await b.commit()
       setErr(null)
     } catch { setErr('No se pudo reactivar la orden.') }
   }
@@ -458,8 +474,10 @@ export function SolicitudDrawer({
       setErr('El detalle es obligatorio cuando el motivo es "Otro".')
       return
     }
+    const motorizadoId = solicitud.asignacion?.motorizadoId
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+      const b = writeBatch(db)
+      b.update(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: 'rechazada',
         rechazo: {
           motivoCodigo,
@@ -472,7 +490,9 @@ export function SolicitudDrawer({
         asignacion: null,
         updatedAt: serverTimestamp(),
         'historial.rechazadaAt': serverTimestamp(),
-      })
+      } as any)
+      if (motorizadoId) b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
+      await b.commit()
       setShowRechazarModal(false)
       setMotivoCodigo('')
       setMotivoTexto('')

@@ -10,6 +10,7 @@ import {
   onSnapshot,
   updateDoc,
   setDoc,
+  writeBatch,
   serverTimestamp,
   collection,
   getDocs,
@@ -746,13 +747,18 @@ export default function GestorSolicitudDetallePage() {
   const rebotarAsignacion = async () => {
     if (!solicitud) return
     setErr(null)
-
+    const motorizadoId = solicitud.asignacion?.motorizadoId
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+      const b = writeBatch(db)
+      b.update(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: 'confirmada',
         asignacion: null,
         updatedAt: serverTimestamp(),
       } as any)
+      if (motorizadoId) {
+        b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
+      }
+      await b.commit()
     } catch (e) {
       console.error(e)
       setErr('No se pudo rebotar la asignación.')
@@ -762,13 +768,23 @@ export default function GestorSolicitudDetallePage() {
   const cambiarEstado = async (nuevo: EstadoSolicitud) => {
     if (!solicitud) return
     setErr(null)
+    const motorizadoId = solicitud.asignacion?.motorizadoId
 
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+      const b = writeBatch(db)
+      b.update(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: nuevo,
         updatedAt: serverTimestamp(),
         [`historial.${nuevo}At`]: serverTimestamp(),
-      })
+      } as any)
+
+      // Sincronizar estado del motorizado
+      if (motorizadoId) {
+        const nuevoEstadoMoto = nuevo === 'entregado' ? 'disponible' : 'ocupado'
+        b.update(doc(db, 'motorizado', motorizadoId), { estado: nuevoEstadoMoto, updatedAt: serverTimestamp() })
+      }
+
+      await b.commit()
 
       if (nuevo === 'entregado') {
         const celular = solicitud.entrega?.celular?.replace(/\D/g, '')
@@ -790,13 +806,19 @@ export default function GestorSolicitudDetallePage() {
   const reactivarOrden = async () => {
     if (!solicitud) return
     setErr(null)
+    const motorizadoId = solicitud.asignacion?.motorizadoId
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+      const b = writeBatch(db)
+      b.update(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: 'pendiente_confirmacion',
         rechazo: null,
         asignacion: null,
         updatedAt: serverTimestamp(),
       } as any)
+      if (motorizadoId) {
+        b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
+      }
+      await b.commit()
     } catch (e) {
       console.error(e)
       setErr('No se pudo reactivar la orden.')
@@ -810,8 +832,10 @@ export default function GestorSolicitudDetallePage() {
       setErr('El detalle es obligatorio cuando el motivo es "Otro".')
       return
     }
+    const motorizadoId = solicitud.asignacion?.motorizadoId
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+      const b = writeBatch(db)
+      b.update(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: 'rechazada',
         rechazo: {
           motivoCodigo,
@@ -825,6 +849,10 @@ export default function GestorSolicitudDetallePage() {
         updatedAt: serverTimestamp(),
         'historial.rechazadaAt': serverTimestamp(),
       } as any)
+      if (motorizadoId) {
+        b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
+      }
+      await b.commit()
       setShowRechazarModal(false)
       setMotivoCodigo('')
       setMotivoTexto('')
