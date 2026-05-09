@@ -23,6 +23,7 @@ import { ResultadoCotizacion } from './calculadora/ResultadoCotizacion'
 import { HistorialCotizaciones } from './calculadora/HistorialCotizaciones'
 import { BuscadorComercio } from './calculadora/BuscadorComercio'
 import type { PlaceLite, Cotizacion, PuntoFavorito, PuntoComercio } from './calculadora/types'
+import { calcularRecargoZona, type RecargoZona } from '@/lib/recargoZona'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -76,7 +77,7 @@ function clearRecents(kind: keyof typeof RKEY) {
 
 async function guardarCotizacion(
   uid: string,
-  data: { origen: string; destino: string; km: number; precio: number; origenCoord: google.maps.LatLngLiteral; destinoCoord: google.maps.LatLngLiteral; fuente: string; zonaOrigen?: string | null; zonaDestino?: string | null }
+  data: { origen: string; destino: string; km: number; precio: number; precioBase: number; origenCoord: google.maps.LatLngLiteral; destinoCoord: google.maps.LatLngLiteral; fuente: string; zonaOrigen?: string | null; zonaDestino?: string | null; recargoZona?: RecargoZona }
 ) {
   await addDoc(collection(db, 'cotizaciones'), {
     userId: uid,
@@ -84,11 +85,13 @@ async function guardarCotizacion(
     destino: data.destino,
     distanciaKm: parseFloat(data.km.toFixed(3)),
     precioCordobas: data.precio,
+    precioBase: data.precioBase,
     origenCoord: data.origenCoord,
     destinoCoord: data.destinoCoord,
     fuente: data.fuente,
     ...(data.zonaOrigen != null && { zonaOrigen: data.zonaOrigen }),
     ...(data.zonaDestino != null && { zonaDestino: data.zonaDestino }),
+    ...(data.recargoZona && { recargoZona: data.recargoZona }),
     createdAt: serverTimestamp(),
   })
 }
@@ -110,6 +113,8 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
   const [destinoCoord, setDestinoCoord] = useState<google.maps.LatLngLiteral | null>(null)
   const [distancia, setDistancia] = useState<number | null>(null)
   const [precio, setPrecio] = useState<number | null>(null)
+  const [precioBase, setPrecioBase] = useState<number | null>(null)
+  const [recargoZonaInfo, setRecargoZonaInfo] = useState<RecargoZona | null>(null)
   const [loading, setLoading] = useState(false)
   const [locating, setLocating] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -294,7 +299,8 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
   }, [])
 
   useEffect(() => {
-    setDistancia(null); setPrecio(null); setError(null); setZonasResult(null)
+    setDistancia(null); setPrecio(null); setPrecioBase(null); setRecargoZonaInfo(null)
+    setError(null); setZonasResult(null)
   }, [origenCoord, destinoCoord])
 
   // My location
@@ -354,21 +360,31 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
     const origenText = origenInputRef.current?.value || ''
     const destinoText = destinoInputRef.current?.value || ''
 
+    const aplicarPrecio = (km: number, zr: ReturnType<typeof clasificarOrdenCompleto> | null) => {
+      const p = tarifa(km)
+      const zonaRetiro = zr?.zonaRetiroNombre ?? zr?.macroZonaRetiroNombre ?? null
+      const zonaEntrega = zr?.zonaEntregaNombre ?? zr?.macroZonaEntregaNombre ?? null
+      const recargo = calcularRecargoZona(zonaRetiro, zonaEntrega)
+      const precioTotal = p === -1 ? -1 : p + (recargo.aplica ? recargo.monto : 0)
+      setDistancia(km)
+      setPrecioBase(p)
+      setRecargoZonaInfo(recargo)
+      setPrecio(precioTotal)
+      return { p, zonaRetiro, zonaEntrega, recargo, precioTotal }
+    }
+
     try {
       const raw = sessionStorage.getItem(cacheKey)
       if (raw) {
         const cached: { km: number; ts: number } = JSON.parse(raw)
         if (Date.now() - cached.ts < TTL_MS) {
-          const p = tarifa(cached.km)
-          setDistancia(cached.km); setPrecio(p)
           const zr = zonas.length > 0 ? clasificarOrdenCompleto(origenCoord, destinoCoord, zonas) : null
           setZonasResult(zr)
-          const zonaOrigen = zr?.zonaRetiroNombre ?? zr?.macroZonaRetiroNombre ?? null
-          const zonaDestino = zr?.zonaEntregaNombre ?? zr?.macroZonaEntregaNombre ?? null
+          const { p, zonaRetiro, zonaEntrega, recargo, precioTotal } = aplicarPrecio(cached.km, zr)
           if (p === -1) {
             setError('La distancia supera el rango tarifario. Consultá por WhatsApp.')
           } else if (!isDuplicate(origenText, destinoText)) {
-            await guardarCotizacion(uid, { origen: origenText, destino: destinoText, km: cached.km, precio: p, origenCoord, destinoCoord, fuente: 'cache', zonaOrigen, zonaDestino })
+            await guardarCotizacion(uid, { origen: origenText, destino: destinoText, km: cached.km, precio: precioTotal, precioBase: p, origenCoord, destinoCoord, fuente: 'cache', zonaOrigen: zonaRetiro, zonaDestino: zonaEntrega, recargoZona: recargo })
           }
           return
         }
@@ -385,17 +401,14 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
       const metros = data.rows?.[0]?.elements?.[0]?.distance?.value
       if (!metros) { setError('No se pudo calcular la distancia. Verificá los puntos.'); return }
       const km = metros / 1000
-      const p = tarifa(km)
-      setDistancia(km); setPrecio(p)
       const zr = zonas.length > 0 ? clasificarOrdenCompleto(origenCoord, destinoCoord, zonas) : null
       setZonasResult(zr)
-      const zonaOrigen = zr?.zonaRetiroNombre ?? zr?.macroZonaRetiroNombre ?? null
-      const zonaDestino = zr?.zonaEntregaNombre ?? zr?.macroZonaEntregaNombre ?? null
+      const { p, zonaRetiro, zonaEntrega, recargo, precioTotal } = aplicarPrecio(km, zr)
       sessionStorage.setItem(cacheKey, JSON.stringify({ km, ts: Date.now() }))
       if (p === -1) {
         setError('La distancia supera el rango tarifario. Consultá por WhatsApp.')
       } else if (!isDuplicate(origenText, destinoText)) {
-        await guardarCotizacion(uid, { origen: origenText, destino: destinoText, km, precio: p, origenCoord, destinoCoord, fuente: 'api', zonaOrigen, zonaDestino })
+        await guardarCotizacion(uid, { origen: origenText, destino: destinoText, km, precio: precioTotal, precioBase: p, origenCoord, destinoCoord, fuente: 'api', zonaOrigen: zonaRetiro, zonaDestino: zonaEntrega, recargoZona: recargo })
       }
     } catch (e) {
       console.error('[calculadora] error al calcular:', e)
@@ -407,6 +420,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
 
   const limpiar = () => {
     setOrigenCoord(null); setDestinoCoord(null); setDistancia(null); setPrecio(null)
+    setPrecioBase(null); setRecargoZonaInfo(null)
     setError(null); setZonasResult(null); setOrigenFavData(null); setSelectedBuscadorComercio(null)
     if (origenInputRef.current) origenInputRef.current.value = ''
     if (destinoInputRef.current) destinoInputRef.current.value = ''
@@ -427,6 +441,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
     if (cot.origenCoord) setOrigenCoord(cot.origenCoord)
     if (cot.destinoCoord) setDestinoCoord(cot.destinoCoord)
     setDistancia(cot.distanciaKm); setPrecio(cot.precioCordobas)
+    setPrecioBase(null); setRecargoZonaInfo(null)
     setOrigenFavData(null)
     setSelectedBuscadorComercio(null)
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -672,6 +687,8 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
           precio={precio}
           zonasResult={zonasResult}
           onSolicitar={solicitarActual}
+          precioBase={precioBase}
+          recargoZona={recargoZonaInfo}
         />
       )}
 

@@ -19,6 +19,7 @@ import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
+import { calcularRecargoZona } from '@/lib/recargoZona'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import StepIndicator from './_components/StepIndicator'
 import StickyOrderHeader from './_components/StickyOrderHeader'
@@ -893,7 +894,16 @@ export default function SolicitarEnvioPage() {
       .finally(() => setCalcLoading(false))
   }
 
-  const precioEfectivo = calcResult?.precio ?? precioSugerido ?? (viajeAnterior?.tipo === 'entregado' ? viajeAnterior.precio : null)
+  const recargoZona = useMemo(
+    () => calcularRecargoZona(zonaInfo.retiroNombre, zonaInfo.entregaNombre),
+    [zonaInfo]
+  )
+  const recargoMonto = recargoZona.aplica ? recargoZona.monto : 0
+
+  const precioEfectivo = (() => {
+    if (calcResult) return calcResult.precio === -1 ? -1 : calcResult.precio + recargoMonto
+    return precioSugerido ?? (viajeAnterior?.tipo === 'entregado' ? viajeAnterior.precio : null)
+  })()
   const distanciaEfectiva = calcResult?.km ?? draft?.distanciaKm ?? null
 
   useEffect(() => {
@@ -1041,6 +1051,11 @@ export default function SolicitarEnvioPage() {
         macroZonaEntregaId, macroZonaEntregaNombre,
       } = clasificarOrdenCompleto(retiro.coord || null, entrega.coord || null, zonasActivas)
 
+      const recargoFinal = calcularRecargoZona(
+        zonaRetiroNombre ?? macroZonaRetiroNombre ?? null,
+        zonaEntregaNombre ?? macroZonaEntregaNombre ?? null,
+      )
+
       const deducirAplica = tipoCliente === 'contado' && cobroCE && quienPagaDelivery === 'entrega' && deducirDelivery === 'deducir_del_cobro'
       const tieneCalculo = !!calcResult || !!draft
 
@@ -1117,6 +1132,7 @@ export default function SolicitarEnvioPage() {
         macroZonaRetiroNombre,
         macroZonaEntregaId,
         macroZonaEntregaNombre,
+        recargoZona: recargoFinal,
         createdAt: serverTimestamp(),
       })
 
@@ -1750,9 +1766,17 @@ export default function SolicitarEnvioPage() {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#fff', border: '1px solid #bfdbfe', borderRadius: 12, padding: '14px 16px' }}>
                 <div>
                   <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>Calculado</p>
-                  <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>
-                    {calcResult.precio === -1 ? 'Consultar' : `C$ ${calcResult.precio}`}
-                  </p>
+                  {calcResult.precio === -1 ? (
+                    <p style={{ fontSize: 28, fontWeight: 900, color: '#d97706', margin: 0 }}>Consultar</p>
+                  ) : recargoZona.aplica ? (
+                    <>
+                      <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>Tarifa base: <strong>C$ {calcResult.precio}</strong></p>
+                      <p style={{ fontSize: 12, fontWeight: 700, color: '#ea580c', margin: '0 0 2px' }}>+ Recargo {recargoZona.zona}: +C$ {recargoZona.monto}</p>
+                      <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio + recargoMonto}</p>
+                    </>
+                  ) : (
+                    <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio}</p>
+                  )}
                   <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{calcResult.km.toFixed(2)} km · sujeto a confirmación</p>
                 </div>
                 <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ ...S.btnOutline, fontSize: 11 }}>
@@ -1821,6 +1845,11 @@ export default function SolicitarEnvioPage() {
                 </span>
                 <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>{precioEfectivo ? `C$ ${precioEfectivo}` : '—'}</span>
               </div>
+              {calcResult && recargoZona.aplica && precioEfectivo !== -1 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 11, color: '#ea580c' }}>↳ incl. recargo {recargoZona.zona} +C$ {recargoZona.monto}</span>
+                </div>
+              )}
               {cobroCE && tipoCliente === 'contado' && quienPagaDelivery === 'entrega' && montoDelivery > 0 && (
                 <>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>

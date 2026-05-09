@@ -21,7 +21,7 @@ type Solicitud = {
   confirmacion?: { precioFinalCordobas?: number }
   cobroContraEntrega?: { aplica?: boolean; monto?: number }
   pagoDelivery?: { tipo?: string; quienPaga?: string; montoSugerido?: number | null }
-  asignacion?: { motorizadoNombre?: string; motorizadoId?: string } | null
+  asignacion?: { motorizadoNombre?: string; motorizadoId?: string; motorizadoFotoUrl?: string } | null
   historial?: {
     en_camino_retiroAt?: any; retiradoAt?: any
     en_camino_entregaAt?: any; entregadoAt?: any
@@ -255,14 +255,26 @@ export default function OrdenDetallePage() {
       {/* Motorizado */}
       {orden.asignacion?.motorizadoNombre && (
         <div className="rounded-xl border border-gray-200 bg-white p-4">
-          <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Motorizado asignado</h2>
+          <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-3">Motorizado asignado</h2>
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-full bg-[#004aad]/10 grid place-items-center flex-shrink-0">
-              <span className="text-sm font-black text-[#004aad]">
-                {(orden.asignacion.motorizadoNombre || '?')[0].toUpperCase()}
-              </span>
+            <div className="w-10 h-10 rounded-full bg-[#004aad]/10 grid place-items-center flex-shrink-0 overflow-hidden border border-gray-200">
+              {orden.asignacion.motorizadoFotoUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={orden.asignacion.motorizadoFotoUrl}
+                  alt={orden.asignacion.motorizadoNombre}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <span className="text-sm font-black text-[#004aad]">
+                  {(orden.asignacion.motorizadoNombre || '?')[0].toUpperCase()}
+                </span>
+              )}
             </div>
-            <p className="text-sm font-semibold text-gray-900">{orden.asignacion.motorizadoNombre}</p>
+            <div>
+              <p className="text-sm font-semibold text-gray-900">{orden.asignacion.motorizadoNombre}</p>
+              <p className="text-xs text-gray-400 mt-0.5">{estadoLabel[orden.estado || ''] || orden.estado}</p>
+            </div>
           </div>
         </div>
       )}

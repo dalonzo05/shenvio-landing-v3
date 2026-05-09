@@ -399,6 +399,24 @@ export default function ComerciosPage() {
           ? prev.map((p) => (p.key === editingPuntoKey ? updated : p))
           : [...prev, updated]
       )
+      setComerciosList((prev) =>
+        prev.map((c) => {
+          if (c.uid !== selected!.uid) return c
+          const puntosRetiro = {
+            ...(c.puntosRetiro || {}),
+            [key]: {
+              label: pLabel.trim(),
+              nombre: pNombre.trim() || pLabel.trim(),
+              celular: pCelular.trim(),
+              direccion: pDireccion.trim(),
+              nota: pNota.trim() || null,
+              tipoUbicacion: pTipo,
+              ...(pCoord ? { coord: pCoord } : {}),
+            },
+          }
+          return { ...c, puntosRetiro }
+        })
+      )
       setPuntoModal(false)
     } catch (e) {
       console.error(e)
@@ -416,6 +434,14 @@ export default function ComerciosPage() {
         updatedAt: serverTimestamp(),
       })
       setEPuntos((prev) => prev.filter((p) => p.key !== key))
+      setComerciosList((prev) =>
+        prev.map((c) => {
+          if (c.uid !== selected!.uid) return c
+          const puntosRetiro = { ...(c.puntosRetiro || {}) }
+          delete puntosRetiro[key]
+          return { ...c, puntosRetiro }
+        })
+      )
     } catch (e) {
       console.error(e)
     }

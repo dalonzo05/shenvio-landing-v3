@@ -18,6 +18,7 @@ import {
   Timestamp,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
+import { compressImage, uploadFotoMotorizado } from '@/fb/storage'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarPuntoEnZona } from '@/lib/zonas'
@@ -52,6 +53,7 @@ type Motorizado = {
   zonaBaseNombre?: string | null
   macroZonaBaseId?: string | null
   macroZonaBaseNombre?: string | null
+  fotoUrl?: string | null
 }
 
 type Stats = {
@@ -147,6 +149,11 @@ export default function MotorizadosPage() {
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
 
+  // Foto de perfil
+  const [ePhotoFile, setEPhotoFile] = useState<File | null>(null)
+  const [ePhotoPreview, setEPhotoPreview] = useState<string | null>(null)
+  const [ePhotoRemoved, setEPhotoRemoved] = useState(false)
+
   // Crear acceso Auth (en drawer, cualquier motorizado)
   const [caEmail, setCaEmail] = useState('')
   const [caPassword, setCaPassword] = useState('')
@@ -162,6 +169,9 @@ export default function MotorizadosPage() {
   const [eMacroZonaBaseNombre,  setEMacroZonaBaseNombre]  = useState<string | null>(null)
   const [zonasActivas,          setZonasActivas]          = useState<ZonaGeografica[]>([])
   const [warningFueraDeMacrozona, setWarningFueraDeMacrozona] = useState(false)
+
+  // Photo ref
+  const photoInputRef = useRef<HTMLInputElement | null>(null)
 
   // Map refs
   const mapContainerRef      = useRef<HTMLDivElement | null>(null)
@@ -338,6 +348,18 @@ export default function MotorizadosPage() {
     }
   }
 
+  function handlePhotoChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!file.type.startsWith('image/')) { setMsg('❌ Solo se permiten imágenes.'); return }
+    if (file.size > 10 * 1024 * 1024) { setMsg('❌ La imagen no debe superar 10 MB.'); return }
+    setEPhotoFile(file)
+    setEPhotoRemoved(false)
+    const reader = new FileReader()
+    reader.onloadend = () => setEPhotoPreview(reader.result as string)
+    reader.readAsDataURL(file)
+  }
+
   function openEdit(m: Motorizado) {
     setIsNew(false)
     setSelected(m)
@@ -357,6 +379,9 @@ export default function MotorizadosPage() {
     if (gMapRef.current && autocompleteInputRef.current) {
       autocompleteInputRef.current.value = m.direccionBase ?? ''
     }
+    setEPhotoFile(null)
+    setEPhotoPreview(m.fotoUrl ?? null)
+    setEPhotoRemoved(false)
     setMsg(null)
     setStats(null)
     setCaEmail('')
@@ -385,6 +410,9 @@ export default function MotorizadosPage() {
     setEMacroZonaBaseNombre(null)
     setWarningFueraDeMacrozona(false)
     if (autocompleteInputRef.current) autocompleteInputRef.current.value = ''
+    setEPhotoFile(null)
+    setEPhotoPreview(null)
+    setEPhotoRemoved(false)
     setMsg(null)
     setStats(null)
     setCaEmail('')
@@ -411,19 +439,37 @@ export default function MotorizadosPage() {
         macroZonaBaseNombre:  eMacroZonaBaseNombre  ?? null,
       }
       if (isNew) {
-        await addDoc(collection(db, 'motorizado'), {
+        const docRef = await addDoc(collection(db, 'motorizado'), {
           nombre: eName.trim(),
           telefono: ePhone.trim(),
           estado: eEstado,
           activo: eActivo,
           authUid: eAuthUid.trim() || null,
           tieneBolso: eTieneBolso,
+          fotoUrl: null,
           createdAt: serverTimestamp(),
           ...ubicacionBasePayload,
         })
+        if (ePhotoFile) {
+          const blob = await compressImage(ePhotoFile)
+          const { url } = await uploadFotoMotorizado(docRef.id, blob)
+          await updateDoc(docRef, { fotoUrl: url })
+          setEPhotoPreview(url)
+          setEPhotoFile(null)
+        }
         setMsg('✅ Motorizado creado')
         setIsNew(false)
       } else if (selected) {
+        let fotoUrl: string | null = selected.fotoUrl ?? null
+        if (ePhotoFile) {
+          const blob = await compressImage(ePhotoFile)
+          const { url } = await uploadFotoMotorizado(selected.id, blob)
+          fotoUrl = url
+          setEPhotoPreview(url)
+          setEPhotoFile(null)
+        } else if (ePhotoRemoved) {
+          fotoUrl = null
+        }
         await updateDoc(doc(db, 'motorizado', selected.id), {
           nombre: eName.trim(),
           telefono: ePhone.trim(),
@@ -431,6 +477,7 @@ export default function MotorizadosPage() {
           activo: eActivo,
           authUid: eAuthUid.trim() || null,
           tieneBolso: eTieneBolso,
+          fotoUrl,
           ...ubicacionBasePayload,
         })
         setMsg('✅ Guardado')
@@ -506,10 +553,15 @@ export default function MotorizadosPage() {
                   <tr key={m.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-full bg-[#004aad]/10 grid place-items-center flex-shrink-0">
-                          <span className="text-sm font-black text-[#004aad]">
-                            {(m.nombre || '?')[0].toUpperCase()}
-                          </span>
+                        <div className="w-9 h-9 rounded-full bg-[#004aad]/10 grid place-items-center flex-shrink-0 overflow-hidden border border-gray-200">
+                          {m.fotoUrl ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={m.fotoUrl} alt={m.nombre} className="w-full h-full object-cover" />
+                          ) : (
+                            <span className="text-sm font-black text-[#004aad]">
+                              {(m.nombre || '?')[0].toUpperCase()}
+                            </span>
+                          )}
                         </div>
                         <span className="font-semibold text-gray-900">{m.nombre}</span>
                       </div>
@@ -560,17 +612,31 @@ export default function MotorizadosPage() {
       <div className={`fixed right-0 top-0 z-50 h-full w-full max-w-[460px] bg-white shadow-2xl flex flex-col transition-transform duration-300 ${drawerOpen ? 'translate-x-0' : 'translate-x-full'}`}>
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
-          <div>
-            <h2 className="text-lg font-black text-gray-900">
-              {isNew ? 'Nuevo motorizado' : (selected?.nombre || 'Editar')}
-            </h2>
-            {!isNew && selected && (
-              <p className="text-xs text-gray-400 mt-0.5">
-                {selected.activo !== false ? 'Motorizado activo' : 'Motorizado inactivo'}
-              </p>
+          <div className="flex items-center gap-3 min-w-0">
+            {!isNew && (
+              <div className="w-10 h-10 rounded-full bg-[#004aad]/10 grid place-items-center flex-shrink-0 overflow-hidden border border-gray-200">
+                {ePhotoPreview ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={ePhotoPreview} alt="" className="w-full h-full object-cover" />
+                ) : (
+                  <span className="text-base font-black text-[#004aad]">
+                    {(selected?.nombre || '?')[0].toUpperCase()}
+                  </span>
+                )}
+              </div>
             )}
+            <div className="min-w-0">
+              <h2 className="text-lg font-black text-gray-900 truncate">
+                {isNew ? 'Nuevo motorizado' : (selected?.nombre || 'Editar')}
+              </h2>
+              {!isNew && selected && (
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {selected.activo !== false ? 'Motorizado activo' : 'Motorizado inactivo'}
+                </p>
+              )}
+            </div>
           </div>
-          <button onClick={closeDrawer} className="w-9 h-9 grid place-items-center rounded-full border border-gray-200 hover:bg-gray-50 transition">
+          <button onClick={closeDrawer} className="w-9 h-9 grid place-items-center rounded-full border border-gray-200 hover:bg-gray-50 transition flex-shrink-0">
             <X className="h-4 w-4 text-gray-500" />
           </button>
         </div>
@@ -697,6 +763,52 @@ export default function MotorizadosPage() {
               )}
             </section>
           )}
+
+          {/* Foto de perfil */}
+          <section className="space-y-3">
+            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wide">Foto de perfil</h3>
+            <div className="flex items-center gap-4">
+              <div className="w-16 h-16 rounded-full bg-[#004aad]/10 grid place-items-center flex-shrink-0 overflow-hidden border-2 border-gray-200">
+                {ePhotoPreview ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={ePhotoPreview} alt="Foto" className="w-full h-full object-cover" />
+                ) : (
+                  <span className="text-2xl font-black text-[#004aad]">
+                    {(eName || selected?.nombre || '?')[0].toUpperCase()}
+                  </span>
+                )}
+              </div>
+              <div className="space-y-2">
+                <input
+                  ref={photoInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handlePhotoChange}
+                />
+                <button
+                  type="button"
+                  onClick={() => photoInputRef.current?.click()}
+                  className="inline-flex items-center gap-2 text-xs font-semibold text-[#004aad] border border-[#004aad]/30 rounded-lg px-3 py-1.5 hover:bg-[#004aad]/5 transition"
+                >
+                  {ePhotoPreview ? 'Cambiar foto' : 'Subir foto'}
+                </button>
+                {ePhotoFile && (
+                  <p className="text-xs text-gray-400">Se subirá al guardar.</p>
+                )}
+                {ePhotoPreview && (
+                  <button
+                    type="button"
+                    onClick={() => { setEPhotoPreview(null); setEPhotoFile(null); setEPhotoRemoved(true) }}
+                    className="block text-xs text-red-500 font-semibold hover:underline"
+                  >
+                    Quitar foto
+                  </button>
+                )}
+              </div>
+            </div>
+            <p className="text-xs text-gray-400">Solo imágenes. Se comprimirá automáticamente antes de subir.</p>
+          </section>
 
           {/* Datos */}
           <section className="space-y-3">

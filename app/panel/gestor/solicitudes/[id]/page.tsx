@@ -120,6 +120,7 @@ type Solicitud = {
     motorizadoAuthUid?: string
     motorizadoNombre?: string
     motorizadoTelefono?: string
+    motorizadoFotoUrl?: string | null
     asignadoPorUid?: string
     asignadoAt?: any
     aceptarAntesDe?: any
@@ -726,6 +727,7 @@ export default function GestorSolicitudDetallePage() {
                 motorizadoAuthUid: (m.authUid || '').trim(),
                 motorizadoNombre: m.nombre,
                 motorizadoTelefono: m.telefono || '',
+                motorizadoFotoUrl: (m as any).fotoUrl || null,
                 asignadoPorUid: user.uid,
                 asignadoAt: serverTimestamp(),
                 estadoAceptacion: 'pendiente',
@@ -1467,11 +1469,22 @@ export default function GestorSolicitudDetallePage() {
 
             {solicitud.asignacion?.motorizadoNombre ? (
               <div className="space-y-3 text-sm">
-                <div>
-                  <div className="text-gray-500">Motorizado</div>
-                  <div className="font-medium text-gray-900 flex items-center gap-2">
-                    <Bike className="h-4 w-4 text-gray-400" />
-                    {solicitud.asignacion.motorizadoNombre}
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-indigo-100 grid place-items-center flex-shrink-0 overflow-hidden border border-indigo-200">
+                    {solicitud.asignacion.motorizadoFotoUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={solicitud.asignacion.motorizadoFotoUrl}
+                        alt={solicitud.asignacion.motorizadoNombre}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <Bike className="h-4 w-4 text-indigo-500" />
+                    )}
+                  </div>
+                  <div>
+                    <div className="font-semibold text-gray-900">{solicitud.asignacion.motorizadoNombre}</div>
+                    <div className="text-xs text-gray-500">{solicitud.asignacion.motorizadoTelefono || '—'}</div>
                   </div>
                 </div>
 

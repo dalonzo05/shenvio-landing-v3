@@ -57,3 +57,18 @@ export async function uploadDepositoBoucher(
   const url = await getDownloadURL(storageRef)
   return { url, pathStorage }
 }
+
+/**
+ * Uploads a motorizado profile photo to Firebase Storage under
+ * motorizados/{motorizadoId}/foto.jpg
+ */
+export async function uploadFotoMotorizado(
+  motorizadoId: string,
+  blob: Blob,
+): Promise<{ url: string; pathStorage: string }> {
+  const pathStorage = `motorizados/${motorizadoId}/foto.jpg`
+  const storageRef = ref(storage, pathStorage)
+  await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' })
+  const url = await getDownloadURL(storageRef)
+  return { url, pathStorage }
+}

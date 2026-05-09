@@ -98,6 +98,7 @@ type Solicitud = {
     motorizadoAuthUid?: string
     motorizadoNombre?: string
     motorizadoTelefono?: string
+    motorizadoFotoUrl?: string | null
     asignadoPorUid?: string
     asignadoAt?: any
     aceptarAntesDe?: any
@@ -377,7 +378,7 @@ function SolicitudDrawer({
       await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: m ? 'asignada' : 'confirmada',
         confirmacion: { precioFinalCordobas: Number(precioFinal), confirmadoPorUid: user.uid, confirmadoAt: serverTimestamp() },
-        ...(m ? { asignacion: { motorizadoId: m.id, motorizadoAuthUid: m.authUid || '', motorizadoNombre: m.nombre, motorizadoTelefono: m.telefono || '', asignadoPorUid: user.uid, asignadoAt: serverTimestamp(), estadoAceptacion: 'pendiente', aceptadoAt: null, rechazadoAt: null, motivoRechazo: '', aceptarAntesDe } } : { asignacion: null }),
+        ...(m ? { asignacion: { motorizadoId: m.id, motorizadoAuthUid: m.authUid || '', motorizadoNombre: m.nombre, motorizadoTelefono: m.telefono || '', motorizadoFotoUrl: (m as any).fotoUrl || null, asignadoPorUid: user.uid, asignadoAt: serverTimestamp(), estadoAceptacion: 'pendiente', aceptadoAt: null, rechazadoAt: null, motivoRechazo: '', aceptarAntesDe } } : { asignacion: null }),
         updatedAt: serverTimestamp(),
       } as any)
       setErr(null)

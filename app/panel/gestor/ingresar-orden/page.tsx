@@ -16,6 +16,7 @@ import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
+import { calcularRecargoZona } from '@/lib/recargoZona'
 import { useSearchParams } from 'next/navigation'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import ComercioSearchModal, { ComercioModalItem } from '@/app/Components/ComercioSearchModal'
@@ -1418,7 +1419,17 @@ export default function GestorIngresarOrdenPage() {
     return typeof p === 'number' ? p : null
   }, [draft])
 
-  const precioEfectivo = calcResult?.precio ?? precioSugerido
+  const recargoZona = useMemo(() => {
+    const zr = zonaPreview?.zonaRetiroNombre ?? zonaPreview?.macroZonaRetiroNombre ?? null
+    const ze = zonaPreview?.zonaEntregaNombre ?? zonaPreview?.macroZonaEntregaNombre ?? null
+    return calcularRecargoZona(zr, ze)
+  }, [zonaPreview])
+  const recargoMonto = recargoZona.aplica ? recargoZona.monto : 0
+
+  const precioEfectivo = (() => {
+    if (calcResult) return calcResult.precio === -1 ? -1 : calcResult.precio + recargoMonto
+    return precioSugerido ?? null
+  })()
   const distanciaEfectiva = calcResult?.km ?? draft?.distanciaKm ?? null
 
   // ── Favoritos: auto-seleccionar el primero cuando cambia el comercio ──
@@ -1619,6 +1630,11 @@ export default function GestorIngresarOrdenPage() {
         macroZonaEntregaId, macroZonaEntregaNombre,
       } = clasificarOrdenCompleto(retiro.coord || null, entrega.coord || null, zonasActivas)
 
+      const recargoFinal = calcularRecargoZona(
+        zonaRetiroNombre ?? macroZonaRetiroNombre ?? null,
+        zonaEntregaNombre ?? macroZonaEntregaNombre ?? null,
+      )
+
       const deducirAplica =
         tipoCliente === 'contado' &&
         cobroCE &&
@@ -1713,6 +1729,7 @@ export default function GestorIngresarOrdenPage() {
         macroZonaRetiroNombre,
         macroZonaEntregaId,
         macroZonaEntregaNombre,
+        recargoZona: recargoFinal,
         createdAt: serverTimestamp(),
         creadoInternamente: true,
         creadoPorGestorUid: gestorUid,
@@ -2404,9 +2421,17 @@ export default function GestorIngresarOrdenPage() {
                 <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>
                   Calculado automáticamente
                 </p>
-                <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>
-                  {calcResult.precio === -1 ? 'Consultar' : `C$ ${calcResult.precio}`}
-                </p>
+                {calcResult.precio === -1 ? (
+                  <p style={{ fontSize: 28, fontWeight: 900, color: '#d97706', margin: 0 }}>Consultar</p>
+                ) : recargoZona.aplica ? (
+                  <>
+                    <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>Tarifa base: <strong>C$ {calcResult.precio}</strong></p>
+                    <p style={{ fontSize: 12, fontWeight: 700, color: '#ea580c', margin: '0 0 2px' }}>+ Recargo {recargoZona.zona}: +C$ {recargoZona.monto}</p>
+                    <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio + recargoMonto}</p>
+                  </>
+                ) : (
+                  <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio}</p>
+                )}
                 <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>
                   {calcResult.km.toFixed(2)} km · sujeto a confirmación del gestor
                 </p>
@@ -2742,7 +2767,9 @@ export default function GestorIngresarOrdenPage() {
                 {calcResult && (
                   <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap' as const }}>
                     <span style={{ fontSize: 13, color: '#6b7280' }}>Distancia: <strong>{calcResult.km.toFixed(2)} km</strong></span>
-                    <span style={{ fontSize: 13, color: '#004aad', fontWeight: 700 }}>Precio: {calcResult.precio === -1 ? 'Consultar' : `C$ ${calcResult.precio}`}</span>
+                    <span style={{ fontSize: 13, color: '#004aad', fontWeight: 700 }}>
+                      Precio: {calcResult.precio === -1 ? 'Consultar' : recargoZona.aplica ? `C$ ${calcResult.precio + recargoMonto} (base C$ ${calcResult.precio} + recargo C$ ${recargoMonto})` : `C$ ${calcResult.precio}`}
+                    </span>
                   </div>
                 )}
               </div>
@@ -2791,6 +2818,11 @@ export default function GestorIngresarOrdenPage() {
                   <span style={{ fontSize: 13, color: '#6b7280' }}>Delivery {precioEfectivo ? (calcResult ? '(calculado)' : '(cotización)') : '(a confirmar)'}</span>
                   <span style={{ fontSize: 13, fontWeight: 700, color: '#004aad' }}>{precioEfectivo ? `C$ ${precioEfectivo}` : '—'}</span>
                 </div>
+                {calcResult && recargoZona.aplica && precioEfectivo !== -1 && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: 11, color: '#ea580c' }}>↳ incl. recargo {recargoZona.zona} +C$ {recargoZona.monto}</span>
+                  </div>
+                )}
                 {tipoCliente === 'contado' && quienPagaDelivery && (
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span style={{ fontSize: 13, color: '#6b7280' }}>Quién paga delivery</span>

@@ -26,6 +26,7 @@ export interface MotorizadoConRanking {
   zonaOperativaActual?: string | null       // zona pequeña operativa actual (para uso futuro)
   macroZonaOperativaActual?: string | null  // macrozona operativa actual (para uso futuro)
   scoreDesempeño?: number         // reservado para uso futuro
+  fotoUrl?: string | null
 }
 
 export interface OrdenActivaRanking {

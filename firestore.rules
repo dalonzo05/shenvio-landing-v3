@@ -118,12 +118,14 @@ service cloud.firestore {
           'destino',
           'distanciaKm',
           'precioCordobas',
+          'precioBase',
           'origenCoord',
           'destinoCoord',
           'fuente',
           'createdAt',
           'zonaOrigen',
-          'zonaDestino'
+          'zonaDestino',
+          'recargoZona'
         ]);
       }
 
@@ -156,7 +158,9 @@ service cloud.firestore {
           validCoords(request.resource.data.destinoCoord) &&
           (request.resource.data.createdAt is timestamp) &&
           (!('zonaOrigen' in request.resource.data) || request.resource.data.zonaOrigen is string) &&
-          (!('zonaDestino' in request.resource.data) || request.resource.data.zonaDestino is string);
+          (!('zonaDestino' in request.resource.data) || request.resource.data.zonaDestino is string) &&
+          (!('precioBase' in request.resource.data) || request.resource.data.precioBase is number) &&
+          (!('recargoZona' in request.resource.data) || request.resource.data.recargoZona is map);
       }
 
       allow create: if isMeCreating() && onlyAllowedKeys() && validData();

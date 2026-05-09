@@ -78,7 +78,8 @@ export type SolicitudDetalle = {
   confirmacion?: { precioFinalCordobas?: number; confirmadoPorUid?: string; confirmadoAt?: any }
   asignacion?: {
     motorizadoId?: string; motorizadoAuthUid?: string; motorizadoNombre?: string
-    motorizadoTelefono?: string; asignadoPorUid?: string; asignadoAt?: any
+    motorizadoTelefono?: string; motorizadoFotoUrl?: string
+    asignadoPorUid?: string; asignadoAt?: any
     aceptarAntesDe?: any; estadoAceptacion?: 'pendiente' | 'aceptada' | 'rechazada' | 'expirada'
     aceptadoAt?: any; rechazadoAt?: any; motivoRechazo?: string
   } | null
@@ -400,7 +401,7 @@ export function SolicitudDrawer({
       await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: m ? 'asignada' : 'confirmada',
         confirmacion: { precioFinalCordobas: Number(precioFinal), confirmadoPorUid: user.uid, confirmadoAt: serverTimestamp() },
-        ...(m ? { asignacion: { motorizadoId: m.id, motorizadoAuthUid: m.authUid || '', motorizadoNombre: m.nombre, motorizadoTelefono: m.telefono || '', asignadoPorUid: user.uid, asignadoAt: serverTimestamp(), estadoAceptacion: 'pendiente', aceptadoAt: null, rechazadoAt: null, motivoRechazo: '', aceptarAntesDe } } : { asignacion: null }),
+        ...(m ? { asignacion: { motorizadoId: m.id, motorizadoAuthUid: m.authUid || '', motorizadoNombre: m.nombre, motorizadoTelefono: m.telefono || '', motorizadoFotoUrl: (m as any).fotoUrl || null, asignadoPorUid: user.uid, asignadoAt: serverTimestamp(), estadoAceptacion: 'pendiente', aceptadoAt: null, rechazadoAt: null, motivoRechazo: '', aceptarAntesDe } } : { asignacion: null }),
         updatedAt: serverTimestamp(),
       } as any)
       setErr(null)
@@ -768,8 +769,19 @@ export function SolicitudDrawer({
               {solicitud.asignacion?.motorizadoNombre && (
                 <Section title="Motorizado asignado" accent="indigo">
                   <div className="flex items-start gap-3">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-600">
-                      <Bike size={15} />
+                    <div className="h-10 w-10 shrink-0 rounded-full overflow-hidden bg-indigo-100 border border-indigo-200">
+                      {solicitud.asignacion.motorizadoFotoUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={solicitud.asignacion.motorizadoFotoUrl}
+                          alt={solicitud.asignacion.motorizadoNombre}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-indigo-600">
+                          <Bike size={15} />
+                        </div>
+                      )}
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-semibold text-gray-900">{solicitud.asignacion.motorizadoNombre}</div>

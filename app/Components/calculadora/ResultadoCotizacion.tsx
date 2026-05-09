@@ -1,19 +1,26 @@
 'use client'
 import React from 'react'
 import { ZonasResult } from './types'
+import type { RecargoZona } from '@/lib/recargoZona'
 
 export function ResultadoCotizacion({
   distancia,
   precio,
   zonasResult,
   onSolicitar,
+  precioBase,
+  recargoZona,
 }: {
   distancia: number
   precio: number | null
   zonasResult: ZonasResult
   onSolicitar: () => void
+  precioBase?: number | null
+  recargoZona?: RecargoZona | null
 }) {
   const precioInvalido = precio === null || precio === -1
+  const tieneRecargo = !precioInvalido && recargoZona?.aplica && precioBase != null
+
   return (
     <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4">
       <div className="flex flex-wrap justify-between items-start gap-3">
@@ -21,6 +28,16 @@ export function ResultadoCotizacion({
           <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide mb-1">Precio estimado</p>
           {precioInvalido ? (
             <p className="text-xl font-black text-amber-600">Consultar por WhatsApp</p>
+          ) : tieneRecargo ? (
+            <div className="space-y-0.5">
+              <p className="text-[12px] text-gray-500">
+                Tarifa base: <strong>C$ {precioBase}</strong>
+              </p>
+              <p className="text-[12px] font-semibold text-orange-600">
+                + Recargo {recargoZona!.zona}: +C$ {recargoZona!.monto}
+              </p>
+              <p className="text-[32px] font-black text-[#004aad] leading-none tracking-tight">C$ {precio}</p>
+            </div>
           ) : (
             <p className="text-[32px] font-black text-[#004aad] leading-none tracking-tight">C$ {precio}</p>
           )}
