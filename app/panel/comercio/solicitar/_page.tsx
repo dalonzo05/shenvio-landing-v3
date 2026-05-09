@@ -19,7 +19,7 @@ import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
-import { calcularRecargoZona, RECARGO_TERMINAL_BUS, type TipoServicio } from '@/lib/recargoZona'
+import { calcularRecargoZona, RECARGO_TERMINAL_BUS, sugerirTerminal, type TipoServicio, type MetodoFueraManagua } from '@/lib/recargoZona'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import StepIndicator from './_components/StepIndicator'
 import StickyOrderHeader from './_components/StickyOrderHeader'
@@ -783,13 +783,19 @@ export default function SolicitarEnvioPage() {
 
   const [showClienteModal, setShowClienteModal] = useState(false)
 
-  // ── Envío especial ──
-  const [tipoServicio, setTipoServicio] = useState<TipoServicio>('normal')
-  const [terminalDestino, setTerminalDestino] = useState('')
-  const [terminalTransporte, setTerminalTransporte] = useState('')
-  const [terminalCelular, setTerminalCelular] = useState('')
-  const [terminalHoraSalida, setTerminalHoraSalida] = useState('')
-  const [terminalNota, setTerminalNota] = useState('')
+  // ── Envío fuera de Managua ──
+  const [esFueraManagua, setEsFueraManagua] = useState(false)
+  const [metodoFueraManagua, setMetodoFueraManagua] = useState<MetodoFueraManagua>('bus_terminal')
+  const [destinoFinal, setDestinoFinal] = useState('')
+  const [showDetallesTransporte, setShowDetallesTransporte] = useState(false)
+  const [transporteNombre, setTransporteNombre] = useState('')
+  const [transporteCelular, setTransporteCelular] = useState('')
+  const [transporteHoraSalida, setTransporteHoraSalida] = useState('')
+  const [transporteNota, setTransporteNota] = useState('')
+  const [cantidadPaquetes, setCantidadPaquetes] = useState('1')
+  const [notaCargotrans, setNotaCargotrans] = useState('')
+  const tipoServicio: TipoServicio = esFueraManagua ? 'fuera_managua' : 'normal'
+  const terminalSugerida = esFueraManagua && metodoFueraManagua === 'bus_terminal' ? sugerirTerminal(destinoFinal) : null
 
   const [showGuardarFav, setShowGuardarFav] = useState(false)
   const [newFavLabel, setNewFavLabel] = useState('')
@@ -907,7 +913,7 @@ export default function SolicitarEnvioPage() {
     [zonaInfo]
   )
   const recargoMonto = recargoZona.aplica ? recargoZona.monto : 0
-  const recargoServicioMonto = tipoServicio === 'terminal_bus' ? RECARGO_TERMINAL_BUS : 0
+  const recargoServicioMonto = (esFueraManagua && metodoFueraManagua === 'bus_terminal') ? RECARGO_TERMINAL_BUS : 0
 
   const precioEfectivo = (() => {
     if (calcResult) return calcResult.precio === -1 ? -1 : calcResult.precio + recargoMonto + recargoServicioMonto
@@ -987,20 +993,21 @@ export default function SolicitarEnvioPage() {
     if (!retiro.celular.trim()) f.push('Celular de retiro')
     else if (!validarCelular(retiro.celular)) f.push('Celular de retiro — 8 dígitos')
     if (!retiro.direccion.trim()) f.push('Dirección de retiro')
-    if (!entrega.nombre.trim()) f.push('Nombre de entrega')
-    if (!entrega.celular.trim()) f.push('Celular de entrega')
-    else if (!validarCelular(entrega.celular)) f.push('Celular de entrega — 8 dígitos')
-    if (!entrega.direccion.trim()) f.push('Dirección de entrega')
+    if (!esFueraManagua) {
+      if (!entrega.nombre.trim()) f.push('Nombre de entrega')
+      if (!entrega.celular.trim()) f.push('Celular de entrega')
+      else if (!validarCelular(entrega.celular)) f.push('Celular de entrega — 8 dígitos')
+      if (!entrega.direccion.trim()) f.push('Dirección de entrega')
+    }
     if (cobroCE && (montoCE === '' || Number(montoCE) <= 0)) f.push('Monto del cobro contra entrega')
     if (tipoCliente === 'contado' && !quienPagaDelivery) f.push('Quién paga el delivery')
     if (esProgramado && (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && !fechaRetiro) f.push('Fecha de retiro programado')
     if (esProgramado && (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && !fechaEntrega) f.push('Fecha de entrega programada')
-    if (tipoServicio === 'terminal_bus') {
-      if (!terminalDestino.trim()) f.push('Destino del paquete (terminal)')
-      if (!terminalTransporte.trim()) f.push('Nombre del transporte / bus')
+    if (esFueraManagua && metodoFueraManagua === 'bus_terminal' && !destinoFinal.trim()) {
+      f.push('Destino del paquete (fuera de Managua)')
     }
     return f
-  }, [retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega, tipoServicio, terminalDestino, terminalTransporte])
+  }, [retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega, esFueraManagua, metodoFueraManagua, destinoFinal])
 
   const formularioCompleto = camposFaltantes.length === 0
 
@@ -1010,6 +1017,7 @@ export default function SolicitarEnvioPage() {
       return retiro.nombre.trim() !== '' && validarCelular(retiro.celular) && retiro.direccion.trim() !== ''
     }
     if (desde === 2) {
+      if (esFueraManagua) return metodoFueraManagua === 'bus_terminal' ? destinoFinal.trim() !== '' : true
       return entrega.nombre.trim() !== '' && validarCelular(entrega.celular) && entrega.direccion.trim() !== ''
     }
     if (desde === 3) {
@@ -1149,13 +1157,20 @@ export default function SolicitarEnvioPage() {
         macroZonaEntregaNombre,
         recargoZona: recargoFinal,
         tipoServicio,
-        ...(tipoServicio === 'terminal_bus' ? {
-          terminalBus: {
-            destino: terminalDestino.trim(),
-            transporte: terminalTransporte.trim(),
-            celularTransporte: terminalCelular.trim(),
-            horaSalida: terminalHoraSalida.trim(),
-            nota: terminalNota.trim() || null,
+        ...(esFueraManagua ? {
+          fueraManagua: {
+            metodoEnvio: metodoFueraManagua,
+            destinoFinal: destinoFinal.trim() || null,
+            ...(metodoFueraManagua === 'bus_terminal' ? {
+              terminalSugerida: terminalSugerida ?? null,
+              transporteNombre: transporteNombre.trim() || null,
+              transporteCelular: transporteCelular.trim() || null,
+              transporteHoraSalida: transporteHoraSalida.trim() || null,
+              transporteNota: transporteNota.trim() || null,
+            } : {
+              cantidadPaquetes: Number(cantidadPaquetes) || 1,
+              notaCargotrans: notaCargotrans.trim() || null,
+            }),
           },
         } : {}),
         precioDesglose: precioEfectivo && precioEfectivo !== -1 && calcResult ? {
@@ -1192,7 +1207,8 @@ export default function SolicitarEnvioPage() {
       setNumeroOrden('')
       setEsProgramado(false); setTipoProgramado('retiro'); setFechaRetiro(''); setHoraRetiro(''); setFechaEntrega(''); setHoraEntrega('')
       setGeoRetiro(''); setGeoEntrega('')
-      setTipoServicio('normal'); setTerminalDestino(''); setTerminalTransporte(''); setTerminalCelular(''); setTerminalHoraSalida(''); setTerminalNota('')
+      setEsFueraManagua(false); setMetodoFueraManagua('bus_terminal'); setDestinoFinal(''); setShowDetallesTransporte(false)
+      setTransporteNombre(''); setTransporteCelular(''); setTransporteHoraSalida(''); setTransporteNota(''); setCantidadPaquetes('1'); setNotaCargotrans('')
       try { sessionStorage.removeItem('draftEnvio') } catch {}
       setDraft(null)
     } catch (err) {
@@ -1374,6 +1390,30 @@ export default function SolicitarEnvioPage() {
       {/* ═══════════════════════════════════════════════════════════════ */}
       {paso === 2 && (
         <div>
+
+          {/* Tipo de entrega */}
+          <div style={{ ...S.sectionCard }}>
+            <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: 0.5, color: '#9ca3af', margin: '0 0 10px' }}>Tipo de entrega</p>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {([
+                { val: false, label: '📍 Dentro de Managua', desc: 'Retiro y entrega en la ciudad' },
+                { val: true,  label: '🌍 Fuera de Managua',  desc: 'Bus / terminal o Cargotrans' },
+              ] as { val: boolean; label: string; desc: string }[]).map(opt => (
+                <button
+                  key={String(opt.val)}
+                  type="button"
+                  onClick={() => { setEsFueraManagua(opt.val); if (opt.val) setEntrega(blankEntrega()) }}
+                  style={{ flex: 1, textAlign: 'left' as const, padding: '12px 14px', borderRadius: 12, cursor: 'pointer', border: `2px solid ${esFueraManagua === opt.val ? (opt.val ? '#7c3aed' : '#004aad') : '#e5e7eb'}`, background: esFueraManagua === opt.val ? (opt.val ? '#f5f3ff' : '#eff6ff') : '#fff' }}
+                >
+                  <p style={{ fontSize: 13, fontWeight: 700, color: esFueraManagua === opt.val ? (opt.val ? '#7c3aed' : '#004aad') : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
+                  <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>{opt.desc}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Dentro de Managua: flujo normal */}
+          {!esFueraManagua && (
           <SectionCard title="Punto de entrega" icon="🏠">
             <div>
               <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
@@ -1451,46 +1491,99 @@ export default function SolicitarEnvioPage() {
               label="¿Hay instrucciones adicionales para el motorizado en la entrega?"
             />
           </SectionCard>
+          )}
 
-          {/* Envío especial */}
-          <SectionCard title="¿Este envío requiere algo especial?" icon="🚌">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {([
-                { value: 'normal', label: '📦 Delivery normal', desc: 'Retiro y entrega estándar' },
-                { value: 'terminal_bus', label: '🚌 Terminal / bus', desc: `Envío a terminal. Recargo +C$ ${RECARGO_TERMINAL_BUS}` },
-              ] as { value: TipoServicio; label: string; desc: string }[]).map(opt => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  onClick={() => setTipoServicio(opt.value)}
-                  style={{ textAlign: 'left' as const, padding: '12px 14px', borderRadius: 10, cursor: 'pointer', border: `1.5px solid ${tipoServicio === opt.value ? '#004aad' : '#e5e7eb'}`, background: tipoServicio === opt.value ? '#eff6ff' : '#fff' }}
-                >
-                  <p style={{ fontSize: 13, fontWeight: 700, color: tipoServicio === opt.value ? '#004aad' : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
-                  <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>{opt.desc}</p>
-                </button>
-              ))}
-            </div>
+          {/* Fuera de Managua: flujo especializado */}
+          {esFueraManagua && (
+          <div style={{ ...S.sectionCard }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
 
-            {tipoServicio === 'terminal_bus' && (
-              <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 14, borderTop: '1px solid #e5e7eb', paddingTop: 14 }}>
-                <Field label="Destino del paquete" required hint="Ciudad o lugar al que va el paquete.">
-                  <input value={terminalDestino} onChange={e => setTerminalDestino(e.target.value)} placeholder="Ej: León, Chinandega, Estelí..." style={S.input} />
-                </Field>
-                <Field label="Nombre del transporte / bus" required hint="Nombre de la cooperativa o bus.">
-                  <input value={terminalTransporte} onChange={e => setTerminalTransporte(e.target.value)} placeholder="Ej: El Exprés, Transnica, Cotran Norte..." style={S.input} />
-                </Field>
-                <Field label="Celular del transporte">
-                  <input value={terminalCelular} onChange={e => setTerminalCelular(formatCelular(e.target.value))} placeholder="Ej: 88888888" maxLength={8} style={S.input} />
-                </Field>
-                <Field label="Hora de salida de Managua">
-                  <input type="time" value={terminalHoraSalida} onChange={e => setTerminalHoraSalida(e.target.value)} style={S.input} />
-                </Field>
-                <Field label="Nota adicional">
-                  <textarea value={terminalNota} onChange={e => setTerminalNota(e.target.value)} placeholder="Instrucciones adicionales para el motorizado..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 60 }} rows={2} />
-                </Field>
+              {/* Método de envío */}
+              <div>
+                <label style={S.label}>¿Cómo se enviará?</label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {([
+                    { value: 'bus_terminal' as MetodoFueraManagua, label: '🚌 Bus / terminal', desc: `Recargo +C$ ${RECARGO_TERMINAL_BUS}` },
+                    { value: 'cargotrans' as MetodoFueraManagua, label: '📦 Cargotrans', desc: 'Sucursal más cercana' },
+                  ]).map(opt => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setMetodoFueraManagua(opt.value)}
+                      style={{ flex: 1, textAlign: 'left' as const, padding: '10px 12px', borderRadius: 10, cursor: 'pointer', border: `1.5px solid ${metodoFueraManagua === opt.value ? '#7c3aed' : '#e5e7eb'}`, background: metodoFueraManagua === opt.value ? '#f5f3ff' : '#fff' }}
+                    >
+                      <p style={{ fontSize: 13, fontWeight: 700, color: metodoFueraManagua === opt.value ? '#7c3aed' : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
+                      <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>{opt.desc}</p>
+                    </button>
+                  ))}
+                </div>
               </div>
-            )}
-          </SectionCard>
+
+              {/* Bus / terminal */}
+              {metodoFueraManagua === 'bus_terminal' && (
+                <>
+                  <Field label="Destino del paquete" required hint="Ciudad o departamento al que va el paquete">
+                    <input
+                      value={destinoFinal}
+                      onChange={e => setDestinoFinal(e.target.value)}
+                      placeholder="Ej: Matagalpa, Estelí, León..."
+                      style={S.input}
+                    />
+                    {terminalSugerida && (
+                      <div style={{ marginTop: 6, background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 8, padding: '8px 12px' }}>
+                        <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: 0 }}>📍 Terminal sugerida: <strong>{terminalSugerida}</strong></p>
+                      </div>
+                    )}
+                  </Field>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowDetallesTransporte(v => !v)}
+                    style={{ textAlign: 'left' as const, padding: '8px 12px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#f9fafb', cursor: 'pointer', fontSize: 12, color: '#6b7280', fontWeight: 600 }}
+                  >
+                    {showDetallesTransporte ? '▲' : '▼'} ¿Tenés información del transporte? (opcional)
+                  </button>
+
+                  {showDetallesTransporte && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      <Field label="Nombre del transporte / bus" hint="Ej: Cotran Norte, El Exprés, Transnica...">
+                        <input value={transporteNombre} onChange={e => setTransporteNombre(e.target.value)} placeholder="Ej: Cotran Norte..." style={S.input} />
+                      </Field>
+                      <Field label="Celular del transporte">
+                        <input value={transporteCelular} onChange={e => setTransporteCelular(formatCelular(e.target.value))} placeholder="Ej: 88888888" maxLength={8} style={S.input} />
+                      </Field>
+                      <Field label="Hora de salida de Managua">
+                        <input type="time" value={transporteHoraSalida} onChange={e => setTransporteHoraSalida(e.target.value)} style={S.input} />
+                      </Field>
+                      <Field label="Nota adicional">
+                        <textarea value={transporteNota} onChange={e => setTransporteNota(e.target.value)} placeholder="Instrucciones adicionales..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 60 }} rows={2} />
+                      </Field>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Cargotrans */}
+              {metodoFueraManagua === 'cargotrans' && (
+                <>
+                  <Field label="Destino del paquete" hint="Ciudad o departamento al que va el paquete">
+                    <input value={destinoFinal} onChange={e => setDestinoFinal(e.target.value)} placeholder="Ej: Matagalpa, León, Estelí..." style={S.input} />
+                  </Field>
+                  <Field label="Cantidad de paquetes">
+                    <input type="number" min="1" value={cantidadPaquetes} onChange={e => setCantidadPaquetes(e.target.value)} placeholder="1" style={S.input} />
+                  </Field>
+                  <Field label="Nota">
+                    <textarea value={notaCargotrans} onChange={e => setNotaCargotrans(e.target.value)} placeholder="Instrucciones o detalles del envío..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 60 }} rows={2} />
+                  </Field>
+                  <div style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 8, padding: '10px 12px' }}>
+                    <p style={{ fontSize: 12, color: '#92400e', margin: 0 }}>📦 Storkhub llevará el paquete a la sucursal Cargotrans más cercana. El precio incluye el delivery a sucursal.</p>
+                  </div>
+                </>
+              )}
+
+            </div>
+          </div>
+          )}
 
           {/* Paquete */}
           <SectionCard title="Datos del paquete" icon="📦">
@@ -1779,16 +1872,19 @@ export default function SolicitarEnvioPage() {
             </div>
           )}
 
-          {/* Banner terminal bus */}
-          {tipoServicio === 'terminal_bus' && (
+          {/* Banner fuera de Managua */}
+          {esFueraManagua && (
             <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 14, padding: '14px 16px', marginBottom: 16 }}>
-              <p style={{ fontSize: 14, fontWeight: 800, color: '#7c3aed', margin: '0 0 8px' }}>🚌 Envío a terminal / bus</p>
+              <p style={{ fontSize: 14, fontWeight: 800, color: '#7c3aed', margin: '0 0 8px' }}>
+                {metodoFueraManagua === 'bus_terminal' ? '🚌 Envío fuera de Managua — Bus / terminal' : '📦 Envío fuera de Managua — Cargotrans'}
+              </p>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {terminalDestino && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📍 Destino: <strong>{terminalDestino}</strong></p>}
-                {terminalTransporte && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>🚌 Transporte: <strong>{terminalTransporte}</strong></p>}
-                {terminalCelular && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📱 Celular: {terminalCelular}</p>}
-                {terminalHoraSalida && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>⏰ Salida: {terminalHoraSalida}</p>}
-                {terminalNota && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📝 {terminalNota}</p>}
+                {destinoFinal && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📍 Destino: <strong>{destinoFinal}</strong></p>}
+                {terminalSugerida && metodoFueraManagua === 'bus_terminal' && <p style={{ fontSize: 13, color: '#7c3aed', margin: 0 }}>🏢 Terminal sugerida: <strong>{terminalSugerida}</strong></p>}
+                {metodoFueraManagua === 'bus_terminal' && transporteNombre && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>🚌 Transporte: <strong>{transporteNombre}</strong></p>}
+                {metodoFueraManagua === 'bus_terminal' && transporteCelular && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📱 Celular: {transporteCelular}</p>}
+                {metodoFueraManagua === 'bus_terminal' && transporteHoraSalida && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>⏰ Salida: {transporteHoraSalida}</p>}
+                {metodoFueraManagua === 'cargotrans' && cantidadPaquetes && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📦 Paquetes: <strong>{cantidadPaquetes}</strong></p>}
               </div>
             </div>
           )}
@@ -1859,7 +1955,7 @@ export default function SolicitarEnvioPage() {
                     <>
                       <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>Delivery base: <strong>C$ {calcResult.precio}</strong></p>
                       {recargoZona.aplica && <p style={{ fontSize: 12, fontWeight: 700, color: '#ea580c', margin: '0 0 2px' }}>+ Zona {recargoZona.zona}: +C$ {recargoZona.monto}</p>}
-                      {recargoServicioMonto > 0 && <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: '0 0 2px' }}>+ Terminal / bus: +C$ {recargoServicioMonto}</p>}
+                      {recargoServicioMonto > 0 && <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: '0 0 2px' }}>+ Fuera Managua (bus): +C$ {recargoServicioMonto}</p>}
                       <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio + recargoMonto + recargoServicioMonto}</p>
                     </>
                   ) : (

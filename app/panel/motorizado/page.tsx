@@ -84,13 +84,17 @@ type Solicitud = {
     entrega?: EvidenciaFoto;
     deposito?: EvidenciaFoto;
   };
-  tipoServicio?: 'normal' | 'terminal_bus' | 'compra_gestion' | 'cargotrans';
-  terminalBus?: {
-    destino?: string;
-    transporte?: string;
-    celularTransporte?: string;
-    horaSalida?: string;
-    nota?: string | null;
+  tipoServicio?: 'normal' | 'fuera_managua' | 'compra_gestion';
+  fueraManagua?: {
+    metodoEnvio?: 'bus_terminal' | 'cargotrans';
+    destinoFinal?: string | null;
+    terminalSugerida?: string | null;
+    transporteNombre?: string | null;
+    transporteCelular?: string | null;
+    transporteHoraSalida?: string | null;
+    transporteNota?: string | null;
+    cantidadPaquetes?: number;
+    notaCargotrans?: string | null;
   };
   precioDesglose?: {
     deliveryBase?: number;
@@ -865,7 +869,7 @@ export default function PanelMotorizadoPage() {
                       <CobroBox o={o} dep={dep} />
 
                       <PaqueteBadge paquete={o.paquete} />
-                      {o.tipoServicio === 'terminal_bus' && <TerminalBusInfo terminalBus={o.terminalBus} />}
+                      {o.tipoServicio === 'fuera_managua' && <FueraManaguaInfo fueraManagua={o.fueraManagua} />}
                       <RoutePoint type="pickup" point={o.recoleccion} fallbackName={o.cliente?.nombre} retiroCoord={o.cotizacion?.origenCoord} />
                       <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
                       <RoutePoint type="dropoff" point={o.entrega} entregaCoord={o.cotizacion?.destinoCoord} />
@@ -934,7 +938,7 @@ export default function PanelMotorizadoPage() {
                       <CobroBox o={o} dep={dep} />
 
                       <PaqueteBadge paquete={o.paquete} />
-                      {o.tipoServicio === 'terminal_bus' && <TerminalBusInfo terminalBus={o.terminalBus} />}
+                      {o.tipoServicio === 'fuera_managua' && <FueraManaguaInfo fueraManagua={o.fueraManagua} />}
                       <RoutePoint type="pickup" point={o.recoleccion} fallbackName={o.cliente?.nombre} retiroCoord={o.cotizacion?.origenCoord} />
                       <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
                       <RoutePoint type="dropoff" point={o.entrega} entregaCoord={o.cotizacion?.destinoCoord} />
@@ -1054,8 +1058,8 @@ export default function PanelMotorizadoPage() {
                         </div>
                       )}
 
-                      {/* ── Secciones especiales terminal ── */}
-                      {o.tipoServicio === 'terminal_bus' && (
+                      {/* ── Secciones especiales fuera de Managua ── */}
+                      {o.tipoServicio === 'fuera_managua' && o.fueraManagua?.metodoEnvio === 'bus_terminal' && (
                         <div style={{ borderTop: '1px solid #e5e7eb', paddingTop: 12, marginTop: 4, display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
 
                           {/* Evidencias terminal */}
@@ -1714,22 +1718,28 @@ function getMapsLink(point: PointData, coordOverride?: { lat: number; lng: numbe
   return null;
 }
 
-function TerminalBusInfo({ terminalBus }: { terminalBus?: Solicitud['terminalBus'] }) {
-  if (!terminalBus) return null;
+function FueraManaguaInfo({ fueraManagua }: { fueraManagua?: Solicitud['fueraManagua'] }) {
+  if (!fueraManagua) return null;
+  const esBus = fueraManagua.metodoEnvio !== 'cargotrans';
   return (
     <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 12, padding: '12px 14px', marginBottom: 10 }}>
-      <p style={{ fontSize: 12, fontWeight: 800, color: '#7c3aed', margin: '0 0 8px' }}>🚌 Envío a terminal / bus</p>
+      <p style={{ fontSize: 12, fontWeight: 800, color: '#7c3aed', margin: '0 0 8px' }}>
+        {esBus ? '🚌 Envío fuera de Managua — Bus / terminal' : '📦 Envío fuera de Managua — Cargotrans'}
+      </p>
       <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 4 }}>
-        {terminalBus.destino && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>📍 Destino: <strong>{terminalBus.destino}</strong></p>}
-        {terminalBus.transporte && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>🚌 Transporte: <strong>{terminalBus.transporte}</strong></p>}
-        {terminalBus.celularTransporte && (
+        {fueraManagua.destinoFinal && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>📍 Destino: <strong>{fueraManagua.destinoFinal}</strong></p>}
+        {esBus && fueraManagua.terminalSugerida && <p style={{ fontSize: 12, color: '#7c3aed', margin: 0, fontWeight: 700 }}>🏢 Terminal: <strong>{fueraManagua.terminalSugerida}</strong></p>}
+        {esBus && fueraManagua.transporteNombre && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>🚌 Transporte: <strong>{fueraManagua.transporteNombre}</strong></p>}
+        {esBus && fueraManagua.transporteCelular && (
           <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>
             📱 Celular:{' '}
-            <a href={`tel:${terminalBus.celularTransporte}`} style={{ color: '#7c3aed', fontWeight: 700 }}>{terminalBus.celularTransporte}</a>
+            <a href={`tel:${fueraManagua.transporteCelular}`} style={{ color: '#7c3aed', fontWeight: 700 }}>{fueraManagua.transporteCelular}</a>
           </p>
         )}
-        {terminalBus.horaSalida && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>⏰ Salida Managua: <strong>{terminalBus.horaSalida}</strong></p>}
-        {terminalBus.nota && <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0', fontStyle: 'italic' as const }}>📝 {terminalBus.nota}</p>}
+        {esBus && fueraManagua.transporteHoraSalida && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>⏰ Salida Managua: <strong>{fueraManagua.transporteHoraSalida}</strong></p>}
+        {esBus && fueraManagua.transporteNota && <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0', fontStyle: 'italic' as const }}>📝 {fueraManagua.transporteNota}</p>}
+        {!esBus && fueraManagua.cantidadPaquetes != null && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>📦 Paquetes: <strong>{fueraManagua.cantidadPaquetes}</strong></p>}
+        {!esBus && fueraManagua.notaCargotrans && <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0', fontStyle: 'italic' as const }}>📝 {fueraManagua.notaCargotrans}</p>}
       </div>
     </div>
   );

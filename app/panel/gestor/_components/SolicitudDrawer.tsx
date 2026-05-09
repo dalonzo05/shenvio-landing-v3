@@ -121,13 +121,17 @@ export type SolicitudDetalle = {
   macroZonaRetiroNombre?: string | null
   macroZonaEntregaId?: string | null
   macroZonaEntregaNombre?: string | null
-  tipoServicio?: 'normal' | 'terminal_bus' | 'compra_gestion' | 'cargotrans'
-  terminalBus?: {
-    destino?: string
-    transporte?: string
-    celularTransporte?: string
-    horaSalida?: string
-    nota?: string | null
+  tipoServicio?: 'normal' | 'fuera_managua' | 'compra_gestion'
+  fueraManagua?: {
+    metodoEnvio?: 'bus_terminal' | 'cargotrans'
+    destinoFinal?: string | null
+    terminalSugerida?: string | null
+    transporteNombre?: string | null
+    transporteCelular?: string | null
+    transporteHoraSalida?: string | null
+    transporteNota?: string | null
+    cantidadPaquetes?: number
+    notaCargotrans?: string | null
   }
   precioDesglose?: {
     deliveryBase?: number
@@ -786,13 +790,13 @@ export function SolicitudDrawer({
                 <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                   <InfoRow label="Comercio" value={solicitud.ownerSnapshot?.companyName || solicitud.ownerSnapshot?.nombre || (solicitud.userId ? comercioNames[solicitud.userId] : undefined)} />
                   <InfoRow label="Tipo cliente" value={solicitud.tipoCliente} />
-                  <InfoRow label="Tipo servicio" value={solicitud.tipoServicio === 'terminal_bus' ? '🚌 Terminal / bus' : solicitud.tipoServicio === 'normal' || !solicitud.tipoServicio ? '📦 Normal' : solicitud.tipoServicio} />
+                  <InfoRow label="Tipo servicio" value={solicitud.tipoServicio === 'fuera_managua' ? (solicitud.fueraManagua?.metodoEnvio === 'cargotrans' ? '📦 Cargotrans' : '🚌 Bus / terminal') : solicitud.tipoServicio === 'normal' || !solicitud.tipoServicio ? '📦 Normal' : solicitud.tipoServicio} />
                   <InfoRow label="Distancia" value={solicitud.cotizacion?.distanciaKm != null ? `${solicitud.cotizacion.distanciaKm} km` : undefined} />
                   {solicitud.precioDesglose ? (
                     <>
                       <InfoRow label="Delivery base" value={solicitud.precioDesglose.deliveryBase != null ? money(solicitud.precioDesglose.deliveryBase) : undefined} />
                       {(solicitud.precioDesglose.recargoZona ?? 0) > 0 && <InfoRow label="Recargo zona" value={money(solicitud.precioDesglose.recargoZona!)} />}
-                      {(solicitud.precioDesglose.recargoServicio ?? 0) > 0 && <InfoRow label="Recargo terminal" value={money(solicitud.precioDesglose.recargoServicio!)} />}
+                      {(solicitud.precioDesglose.recargoServicio ?? 0) > 0 && <InfoRow label="Recargo fuera Managua" value={money(solicitud.precioDesglose.recargoServicio!)} />}
                       <InfoRow label="Total cobrado" value={solicitud.precioDesglose.totalCobrado != null ? money(solicitud.precioDesglose.totalCobrado) : undefined} />
                     </>
                   ) : (
@@ -808,15 +812,18 @@ export function SolicitudDrawer({
                 )}
               </Section>
 
-              {/* Terminal / bus */}
-              {solicitud.tipoServicio === 'terminal_bus' && solicitud.terminalBus && (
-                <Section title="Envío a terminal / bus" accent="indigo">
+              {/* Fuera de Managua */}
+              {solicitud.tipoServicio === 'fuera_managua' && solicitud.fueraManagua && (
+                <Section title={solicitud.fueraManagua.metodoEnvio === 'cargotrans' ? '📦 Envío fuera de Managua — Cargotrans' : '🚌 Envío fuera de Managua — Bus / terminal'} accent="indigo">
                   <div className="grid grid-cols-2 gap-x-4 gap-y-3">
-                    <InfoRow label="Destino" value={solicitud.terminalBus.destino} />
-                    <InfoRow label="Transporte" value={solicitud.terminalBus.transporte} />
-                    {solicitud.terminalBus.celularTransporte && <InfoRow label="Celular transporte" value={solicitud.terminalBus.celularTransporte} />}
-                    {solicitud.terminalBus.horaSalida && <InfoRow label="Hora salida Managua" value={solicitud.terminalBus.horaSalida} />}
-                    {solicitud.terminalBus.nota && <InfoRow label="Nota" value={solicitud.terminalBus.nota} />}
+                    {solicitud.fueraManagua.destinoFinal && <InfoRow label="Destino" value={solicitud.fueraManagua.destinoFinal} />}
+                    {solicitud.fueraManagua.terminalSugerida && <InfoRow label="Terminal sugerida" value={solicitud.fueraManagua.terminalSugerida} />}
+                    {solicitud.fueraManagua.transporteNombre && <InfoRow label="Transporte" value={solicitud.fueraManagua.transporteNombre} />}
+                    {solicitud.fueraManagua.transporteCelular && <InfoRow label="Celular transporte" value={solicitud.fueraManagua.transporteCelular} />}
+                    {solicitud.fueraManagua.transporteHoraSalida && <InfoRow label="Hora salida Managua" value={solicitud.fueraManagua.transporteHoraSalida} />}
+                    {solicitud.fueraManagua.transporteNota && <InfoRow label="Nota transporte" value={solicitud.fueraManagua.transporteNota} />}
+                    {solicitud.fueraManagua.cantidadPaquetes != null && <InfoRow label="Paquetes" value={String(solicitud.fueraManagua.cantidadPaquetes)} />}
+                    {solicitud.fueraManagua.notaCargotrans && <InfoRow label="Nota Cargotrans" value={solicitud.fueraManagua.notaCargotrans} />}
                   </div>
                   {solicitud.evidenciasTerminal && (
                     <div className="mt-2 space-y-1.5">
