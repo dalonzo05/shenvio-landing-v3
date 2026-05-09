@@ -84,6 +84,39 @@ type Solicitud = {
     entrega?: EvidenciaFoto;
     deposito?: EvidenciaFoto;
   };
+  tipoServicio?: 'normal' | 'terminal_bus' | 'compra_gestion' | 'cargotrans';
+  terminalBus?: {
+    destino?: string;
+    transporte?: string;
+    celularTransporte?: string;
+    horaSalida?: string;
+    nota?: string | null;
+  };
+  precioDesglose?: {
+    deliveryBase?: number;
+    recargoZona?: number;
+    recargoServicio?: number;
+    totalCobrado?: number;
+  } | null;
+  evidenciasTerminal?: {
+    fotoBus?: EvidenciaFoto;
+    fotoPaquete?: EvidenciaFoto;
+    fotoTicket?: EvidenciaFoto;
+    sinTicket?: boolean;
+    nota?: string | null;
+    horaEntregaBus?: string | null;
+  };
+  gastosEspeciales?: {
+    tipo: string;
+    monto: number;
+    reportadoPorMotorizado: boolean;
+    autorizadoPorGestor: boolean;
+    comprobante?: { url: string; pathStorage: string };
+    nota?: string | null;
+    estado: 'reportado' | 'pendiente' | 'aprobado' | 'rechazado';
+    montoOficial?: number | null;
+    reportadoAt?: any;
+  }[];
 };
 
 type EvidenciaFoto = { url: string; pathStorage: string; uploadedAt?: Timestamp; motorizadoUid?: string };
@@ -290,6 +323,17 @@ export default function PanelMotorizadoPage() {
   const [photoUploading, setPhotoUploading] = useState(false);
   const [photoSuccess, setPhotoSuccess] = useState(false);
   const [photoErr, setPhotoErr] = useState<string | null>(null);
+
+  // ── Terminal bus evidences + peaje ──
+  const [terminalEvidOrdenId, setTerminalEvidOrdenId] = useState<string | null>(null);
+  const [terminalSinTicket, setTerminalSinTicket] = useState(false);
+  const [terminalNota, setTerminalNota] = useState('');
+  const [terminalHoraEntrega, setTerminalHoraEntrega] = useState('');
+  const [terminalUploading, setTerminalUploading] = useState(false);
+  const [peajeOrdenId, setPeajeOrdenId] = useState<string | null>(null);
+  const [peajeMonto, setPeajeMonto] = useState<number | ''>('');
+  const [peajeNota, setPeajeNota] = useState('');
+  const [peajeSaving, setPeajeSaving] = useState(false);
 
   // Motorizado doc (estado propio)
   const [motorizadoDocId, setMotorizadoDocId] = useState<string | null>(null);
@@ -559,6 +603,45 @@ export default function PanelMotorizadoPage() {
     });
   }
 
+  async function handleReportarPeaje(ordenId: string, existingGastos: Solicitud['gastosEspeciales']) {
+    if (!peajeMonto || Number(peajeMonto) <= 0) return;
+    setPeajeSaving(true);
+    try {
+      const nuevosGastos = [...(existingGastos ?? []), {
+        tipo: 'peaje',
+        monto: Number(peajeMonto),
+        reportadoPorMotorizado: true,
+        autorizadoPorGestor: false,
+        nota: peajeNota.trim() || null,
+        estado: 'reportado' as const,
+        montoOficial: null,
+        reportadoAt: serverTimestamp(),
+      }];
+      await updateDoc(doc(db, 'solicitudes_envio', ordenId), { gastosEspeciales: nuevosGastos, updatedAt: serverTimestamp() });
+      setPeajeOrdenId(null); setPeajeMonto(''); setPeajeNota('');
+    } catch (e) { console.error(e); }
+    finally { setPeajeSaving(false); }
+  }
+
+  async function handleGuardarEvidenciasTerminal(orden: Solicitud) {
+    if (!user) return;
+    setTerminalUploading(true);
+    try {
+      const existing = orden.evidenciasTerminal ?? {};
+      await updateDoc(doc(db, 'solicitudes_envio', orden.id), {
+        evidenciasTerminal: {
+          ...existing,
+          sinTicket: terminalSinTicket,
+          nota: terminalNota.trim() || null,
+          horaEntregaBus: terminalHoraEntrega.trim() || null,
+        },
+        updatedAt: serverTimestamp(),
+      });
+      setTerminalEvidOrdenId(null); setTerminalSinTicket(false); setTerminalNota(''); setTerminalHoraEntrega('');
+    } catch (e) { console.error(e); }
+    finally { setTerminalUploading(false); }
+  }
+
   const todas = useMemo(() => (!user ? [] : sortDesc(ordenes)), [ordenes, user]);
 
   const pendientes = useMemo(() =>
@@ -782,6 +865,7 @@ export default function PanelMotorizadoPage() {
                       <CobroBox o={o} dep={dep} />
 
                       <PaqueteBadge paquete={o.paquete} />
+                      {o.tipoServicio === 'terminal_bus' && <TerminalBusInfo terminalBus={o.terminalBus} />}
                       <RoutePoint type="pickup" point={o.recoleccion} fallbackName={o.cliente?.nombre} retiroCoord={o.cotizacion?.origenCoord} />
                       <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
                       <RoutePoint type="dropoff" point={o.entrega} entregaCoord={o.cotizacion?.destinoCoord} />
@@ -850,6 +934,7 @@ export default function PanelMotorizadoPage() {
                       <CobroBox o={o} dep={dep} />
 
                       <PaqueteBadge paquete={o.paquete} />
+                      {o.tipoServicio === 'terminal_bus' && <TerminalBusInfo terminalBus={o.terminalBus} />}
                       <RoutePoint type="pickup" point={o.recoleccion} fallbackName={o.cliente?.nombre} retiroCoord={o.cotizacion?.origenCoord} />
                       <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
                       <RoutePoint type="dropoff" point={o.entrega} entregaCoord={o.cotizacion?.destinoCoord} />
@@ -966,6 +1051,85 @@ export default function PanelMotorizadoPage() {
                               </button>
                             );
                           })}
+                        </div>
+                      )}
+
+                      {/* ── Secciones especiales terminal ── */}
+                      {o.tipoServicio === 'terminal_bus' && (
+                        <div style={{ borderTop: '1px solid #e5e7eb', paddingTop: 12, marginTop: 4, display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
+
+                          {/* Evidencias terminal */}
+                          {terminalEvidOrdenId === o.id ? (
+                            <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 12, padding: '12px 14px' }}>
+                              <p style={{ fontSize: 12, fontWeight: 800, color: '#7c3aed', margin: '0 0 10px' }}>📷 Evidencias de entrega terminal</p>
+                              <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => setTerminalSinTicket(v => !v)}
+                                    style={{ width: 18, height: 18, borderRadius: 4, border: `2px solid ${terminalSinTicket ? '#7c3aed' : '#d1d5db'}`, background: terminalSinTicket ? '#7c3aed' : '#fff', cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                                  >
+                                    {terminalSinTicket && <span style={{ color: '#fff', fontSize: 10, fontWeight: 900 }}>✓</span>}
+                                  </button>
+                                  <label style={{ fontSize: 12, color: '#374151', cursor: 'pointer' }} onClick={() => setTerminalSinTicket(v => !v)}>No dieron ticket</label>
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Hora entrega al bus</label>
+                                  <input type="time" value={terminalHoraEntrega} onChange={e => setTerminalHoraEntrega(e.target.value)} style={{ width: '100%', border: '1px solid #ddd6fe', borderRadius: 8, padding: '8px 10px', fontSize: 13, outline: 'none', boxSizing: 'border-box' as const }} />
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Nota adicional</label>
+                                  <textarea value={terminalNota} onChange={e => setTerminalNota(e.target.value)} placeholder="Detalles de la entrega..." style={{ width: '100%', border: '1px solid #ddd6fe', borderRadius: 8, padding: '8px 10px', fontSize: 12, resize: 'none' as const, height: 56, outline: 'none', boxSizing: 'border-box' as const }} />
+                                </div>
+                              </div>
+                              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                                <button onClick={() => setTerminalEvidOrdenId(null)} style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, padding: '8px 12px', fontSize: 12, color: '#6b7280', cursor: 'pointer' }}>Cancelar</button>
+                                <button onClick={() => handleGuardarEvidenciasTerminal(o)} disabled={terminalUploading} style={{ flex: 1, background: '#7c3aed', border: 'none', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer' }}>
+                                  {terminalUploading ? 'Guardando...' : '✓ Guardar'}
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => { setTerminalEvidOrdenId(o.id); setTerminalSinTicket(!!o.evidenciasTerminal?.sinTicket); setTerminalNota(o.evidenciasTerminal?.nota ?? ''); setTerminalHoraEntrega(o.evidenciasTerminal?.horaEntregaBus ?? ''); }}
+                              style={{ background: o.evidenciasTerminal?.horaEntregaBus || o.evidenciasTerminal?.sinTicket ? '#f0fdf4' : '#faf5ff', border: `1px solid ${o.evidenciasTerminal?.horaEntregaBus || o.evidenciasTerminal?.sinTicket ? '#bbf7d0' : '#ddd6fe'}`, borderRadius: 10, padding: '9px 14px', fontSize: 12, fontWeight: 700, color: o.evidenciasTerminal?.horaEntregaBus || o.evidenciasTerminal?.sinTicket ? '#15803d' : '#7c3aed', cursor: 'pointer', textAlign: 'left' as const }}
+                            >
+                              {o.evidenciasTerminal?.horaEntregaBus ? `✓ Entregado al bus ${o.evidenciasTerminal.horaEntregaBus}` : '📷 Registrar entrega al bus'}
+                            </button>
+                          )}
+
+                          {/* Peaje */}
+                          {peajeOrdenId === o.id ? (
+                            <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 12, padding: '12px 14px' }}>
+                              <p style={{ fontSize: 12, fontWeight: 800, color: '#c2410c', margin: '0 0 10px' }}>🛣️ Reportar peaje</p>
+                              <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
+                                <div>
+                                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Monto del peaje (C$) *</label>
+                                  <input type="number" value={peajeMonto} onChange={e => setPeajeMonto(e.target.value === '' ? '' : Number(e.target.value))} placeholder="Ej: 20" style={{ width: '100%', border: '1px solid #fed7aa', borderRadius: 8, padding: '8px 10px', fontSize: 13, outline: 'none', boxSizing: 'border-box' as const }} />
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Nota (opcional)</label>
+                                  <textarea value={peajeNota} onChange={e => setPeajeNota(e.target.value)} placeholder="Ej: Peaje en carretera norte..." style={{ width: '100%', border: '1px solid #fed7aa', borderRadius: 8, padding: '8px 10px', fontSize: 12, resize: 'none' as const, height: 50, outline: 'none', boxSizing: 'border-box' as const }} />
+                                </div>
+                                <p style={{ fontSize: 10, color: '#9ca3af', margin: 0, fontStyle: 'italic' as const }}>El gestor validará este gasto antes de procesarlo.</p>
+                              </div>
+                              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                                <button onClick={() => setPeajeOrdenId(null)} style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, padding: '8px 12px', fontSize: 12, color: '#6b7280', cursor: 'pointer' }}>Cancelar</button>
+                                <button onClick={() => handleReportarPeaje(o.id, o.gastosEspeciales)} disabled={peajeSaving || !peajeMonto} style={{ flex: 1, background: !peajeMonto ? '#d1d5db' : '#d46b08', border: 'none', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer' }}>
+                                  {peajeSaving ? 'Guardando...' : '📤 Reportar peaje'}
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => { setPeajeOrdenId(o.id); setPeajeMonto(''); setPeajeNota(''); }}
+                              style={{ background: (o.gastosEspeciales ?? []).some((g: any) => g.tipo === 'peaje') ? '#fff7ed' : '#fff', border: `1px solid ${(o.gastosEspeciales ?? []).some((g: any) => g.tipo === 'peaje') ? '#fed7aa' : '#e5e7eb'}`, borderRadius: 10, padding: '9px 14px', fontSize: 12, fontWeight: 700, color: '#d46b08', cursor: 'pointer', textAlign: 'left' as const }}
+                            >
+                              {(o.gastosEspeciales ?? []).some((g: any) => g.tipo === 'peaje')
+                                ? `🛣️ Peaje reportado (pendiente validación)`
+                                : '🛣️ Reportar peaje'}
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1550,6 +1714,27 @@ function getMapsLink(point: PointData, coordOverride?: { lat: number; lng: numbe
   return null;
 }
 
+function TerminalBusInfo({ terminalBus }: { terminalBus?: Solicitud['terminalBus'] }) {
+  if (!terminalBus) return null;
+  return (
+    <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 12, padding: '12px 14px', marginBottom: 10 }}>
+      <p style={{ fontSize: 12, fontWeight: 800, color: '#7c3aed', margin: '0 0 8px' }}>🚌 Envío a terminal / bus</p>
+      <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 4 }}>
+        {terminalBus.destino && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>📍 Destino: <strong>{terminalBus.destino}</strong></p>}
+        {terminalBus.transporte && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>🚌 Transporte: <strong>{terminalBus.transporte}</strong></p>}
+        {terminalBus.celularTransporte && (
+          <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>
+            📱 Celular:{' '}
+            <a href={`tel:${terminalBus.celularTransporte}`} style={{ color: '#7c3aed', fontWeight: 700 }}>{terminalBus.celularTransporte}</a>
+          </p>
+        )}
+        {terminalBus.horaSalida && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>⏰ Salida Managua: <strong>{terminalBus.horaSalida}</strong></p>}
+        {terminalBus.nota && <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0', fontStyle: 'italic' as const }}>📝 {terminalBus.nota}</p>}
+      </div>
+    </div>
+  );
+}
+
 function PaqueteBadge({ paquete }: { paquete?: Solicitud['paquete'] }) {
   if (!paquete || (!paquete.fragil && !paquete.grande)) return null;
   return (
@@ -1667,11 +1852,19 @@ function PhotoUploadModal({
     retiro: 'retiro del paquete',
     entrega: 'entrega al destinatario',
     deposito: 'boucher de depósito',
+    terminal_bus: 'foto del bus/transporte',
+    terminal_paquete: 'foto del paquete en terminal',
+    terminal_ticket: 'foto del ticket de terminal',
+    peaje: 'comprobante de peaje',
   };
   const tipoEmoji: Record<TipoEvidencia, string> = {
     retiro: '📦',
     entrega: '✅',
     deposito: '🏦',
+    terminal_bus: '🚌',
+    terminal_paquete: '📦',
+    terminal_ticket: '🎫',
+    peaje: '🛣️',
   };
 
   // Pantalla de éxito

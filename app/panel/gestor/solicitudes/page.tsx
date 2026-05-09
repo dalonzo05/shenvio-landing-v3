@@ -147,6 +147,20 @@ type Solicitud = {
   macroZonaEntregaId?: string | null
   macroZonaEntregaNombre?: string | null
 
+  tipoServicio?: 'normal' | 'terminal_bus' | 'compra_gestion' | 'cargotrans'
+  terminalBus?: {
+    destino?: string
+    transporte?: string
+    celularTransporte?: string
+    horaSalida?: string
+  }
+  precioDesglose?: {
+    deliveryBase?: number
+    recargoZona?: number
+    recargoServicio?: number
+    totalCobrado?: number
+  } | null
+  gastosEspeciales?: { estado: string; tipo: string; monto: number }[]
   prioridad?: boolean
   entregadoAt?: any
   cobrosMotorizado?: {
@@ -1692,8 +1706,14 @@ export default function GestorSolicitudesPage() {
                               <div className="text-[11px] font-medium text-blue-700 mt-0.5 truncate" title={ownerName}>{ownerName}</div>
                             ) : null
                           })()}
-                          <div className="text-[11px] text-gray-400 mt-0.5">
-                            {s.tipoCliente}{typeof s?.cotizacion?.distanciaKm === 'number' ? ` · ${s.cotizacion.distanciaKm}km` : ''}
+                          <div className="text-[11px] text-gray-400 mt-0.5 flex flex-wrap items-center gap-1">
+                            <span>{s.tipoCliente}{typeof s?.cotizacion?.distanciaKm === 'number' ? ` · ${s.cotizacion.distanciaKm}km` : ''}</span>
+                            {s.tipoServicio === 'terminal_bus' && (
+                              <span className="inline-flex items-center rounded-full bg-violet-50 border border-violet-200 px-1.5 py-0.5 text-[10px] font-bold text-violet-700">🚌 Terminal</span>
+                            )}
+                            {(s.gastosEspeciales ?? []).some((g: any) => g.estado === 'reportado' || g.estado === 'pendiente') && (
+                              <span className="inline-flex items-center rounded-full bg-red-50 border border-red-200 px-1.5 py-0.5 text-[10px] font-bold text-red-700">⚠️ Peaje</span>
+                            )}
                           </div>
                         </td>
 

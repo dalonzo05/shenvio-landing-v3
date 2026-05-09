@@ -19,7 +19,7 @@ import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
-import { calcularRecargoZona } from '@/lib/recargoZona'
+import { calcularRecargoZona, RECARGO_TERMINAL_BUS, type TipoServicio } from '@/lib/recargoZona'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import StepIndicator from './_components/StepIndicator'
 import StickyOrderHeader from './_components/StickyOrderHeader'
@@ -783,6 +783,14 @@ export default function SolicitarEnvioPage() {
 
   const [showClienteModal, setShowClienteModal] = useState(false)
 
+  // ── Envío especial ──
+  const [tipoServicio, setTipoServicio] = useState<TipoServicio>('normal')
+  const [terminalDestino, setTerminalDestino] = useState('')
+  const [terminalTransporte, setTerminalTransporte] = useState('')
+  const [terminalCelular, setTerminalCelular] = useState('')
+  const [terminalHoraSalida, setTerminalHoraSalida] = useState('')
+  const [terminalNota, setTerminalNota] = useState('')
+
   const [showGuardarFav, setShowGuardarFav] = useState(false)
   const [newFavLabel, setNewFavLabel] = useState('')
   const [savingNewFav, setSavingNewFav] = useState(false)
@@ -899,10 +907,13 @@ export default function SolicitarEnvioPage() {
     [zonaInfo]
   )
   const recargoMonto = recargoZona.aplica ? recargoZona.monto : 0
+  const recargoServicioMonto = tipoServicio === 'terminal_bus' ? RECARGO_TERMINAL_BUS : 0
 
   const precioEfectivo = (() => {
-    if (calcResult) return calcResult.precio === -1 ? -1 : calcResult.precio + recargoMonto
-    return precioSugerido ?? (viajeAnterior?.tipo === 'entregado' ? viajeAnterior.precio : null)
+    if (calcResult) return calcResult.precio === -1 ? -1 : calcResult.precio + recargoMonto + recargoServicioMonto
+    const base = precioSugerido ?? (viajeAnterior?.tipo === 'entregado' ? viajeAnterior.precio : null)
+    if (base === null) return null
+    return base + recargoServicioMonto
   })()
   const distanciaEfectiva = calcResult?.km ?? draft?.distanciaKm ?? null
 
@@ -984,8 +995,12 @@ export default function SolicitarEnvioPage() {
     if (tipoCliente === 'contado' && !quienPagaDelivery) f.push('Quién paga el delivery')
     if (esProgramado && (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && !fechaRetiro) f.push('Fecha de retiro programado')
     if (esProgramado && (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && !fechaEntrega) f.push('Fecha de entrega programada')
+    if (tipoServicio === 'terminal_bus') {
+      if (!terminalDestino.trim()) f.push('Destino del paquete (terminal)')
+      if (!terminalTransporte.trim()) f.push('Nombre del transporte / bus')
+    }
     return f
-  }, [retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega])
+  }, [retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega, tipoServicio, terminalDestino, terminalTransporte])
 
   const formularioCompleto = camposFaltantes.length === 0
 
@@ -1133,6 +1148,23 @@ export default function SolicitarEnvioPage() {
         macroZonaEntregaId,
         macroZonaEntregaNombre,
         recargoZona: recargoFinal,
+        tipoServicio,
+        ...(tipoServicio === 'terminal_bus' ? {
+          terminalBus: {
+            destino: terminalDestino.trim(),
+            transporte: terminalTransporte.trim(),
+            celularTransporte: terminalCelular.trim(),
+            horaSalida: terminalHoraSalida.trim(),
+            nota: terminalNota.trim() || null,
+          },
+        } : {}),
+        precioDesglose: precioEfectivo && precioEfectivo !== -1 && calcResult ? {
+          deliveryBase: calcResult.precio,
+          recargoZona: recargoFinal.aplica ? recargoFinal.monto : 0,
+          recargoServicio: recargoServicioMonto,
+          totalCobrado: precioEfectivo,
+        } : null,
+        gastosEspeciales: [],
         createdAt: serverTimestamp(),
       })
 
@@ -1160,6 +1192,7 @@ export default function SolicitarEnvioPage() {
       setNumeroOrden('')
       setEsProgramado(false); setTipoProgramado('retiro'); setFechaRetiro(''); setHoraRetiro(''); setFechaEntrega(''); setHoraEntrega('')
       setGeoRetiro(''); setGeoEntrega('')
+      setTipoServicio('normal'); setTerminalDestino(''); setTerminalTransporte(''); setTerminalCelular(''); setTerminalHoraSalida(''); setTerminalNota('')
       try { sessionStorage.removeItem('draftEnvio') } catch {}
       setDraft(null)
     } catch (err) {
@@ -1417,6 +1450,46 @@ export default function SolicitarEnvioPage() {
               onChange={setNotaEntrega}
               label="¿Hay instrucciones adicionales para el motorizado en la entrega?"
             />
+          </SectionCard>
+
+          {/* Envío especial */}
+          <SectionCard title="¿Este envío requiere algo especial?" icon="🚌">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {([
+                { value: 'normal', label: '📦 Delivery normal', desc: 'Retiro y entrega estándar' },
+                { value: 'terminal_bus', label: '🚌 Terminal / bus', desc: `Envío a terminal. Recargo +C$ ${RECARGO_TERMINAL_BUS}` },
+              ] as { value: TipoServicio; label: string; desc: string }[]).map(opt => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setTipoServicio(opt.value)}
+                  style={{ textAlign: 'left' as const, padding: '12px 14px', borderRadius: 10, cursor: 'pointer', border: `1.5px solid ${tipoServicio === opt.value ? '#004aad' : '#e5e7eb'}`, background: tipoServicio === opt.value ? '#eff6ff' : '#fff' }}
+                >
+                  <p style={{ fontSize: 13, fontWeight: 700, color: tipoServicio === opt.value ? '#004aad' : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
+                  <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>{opt.desc}</p>
+                </button>
+              ))}
+            </div>
+
+            {tipoServicio === 'terminal_bus' && (
+              <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 14, borderTop: '1px solid #e5e7eb', paddingTop: 14 }}>
+                <Field label="Destino del paquete" required hint="Ciudad o lugar al que va el paquete.">
+                  <input value={terminalDestino} onChange={e => setTerminalDestino(e.target.value)} placeholder="Ej: León, Chinandega, Estelí..." style={S.input} />
+                </Field>
+                <Field label="Nombre del transporte / bus" required hint="Nombre de la cooperativa o bus.">
+                  <input value={terminalTransporte} onChange={e => setTerminalTransporte(e.target.value)} placeholder="Ej: El Exprés, Transnica, Cotran Norte..." style={S.input} />
+                </Field>
+                <Field label="Celular del transporte">
+                  <input value={terminalCelular} onChange={e => setTerminalCelular(formatCelular(e.target.value))} placeholder="Ej: 88888888" maxLength={8} style={S.input} />
+                </Field>
+                <Field label="Hora de salida de Managua">
+                  <input type="time" value={terminalHoraSalida} onChange={e => setTerminalHoraSalida(e.target.value)} style={S.input} />
+                </Field>
+                <Field label="Nota adicional">
+                  <textarea value={terminalNota} onChange={e => setTerminalNota(e.target.value)} placeholder="Instrucciones adicionales para el motorizado..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 60 }} rows={2} />
+                </Field>
+              </div>
+            )}
           </SectionCard>
 
           {/* Paquete */}
@@ -1706,6 +1779,20 @@ export default function SolicitarEnvioPage() {
             </div>
           )}
 
+          {/* Banner terminal bus */}
+          {tipoServicio === 'terminal_bus' && (
+            <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 14, padding: '14px 16px', marginBottom: 16 }}>
+              <p style={{ fontSize: 14, fontWeight: 800, color: '#7c3aed', margin: '0 0 8px' }}>🚌 Envío a terminal / bus</p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {terminalDestino && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📍 Destino: <strong>{terminalDestino}</strong></p>}
+                {terminalTransporte && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>🚌 Transporte: <strong>{terminalTransporte}</strong></p>}
+                {terminalCelular && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📱 Celular: {terminalCelular}</p>}
+                {terminalHoraSalida && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>⏰ Salida: {terminalHoraSalida}</p>}
+                {terminalNota && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📝 {terminalNota}</p>}
+              </div>
+            </div>
+          )}
+
           {/* Resumen de puntos */}
           <div style={{ ...S.sectionCard, marginBottom: 16 }}>
             <div style={S.sectionHeader}>
@@ -1768,11 +1855,12 @@ export default function SolicitarEnvioPage() {
                   <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>Calculado</p>
                   {calcResult.precio === -1 ? (
                     <p style={{ fontSize: 28, fontWeight: 900, color: '#d97706', margin: 0 }}>Consultar</p>
-                  ) : recargoZona.aplica ? (
+                  ) : (recargoZona.aplica || recargoServicioMonto > 0) ? (
                     <>
-                      <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>Tarifa base: <strong>C$ {calcResult.precio}</strong></p>
-                      <p style={{ fontSize: 12, fontWeight: 700, color: '#ea580c', margin: '0 0 2px' }}>+ Recargo {recargoZona.zona}: +C$ {recargoZona.monto}</p>
-                      <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio + recargoMonto}</p>
+                      <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>Delivery base: <strong>C$ {calcResult.precio}</strong></p>
+                      {recargoZona.aplica && <p style={{ fontSize: 12, fontWeight: 700, color: '#ea580c', margin: '0 0 2px' }}>+ Zona {recargoZona.zona}: +C$ {recargoZona.monto}</p>}
+                      {recargoServicioMonto > 0 && <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: '0 0 2px' }}>+ Terminal / bus: +C$ {recargoServicioMonto}</p>}
+                      <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio + recargoMonto + recargoServicioMonto}</p>
                     </>
                   ) : (
                     <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio}</p>
@@ -1833,21 +1921,42 @@ export default function SolicitarEnvioPage() {
                   <span style={{ fontSize: 15, fontWeight: 700, color: '#7c3aed' }}>C$ {montoProducto}</span>
                 </div>
               )}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: 13, color: '#6b7280' }}>
-                  Delivery {precioEfectivo
-                    ? calcResult
-                      ? '(calculado)'
-                      : precioSugerido
-                      ? '(cotización)'
-                      : '(viaje anterior)'
-                    : '(a confirmar)'}
-                </span>
-                <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>{precioEfectivo ? `C$ ${precioEfectivo}` : '—'}</span>
-              </div>
-              {calcResult && recargoZona.aplica && precioEfectivo !== -1 && (
+              {calcResult && precioEfectivo !== -1 ? (
+                <>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: 13, color: '#6b7280' }}>Delivery base (calculado)</span>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: '#374151' }}>C$ {calcResult.precio}</span>
+                  </div>
+                  {recargoZona.aplica && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: 12, color: '#ea580c' }}>+ Zona {recargoZona.zona}</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: '#ea580c' }}>+C$ {recargoZona.monto}</span>
+                    </div>
+                  )}
+                  {recargoServicioMonto > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: 12, color: '#7c3aed' }}>+ Recargo terminal / bus</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: '#7c3aed' }}>+C$ {recargoServicioMonto}</span>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px dashed #e5e7eb', paddingTop: 6 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: '#004aad' }}>Total delivery</span>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>C$ {precioEfectivo}</span>
+                  </div>
+                </>
+              ) : (
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontSize: 11, color: '#ea580c' }}>↳ incl. recargo {recargoZona.zona} +C$ {recargoZona.monto}</span>
+                  <span style={{ fontSize: 13, color: '#6b7280' }}>
+                    Delivery {precioEfectivo
+                      ? calcResult
+                        ? '(calculado)'
+                        : precioSugerido
+                        ? '(cotización)'
+                        : '(viaje anterior)'
+                      : '(a confirmar)'}
+                    {recargoServicioMonto > 0 ? ` + terminal C$${recargoServicioMonto}` : ''}
+                  </span>
+                  <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>{precioEfectivo ? `C$ ${precioEfectivo}` : '—'}</span>
                 </div>
               )}
               {cobroCE && tipoCliente === 'contado' && quienPagaDelivery === 'entrega' && montoDelivery > 0 && (

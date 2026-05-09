@@ -1,3 +1,8 @@
+// Tipo de servicio — 'normal' es el default histórico; los demás son envíos especiales
+export type TipoServicio = 'normal' | 'terminal_bus' | 'compra_gestion' | 'cargotrans'
+
+export const RECARGO_TERMINAL_BUS = 20  // C$ fijo sobre el delivery base
+
 // Recargos adicionales por zonas especiales (sobre la tarifa base por distancia)
 export type RecargoZona =
   | { aplica: false }

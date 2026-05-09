@@ -121,6 +121,39 @@ export type SolicitudDetalle = {
   macroZonaRetiroNombre?: string | null
   macroZonaEntregaId?: string | null
   macroZonaEntregaNombre?: string | null
+  tipoServicio?: 'normal' | 'terminal_bus' | 'compra_gestion' | 'cargotrans'
+  terminalBus?: {
+    destino?: string
+    transporte?: string
+    celularTransporte?: string
+    horaSalida?: string
+    nota?: string | null
+  }
+  precioDesglose?: {
+    deliveryBase?: number
+    recargoZona?: number
+    recargoServicio?: number
+    totalCobrado?: number
+  } | null
+  gastosEspeciales?: {
+    tipo: string
+    monto: number
+    reportadoPorMotorizado: boolean
+    autorizadoPorGestor: boolean
+    comprobante?: { url: string; pathStorage: string }
+    nota?: string | null
+    estado: 'reportado' | 'pendiente' | 'aprobado' | 'rechazado'
+    montoOficial?: number | null
+    reportadoAt?: any
+  }[]
+  evidenciasTerminal?: {
+    fotoBus?: { url: string; pathStorage: string; uploadedAt?: any }
+    fotoPaquete?: { url: string; pathStorage: string; uploadedAt?: any }
+    fotoTicket?: { url: string; pathStorage: string; uploadedAt?: any }
+    sinTicket?: boolean
+    nota?: string | null
+    horaEntregaBus?: string | null
+  }
   rechazo?: {
     motivoCodigo?: string
     motivoTexto?: string
@@ -753,8 +786,18 @@ export function SolicitudDrawer({
                 <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                   <InfoRow label="Comercio" value={solicitud.ownerSnapshot?.companyName || solicitud.ownerSnapshot?.nombre || (solicitud.userId ? comercioNames[solicitud.userId] : undefined)} />
                   <InfoRow label="Tipo cliente" value={solicitud.tipoCliente} />
+                  <InfoRow label="Tipo servicio" value={solicitud.tipoServicio === 'terminal_bus' ? '🚌 Terminal / bus' : solicitud.tipoServicio === 'normal' || !solicitud.tipoServicio ? '📦 Normal' : solicitud.tipoServicio} />
                   <InfoRow label="Distancia" value={solicitud.cotizacion?.distanciaKm != null ? `${solicitud.cotizacion.distanciaKm} km` : undefined} />
-                  <InfoRow label="Precio sugerido" value={solicitud.cotizacion?.precioSugerido != null ? money(solicitud.cotizacion.precioSugerido) : solicitud.pagoDelivery?.montoSugerido != null ? money(solicitud.pagoDelivery.montoSugerido) : undefined} />
+                  {solicitud.precioDesglose ? (
+                    <>
+                      <InfoRow label="Delivery base" value={solicitud.precioDesglose.deliveryBase != null ? money(solicitud.precioDesglose.deliveryBase) : undefined} />
+                      {(solicitud.precioDesglose.recargoZona ?? 0) > 0 && <InfoRow label="Recargo zona" value={money(solicitud.precioDesglose.recargoZona!)} />}
+                      {(solicitud.precioDesglose.recargoServicio ?? 0) > 0 && <InfoRow label="Recargo terminal" value={money(solicitud.precioDesglose.recargoServicio!)} />}
+                      <InfoRow label="Total cobrado" value={solicitud.precioDesglose.totalCobrado != null ? money(solicitud.precioDesglose.totalCobrado) : undefined} />
+                    </>
+                  ) : (
+                    <InfoRow label="Precio sugerido" value={solicitud.cotizacion?.precioSugerido != null ? money(solicitud.cotizacion.precioSugerido) : solicitud.pagoDelivery?.montoSugerido != null ? money(solicitud.pagoDelivery.montoSugerido) : undefined} />
+                  )}
                   <InfoRow label="Precio final" value={solicitud.confirmacion?.precioFinalCordobas != null ? money(solicitud.confirmacion.precioFinalCordobas) : undefined} />
                   <InfoRow label="Cobro CE" value={solicitud.cobroContraEntrega?.aplica ? money(solicitud.cobroContraEntrega.monto) : 'No aplica'} />
                   <InfoRow label="Quién paga delivery" value={solicitud.tipoCliente === 'credito' ? 'Crédito semanal' : solicitud.pagoDelivery?.quienPaga} />
@@ -764,6 +807,92 @@ export function SolicitudDrawer({
                   <div className="mt-1 rounded-lg border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800 whitespace-pre-wrap leading-relaxed">{solicitud.detalle.trim()}</div>
                 )}
               </Section>
+
+              {/* Terminal / bus */}
+              {solicitud.tipoServicio === 'terminal_bus' && solicitud.terminalBus && (
+                <Section title="Envío a terminal / bus" accent="indigo">
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                    <InfoRow label="Destino" value={solicitud.terminalBus.destino} />
+                    <InfoRow label="Transporte" value={solicitud.terminalBus.transporte} />
+                    {solicitud.terminalBus.celularTransporte && <InfoRow label="Celular transporte" value={solicitud.terminalBus.celularTransporte} />}
+                    {solicitud.terminalBus.horaSalida && <InfoRow label="Hora salida Managua" value={solicitud.terminalBus.horaSalida} />}
+                    {solicitud.terminalBus.nota && <InfoRow label="Nota" value={solicitud.terminalBus.nota} />}
+                  </div>
+                  {solicitud.evidenciasTerminal && (
+                    <div className="mt-2 space-y-1.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400">Evidencias terminales</div>
+                      <div className="flex gap-2 flex-wrap">
+                        {solicitud.evidenciasTerminal.fotoBus && (
+                          <a href={solicitud.evidenciasTerminal.fotoBus.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 underline">📷 Foto bus</a>
+                        )}
+                        {solicitud.evidenciasTerminal.fotoPaquete && (
+                          <a href={solicitud.evidenciasTerminal.fotoPaquete.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 underline">📷 Foto paquete</a>
+                        )}
+                        {solicitud.evidenciasTerminal.fotoTicket && (
+                          <a href={solicitud.evidenciasTerminal.fotoTicket.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 underline">📷 Ticket</a>
+                        )}
+                        {solicitud.evidenciasTerminal.sinTicket && (
+                          <span className="text-xs text-gray-500 bg-gray-100 rounded px-2 py-0.5">Sin ticket</span>
+                        )}
+                      </div>
+                      {solicitud.evidenciasTerminal.horaEntregaBus && <InfoRow label="Hora entrega al bus" value={solicitud.evidenciasTerminal.horaEntregaBus} />}
+                      {solicitud.evidenciasTerminal.nota && <p className="text-xs text-gray-600 mt-1">📝 {solicitud.evidenciasTerminal.nota}</p>}
+                    </div>
+                  )}
+                </Section>
+              )}
+
+              {/* Gastos especiales / peaje */}
+              {solicitud.gastosEspeciales && solicitud.gastosEspeciales.length > 0 && (
+                <Section title="Gastos especiales" accent="red">
+                  <div className="space-y-3">
+                    {solicitud.gastosEspeciales.map((gasto, idx) => (
+                      <div key={idx} className="rounded-lg border border-red-100 bg-red-50 p-3 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-bold text-red-800 capitalize">{gasto.tipo === 'peaje' ? '🛣️ Peaje' : gasto.tipo}</span>
+                          <span className={`text-xs font-bold rounded-full px-2 py-0.5 ${gasto.estado === 'aprobado' ? 'bg-green-100 text-green-700' : gasto.estado === 'rechazado' ? 'bg-red-200 text-red-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                            {gasto.estado === 'reportado' ? 'Reportado' : gasto.estado === 'pendiente' ? 'Pendiente' : gasto.estado === 'aprobado' ? 'Aprobado' : 'Rechazado'}
+                          </span>
+                        </div>
+                        <div className="text-xs text-red-700">Monto reportado: <strong>C$ {gasto.monto}</strong></div>
+                        {gasto.montoOficial != null && <div className="text-xs text-green-700 font-semibold">Monto oficial: C$ {gasto.montoOficial}</div>}
+                        {gasto.nota && <div className="text-xs text-gray-600">📝 {gasto.nota}</div>}
+                        {gasto.comprobante && (
+                          <a href={gasto.comprobante.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 underline">📷 Ver comprobante</a>
+                        )}
+                        {(gasto.estado === 'reportado' || gasto.estado === 'pendiente') && (
+                          <div className="flex gap-2 mt-1.5 pt-1.5 border-t border-red-200">
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const montoStr = window.prompt(`Monto oficial del peaje (C$):`, String(gasto.monto))
+                                if (!montoStr || isNaN(Number(montoStr))) return
+                                const updated = [...(solicitud.gastosEspeciales ?? [])]
+                                updated[idx] = { ...updated[idx], estado: 'aprobado', montoOficial: Number(montoStr), autorizadoPorGestor: true }
+                                await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), { gastosEspeciales: updated, updatedAt: serverTimestamp() })
+                              }}
+                              className="text-xs bg-green-600 text-white rounded px-2 py-1 font-semibold"
+                            >
+                              ✓ Aprobar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const updated = [...(solicitud.gastosEspeciales ?? [])]
+                                updated[idx] = { ...updated[idx], estado: 'rechazado', autorizadoPorGestor: true }
+                                await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), { gastosEspeciales: updated, updatedAt: serverTimestamp() })
+                              }}
+                              className="text-xs bg-red-600 text-white rounded px-2 py-1 font-semibold"
+                            >
+                              ✗ Rechazar
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+              )}
 
               {/* Motorizado actual */}
               {solicitud.asignacion?.motorizadoNombre && (
