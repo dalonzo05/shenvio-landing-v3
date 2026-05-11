@@ -2507,11 +2507,12 @@ export default function GestorIngresarOrdenPage() {
             {esFueraManagua && (
             <div style={{ ...S.sectionCard }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                {/* Selector de método */}
                 <div>
                   <label style={S.label}>¿Cómo se enviará?</label>
                   <div style={{ display: 'flex', gap: 8 }}>
                     {([
-                      { value: 'bus_terminal' as MetodoFueraManagua, label: '🚌 Bus / terminal', desc: `Recargo +C$ ${RECARGO_TERMINAL_BUS}` },
+                      { value: 'bus_terminal' as MetodoFueraManagua, label: '🚌 Bus / terminal', desc: 'Terminal de buses' },
                       { value: 'cargotrans' as MetodoFueraManagua, label: '📦 Cargotrans', desc: 'Sucursal más cercana' },
                     ]).map(opt => (
                       <button
@@ -2526,44 +2527,62 @@ export default function GestorIngresarOrdenPage() {
                     ))}
                   </div>
                 </div>
+
+                {/* Bus / terminal */}
                 {metodoFueraManagua === 'bus_terminal' && (
                   <>
                     <div>
                       <label style={S.label}>Destino del paquete <span style={{ color: '#dc2626' }}>*</span></label>
-                      <input value={destinoFinal} onChange={e => { setDestinoFinal(e.target.value); setPuntoLogisticoSeleccionado(null) }} placeholder="Ej: Matagalpa, Estelí, León..." style={S.input} />
+                      <input
+                        value={destinoFinal}
+                        onChange={e => setDestinoFinal(e.target.value)}
+                        placeholder="Ej: Matagalpa, Estelí, León..."
+                        style={S.input}
+                      />
+
+                      {/* 1 resultado → auto-seleccionado */}
                       {terminalesSugeridas.length === 1 && puntoLogisticoSeleccionado && (
-                        <div style={{ marginTop: 8, background: '#f5f3ff', border: '2px solid #7c3aed', borderRadius: 10, padding: '10px 14px' }}>
-                          <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: '0 0 2px' }}>📍 {puntoLogisticoSeleccionado.nombre}</p>
-                          {puntoLogisticoSeleccionado.direccion && <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 2px' }}>{puntoLogisticoSeleccionado.direccion}</p>}
+                        <div style={{ marginTop: 6, background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 8, padding: '8px 12px' }}>
+                          <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: '0 0 2px' }}>📍 Terminal sugerida: <strong>{puntoLogisticoSeleccionado.nombre}</strong></p>
+                          {puntoLogisticoSeleccionado.direccion && <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 1px' }}>📌 {puntoLogisticoSeleccionado.direccion}</p>}
                           {(puntoLogisticoSeleccionado.horarioApertura || puntoLogisticoSeleccionado.horarioCierre) && (
                             <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>🕐 {puntoLogisticoSeleccionado.horarioApertura || '?'}–{puntoLogisticoSeleccionado.horarioCierre || '?'}</p>
                           )}
                         </div>
                       )}
+
+                      {/* Múltiples resultados → elegir */}
                       {terminalesSugeridas.length > 1 && (
-                        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                          <p style={{ fontSize: 11, color: '#004aad', fontWeight: 700, margin: 0 }}>Seleccioná la terminal:</p>
-                          {terminalesSugeridas.map(t => (
-                            <button key={t.id} type="button" onClick={() => setPuntoLogisticoSeleccionado(t)}
-                              style={{ textAlign: 'left', padding: '8px 12px', borderRadius: 8, border: `2px solid ${puntoLogisticoSeleccionado?.id === t.id ? '#7c3aed' : '#e5e7eb'}`, background: puntoLogisticoSeleccionado?.id === t.id ? '#f5f3ff' : '#fff', cursor: 'pointer' }}>
-                              <p style={{ fontSize: 12, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{t.nombre}</p>
-                              {t.direccion && <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>{t.direccion}</p>}
-                            </button>
-                          ))}
+                        <div style={{ marginTop: 6, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '8px 12px' }}>
+                          <p style={{ fontSize: 12, fontWeight: 700, color: '#1d4ed8', margin: '0 0 6px' }}>🏢 Encontramos más de una terminal compatible. Seleccioná la preferida:</p>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            {terminalesSugeridas.map(p => (
+                              <button key={p.id} type="button" onClick={() => setPuntoLogisticoSeleccionado(p)}
+                                style={{ textAlign: 'left' as const, padding: '6px 10px', borderRadius: 8, cursor: 'pointer', border: `1.5px solid ${puntoLogisticoSeleccionado?.id === p.id ? '#7c3aed' : '#bfdbfe'}`, background: puntoLogisticoSeleccionado?.id === p.id ? '#f5f3ff' : '#fff', fontSize: 12, fontWeight: 600, color: '#374151' }}>
+                                🏢 {p.nombre}
+                                {p.direccion && <span style={{ fontSize: 11, color: '#6b7280', display: 'block', fontWeight: 400 }}>{p.direccion}</span>}
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       )}
-                      {destinoFinal.trim() && terminalesSugeridas.length === 0 && puntosLogisticos.length > 0 && (
-                        <div style={{ marginTop: 8, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8, padding: '8px 12px' }}>
-                          <p style={{ fontSize: 11, color: '#92400e', margin: '0 0 6px' }}>⚠️ Sin coincidencia automática. Seleccioná manualmente:</p>
-                          {puntosLogisticos.filter(p => p.activo && p.tipo === 'terminal_bus').map(t => (
-                            <button key={t.id} type="button" onClick={() => setPuntoLogisticoSeleccionado(t)}
-                              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '6px 10px', borderRadius: 6, border: `1px solid ${puntoLogisticoSeleccionado?.id === t.id ? '#7c3aed' : '#e5e7eb'}`, background: puntoLogisticoSeleccionado?.id === t.id ? '#f5f3ff' : '#fff', cursor: 'pointer', marginBottom: 4, fontSize: 12 }}>
-                              {t.nombre}
-                            </button>
-                          ))}
+
+                      {/* Sin resultado → selección manual */}
+                      {destinoFinal.trim().length >= 2 && terminalesSugeridas.length === 0 && (
+                        <div style={{ marginTop: 6, background: '#fef9c3', border: '1px solid #fde68a', borderRadius: 8, padding: '8px 12px' }}>
+                          <p style={{ fontSize: 12, color: '#92400e', margin: '0 0 6px', fontWeight: 600 }}>⚠️ No encontramos terminal automáticamente para este destino. Seleccioná manualmente:</p>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            {puntosLogisticos.filter(p => p.activo && p.tipo === 'terminal_bus').map(p => (
+                              <button key={p.id} type="button" onClick={() => setPuntoLogisticoSeleccionado(p)}
+                                style={{ textAlign: 'left' as const, padding: '6px 10px', borderRadius: 8, cursor: 'pointer', border: `1.5px solid ${puntoLogisticoSeleccionado?.id === p.id ? '#7c3aed' : '#e5e7eb'}`, background: puntoLogisticoSeleccionado?.id === p.id ? '#f5f3ff' : '#fff', fontSize: 12, fontWeight: 600, color: '#374151' }}>
+                                🏢 {p.nombre}
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </div>
+
                     <button type="button" onClick={() => setShowDetallesTransporte(v => !v)} style={{ textAlign: 'left' as const, padding: '8px 12px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#f9fafb', cursor: 'pointer', fontSize: 12, color: '#6b7280', fontWeight: 600 }}>
                       {showDetallesTransporte ? '▲' : '▼'} ¿Tenés información del transporte? (opcional)
                     </button>
@@ -2577,24 +2596,25 @@ export default function GestorIngresarOrdenPage() {
                     )}
                   </>
                 )}
+
+                {/* Cargotrans */}
                 {metodoFueraManagua === 'cargotrans' && (
                   <>
+                    <div><label style={S.label}>Cantidad de paquetes</label><input type="number" min="1" value={cantidadPaquetes} onChange={e => setCantidadPaquetes(e.target.value)} placeholder="1" style={S.input} /></div>
+                    <div><label style={S.label}>Nota</label><textarea value={notaCargotrans} onChange={e => setNotaCargotrans(e.target.value)} placeholder="Instrucciones o detalles del envío..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 60 }} rows={2} /></div>
                     {puntoLogisticoSeleccionado ? (
-                      <div style={{ background: '#f0fdf4', border: '2px solid #16a34a', borderRadius: 10, padding: '10px 14px' }}>
-                        <p style={{ fontSize: 12, fontWeight: 700, color: '#15803d', margin: '0 0 2px' }}>📦 {puntoLogisticoSeleccionado.nombre}</p>
-                        {puntoLogisticoSeleccionado.direccion && <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 2px' }}>{puntoLogisticoSeleccionado.direccion}</p>}
+                      <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '10px 12px' }}>
+                        <p style={{ fontSize: 12, fontWeight: 700, color: '#16a34a', margin: '0 0 2px' }}>📍 Sucursal sugerida: <strong>{puntoLogisticoSeleccionado.nombre}</strong></p>
+                        {puntoLogisticoSeleccionado.direccion && <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 1px' }}>📌 {puntoLogisticoSeleccionado.direccion}</p>}
                         {(puntoLogisticoSeleccionado.horarioApertura || puntoLogisticoSeleccionado.horarioCierre) && (
                           <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>🕐 {puntoLogisticoSeleccionado.horarioApertura || '?'}–{puntoLogisticoSeleccionado.horarioCierre || '?'}</p>
                         )}
                       </div>
                     ) : (
                       <div style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 8, padding: '10px 12px' }}>
-                        <p style={{ fontSize: 12, color: '#92400e', margin: 0 }}>📦 Marcá el punto de retiro para detectar la sucursal Cargotrans más cercana.</p>
+                        <p style={{ fontSize: 12, color: '#92400e', margin: 0 }}>📦 Shenvio buscará la sucursal Cargotrans más cercana a tu punto de retiro.</p>
                       </div>
                     )}
-                    <div><label style={S.label}>Destino del paquete</label><input value={destinoFinal} onChange={e => setDestinoFinal(e.target.value)} placeholder="Ej: Matagalpa, León, Estelí..." style={S.input} /></div>
-                    <div><label style={S.label}>Cantidad de paquetes</label><input type="number" min="1" value={cantidadPaquetes} onChange={e => setCantidadPaquetes(e.target.value)} placeholder="1" style={S.input} /></div>
-                    <div><label style={S.label}>Nota</label><textarea value={notaCargotrans} onChange={e => setNotaCargotrans(e.target.value)} placeholder="Instrucciones o detalles del envío..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 60 }} rows={2} /></div>
                   </>
                 )}
               </div>
@@ -2984,10 +3004,10 @@ export default function GestorIngresarOrdenPage() {
             </div>
 
             {/* Mapa de ruta */}
-            {(retiro.coord || entrega.coord) && (
+            {(retiro.coord || entregaCoordEfectiva) && (
               <div style={{ ...S.sectionCard, marginBottom: 16 }}>
                 <h3 style={{ fontSize: 13, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Ruta</h3>
-                <RoutePreviewMap origen={retiro.coord} destino={entrega.coord} />
+                <RoutePreviewMap origen={retiro.coord} destino={entregaCoordEfectiva} />
                 {calcResult && (
                   <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap' as const }}>
                     <span style={{ fontSize: 13, color: '#6b7280' }}>Distancia: <strong>{calcResult.km.toFixed(2)} km</strong></span>
@@ -3006,6 +3026,27 @@ export default function GestorIngresarOrdenPage() {
               {selectedOwner?.email && <p style={{ fontSize: 12, color: '#6b7280', margin: '2px 0 0' }}>{selectedOwner.email}</p>}
             </div>
 
+            {/* Banner fuera de Managua */}
+            {esFueraManagua && (
+              <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 14, padding: '14px 16px', marginBottom: 16 }}>
+                <p style={{ fontSize: 14, fontWeight: 800, color: '#7c3aed', margin: '0 0 8px' }}>
+                  {metodoFueraManagua === 'bus_terminal' ? '🚌 Envío fuera de Managua — Bus / terminal' : '📦 Envío fuera de Managua — Cargotrans'}
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {destinoFinal && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📍 Destino: <strong>{destinoFinal}</strong></p>}
+                  {puntoLogisticoSeleccionado && (
+                    <p style={{ fontSize: 13, color: '#7c3aed', margin: 0 }}>
+                      🏢 {metodoFueraManagua === 'bus_terminal' ? 'Terminal' : 'Sucursal'}: <strong>{puntoLogisticoSeleccionado.nombre}</strong>
+                    </p>
+                  )}
+                  {metodoFueraManagua === 'bus_terminal' && transporteNombre && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>🚌 Transporte: <strong>{transporteNombre}</strong></p>}
+                  {metodoFueraManagua === 'bus_terminal' && transporteCelular && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📱 Celular: {transporteCelular}</p>}
+                  {metodoFueraManagua === 'bus_terminal' && transporteHoraSalida && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>⏰ Salida: {transporteHoraSalida}</p>}
+                  {metodoFueraManagua === 'cargotrans' && cantidadPaquetes && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📦 Paquetes: <strong>{cantidadPaquetes}</strong></p>}
+                </div>
+              </div>
+            )}
+
             {/* Retiro / Entrega lado a lado */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
               <div style={{ ...S.sectionCard, marginBottom: 0 }}>
@@ -3016,11 +3057,28 @@ export default function GestorIngresarOrdenPage() {
                 {retiro.coord && <p style={{ fontSize: 11, color: '#16a34a', margin: '4px 0 0', fontWeight: 600 }}>✓ Ubicación marcada</p>}
               </div>
               <div style={{ ...S.sectionCard, marginBottom: 0 }}>
-                <h3 style={{ fontSize: 12, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 10px' }}>🏠 Entrega</h3>
-                <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{entrega.nombre || '—'}</p>
-                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>{entrega.celular || '—'}</p>
-                <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>{entrega.direccion || '—'}</p>
-                {entrega.coord && <p style={{ fontSize: 11, color: '#16a34a', margin: '4px 0 0', fontWeight: 600 }}>✓ Ubicación marcada</p>}
+                <h3 style={{ fontSize: 12, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 10px' }}>
+                  {esFueraManagua && puntoLogisticoSeleccionado
+                    ? (metodoFueraManagua === 'cargotrans' ? '📦 Sucursal Cargotrans' : '🏢 Terminal')
+                    : '🏠 Entrega'}
+                </h3>
+                {esFueraManagua && puntoLogisticoSeleccionado ? (
+                  <>
+                    <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{puntoLogisticoSeleccionado.nombre}</p>
+                    {puntoLogisticoSeleccionado.direccion && <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>📌 {puntoLogisticoSeleccionado.direccion}</p>}
+                    {(puntoLogisticoSeleccionado.horarioApertura || puntoLogisticoSeleccionado.horarioCierre) && (
+                      <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 2px' }}>🕐 {puntoLogisticoSeleccionado.horarioApertura || '?'}–{puntoLogisticoSeleccionado.horarioCierre || '?'}</p>
+                    )}
+                    {destinoFinal && <p style={{ fontSize: 12, color: '#7c3aed', margin: '4px 0 0', fontWeight: 600 }}>📍 Destino: {destinoFinal}</p>}
+                  </>
+                ) : (
+                  <>
+                    <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{entrega.nombre || '—'}</p>
+                    <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>{entrega.celular || '—'}</p>
+                    <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>{entrega.direccion || '—'}</p>
+                    {entrega.coord && <p style={{ fontSize: 11, color: '#16a34a', margin: '4px 0 0', fontWeight: 600 }}>✓ Ubicación marcada</p>}
+                  </>
+                )}
               </div>
             </div>
 
