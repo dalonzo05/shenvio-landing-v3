@@ -1060,11 +1060,12 @@ export default function SolicitarEnvioPage() {
     if (tipoCliente === 'contado' && !quienPagaDelivery) f.push('Quién paga el delivery')
     if (esProgramado && (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && !fechaRetiro) f.push('Fecha de retiro programado')
     if (esProgramado && (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && !fechaEntrega) f.push('Fecha de entrega programada')
-    if (esFueraManagua && metodoFueraManagua === 'bus_terminal' && !destinoFinal.trim()) {
-      f.push('Destino del paquete (fuera de Managua)')
+    if (esFueraManagua && metodoFueraManagua === 'bus_terminal') {
+      if (!destinoFinal.trim()) f.push('Destino del paquete (fuera de Managua)')
+      else if (!puntoLogisticoSeleccionado) f.push('Seleccioná la terminal de buses')
     }
     return f
-  }, [retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega, esFueraManagua, metodoFueraManagua, destinoFinal])
+  }, [retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega, esFueraManagua, metodoFueraManagua, destinoFinal, puntoLogisticoSeleccionado])
 
   const formularioCompleto = camposFaltantes.length === 0
 
@@ -1074,7 +1075,7 @@ export default function SolicitarEnvioPage() {
       return retiro.nombre.trim() !== '' && validarCelular(retiro.celular) && retiro.direccion.trim() !== ''
     }
     if (desde === 2) {
-      if (esFueraManagua) return metodoFueraManagua === 'bus_terminal' ? destinoFinal.trim() !== '' : true
+      if (esFueraManagua) return metodoFueraManagua === 'bus_terminal' ? destinoFinal.trim() !== '' && puntoLogisticoSeleccionado !== null : true
       return entrega.nombre.trim() !== '' && validarCelular(entrega.celular) && entrega.direccion.trim() !== ''
     }
     if (desde === 3) {

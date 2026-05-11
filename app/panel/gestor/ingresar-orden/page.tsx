@@ -1970,7 +1970,7 @@ export default function GestorIngresarOrdenPage() {
     }
     if (desde === 3) {
       if (esFueraManagua) {
-        if (metodoFueraManagua === 'bus_terminal') return destinoFinal.trim().length > 0
+        if (metodoFueraManagua === 'bus_terminal') return destinoFinal.trim().length > 0 && puntoLogisticoSeleccionado !== null
         return true // cargotrans: sin requisitos mínimos para avanzar
       }
       return !!(
