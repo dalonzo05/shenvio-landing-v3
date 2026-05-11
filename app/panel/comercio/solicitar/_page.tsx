@@ -1075,7 +1075,13 @@ export default function SolicitarEnvioPage() {
       return retiro.nombre.trim() !== '' && validarCelular(retiro.celular) && retiro.direccion.trim() !== ''
     }
     if (desde === 2) {
-      if (esFueraManagua) return metodoFueraManagua === 'bus_terminal' ? destinoFinal.trim() !== '' && puntoLogisticoSeleccionado !== null : true
+      if (esFueraManagua) {
+        if (metodoFueraManagua !== 'bus_terminal') return true
+        if (!destinoFinal.trim() || !puntoLogisticoSeleccionado) return false
+        // When multiple terminals match, the selection must belong to the current list (prevents stale state)
+        if (terminalesSugeridas.length > 1) return terminalesSugeridas.some(t => t.id === puntoLogisticoSeleccionado!.id)
+        return true
+      }
       return entrega.nombre.trim() !== '' && validarCelular(entrega.celular) && entrega.direccion.trim() !== ''
     }
     if (desde === 3) {
@@ -1607,8 +1613,10 @@ export default function SolicitarEnvioPage() {
 
                     {/* Múltiples resultados → elegir */}
                     {terminalesSugeridas.length > 1 && (
-                      <div style={{ marginTop: 6, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '8px 12px' }}>
-                        <p style={{ fontSize: 12, fontWeight: 700, color: '#1d4ed8', margin: '0 0 6px' }}>🏢 Encontramos más de una terminal compatible. Seleccioná la preferida:</p>
+                      <div style={{ marginTop: 6, background: '#eff6ff', border: `1px solid ${!puntoLogisticoSeleccionado || !terminalesSugeridas.some(t => t.id === puntoLogisticoSeleccionado?.id) ? '#93c5fd' : '#bfdbfe'}`, borderRadius: 8, padding: '8px 12px' }}>
+                        <p style={{ fontSize: 12, fontWeight: 700, color: '#1d4ed8', margin: '0 0 6px' }}>
+                          🏢 Encontramos más de una terminal compatible. <span style={{ color: '#dc2626' }}>Seleccioná la preferida para continuar:</span>
+                        </p>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                           {terminalesSugeridas.map(p => (
                             <button key={p.id} type="button" onClick={() => setPuntoLogisticoSeleccionado(p)}
