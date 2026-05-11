@@ -151,6 +151,8 @@ type Solicitud = {
   fueraManagua?: {
     metodoEnvio?: 'bus_terminal' | 'cargotrans'
     destinoFinal?: string | null
+    puntoLogisticoId?: string | null
+    puntoLogisticoNombre?: string | null
     terminalSugerida?: string | null
   }
   precioDesglose?: {

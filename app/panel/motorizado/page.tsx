@@ -88,6 +88,10 @@ type Solicitud = {
   fueraManagua?: {
     metodoEnvio?: 'bus_terminal' | 'cargotrans';
     destinoFinal?: string | null;
+    puntoLogisticoId?: string | null;
+    puntoLogisticoNombre?: string | null;
+    puntoLogisticoTipo?: string | null;
+    coordsPuntoLogistico?: { lat: number; lng: number } | null;
     terminalSugerida?: string | null;
     transporteNombre?: string | null;
     transporteCelular?: string | null;
@@ -1728,7 +1732,23 @@ function FueraManaguaInfo({ fueraManagua }: { fueraManagua?: Solicitud['fueraMan
       </p>
       <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 4 }}>
         {fueraManagua.destinoFinal && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>📍 Destino: <strong>{fueraManagua.destinoFinal}</strong></p>}
-        {esBus && fueraManagua.terminalSugerida && <p style={{ fontSize: 12, color: '#7c3aed', margin: 0, fontWeight: 700 }}>🏢 Terminal: <strong>{fueraManagua.terminalSugerida}</strong></p>}
+        {fueraManagua.puntoLogisticoNombre && (
+          <p style={{ fontSize: 12, color: '#7c3aed', margin: 0, fontWeight: 700 }}>
+            🏢 {esBus ? 'Terminal' : 'Sucursal Cargotrans'}: <strong>{fueraManagua.puntoLogisticoNombre}</strong>
+          </p>
+        )}
+        {!fueraManagua.puntoLogisticoNombre && esBus && fueraManagua.terminalSugerida && (
+          <p style={{ fontSize: 12, color: '#7c3aed', margin: 0, fontWeight: 700 }}>🏢 Terminal: <strong>{fueraManagua.terminalSugerida}</strong></p>
+        )}
+        {fueraManagua.coordsPuntoLogistico && (
+          <a
+            href={`https://www.google.com/maps?q=${fueraManagua.coordsPuntoLogistico.lat},${fueraManagua.coordsPuntoLogistico.lng}`}
+            target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: 11, color: '#004aad', fontWeight: 600, display: 'inline-block', marginTop: 2 }}
+          >
+            🗺️ Ver en mapa
+          </a>
+        )}
         {esBus && fueraManagua.transporteNombre && <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>🚌 Transporte: <strong>{fueraManagua.transporteNombre}</strong></p>}
         {esBus && fueraManagua.transporteCelular && (
           <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>

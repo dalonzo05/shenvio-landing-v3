@@ -19,7 +19,9 @@ import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
-import { calcularRecargoZona, RECARGO_TERMINAL_BUS, sugerirTerminal, type TipoServicio, type MetodoFueraManagua } from '@/lib/recargoZona'
+import { calcularRecargoZona, RECARGO_TERMINAL_BUS, type TipoServicio, type MetodoFueraManagua } from '@/lib/recargoZona'
+import { getPuntosActivos } from '@/fb/puntosLogisticos'
+import { type PuntoLogistico, sugerirPuntosParaDestino, encontrarCargotransMasCercano } from '@/lib/puntosLogisticos'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import StepIndicator from './_components/StepIndicator'
 import StickyOrderHeader from './_components/StickyOrderHeader'
@@ -795,7 +797,38 @@ export default function SolicitarEnvioPage() {
   const [cantidadPaquetes, setCantidadPaquetes] = useState('1')
   const [notaCargotrans, setNotaCargotrans] = useState('')
   const tipoServicio: TipoServicio = esFueraManagua ? 'fuera_managua' : 'normal'
-  const terminalSugerida = esFueraManagua && metodoFueraManagua === 'bus_terminal' ? sugerirTerminal(destinoFinal) : null
+
+  // ── Puntos logísticos ──
+  const [puntosLogisticos, setPuntosLogisticos] = useState<PuntoLogistico[]>([])
+  const [puntoLogisticoSeleccionado, setPuntoLogisticoSeleccionado] = useState<PuntoLogistico | null>(null)
+  const [terminalesSugeridas, setTerminalesSugeridas] = useState<PuntoLogistico[]>([])
+
+  useEffect(() => {
+    getPuntosActivos().then(setPuntosLogisticos).catch(() => {})
+  }, [])
+
+  // Auto-sugerir terminal cuando cambia el destino (bus_terminal)
+  useEffect(() => {
+    if (!esFueraManagua || metodoFueraManagua !== 'bus_terminal') {
+      setTerminalesSugeridas([])
+      return
+    }
+    const sugeridos = sugerirPuntosParaDestino(destinoFinal, puntosLogisticos)
+    setTerminalesSugeridas(sugeridos)
+    if (sugeridos.length === 1) {
+      setPuntoLogisticoSeleccionado((prev) => prev?.id === sugeridos[0].id ? prev : sugeridos[0])
+    } else {
+      setPuntoLogisticoSeleccionado(null)
+    }
+  }, [destinoFinal, esFueraManagua, metodoFueraManagua, puntosLogisticos])
+
+  // Auto-sugerir Cargotrans más cercana cuando cambia el punto de retiro
+  useEffect(() => {
+    if (!esFueraManagua || metodoFueraManagua !== 'cargotrans') return
+    if (!retiro.coord) { setPuntoLogisticoSeleccionado(null); return }
+    const nearest = encontrarCargotransMasCercano(retiro.coord, puntosLogisticos)
+    setPuntoLogisticoSeleccionado(nearest)
+  }, [retiro.coord, esFueraManagua, metodoFueraManagua, puntosLogisticos])
 
   const [showGuardarFav, setShowGuardarFav] = useState(false)
   const [newFavLabel, setNewFavLabel] = useState('')
@@ -892,7 +925,9 @@ export default function SolicitarEnvioPage() {
 
   const handleCalcular = async () => {
     const o = retiro.coord
-    const d = entrega.coord
+    const d = esFueraManagua && puntoLogisticoSeleccionado
+      ? puntoLogisticoSeleccionado.coord
+      : entrega.coord
     if (!o || !d) return
     const key = `${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${d.lat.toFixed(5)},${d.lng.toFixed(5)}`
     if (key === lastCalcKey.current && calcResult) return
@@ -1094,7 +1129,9 @@ export default function SolicitarEnvioPage() {
         cotizacion: tieneCalculo
           ? {
               origenCoord: retiro.coord || draft?.origenCoord || null,
-              destinoCoord: entrega.coord || draft?.destinoCoord || null,
+              destinoCoord: (esFueraManagua && puntoLogisticoSeleccionado)
+                ? puntoLogisticoSeleccionado.coord
+                : entrega.coord || draft?.destinoCoord || null,
               distanciaKm: distanciaEfectiva ?? null,
               precioSugerido: precioEfectivo ?? null,
               origenTextoGoogle: null,
@@ -1161,8 +1198,12 @@ export default function SolicitarEnvioPage() {
           fueraManagua: {
             metodoEnvio: metodoFueraManagua,
             destinoFinal: destinoFinal.trim() || null,
+            puntoLogisticoId: puntoLogisticoSeleccionado?.id ?? null,
+            puntoLogisticoNombre: puntoLogisticoSeleccionado?.nombre ?? null,
+            puntoLogisticoTipo: puntoLogisticoSeleccionado?.tipo ?? null,
+            coordsPuntoLogistico: puntoLogisticoSeleccionado?.coord ?? null,
             ...(metodoFueraManagua === 'bus_terminal' ? {
-              terminalSugerida: terminalSugerida ?? null,
+              terminalSugerida: puntoLogisticoSeleccionado?.nombre ?? null,
               transporteNombre: transporteNombre.trim() || null,
               transporteCelular: transporteCelular.trim() || null,
               transporteHoraSalida: transporteHoraSalida.trim() || null,
@@ -1503,13 +1544,13 @@ export default function SolicitarEnvioPage() {
                 <label style={S.label}>¿Cómo se enviará?</label>
                 <div style={{ display: 'flex', gap: 8 }}>
                   {([
-                    { value: 'bus_terminal' as MetodoFueraManagua, label: '🚌 Bus / terminal', desc: `Recargo +C$ ${RECARGO_TERMINAL_BUS}` },
+                    { value: 'bus_terminal' as MetodoFueraManagua, label: '🚌 Bus / terminal', desc: 'Terminal de buses' },
                     { value: 'cargotrans' as MetodoFueraManagua, label: '📦 Cargotrans', desc: 'Sucursal más cercana' },
                   ]).map(opt => (
                     <button
                       key={opt.value}
                       type="button"
-                      onClick={() => setMetodoFueraManagua(opt.value)}
+                      onClick={() => { setMetodoFueraManagua(opt.value); setPuntoLogisticoSeleccionado(null); setTerminalesSugeridas([]); setCalcResult(null) }}
                       style={{ flex: 1, textAlign: 'left' as const, padding: '10px 12px', borderRadius: 10, cursor: 'pointer', border: `1.5px solid ${metodoFueraManagua === opt.value ? '#7c3aed' : '#e5e7eb'}`, background: metodoFueraManagua === opt.value ? '#f5f3ff' : '#fff' }}
                     >
                       <p style={{ fontSize: 13, fontWeight: 700, color: metodoFueraManagua === opt.value ? '#7c3aed' : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
@@ -1529,9 +1570,46 @@ export default function SolicitarEnvioPage() {
                       placeholder="Ej: Matagalpa, Estelí, León..."
                       style={S.input}
                     />
-                    {terminalSugerida && (
+
+                    {/* 1 resultado → auto-seleccionado */}
+                    {terminalesSugeridas.length === 1 && puntoLogisticoSeleccionado && (
                       <div style={{ marginTop: 6, background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 8, padding: '8px 12px' }}>
-                        <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: 0 }}>📍 Terminal sugerida: <strong>{terminalSugerida}</strong></p>
+                        <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: '0 0 2px' }}>📍 Terminal sugerida: <strong>{puntoLogisticoSeleccionado.nombre}</strong></p>
+                        {puntoLogisticoSeleccionado.direccion && <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 1px' }}>📌 {puntoLogisticoSeleccionado.direccion}</p>}
+                        {(puntoLogisticoSeleccionado.horarioApertura || puntoLogisticoSeleccionado.horarioCierre) && (
+                          <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>🕐 {puntoLogisticoSeleccionado.horarioApertura || '?'}–{puntoLogisticoSeleccionado.horarioCierre || '?'}</p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Múltiples resultados → elegir */}
+                    {terminalesSugeridas.length > 1 && (
+                      <div style={{ marginTop: 6, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '8px 12px' }}>
+                        <p style={{ fontSize: 12, fontWeight: 700, color: '#1d4ed8', margin: '0 0 6px' }}>🏢 Encontramos más de una terminal compatible. Seleccioná la preferida:</p>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          {terminalesSugeridas.map(p => (
+                            <button key={p.id} type="button" onClick={() => setPuntoLogisticoSeleccionado(p)}
+                              style={{ textAlign: 'left' as const, padding: '6px 10px', borderRadius: 8, cursor: 'pointer', border: `1.5px solid ${puntoLogisticoSeleccionado?.id === p.id ? '#7c3aed' : '#bfdbfe'}`, background: puntoLogisticoSeleccionado?.id === p.id ? '#f5f3ff' : '#fff', fontSize: 12, fontWeight: 600, color: '#374151' }}>
+                              🏢 {p.nombre}
+                              {p.direccion && <span style={{ fontSize: 11, color: '#6b7280', display: 'block', fontWeight: 400 }}>{p.direccion}</span>}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Sin resultado → selección manual */}
+                    {destinoFinal.trim().length >= 2 && terminalesSugeridas.length === 0 && (
+                      <div style={{ marginTop: 6, background: '#fef9c3', border: '1px solid #fde68a', borderRadius: 8, padding: '8px 12px' }}>
+                        <p style={{ fontSize: 12, color: '#92400e', margin: '0 0 6px', fontWeight: 600 }}>⚠️ No encontramos terminal automáticamente para este destino. Seleccioná manualmente:</p>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          {puntosLogisticos.filter(p => p.activo && p.tipo === 'terminal_bus').map(p => (
+                            <button key={p.id} type="button" onClick={() => setPuntoLogisticoSeleccionado(p)}
+                              style={{ textAlign: 'left' as const, padding: '6px 10px', borderRadius: 8, cursor: 'pointer', border: `1.5px solid ${puntoLogisticoSeleccionado?.id === p.id ? '#7c3aed' : '#e5e7eb'}`, background: puntoLogisticoSeleccionado?.id === p.id ? '#f5f3ff' : '#fff', fontSize: 12, fontWeight: 600, color: '#374151' }}>
+                              🏢 {p.nombre}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     )}
                   </Field>
@@ -1566,18 +1644,25 @@ export default function SolicitarEnvioPage() {
               {/* Cargotrans */}
               {metodoFueraManagua === 'cargotrans' && (
                 <>
-                  <Field label="Destino del paquete" hint="Ciudad o departamento al que va el paquete">
-                    <input value={destinoFinal} onChange={e => setDestinoFinal(e.target.value)} placeholder="Ej: Matagalpa, León, Estelí..." style={S.input} />
-                  </Field>
                   <Field label="Cantidad de paquetes">
                     <input type="number" min="1" value={cantidadPaquetes} onChange={e => setCantidadPaquetes(e.target.value)} placeholder="1" style={S.input} />
                   </Field>
                   <Field label="Nota">
                     <textarea value={notaCargotrans} onChange={e => setNotaCargotrans(e.target.value)} placeholder="Instrucciones o detalles del envío..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 60 }} rows={2} />
                   </Field>
-                  <div style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 8, padding: '10px 12px' }}>
-                    <p style={{ fontSize: 12, color: '#92400e', margin: 0 }}>📦 Storkhub llevará el paquete a la sucursal Cargotrans más cercana. El precio incluye el delivery a sucursal.</p>
-                  </div>
+                  {puntoLogisticoSeleccionado ? (
+                    <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '10px 12px' }}>
+                      <p style={{ fontSize: 12, fontWeight: 700, color: '#16a34a', margin: '0 0 2px' }}>📍 Sucursal sugerida: <strong>{puntoLogisticoSeleccionado.nombre}</strong></p>
+                      {puntoLogisticoSeleccionado.direccion && <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 1px' }}>📌 {puntoLogisticoSeleccionado.direccion}</p>}
+                      {(puntoLogisticoSeleccionado.horarioApertura || puntoLogisticoSeleccionado.horarioCierre) && (
+                        <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>🕐 {puntoLogisticoSeleccionado.horarioApertura || '?'}–{puntoLogisticoSeleccionado.horarioCierre || '?'}</p>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 8, padding: '10px 12px' }}>
+                      <p style={{ fontSize: 12, color: '#92400e', margin: 0 }}>📦 Storkhub buscará la sucursal Cargotrans más cercana a tu punto de retiro.</p>
+                    </div>
+                  )}
                 </>
               )}
 
@@ -1880,7 +1965,11 @@ export default function SolicitarEnvioPage() {
               </p>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {destinoFinal && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📍 Destino: <strong>{destinoFinal}</strong></p>}
-                {terminalSugerida && metodoFueraManagua === 'bus_terminal' && <p style={{ fontSize: 13, color: '#7c3aed', margin: 0 }}>🏢 Terminal sugerida: <strong>{terminalSugerida}</strong></p>}
+                {puntoLogisticoSeleccionado && (
+                  <p style={{ fontSize: 13, color: '#7c3aed', margin: 0 }}>
+                    🏢 {metodoFueraManagua === 'bus_terminal' ? 'Terminal' : 'Sucursal'}: <strong>{puntoLogisticoSeleccionado.nombre}</strong>
+                  </p>
+                )}
                 {metodoFueraManagua === 'bus_terminal' && transporteNombre && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>🚌 Transporte: <strong>{transporteNombre}</strong></p>}
                 {metodoFueraManagua === 'bus_terminal' && transporteCelular && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📱 Celular: {transporteCelular}</p>}
                 {metodoFueraManagua === 'bus_terminal' && transporteHoraSalida && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>⏰ Salida: {transporteHoraSalida}</p>}
@@ -1955,7 +2044,6 @@ export default function SolicitarEnvioPage() {
                     <>
                       <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>Delivery base: <strong>C$ {calcResult.precio}</strong></p>
                       {recargoZona.aplica && <p style={{ fontSize: 12, fontWeight: 700, color: '#ea580c', margin: '0 0 2px' }}>+ Zona {recargoZona.zona}: +C$ {recargoZona.monto}</p>}
-                      {recargoServicioMonto > 0 && <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: '0 0 2px' }}>+ Fuera Managua (bus): +C$ {recargoServicioMonto}</p>}
                       <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio + recargoMonto + recargoServicioMonto}</p>
                     </>
                   ) : (
@@ -2029,12 +2117,6 @@ export default function SolicitarEnvioPage() {
                       <span style={{ fontSize: 13, fontWeight: 600, color: '#ea580c' }}>+C$ {recargoZona.monto}</span>
                     </div>
                   )}
-                  {recargoServicioMonto > 0 && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: 12, color: '#7c3aed' }}>+ Recargo terminal / bus</span>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: '#7c3aed' }}>+C$ {recargoServicioMonto}</span>
-                    </div>
-                  )}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px dashed #e5e7eb', paddingTop: 6 }}>
                     <span style={{ fontSize: 13, fontWeight: 700, color: '#004aad' }}>Total delivery</span>
                     <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>C$ {precioEfectivo}</span>
@@ -2050,7 +2132,6 @@ export default function SolicitarEnvioPage() {
                         ? '(cotización)'
                         : '(viaje anterior)'
                       : '(a confirmar)'}
-                    {recargoServicioMonto > 0 ? ` + terminal C$${recargoServicioMonto}` : ''}
                   </span>
                   <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>{precioEfectivo ? `C$ ${precioEfectivo}` : '—'}</span>
                 </div>

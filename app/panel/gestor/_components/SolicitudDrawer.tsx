@@ -125,6 +125,10 @@ export type SolicitudDetalle = {
   fueraManagua?: {
     metodoEnvio?: 'bus_terminal' | 'cargotrans'
     destinoFinal?: string | null
+    puntoLogisticoId?: string | null
+    puntoLogisticoNombre?: string | null
+    puntoLogisticoTipo?: string | null
+    coordsPuntoLogistico?: { lat: number; lng: number } | null
     terminalSugerida?: string | null
     transporteNombre?: string | null
     transporteCelular?: string | null
@@ -817,7 +821,12 @@ export function SolicitudDrawer({
                 <Section title={solicitud.fueraManagua.metodoEnvio === 'cargotrans' ? '📦 Envío fuera de Managua — Cargotrans' : '🚌 Envío fuera de Managua — Bus / terminal'} accent="indigo">
                   <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                     {solicitud.fueraManagua.destinoFinal && <InfoRow label="Destino" value={solicitud.fueraManagua.destinoFinal} />}
-                    {solicitud.fueraManagua.terminalSugerida && <InfoRow label="Terminal sugerida" value={solicitud.fueraManagua.terminalSugerida} />}
+                    {solicitud.fueraManagua.puntoLogisticoNombre && (
+                      <InfoRow
+                        label={solicitud.fueraManagua.metodoEnvio === 'cargotrans' ? 'Sucursal Cargotrans' : 'Terminal seleccionada'}
+                        value={solicitud.fueraManagua.puntoLogisticoNombre}
+                      />
+                    )}
                     {solicitud.fueraManagua.transporteNombre && <InfoRow label="Transporte" value={solicitud.fueraManagua.transporteNombre} />}
                     {solicitud.fueraManagua.transporteCelular && <InfoRow label="Celular transporte" value={solicitud.fueraManagua.transporteCelular} />}
                     {solicitud.fueraManagua.transporteHoraSalida && <InfoRow label="Hora salida Managua" value={solicitud.fueraManagua.transporteHoraSalida} />}
