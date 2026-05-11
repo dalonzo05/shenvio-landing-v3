@@ -2079,14 +2079,8 @@ export default function SolicitarEnvioPage() {
                   <p style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 4px' }}>Calculado</p>
                   {calcResult.precio === -1 ? (
                     <p style={{ fontSize: 28, fontWeight: 900, color: '#d97706', margin: 0 }}>Consultar</p>
-                  ) : (recargoZona.aplica || recargoServicioMonto > 0) ? (
-                    <>
-                      <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>Delivery base: <strong>C$ {calcResult.precio}</strong></p>
-                      {recargoZona.aplica && <p style={{ fontSize: 12, fontWeight: 700, color: '#ea580c', margin: '0 0 2px' }}>+ Zona {recargoZona.zona}: +C$ {recargoZona.monto}</p>}
-                      <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio + recargoMonto + recargoServicioMonto}</p>
-                    </>
                   ) : (
-                    <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio}</p>
+                    <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio + recargoMonto + recargoServicioMonto}</p>
                   )}
                   <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{calcResult.km.toFixed(2)} km · sujeto a confirmación</p>
                 </div>
@@ -2145,22 +2139,10 @@ export default function SolicitarEnvioPage() {
                 </div>
               )}
               {calcResult && precioEfectivo !== -1 ? (
-                <>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: 13, color: '#6b7280' }}>Delivery base (calculado)</span>
-                    <span style={{ fontSize: 14, fontWeight: 600, color: '#374151' }}>C$ {calcResult.precio}</span>
-                  </div>
-                  {recargoZona.aplica && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: 12, color: '#ea580c' }}>+ Zona {recargoZona.zona}</span>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: '#ea580c' }}>+C$ {recargoZona.monto}</span>
-                    </div>
-                  )}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px dashed #e5e7eb', paddingTop: 6 }}>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: '#004aad' }}>Total delivery</span>
-                    <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>C$ {precioEfectivo}</span>
-                  </div>
-                </>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#004aad' }}>Total delivery</span>
+                  <span style={{ fontSize: 15, fontWeight: 700, color: '#004aad' }}>C$ {precioEfectivo}</span>
+                </div>
               ) : (
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontSize: 13, color: '#6b7280' }}>
