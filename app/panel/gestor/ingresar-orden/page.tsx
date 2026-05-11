@@ -1634,7 +1634,7 @@ export default function GestorIngresarOrdenPage() {
     if (esProgramado && (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && !fechaRetiro) f.push('Fecha de retiro programado')
     if (esProgramado && (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && !fechaEntrega) f.push('Fecha de entrega programada')
     return f
-  }, [selectedOwnerUid, retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega])
+  }, [selectedOwnerUid, retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega, esFueraManagua, metodoFueraManagua, destinoFinal])
 
   const formularioCompleto = camposFaltantes.length === 0
 
@@ -1969,6 +1969,10 @@ export default function GestorIngresarOrdenPage() {
       )
     }
     if (desde === 3) {
+      if (esFueraManagua) {
+        if (metodoFueraManagua === 'bus_terminal') return destinoFinal.trim().length > 0
+        return true // cargotrans: sin requisitos mínimos para avanzar
+      }
       return !!(
         entrega.nombre.trim() &&
         entrega.celular.trim() &&
