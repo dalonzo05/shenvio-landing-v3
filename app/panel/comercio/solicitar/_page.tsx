@@ -958,6 +958,28 @@ export default function SolicitarEnvioPage() {
   })()
   const distanciaEfectiva = calcResult?.km ?? draft?.distanciaKm ?? null
 
+  // Coord efectiva de entrega: para fuera_managua usa el punto logístico
+  const entregaCoordEfectiva: LatLng | null =
+    esFueraManagua && puntoLogisticoSeleccionado
+      ? puntoLogisticoSeleccionado.coord
+      : entrega.coord
+
+  // Auto-calcular cuando el punto logístico se selecciona y hay retiro
+  useEffect(() => {
+    if (!esFueraManagua || !puntoLogisticoSeleccionado || !retiro.coord) return
+    const o = retiro.coord
+    const d = puntoLogisticoSeleccionado.coord
+    const key = `${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${d.lat.toFixed(5)},${d.lng.toFixed(5)}`
+    if (key === lastCalcKey.current && calcResult) return
+    lastCalcKey.current = key
+    setCalcLoading(true)
+    setCalcError(null)
+    calcularDistancia(o, d)
+      .then(result => { if (result) setCalcResult(result) })
+      .catch(() => {})
+      .finally(() => setCalcLoading(false))
+  }, [puntoLogisticoSeleccionado, retiro.coord, esFueraManagua])
+
   useEffect(() => {
     if (!puntosFavoritos.length) return
     const first = puntosFavoritos.find(f => f.key !== '__otro__')
@@ -1920,7 +1942,7 @@ export default function SolicitarEnvioPage() {
                       <button type="button" onClick={handleInvertir} style={S.btnOutline}>↕</button>
                     </div>
                   </div>
-                  {coordsModificadas && retiro.coord && entrega.coord && (
+                  {coordsModificadas && retiro.coord && entregaCoordEfectiva && (
                     <button
                       type="button"
                       onClick={handleCalcular}
@@ -1947,7 +1969,7 @@ export default function SolicitarEnvioPage() {
                       </>
                     )}
                   </div>
-                  {retiro.coord && entrega.coord && (
+                  {retiro.coord && entregaCoordEfectiva && (
                     <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ ...S.btnOutline, fontSize: 11, flexShrink: 0 }}>
                       {calcLoading ? '⏳' : '🧮 Recalcular'}
                     </button>
@@ -1998,26 +2020,43 @@ export default function SolicitarEnvioPage() {
               </div>
               <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '12px 14px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-                  <p style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: 0 }}>🏠 Entrega</p>
-                  {zonaInfo.entregaNombre && (
+                  <p style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: 0 }}>
+                    {esFueraManagua && puntoLogisticoSeleccionado
+                      ? (metodoFueraManagua === 'cargotrans' ? '📦 Sucursal Cargotrans' : '🏢 Terminal')
+                      : '🏠 Entrega'}
+                  </p>
+                  {zonaInfo.entregaNombre && !esFueraManagua && (
                     <span style={{ fontSize: 10, fontWeight: 700, color: '#16a34a', background: '#dcfce7', borderRadius: 6, padding: '2px 7px' }}>{zonaInfo.entregaNombre}</span>
                   )}
                 </div>
-                <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{entrega.nombre}</p>
-                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>📱 {entrega.celular}</p>
-                <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>📍 {entrega.direccion}</p>
+                {esFueraManagua && puntoLogisticoSeleccionado ? (
+                  <>
+                    <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{puntoLogisticoSeleccionado.nombre}</p>
+                    {puntoLogisticoSeleccionado.direccion && <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>📌 {puntoLogisticoSeleccionado.direccion}</p>}
+                    {(puntoLogisticoSeleccionado.horarioApertura || puntoLogisticoSeleccionado.horarioCierre) && (
+                      <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>🕐 {puntoLogisticoSeleccionado.horarioApertura || '?'}–{puntoLogisticoSeleccionado.horarioCierre || '?'}</p>
+                    )}
+                    {destinoFinal && <p style={{ fontSize: 12, color: '#7c3aed', margin: '4px 0 0', fontWeight: 600 }}>📍 Destino final: {destinoFinal}</p>}
+                  </>
+                ) : (
+                  <>
+                    <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{entrega.nombre}</p>
+                    <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>📱 {entrega.celular}</p>
+                    <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>📍 {entrega.direccion}</p>
+                  </>
+                )}
               </div>
             </div>
           </div>
 
           {/* Route preview map */}
-          {(retiro.coord || entrega.coord) && (
+          {(retiro.coord || entregaCoordEfectiva) && (
             <div style={{ ...S.sectionCard, marginBottom: 16 }}>
               <div style={S.sectionHeader}>
                 <span style={{ fontSize: 20 }}>📍</span>
                 <h3 style={{ fontSize: 15, fontWeight: 800, color: '#111827', margin: 0 }}>Vista de ruta</h3>
               </div>
-              <RoutePreviewMap origen={retiro.coord} destino={entrega.coord} />
+              <RoutePreviewMap origen={retiro.coord} destino={entregaCoordEfectiva} />
               <div style={{ display: 'flex', gap: 16, marginTop: 10 }}>
                 <span style={{ fontSize: 12, color: '#004aad' }}>● Retiro</span>
                 <span style={{ fontSize: 12, color: '#16a34a' }}>● Entrega</span>
@@ -2062,7 +2101,7 @@ export default function SolicitarEnvioPage() {
                   <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0 }}>C$ {precioSugerido}</p>
                   {distanciaEfectiva && <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{distanciaEfectiva.toFixed(2)} km</p>}
                 </div>
-                {retiro.coord && entrega.coord && (
+                {retiro.coord && entregaCoordEfectiva && (
                   <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ width: '100%', padding: '10px', borderRadius: 10, border: '1px solid #bfdbfe', background: '#eff6ff', color: '#004aad', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
                     🧮 Recalcular con los puntos del mapa
                   </button>
@@ -2075,13 +2114,13 @@ export default function SolicitarEnvioPage() {
                   <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0 }}>C$ {viajeAnterior.precio}</p>
                   <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>Sujeto a confirmación del gestor</p>
                 </div>
-                {retiro.coord && entrega.coord && (
+                {retiro.coord && entregaCoordEfectiva && (
                   <button type="button" onClick={handleCalcular} disabled={calcLoading} style={{ width: '100%', padding: '10px', borderRadius: 10, border: '1px solid #bfdbfe', background: '#eff6ff', color: '#004aad', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
                     🧮 Recalcular con los puntos del mapa
                   </button>
                 )}
               </div>
-            ) : retiro.coord && entrega.coord ? (
+            ) : retiro.coord && entregaCoordEfectiva ? (
               <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '14px 16px', textAlign: 'center' as const }}>
                 <p style={{ fontSize: 13, color: '#d46b08', fontWeight: 600, margin: '0 0 12px' }}>
                   Calculá el precio estimado antes de enviar.
