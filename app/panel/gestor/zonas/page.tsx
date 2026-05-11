@@ -6,6 +6,7 @@ import { getMapsLoader } from '@/lib/googleMaps'
 import { onZonasSnapshot, crearZona, actualizarZona, toggleZonaActiva, eliminarZona } from '@/fb/zonas'
 import { clasificarPuntoEnZona } from '@/lib/zonas'
 import type { ZonaGeografica, Coord } from '@/lib/zonas'
+import PuntosLogisticosPanel from './_components/PuntosLogisticosPanel'
 import {
   Map,
   Plus,
@@ -22,6 +23,7 @@ import {
   Copy,
   Focus,
   Trash2,
+  MapPin,
 } from 'lucide-react'
 
 // ── Constantes ────────────────────────────────────────────────────────────────
@@ -74,6 +76,8 @@ function crearIconoEtiqueta(
 // ── Componente ────────────────────────────────────────────────────────────────
 
 export default function ZonasPage() {
+
+  const [tab, setTab] = useState<'zonas' | 'puntos'>('zonas')
 
   // ── State ──────────────────────────────────────────────────────────────────
   const [zonas, setZonas] = useState<ZonaGeografica[]>([])
@@ -326,6 +330,13 @@ export default function ZonasPage() {
       })
     })
   }
+
+  // ── Resize mapa de zonas cuando el tab vuelve a ser visible ──────────────────
+  useEffect(() => {
+    if (tab === 'zonas' && mapRef.current) {
+      google.maps.event.trigger(mapRef.current, 'resize')
+    }
+  }, [tab])
 
   // ── Satélite ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -671,7 +682,39 @@ export default function ZonasPage() {
   // ── Render ─────────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full min-h-0 gap-4">
+    <div className="flex h-full min-h-0 flex-col gap-3">
+
+      {/* Tab selector */}
+      <div className="flex shrink-0 gap-1 border-b border-gray-200 pb-0">
+        <button
+          onClick={() => setTab('zonas')}
+          className={`flex items-center gap-1.5 rounded-t-lg border-b-2 px-4 py-2 text-sm font-semibold transition ${
+            tab === 'zonas'
+              ? 'border-[#004aad] text-[#004aad]'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Map size={15} />
+          Zonas
+        </button>
+        <button
+          onClick={() => setTab('puntos')}
+          className={`flex items-center gap-1.5 rounded-t-lg border-b-2 px-4 py-2 text-sm font-semibold transition ${
+            tab === 'puntos'
+              ? 'border-[#004aad] text-[#004aad]'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <MapPin size={15} />
+          Puntos logísticos
+        </button>
+      </div>
+
+      <div className={tab === 'puntos' ? 'min-h-0 flex-1' : 'hidden'}>
+        <PuntosLogisticosPanel visible={tab === 'puntos'} />
+      </div>
+
+      <div className={tab === 'zonas' ? 'flex min-h-0 flex-1 gap-4' : 'hidden'}>
 
       {/* ── Panel izquierdo ─────────────────────────────────────────────────── */}
       <div className="flex w-64 shrink-0 flex-col gap-2.5">
@@ -1074,6 +1117,7 @@ export default function ZonasPage() {
           )}
         </div>
       </div>
+    </div>
     </div>
   )
 }

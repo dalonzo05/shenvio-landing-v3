@@ -1,7 +1,14 @@
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { storage } from './config'
 
-export type TipoEvidencia = 'retiro' | 'entrega' | 'deposito'
+export type TipoEvidencia =
+  | 'retiro'
+  | 'entrega'
+  | 'deposito'
+  | 'terminal_bus'      // foto del bus/transporte
+  | 'terminal_paquete'  // foto del paquete en terminal
+  | 'terminal_ticket'   // foto del ticket de terminal
+  | 'peaje'             // comprobante de peaje reportado por motorizado
 
 /**
  * Compresses an image file to max 1200px (longest side), JPEG, quality 0.75.

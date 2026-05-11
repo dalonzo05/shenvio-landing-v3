@@ -289,5 +289,12 @@ service cloud.firestore {
       allow delete: if isAdminOrGestor();
     }
 
+    // Puntos logísticos (terminales, Cargotrans, etc.): mismo patrón que zonas
+    match /puntosLogisticos/{puntoId} {
+      allow read: if isActiveUser();
+      allow create, update: if isAdminOrGestor();
+      allow delete: if isAdminOrGestor();
+    }
+
   }
 }

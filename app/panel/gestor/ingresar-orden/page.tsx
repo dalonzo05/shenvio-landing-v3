@@ -16,7 +16,9 @@ import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
-import { calcularRecargoZona } from '@/lib/recargoZona'
+import { calcularRecargoZona, RECARGO_TERMINAL_BUS, type TipoServicio, type MetodoFueraManagua } from '@/lib/recargoZona'
+import { getPuntosActivos } from '@/fb/puntosLogisticos'
+import { type PuntoLogistico, sugerirPuntosParaDestino, encontrarCargotransMasCercano } from '@/lib/puntosLogisticos'
 import { useSearchParams } from 'next/navigation'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import ComercioSearchModal, { ComercioModalItem } from '@/app/Components/ComercioSearchModal'
@@ -1287,6 +1289,22 @@ export default function GestorIngresarOrdenPage() {
   // ── Modal buscador de comercios ──
   const [showComercioModal, setShowComercioModal] = useState(false)
 
+  // ── Envío fuera de Managua ──
+  const [esFueraManagua, setEsFueraManagua] = useState(false)
+  const [metodoFueraManagua, setMetodoFueraManagua] = useState<MetodoFueraManagua>('bus_terminal')
+  const [destinoFinal, setDestinoFinal] = useState('')
+  const [showDetallesTransporte, setShowDetallesTransporte] = useState(false)
+  const [transporteNombre, setTransporteNombre] = useState('')
+  const [transporteCelular, setTransporteCelular] = useState('')
+  const [transporteHoraSalida, setTransporteHoraSalida] = useState('')
+  const [transporteNota, setTransporteNota] = useState('')
+  const [cantidadPaquetes, setCantidadPaquetes] = useState('1')
+  const [notaCargotrans, setNotaCargotrans] = useState('')
+  const tipoServicio: TipoServicio = esFueraManagua ? 'fuera_managua' : 'normal'
+  const [puntosLogisticos, setPuntosLogisticos] = useState<PuntoLogistico[]>([])
+  const [puntoLogisticoSeleccionado, setPuntoLogisticoSeleccionado] = useState<PuntoLogistico | null>(null)
+  const [terminalesSugeridas, setTerminalesSugeridas] = useState<PuntoLogistico[]>([])
+
   // ── Modal buscador de clientes ──
   const [showClienteModal, setShowClienteModal] = useState(false)
 
@@ -1390,7 +1408,9 @@ export default function GestorIngresarOrdenPage() {
 
   const handleCalcularPrecio = () => {
     const o = retiro.coord
-    const d = entrega.coord
+    const d = esFueraManagua && puntoLogisticoSeleccionado
+      ? puntoLogisticoSeleccionado.coord
+      : entrega.coord
     if (!o || !d) return
 
     const key = `${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${d.lat.toFixed(5)},${d.lng.toFixed(5)}`
@@ -1425,12 +1445,56 @@ export default function GestorIngresarOrdenPage() {
     return calcularRecargoZona(zr, ze)
   }, [zonaPreview])
   const recargoMonto = recargoZona.aplica ? recargoZona.monto : 0
+  const recargoServicioMonto = (esFueraManagua && metodoFueraManagua === 'bus_terminal') ? RECARGO_TERMINAL_BUS : 0
 
   const precioEfectivo = (() => {
-    if (calcResult) return calcResult.precio === -1 ? -1 : calcResult.precio + recargoMonto
-    return precioSugerido ?? null
+    if (calcResult) return calcResult.precio === -1 ? -1 : calcResult.precio + recargoMonto + recargoServicioMonto
+    const base = precioSugerido ?? null
+    if (base === null) return null
+    return base + recargoServicioMonto
   })()
   const distanciaEfectiva = calcResult?.km ?? draft?.distanciaKm ?? null
+
+  const entregaCoordEfectiva: LatLng | null =
+    esFueraManagua && puntoLogisticoSeleccionado
+      ? puntoLogisticoSeleccionado.coord
+      : entrega.coord
+
+  // Cargar puntos logísticos al montar
+  useEffect(() => {
+    getPuntosActivos().then(setPuntosLogisticos).catch(() => {})
+  }, [])
+
+  // Auto-sugerir terminal cuando cambia destinoFinal (bus_terminal)
+  useEffect(() => {
+    if (!esFueraManagua || metodoFueraManagua !== 'bus_terminal') return
+    const sugeridas = sugerirPuntosParaDestino(destinoFinal, puntosLogisticos)
+    setTerminalesSugeridas(sugeridas)
+    if (sugeridas.length === 1) setPuntoLogisticoSeleccionado(sugeridas[0])
+    else setPuntoLogisticoSeleccionado(null)
+  }, [destinoFinal, puntosLogisticos, esFueraManagua, metodoFueraManagua])
+
+  // Auto-detectar Cargotrans más cercano cuando cambia retiro.coord
+  useEffect(() => {
+    if (!esFueraManagua || metodoFueraManagua !== 'cargotrans' || !retiro.coord) return
+    const cercano = encontrarCargotransMasCercano(retiro.coord, puntosLogisticos)
+    setPuntoLogisticoSeleccionado(cercano)
+  }, [retiro.coord, puntosLogisticos, esFueraManagua, metodoFueraManagua])
+
+  // Auto-calcular cuando se selecciona punto logístico + retiro (fuera_managua)
+  useEffect(() => {
+    if (!esFueraManagua || !puntoLogisticoSeleccionado || !retiro.coord) return
+    const o = retiro.coord
+    const d = puntoLogisticoSeleccionado.coord
+    const key = `${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${d.lat.toFixed(5)},${d.lng.toFixed(5)}`
+    if (key === lastCalcKey.current && calcResult) return
+    lastCalcKey.current = key
+    setCalcLoading(true); setCalcError(null)
+    calcularDistancia(o, d)
+      .then(result => { if (result) setCalcResult(result) })
+      .catch(() => {})
+      .finally(() => setCalcLoading(false))
+  }, [puntoLogisticoSeleccionado, retiro.coord, esFueraManagua])
 
   // ── Favoritos: auto-seleccionar el primero cuando cambia el comercio ──
   const didAutoSelect = useRef(false)
@@ -1557,16 +1621,20 @@ export default function GestorIngresarOrdenPage() {
     if (!retiro.celular.trim()) f.push('Celular de retiro')
     else if (!validarCelular(retiro.celular)) f.push('Celular de retiro — 8 dígitos')
     if (!retiro.direccion.trim()) f.push('Dirección de retiro')
-    if (!entrega.nombre.trim()) f.push('Nombre de entrega')
-    if (!entrega.celular.trim()) f.push('Celular de entrega')
-    else if (!validarCelular(entrega.celular)) f.push('Celular de entrega — 8 dígitos')
-    if (!entrega.direccion.trim()) f.push('Dirección de entrega')
+    if (!esFueraManagua) {
+      if (!entrega.nombre.trim()) f.push('Nombre de entrega')
+      if (!entrega.celular.trim()) f.push('Celular de entrega')
+      else if (!validarCelular(entrega.celular)) f.push('Celular de entrega — 8 dígitos')
+      if (!entrega.direccion.trim()) f.push('Dirección de entrega')
+    } else if (metodoFueraManagua === 'bus_terminal' && !destinoFinal.trim()) {
+      f.push('Destino del paquete (fuera de Managua)')
+    }
     if (cobroCE && (montoCE === '' || Number(montoCE) <= 0)) f.push('Monto del cobro contra entrega')
     if (tipoCliente === 'contado' && !quienPagaDelivery) f.push('Quién paga el delivery')
     if (esProgramado && (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && !fechaRetiro) f.push('Fecha de retiro programado')
     if (esProgramado && (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && !fechaEntrega) f.push('Fecha de entrega programada')
     return f
-  }, [selectedOwnerUid, retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega])
+  }, [selectedOwnerUid, retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega, esFueraManagua, metodoFueraManagua, destinoFinal])
 
   const formularioCompleto = camposFaltantes.length === 0
 
@@ -1730,6 +1798,34 @@ export default function GestorIngresarOrdenPage() {
         macroZonaEntregaId,
         macroZonaEntregaNombre,
         recargoZona: recargoFinal,
+        tipoServicio,
+        ...(esFueraManagua ? {
+          fueraManagua: {
+            metodoEnvio: metodoFueraManagua,
+            destinoFinal: destinoFinal.trim() || null,
+            puntoLogisticoId: puntoLogisticoSeleccionado?.id ?? null,
+            puntoLogisticoNombre: puntoLogisticoSeleccionado?.nombre ?? null,
+            puntoLogisticoTipo: puntoLogisticoSeleccionado?.tipo ?? null,
+            coordsPuntoLogistico: puntoLogisticoSeleccionado?.coord ?? null,
+            ...(metodoFueraManagua === 'bus_terminal' ? {
+              terminalSugerida: puntoLogisticoSeleccionado?.nombre ?? null,
+              transporteNombre: transporteNombre.trim() || null,
+              transporteCelular: transporteCelular.trim() || null,
+              transporteHoraSalida: transporteHoraSalida.trim() || null,
+              transporteNota: transporteNota.trim() || null,
+            } : {
+              cantidadPaquetes: Number(cantidadPaquetes) || 1,
+              notaCargotrans: notaCargotrans.trim() || null,
+            }),
+          },
+        } : {}),
+        precioDesglose: precioEfectivo && precioEfectivo !== -1 && calcResult ? {
+          deliveryBase: calcResult.precio,
+          recargoZona: recargoFinal.aplica ? recargoFinal.monto : 0,
+          recargoServicio: recargoServicioMonto,
+          totalCobrado: precioEfectivo,
+        } : null,
+        gastosEspeciales: [],
         createdAt: serverTimestamp(),
         creadoInternamente: true,
         creadoPorGestorUid: gestorUid,
@@ -1777,6 +1873,9 @@ export default function GestorIngresarOrdenPage() {
       setGeoRetiro(''); setGeoEntrega('')
       setNumeroOrden('')
       setEsProgramado(false); setTipoProgramado('retiro'); setFechaRetiro(''); setHoraRetiro(''); setFechaEntrega(''); setHoraEntrega('')
+      setEsFueraManagua(false); setMetodoFueraManagua('bus_terminal'); setDestinoFinal(''); setShowDetallesTransporte(false)
+      setTransporteNombre(''); setTransporteCelular(''); setTransporteHoraSalida(''); setTransporteNota(''); setCantidadPaquetes('1'); setNotaCargotrans('')
+      setPuntoLogisticoSeleccionado(null); setTerminalesSugeridas([])
       try { sessionStorage.removeItem('draftEnvio') } catch {}
       setDraft(null)
       setClienteSeleccionadoId(null)
@@ -1870,6 +1969,10 @@ export default function GestorIngresarOrdenPage() {
       )
     }
     if (desde === 3) {
+      if (esFueraManagua) {
+        if (metodoFueraManagua === 'bus_terminal') return destinoFinal.trim().length > 0 && puntoLogisticoSeleccionado !== null
+        return true // cargotrans: sin requisitos mínimos para avanzar
+      }
       return !!(
         entrega.nombre.trim() &&
         entrega.celular.trim() &&
@@ -2197,6 +2300,30 @@ export default function GestorIngresarOrdenPage() {
               <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>¿A quién se entrega y dónde?</p>
             </div>
 
+            {/* Tipo de entrega */}
+            <div style={{ ...S.sectionCard }}>
+              <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: 0.5, color: '#9ca3af', margin: '0 0 10px' }}>Tipo de entrega</p>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {([
+                  { val: false, label: '📍 Dentro de Managua', desc: 'Retiro y entrega en la ciudad' },
+                  { val: true,  label: '🌍 Fuera de Managua',  desc: 'Bus / terminal o Cargotrans' },
+                ] as { val: boolean; label: string; desc: string }[]).map(opt => (
+                  <button
+                    key={String(opt.val)}
+                    type="button"
+                    onClick={() => { setEsFueraManagua(opt.val); if (opt.val) setEntrega(blankEntrega()) }}
+                    style={{ flex: 1, textAlign: 'left' as const, padding: '12px 14px', borderRadius: 12, cursor: 'pointer', border: `2px solid ${esFueraManagua === opt.val ? (opt.val ? '#7c3aed' : '#004aad') : '#e5e7eb'}`, background: esFueraManagua === opt.val ? (opt.val ? '#f5f3ff' : '#eff6ff') : '#fff' }}
+                  >
+                    <p style={{ fontSize: 13, fontWeight: 700, color: esFueraManagua === opt.val ? (opt.val ? '#7c3aed' : '#004aad') : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
+                    <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>{opt.desc}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Dentro de Managua: flujo normal */}
+            {!esFueraManagua && (
+            <div>
             {/* ── Banner: cliente preseleccionado ── */}
             {clienteSeleccionadoId && (
               <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 12, padding: '10px 14px', marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
@@ -2377,6 +2504,126 @@ export default function GestorIngresarOrdenPage() {
           </div>
         )}
       </SectionCard>
+            </div>
+            )}
+
+            {/* Fuera de Managua: flujo especializado */}
+            {esFueraManagua && (
+            <div style={{ ...S.sectionCard }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                {/* Selector de método */}
+                <div>
+                  <label style={S.label}>¿Cómo se enviará?</label>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {([
+                      { value: 'bus_terminal' as MetodoFueraManagua, label: '🚌 Bus / terminal', desc: 'Terminal de buses' },
+                      { value: 'cargotrans' as MetodoFueraManagua, label: '📦 Cargotrans', desc: 'Sucursal más cercana' },
+                    ]).map(opt => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => { setMetodoFueraManagua(opt.value); setPuntoLogisticoSeleccionado(null); setTerminalesSugeridas([]) }}
+                        style={{ flex: 1, textAlign: 'left' as const, padding: '10px 12px', borderRadius: 10, cursor: 'pointer', border: `1.5px solid ${metodoFueraManagua === opt.value ? '#7c3aed' : '#e5e7eb'}`, background: metodoFueraManagua === opt.value ? '#f5f3ff' : '#fff' }}
+                      >
+                        <p style={{ fontSize: 13, fontWeight: 700, color: metodoFueraManagua === opt.value ? '#7c3aed' : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
+                        <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>{opt.desc}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Bus / terminal */}
+                {metodoFueraManagua === 'bus_terminal' && (
+                  <>
+                    <div>
+                      <label style={S.label}>Destino del paquete <span style={{ color: '#dc2626' }}>*</span></label>
+                      <input
+                        value={destinoFinal}
+                        onChange={e => setDestinoFinal(e.target.value)}
+                        placeholder="Ej: Matagalpa, Estelí, León..."
+                        style={S.input}
+                      />
+
+                      {/* 1 resultado → auto-seleccionado */}
+                      {terminalesSugeridas.length === 1 && puntoLogisticoSeleccionado && (
+                        <div style={{ marginTop: 6, background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 8, padding: '8px 12px' }}>
+                          <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: '0 0 2px' }}>📍 Terminal sugerida: <strong>{puntoLogisticoSeleccionado.nombre}</strong></p>
+                          {puntoLogisticoSeleccionado.direccion && <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 1px' }}>📌 {puntoLogisticoSeleccionado.direccion}</p>}
+                          {(puntoLogisticoSeleccionado.horarioApertura || puntoLogisticoSeleccionado.horarioCierre) && (
+                            <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>🕐 {puntoLogisticoSeleccionado.horarioApertura || '?'}–{puntoLogisticoSeleccionado.horarioCierre || '?'}</p>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Múltiples resultados → elegir */}
+                      {terminalesSugeridas.length > 1 && (
+                        <div style={{ marginTop: 6, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '8px 12px' }}>
+                          <p style={{ fontSize: 12, fontWeight: 700, color: '#1d4ed8', margin: '0 0 6px' }}>🏢 Encontramos más de una terminal compatible. Seleccioná la preferida:</p>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            {terminalesSugeridas.map(p => (
+                              <button key={p.id} type="button" onClick={() => setPuntoLogisticoSeleccionado(p)}
+                                style={{ textAlign: 'left' as const, padding: '6px 10px', borderRadius: 8, cursor: 'pointer', border: `1.5px solid ${puntoLogisticoSeleccionado?.id === p.id ? '#7c3aed' : '#bfdbfe'}`, background: puntoLogisticoSeleccionado?.id === p.id ? '#f5f3ff' : '#fff', fontSize: 12, fontWeight: 600, color: '#374151' }}>
+                                🏢 {p.nombre}
+                                {p.direccion && <span style={{ fontSize: 11, color: '#6b7280', display: 'block', fontWeight: 400 }}>{p.direccion}</span>}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Sin resultado → selección manual */}
+                      {destinoFinal.trim().length >= 2 && terminalesSugeridas.length === 0 && (
+                        <div style={{ marginTop: 6, background: '#fef9c3', border: '1px solid #fde68a', borderRadius: 8, padding: '8px 12px' }}>
+                          <p style={{ fontSize: 12, color: '#92400e', margin: '0 0 6px', fontWeight: 600 }}>⚠️ No encontramos terminal automáticamente para este destino. Seleccioná manualmente:</p>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            {puntosLogisticos.filter(p => p.activo && p.tipo === 'terminal_bus').map(p => (
+                              <button key={p.id} type="button" onClick={() => setPuntoLogisticoSeleccionado(p)}
+                                style={{ textAlign: 'left' as const, padding: '6px 10px', borderRadius: 8, cursor: 'pointer', border: `1.5px solid ${puntoLogisticoSeleccionado?.id === p.id ? '#7c3aed' : '#e5e7eb'}`, background: puntoLogisticoSeleccionado?.id === p.id ? '#f5f3ff' : '#fff', fontSize: 12, fontWeight: 600, color: '#374151' }}>
+                                🏢 {p.nombre}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <button type="button" onClick={() => setShowDetallesTransporte(v => !v)} style={{ textAlign: 'left' as const, padding: '8px 12px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#f9fafb', cursor: 'pointer', fontSize: 12, color: '#6b7280', fontWeight: 600 }}>
+                      {showDetallesTransporte ? '▲' : '▼'} ¿Tenés información del transporte? (opcional)
+                    </button>
+                    {showDetallesTransporte && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                        <div><label style={S.label}>Nombre del transporte / bus</label><input value={transporteNombre} onChange={e => setTransporteNombre(e.target.value)} placeholder="Ej: Cotran Norte, El Exprés..." style={S.input} /></div>
+                        <div><label style={S.label}>Celular del transporte</label><input value={transporteCelular} onChange={e => setTransporteCelular(formatCelular(e.target.value))} placeholder="Ej: 88888888" maxLength={8} style={S.input} /></div>
+                        <div><label style={S.label}>Hora de salida de Managua</label><input type="time" value={transporteHoraSalida} onChange={e => setTransporteHoraSalida(e.target.value)} style={S.input} /></div>
+                        <div><label style={S.label}>Nota adicional</label><textarea value={transporteNota} onChange={e => setTransporteNota(e.target.value)} placeholder="Instrucciones adicionales..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 60 }} rows={2} /></div>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* Cargotrans */}
+                {metodoFueraManagua === 'cargotrans' && (
+                  <>
+                    <div><label style={S.label}>Cantidad de paquetes</label><input type="number" min="1" value={cantidadPaquetes} onChange={e => setCantidadPaquetes(e.target.value)} placeholder="1" style={S.input} /></div>
+                    <div><label style={S.label}>Nota</label><textarea value={notaCargotrans} onChange={e => setNotaCargotrans(e.target.value)} placeholder="Instrucciones o detalles del envío..." style={{ ...S.input, resize: 'vertical' as const, minHeight: 60 }} rows={2} /></div>
+                    {puntoLogisticoSeleccionado ? (
+                      <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '10px 12px' }}>
+                        <p style={{ fontSize: 12, fontWeight: 700, color: '#16a34a', margin: '0 0 2px' }}>📍 Sucursal sugerida: <strong>{puntoLogisticoSeleccionado.nombre}</strong></p>
+                        {puntoLogisticoSeleccionado.direccion && <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 1px' }}>📌 {puntoLogisticoSeleccionado.direccion}</p>}
+                        {(puntoLogisticoSeleccionado.horarioApertura || puntoLogisticoSeleccionado.horarioCierre) && (
+                          <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>🕐 {puntoLogisticoSeleccionado.horarioApertura || '?'}–{puntoLogisticoSeleccionado.horarioCierre || '?'}</p>
+                        )}
+                      </div>
+                    ) : (
+                      <div style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 8, padding: '10px 12px' }}>
+                        <p style={{ fontSize: 12, color: '#92400e', margin: 0 }}>📦 Shenvio buscará la sucursal Cargotrans más cercana a tu punto de retiro.</p>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+            )}
           </div>
         )}
 
@@ -2389,13 +2636,13 @@ export default function GestorIngresarOrdenPage() {
             </div>
 
             {/* Precio estimado */}
-            {(retiro.coord || entrega.coord) && (
+            {(retiro.coord || entregaCoordEfectiva) && (
         <div style={{ ...S.sectionCard, background: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <h3 style={{ fontSize: 14, fontWeight: 700, color: '#374151', margin: 0, textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>
               Precio estimado
             </h3>
-            {retiro.coord && entrega.coord && (
+            {retiro.coord && entregaCoordEfectiva && (
               <button
                 type="button"
                 onClick={handleCalcularPrecio}
@@ -2407,9 +2654,9 @@ export default function GestorIngresarOrdenPage() {
             )}
           </div>
 
-          {retiro.coord && entrega.coord && (
+          {retiro.coord && entregaCoordEfectiva && (
             <div style={{ marginBottom: 14 }}>
-              <RoutePreviewMap origen={retiro.coord} destino={entrega.coord} />
+              <RoutePreviewMap origen={retiro.coord} destino={entregaCoordEfectiva} />
             </div>
           )}
 
@@ -2423,11 +2670,12 @@ export default function GestorIngresarOrdenPage() {
                 </p>
                 {calcResult.precio === -1 ? (
                   <p style={{ fontSize: 28, fontWeight: 900, color: '#d97706', margin: 0 }}>Consultar</p>
-                ) : recargoZona.aplica ? (
+                ) : (recargoZona.aplica || recargoServicioMonto > 0) ? (
                   <>
-                    <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>Tarifa base: <strong>C$ {calcResult.precio}</strong></p>
-                    <p style={{ fontSize: 12, fontWeight: 700, color: '#ea580c', margin: '0 0 2px' }}>+ Recargo {recargoZona.zona}: +C$ {recargoZona.monto}</p>
-                    <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio + recargoMonto}</p>
+                    <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>Delivery base: <strong>C$ {calcResult.precio}</strong></p>
+                    {recargoZona.aplica && <p style={{ fontSize: 12, fontWeight: 700, color: '#ea580c', margin: '0 0 2px' }}>+ Zona {recargoZona.zona}: +C$ {recargoZona.monto}</p>}
+                    {recargoServicioMonto > 0 && <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: '0 0 2px' }}>+ Terminal / bus: +C$ {recargoServicioMonto}</p>}
+                    <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio + recargoMonto + recargoServicioMonto}</p>
                   </>
                 ) : (
                   <p style={{ fontSize: 28, fontWeight: 900, color: '#004aad', margin: 0, letterSpacing: -1 }}>C$ {calcResult.precio}</p>
@@ -2455,14 +2703,14 @@ export default function GestorIngresarOrdenPage() {
                 <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{distanciaEfectiva.toFixed(2)} km</p>
               )}
             </div>
-          ) : !retiro.coord || !entrega.coord ? (
+          ) : !retiro.coord || !entregaCoordEfectiva ? (
             <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 12, padding: '12px 14px', textAlign: 'center' as const }}>
               <p style={{ fontSize: 13, color: '#d46b08', fontWeight: 600, margin: 0 }}>
-                {!retiro.coord && !entrega.coord
-                  ? 'Marcá ambos puntos en el mapa para calcular el precio'
+                {!retiro.coord && !entregaCoordEfectiva
+                  ? esFueraManagua ? 'Marcá el punto de retiro y seleccioná un punto logístico' : 'Marcá ambos puntos en el mapa para calcular el precio'
                   : !retiro.coord
                     ? 'Falta marcar el punto de retiro'
-                    : 'Falta marcar el punto de entrega'}
+                    : esFueraManagua ? 'Seleccioná el punto logístico de destino' : 'Falta marcar el punto de entrega'}
               </p>
             </div>
           ) : null}
@@ -2760,10 +3008,10 @@ export default function GestorIngresarOrdenPage() {
             </div>
 
             {/* Mapa de ruta */}
-            {(retiro.coord || entrega.coord) && (
+            {(retiro.coord || entregaCoordEfectiva) && (
               <div style={{ ...S.sectionCard, marginBottom: 16 }}>
                 <h3 style={{ fontSize: 13, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Ruta</h3>
-                <RoutePreviewMap origen={retiro.coord} destino={entrega.coord} />
+                <RoutePreviewMap origen={retiro.coord} destino={entregaCoordEfectiva} />
                 {calcResult && (
                   <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap' as const }}>
                     <span style={{ fontSize: 13, color: '#6b7280' }}>Distancia: <strong>{calcResult.km.toFixed(2)} km</strong></span>
@@ -2782,6 +3030,27 @@ export default function GestorIngresarOrdenPage() {
               {selectedOwner?.email && <p style={{ fontSize: 12, color: '#6b7280', margin: '2px 0 0' }}>{selectedOwner.email}</p>}
             </div>
 
+            {/* Banner fuera de Managua */}
+            {esFueraManagua && (
+              <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 14, padding: '14px 16px', marginBottom: 16 }}>
+                <p style={{ fontSize: 14, fontWeight: 800, color: '#7c3aed', margin: '0 0 8px' }}>
+                  {metodoFueraManagua === 'bus_terminal' ? '🚌 Envío fuera de Managua — Bus / terminal' : '📦 Envío fuera de Managua — Cargotrans'}
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {destinoFinal && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📍 Destino: <strong>{destinoFinal}</strong></p>}
+                  {puntoLogisticoSeleccionado && (
+                    <p style={{ fontSize: 13, color: '#7c3aed', margin: 0 }}>
+                      🏢 {metodoFueraManagua === 'bus_terminal' ? 'Terminal' : 'Sucursal'}: <strong>{puntoLogisticoSeleccionado.nombre}</strong>
+                    </p>
+                  )}
+                  {metodoFueraManagua === 'bus_terminal' && transporteNombre && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>🚌 Transporte: <strong>{transporteNombre}</strong></p>}
+                  {metodoFueraManagua === 'bus_terminal' && transporteCelular && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📱 Celular: {transporteCelular}</p>}
+                  {metodoFueraManagua === 'bus_terminal' && transporteHoraSalida && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>⏰ Salida: {transporteHoraSalida}</p>}
+                  {metodoFueraManagua === 'cargotrans' && cantidadPaquetes && <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>📦 Paquetes: <strong>{cantidadPaquetes}</strong></p>}
+                </div>
+              </div>
+            )}
+
             {/* Retiro / Entrega lado a lado */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
               <div style={{ ...S.sectionCard, marginBottom: 0 }}>
@@ -2792,11 +3061,28 @@ export default function GestorIngresarOrdenPage() {
                 {retiro.coord && <p style={{ fontSize: 11, color: '#16a34a', margin: '4px 0 0', fontWeight: 600 }}>✓ Ubicación marcada</p>}
               </div>
               <div style={{ ...S.sectionCard, marginBottom: 0 }}>
-                <h3 style={{ fontSize: 12, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 10px' }}>🏠 Entrega</h3>
-                <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{entrega.nombre || '—'}</p>
-                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>{entrega.celular || '—'}</p>
-                <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>{entrega.direccion || '—'}</p>
-                {entrega.coord && <p style={{ fontSize: 11, color: '#16a34a', margin: '4px 0 0', fontWeight: 600 }}>✓ Ubicación marcada</p>}
+                <h3 style={{ fontSize: 12, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase' as const, letterSpacing: 0.5, margin: '0 0 10px' }}>
+                  {esFueraManagua && puntoLogisticoSeleccionado
+                    ? (metodoFueraManagua === 'cargotrans' ? '📦 Sucursal Cargotrans' : '🏢 Terminal')
+                    : '🏠 Entrega'}
+                </h3>
+                {esFueraManagua && puntoLogisticoSeleccionado ? (
+                  <>
+                    <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{puntoLogisticoSeleccionado.nombre}</p>
+                    {puntoLogisticoSeleccionado.direccion && <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>📌 {puntoLogisticoSeleccionado.direccion}</p>}
+                    {(puntoLogisticoSeleccionado.horarioApertura || puntoLogisticoSeleccionado.horarioCierre) && (
+                      <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 2px' }}>🕐 {puntoLogisticoSeleccionado.horarioApertura || '?'}–{puntoLogisticoSeleccionado.horarioCierre || '?'}</p>
+                    )}
+                    {destinoFinal && <p style={{ fontSize: 12, color: '#7c3aed', margin: '4px 0 0', fontWeight: 600 }}>📍 Destino: {destinoFinal}</p>}
+                  </>
+                ) : (
+                  <>
+                    <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{entrega.nombre || '—'}</p>
+                    <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 2px' }}>{entrega.celular || '—'}</p>
+                    <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>{entrega.direccion || '—'}</p>
+                    {entrega.coord && <p style={{ fontSize: 11, color: '#16a34a', margin: '4px 0 0', fontWeight: 600 }}>✓ Ubicación marcada</p>}
+                  </>
+                )}
               </div>
             </div>
 
@@ -2814,13 +3100,36 @@ export default function GestorIngresarOrdenPage() {
                     <span style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed' }}>C$ {montoProducto}</span>
                   </div>
                 )}
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={{ fontSize: 13, color: '#6b7280' }}>Delivery {precioEfectivo ? (calcResult ? '(calculado)' : '(cotización)') : '(a confirmar)'}</span>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: '#004aad' }}>{precioEfectivo ? `C$ ${precioEfectivo}` : '—'}</span>
-                </div>
-                {calcResult && recargoZona.aplica && precioEfectivo !== -1 && (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: 11, color: '#ea580c' }}>↳ incl. recargo {recargoZona.zona} +C$ {recargoZona.monto}</span>
+                {calcResult && precioEfectivo !== -1 ? (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: 13, color: '#6b7280' }}>Delivery base (calculado)</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>C$ {calcResult.precio}</span>
+                    </div>
+                    {recargoZona.aplica && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ fontSize: 12, color: '#ea580c' }}>+ Zona {recargoZona.zona}</span>
+                        <span style={{ fontSize: 12, fontWeight: 600, color: '#ea580c' }}>+C$ {recargoZona.monto}</span>
+                      </div>
+                    )}
+                    {recargoServicioMonto > 0 && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ fontSize: 12, color: '#7c3aed' }}>+ Terminal / bus</span>
+                        <span style={{ fontSize: 12, fontWeight: 600, color: '#7c3aed' }}>+C$ {recargoServicioMonto}</span>
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px dashed #e5e7eb', paddingTop: 6 }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: '#004aad' }}>Total delivery</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: '#004aad' }}>C$ {precioEfectivo}</span>
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 13, color: '#6b7280' }}>
+                      Delivery {precioEfectivo ? '(cotización)' : '(a confirmar)'}
+                      {recargoServicioMonto > 0 ? ` + terminal C$${recargoServicioMonto}` : ''}
+                    </span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: '#004aad' }}>{precioEfectivo ? `C$ ${precioEfectivo}` : '—'}</span>
                   </div>
                 )}
                 {tipoCliente === 'contado' && quienPagaDelivery && (
