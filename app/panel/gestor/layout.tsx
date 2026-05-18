@@ -325,6 +325,14 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
             />
 
             <NavItem
+              href="/panel/gestor/gastos"
+              icon={<DollarSign size={18} />}
+              label="Gastos"
+              active={pathname.startsWith('/panel/gestor/gastos')}
+              collapsed={collapsed}
+            />
+
+            <NavItem
               href="/panel/gestor/financiero"
               icon={<TrendingUp size={18} />}
               label="Financiero"
