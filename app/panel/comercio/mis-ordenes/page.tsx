@@ -1,10 +1,21 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
-import { collection, onSnapshot, query, where, Timestamp } from 'firebase/firestore'
+import {
+  collection,
+  deleteField,
+  doc,
+  onSnapshot,
+  query,
+  serverTimestamp,
+  updateDoc,
+  where,
+  Timestamp,
+} from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
-import { Package } from 'lucide-react'
+import { compressImage, uploadEvidenciaPath } from '@/fb/storage'
+import { Package, Upload, X } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -12,11 +23,18 @@ type Solicitud = {
   id: string
   estado?: string
   createdAt?: Timestamp
+  tipoServicio?: 'normal' | 'fuera_managua' | 'compra_gestion'
   recoleccion?: { direccionEscrita?: string; nombreApellido?: string }
   entrega?: { direccionEscrita?: string; nombreApellido?: string }
+  fueraManagua?: {
+    metodoEnvio?: 'bus_terminal' | 'cargotrans'
+    destinoFinal?: string | null
+    puntoLogisticoNombre?: string | null
+    terminalSugerida?: string | null
+  }
   confirmacion?: { precioFinalCordobas?: number }
   cobroContraEntrega?: { aplica?: boolean; monto?: number }
-  pagoDelivery?: { tipo?: string; quienPaga?: string }
+  pagoDelivery?: { tipo?: string; quienPaga?: string; montoSugerido?: number | null }
   tipoCliente?: string
   cobrosMotorizado?: {
     delivery?: { monto: number; recibio: boolean }
@@ -28,6 +46,14 @@ type Solicitud = {
       confirmadoComercio?: boolean
       confirmadoStorkhub?: boolean
     }
+  }
+  cobroDelivery?: {
+    estado?: string
+    boucherUrl?: string
+    boucherPath?: string
+    boucherAt?: any
+    monto?: number
+    subidoPor?: string
   }
 }
 
@@ -78,9 +104,7 @@ type DepositoEstado = 'na' | 'pendiente' | 'en_revision' | 'depositado'
 function estadoDeposito(s: Solicitud): DepositoEstado {
   if (!s.cobroContraEntrega?.aplica) return 'na'
   const dep = s.registro?.deposito
-  // Gestor confirmed → fully deposited
   if (dep?.confirmadoComercio) return 'depositado'
-  // Motorizado uploaded boucher and flagged the order → under review by gestor
   if (dep?.confirmadoMotorizado) return 'en_revision'
   return 'pendiente'
 }
@@ -88,10 +112,11 @@ function estadoDeposito(s: Solicitud): DepositoEstado {
 function debeDelivery(s: Solicitud): boolean | null {
   const qp = s.pagoDelivery?.quienPaga || ''
   if (s.tipoCliente === 'credito' || qp === 'credito_semanal') return true
-  if (qp === 'transferencia') return false
+  // transferencia: handled separately in the column
+  if (qp === 'transferencia') return null
   // efectivo — depende de si motorizado confirmó recibo
   if (s.cobrosMotorizado?.delivery !== undefined) return !s.cobrosMotorizado.delivery.recibio
-  return null // sin info aún
+  return null
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -102,6 +127,15 @@ export default function MisOrdenesPage() {
   const [ordenes, setOrdenes] = useState<Solicitud[]>([])
   const [loading, setLoading] = useState(true)
   const [filtro, setFiltro] = useState<FiltroEstado>('todas')
+
+  // Boucher upload
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [uploadTargetId, setUploadTargetId] = useState<string | null>(null)
+  const [uploadingId, setUploadingId] = useState<string | null>(null)
+  const [uploadErr, setUploadErr] = useState<string | null>(null)
+
+  // Boucher viewer modal
+  const [viendoBoucherUrl, setViendoBoucherUrl] = useState<string | null>(null)
 
   useEffect(() => {
     const user = auth.currentUser
@@ -119,6 +153,59 @@ export default function MisOrdenesPage() {
     })
     return () => unsub()
   }, [])
+
+  function triggerUpload(solicitudId: string) {
+    setUploadTargetId(solicitudId)
+    setUploadErr(null)
+    fileInputRef.current?.click()
+  }
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file || !uploadTargetId) return
+    e.target.value = ''
+    const targetId = uploadTargetId
+    setUploadingId(targetId)
+    setUploadErr(null)
+    try {
+      const blob = await compressImage(file)
+      const path = `evidencias/${targetId}/delivery_boucher.jpg`
+      const { url, pathStorage } = await uploadEvidenciaPath(path, blob)
+      const s = ordenes.find((o) => o.id === targetId)
+      await updateDoc(doc(db, 'solicitudes_envio', targetId), {
+        'cobroDelivery.estado': 'en_revision_deposito',
+        'cobroDelivery.boucherUrl': url,
+        'cobroDelivery.boucherPath': pathStorage,
+        'cobroDelivery.boucherAt': serverTimestamp(),
+        'cobroDelivery.monto': s?.confirmacion?.precioFinalCordobas ?? 0,
+        'cobroDelivery.tipoCliente': 'contado',
+        'cobroDelivery.quienPaga': 'transferencia',
+        'cobroDelivery.registradoAt': serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    } catch (err) {
+      console.error(err)
+      setUploadErr('Error al subir el boucher. Intentá de nuevo.')
+    } finally {
+      setUploadingId(null)
+      setUploadTargetId(null)
+    }
+  }
+
+  async function handleQuitarBoucher(solicitudId: string) {
+    try {
+      await updateDoc(doc(db, 'solicitudes_envio', solicitudId), {
+        'cobroDelivery.estado': 'pendiente',
+        'cobroDelivery.boucherUrl': deleteField(),
+        'cobroDelivery.boucherPath': deleteField(),
+        'cobroDelivery.boucherAt': deleteField(),
+        'cobroDelivery.subidoPor': deleteField(),
+        updatedAt: serverTimestamp(),
+      })
+    } catch (err) {
+      console.error(err)
+    }
+  }
 
   const activas = ['pendiente_confirmacion', 'confirmada', 'asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega']
 
@@ -138,6 +225,47 @@ export default function MisOrdenesPage() {
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Hidden file input for boucher upload */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
+      {/* Boucher viewer modal */}
+      {viendoBoucherUrl && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm px-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-black text-gray-900">Boucher de transferencia</h3>
+              <button
+                onClick={() => setViendoBoucherUrl(null)}
+                className="w-8 h-8 grid place-items-center rounded-full border border-gray-200 hover:bg-gray-50"
+              >
+                <X className="h-4 w-4 text-gray-500" />
+              </button>
+            </div>
+            <a href={viendoBoucherUrl} target="_blank" rel="noreferrer" className="block mb-3">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={viendoBoucherUrl}
+                alt="Boucher de transferencia"
+                className="w-full rounded-xl border border-gray-200 object-contain max-h-64"
+              />
+              <p className="text-xs text-center text-blue-600 mt-1 hover:underline">Ver imagen completa →</p>
+            </a>
+            <button
+              onClick={() => setViendoBoucherUrl(null)}
+              className="w-full border border-gray-200 text-gray-600 text-sm font-semibold py-2.5 rounded-xl hover:bg-gray-50 transition"
+            >
+              Cerrar
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -162,6 +290,10 @@ export default function MisOrdenesPage() {
           Entregadas ({ordenes.filter((o) => o.estado === 'entregado').length})
         </button>
       </div>
+
+      {uploadErr && (
+        <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{uploadErr}</div>
+      )}
 
       {/* Tabla */}
       <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -193,6 +325,9 @@ export default function MisOrdenesPage() {
                 const estadoCl = estadoCls[o.estado || ''] || 'bg-gray-100 text-gray-600 border-gray-200'
                 const debe = debeDelivery(o)
                 const cobrado = o.cobrosMotorizado?.producto
+                const esTransferencia = o.pagoDelivery?.quienPaga === 'transferencia'
+                const cdEstado = o.cobroDelivery?.estado
+                const isUploading = uploadingId === o.id
 
                 return (
                   <tr key={o.id} className="hover:bg-gray-50 transition-colors">
@@ -203,11 +338,33 @@ export default function MisOrdenesPage() {
                       <p className="truncate text-gray-400 text-xs">{o.recoleccion?.direccionEscrita || ''}</p>
                     </td>
                     <td className={`${tdCls} max-w-[140px]`}>
-                      <p className="truncate text-gray-900 font-medium">{o.entrega?.nombreApellido || '—'}</p>
-                      <p className="truncate text-gray-400 text-xs">{o.entrega?.direccionEscrita || ''}</p>
+                      {o.tipoServicio === 'fuera_managua' && o.fueraManagua ? (
+                        <>
+                          <p className="truncate text-violet-700 font-semibold text-xs">
+                            {o.fueraManagua.metodoEnvio === 'cargotrans' ? '📦 Cargotrans' : '🚌 Bus/Terminal'}
+                          </p>
+                          <p className="truncate text-gray-900 font-medium">
+                            {o.fueraManagua.puntoLogisticoNombre || o.fueraManagua.terminalSugerida || '—'}
+                          </p>
+                          {o.fueraManagua.destinoFinal && (
+                            <p className="truncate text-gray-400 text-xs">Destino: {o.fueraManagua.destinoFinal}</p>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <p className="truncate text-gray-900 font-medium">{o.entrega?.nombreApellido || '—'}</p>
+                          <p className="truncate text-gray-400 text-xs">{o.entrega?.direccionEscrita || ''}</p>
+                        </>
+                      )}
                     </td>
-                    <td className={`${tdCls} text-right font-semibold text-[#004aad]`}>
-                      {fmt(o.confirmacion?.precioFinalCordobas)}
+                    <td className={`${tdCls} text-right font-semibold`}>
+                      {(() => {
+                        const confirmado = o.confirmacion?.precioFinalCordobas
+                        const sugerido = o.pagoDelivery?.montoSugerido
+                        if (typeof confirmado === 'number') return <span className="text-[#004aad]">{fmt(confirmado)}</span>
+                        if (typeof sugerido === 'number') return <span className="text-gray-400" title="Precio estimado, pendiente de confirmación">~{fmt(sugerido)}</span>
+                        return <span className="text-gray-300">—</span>
+                      })()}
                     </td>
                     <td className={tdCls}>
                       <span className={`inline-flex text-xs font-semibold px-2.5 py-1 rounded-full border ${estadoCl}`}>
@@ -238,8 +395,63 @@ export default function MisOrdenesPage() {
                         return <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 border border-yellow-200">Pendiente</span>
                       })()}
                     </td>
+
+                    {/* ── Delivery pago ─────────────────────────────────── */}
                     <td className={tdCls}>
-                      {debe === null ? (
+                      {esTransferencia ? (
+                        cdEstado === 'pagado' ? (
+                          <div className="flex flex-col gap-1">
+                            <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">
+                              ✓ Pagado
+                            </span>
+                            {o.cobroDelivery?.boucherUrl && (
+                              <button
+                                onClick={() => setViendoBoucherUrl(o.cobroDelivery!.boucherUrl!)}
+                                className="text-[11px] font-semibold text-blue-600 hover:underline text-left"
+                              >
+                                Ver boucher →
+                              </button>
+                            )}
+                          </div>
+                        ) : cdEstado === 'en_revision_deposito' ? (
+                          <div className="flex flex-col gap-1.5">
+                            <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                              🔍 En revisión
+                            </span>
+                            {o.cobroDelivery?.subidoPor !== 'gestor' && (
+                              <div className="flex gap-1">
+                                <button
+                                  onClick={() => triggerUpload(o.id)}
+                                  disabled={isUploading}
+                                  className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-100 transition disabled:opacity-50"
+                                >
+                                  {isUploading ? '…' : '↺ Reemplazar'}
+                                </button>
+                                <button
+                                  onClick={() => handleQuitarBoucher(o.id)}
+                                  className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-red-200 text-red-600 bg-red-50 hover:bg-red-100 transition"
+                                >
+                                  ✕ Quitar
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex flex-col gap-1.5">
+                            <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 border border-yellow-200">
+                              Pago x depósito
+                            </span>
+                            <button
+                              onClick={() => triggerUpload(o.id)}
+                              disabled={isUploading}
+                              className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-lg bg-[#004aad] text-white hover:bg-[#003a8c] transition disabled:opacity-50"
+                            >
+                              <Upload size={10} />
+                              {isUploading ? 'Subiendo…' : 'Subir boucher'}
+                            </button>
+                          </div>
+                        )
+                      ) : debe === null ? (
                         <span className="text-gray-400 text-xs">—</span>
                       ) : debe ? (
                         <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-red-50 text-red-600">Debe</span>
@@ -247,6 +459,7 @@ export default function MisOrdenesPage() {
                         <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700">Pagado</span>
                       )}
                     </td>
+
                     <td className="px-4 py-3 text-right">
                       <Link href={`/panel/comercio/mis-ordenes/${o.id}`}
                         className="text-[#004aad] text-xs font-semibold hover:underline">

@@ -18,6 +18,7 @@ import {
   where,
 } from 'firebase/firestore'
 import { db, auth } from '@/fb/config'
+import { compressImage, uploadEvidenciaPath } from '@/fb/storage'
 import {
   rankearMotorizados,
   type MotorizadoConRanking,
@@ -25,6 +26,10 @@ import {
   type NuevaOrdenRanking,
   type MotorizadoRankeado,
 } from '@/lib/motorizado-ranking'
+import {
+  LABELS_TIPO_GASTO,
+  type GastoMotorizado,
+} from '@/lib/financial-types'
 import {
   X,
   ExternalLink,
@@ -98,6 +103,7 @@ export type SolicitudDetalle = {
   }
   cobroDelivery?: {
     estado?: string; formaPago?: string; notaPago?: string; pagadoAt?: any; monto?: number
+    boucherUrl?: string; boucherPath?: string; boucherAt?: any; subidoPor?: string
   }
   registro?: {
     semana?: number; zona?: string
@@ -129,6 +135,10 @@ export type SolicitudDetalle = {
     puntoLogisticoNombre?: string | null
     puntoLogisticoTipo?: string | null
     coordsPuntoLogistico?: { lat: number; lng: number } | null
+    direccionPuntoLogistico?: string | null
+    horarioApertura?: string | null
+    horarioCierre?: string | null
+    notaPuntoLogistico?: string | null
     terminalSugerida?: string | null
     transporteNombre?: string | null
     transporteCelular?: string | null
@@ -136,6 +146,7 @@ export type SolicitudDetalle = {
     transporteNota?: string | null
     cantidadPaquetes?: number
     notaCargotrans?: string | null
+    pagoCargotrans?: 'efectivo_motorizado' | 'transferencia_comercio' | null
   }
   precioDesglose?: {
     deliveryBase?: number
@@ -159,8 +170,20 @@ export type SolicitudDetalle = {
     fotoPaquete?: { url: string; pathStorage: string; uploadedAt?: any }
     fotoTicket?: { url: string; pathStorage: string; uploadedAt?: any }
     sinTicket?: boolean
+    busNombre?: string | null
+    busNumero?: string | null
+    busCelular?: string | null
+    horaLlegadaDestino?: string | null
+    costoFlete?: number | null
     nota?: string | null
     horaEntregaBus?: string | null
+  }
+  evidenciasCargotrans?: {
+    fotos?: Array<{ url: string; pathStorage: string; uploadedAt?: any }>
+    factura?: { url: string; pathStorage: string; uploadedAt?: any }
+    costoCargotrans?: number | null
+    subidasAt?: any
+    subidasPorUid?: string
   }
   rechazo?: {
     motivoCodigo?: string
@@ -225,7 +248,7 @@ export function estadoClass(e?: EstadoSolicitud): string {
 export function roundTo10(n: any): number { return Math.round(Number(n) / 10) * 10 }
 
 export function getBestMapsUrl(s: SolicitudDetalle, tipo: 'recoleccion' | 'entrega'): string | null {
-  const coord = tipo === 'recoleccion' ? s.cotizacion?.origenCoord : s.cotizacion?.destinoCoord
+  const coord = tipo === 'recoleccion' ? s.cotizacion?.origenCoord : (s.cotizacion?.destinoCoord ?? s.fueraManagua?.coordsPuntoLogistico)
   if (coord) return `https://www.google.com/maps?q=${coord.lat},${coord.lng}`
   const link = tipo === 'recoleccion' ? s.recoleccion?.puntoGoogleLink : s.entrega?.puntoGoogleLink
   if (link?.trim()) return link.trim()
@@ -329,11 +352,32 @@ export function SolicitudDrawer({
   const [motivoCodigo, setMotivoCodigo] = useState('')
   const [motivoTexto, setMotivoTexto] = useState('')
   const [detalleRechazo, setDetalleRechazo] = useState('')
+  const [ctransFiles, setCtransFiles] = useState<File[]>([])
+  const [ctransFactura, setCtransFactura] = useState<File | null>(null)
+  const [ctransUploading, setCtransUploading] = useState(false)
+  const [ctransErr, setCtransErr] = useState<string | null>(null)
+  const [gastosOperativos, setGastosOperativos] = useState<(GastoMotorizado & { id: string })[]>([])
 
   useEffect(() => {
     const t = setInterval(() => setTick(Date.now()), 1000)
     return () => clearInterval(t)
   }, [])
+
+  useEffect(() => {
+    const q = query(
+      collection(db, 'gastos_motorizado'),
+      where('ordenId', '==', solicitudId),
+    )
+    return onSnapshot(q, (snap) => {
+      const docs = snap.docs.map((d) => ({ id: d.id, ...(d.data() as GastoMotorizado) }))
+      docs.sort((a, b) => {
+        const ta = typeof (a.createdAt as any)?.toMillis === 'function' ? (a.createdAt as any).toMillis() : 0
+        const tb = typeof (b.createdAt as any)?.toMillis === 'function' ? (b.createdAt as any).toMillis() : 0
+        return tb - ta
+      })
+      setGastosOperativos(docs)
+    }, (e) => console.error('[SolicitudDrawer] gastos_motorizado:', e))
+  }, [solicitudId])
 
   useEffect(() => {
     getDocs(query(collection(db, 'motorizado'))).then((snap) => {
@@ -370,7 +414,11 @@ export function SolicitudDrawer({
         const data = { id: snap.id, ...(snap.data() as any) } as SolicitudDetalle
         setComercioRequiereBolso(null)
         setSolicitud(data)
-        setPrecioFinal(data.confirmacion?.precioFinalCordobas ?? '')
+        setPrecioFinal(
+          data.confirmacion?.precioFinalCordobas ??
+          data.pagoDelivery?.montoSugerido ??
+          ''
+        )
         setMotorizadoSel(data.asignacion?.motorizadoId || '')
         setLoading(false)
       },
@@ -407,6 +455,41 @@ export function SolicitudDrawer({
     }
     return null
   }, [solicitud, tick])
+
+  async function handleCargotransUpload() {
+    if (!solicitud || ctransFiles.length === 0) return
+    setCtransUploading(true); setCtransErr(null)
+    try {
+      const fotos: Array<{ url: string; pathStorage: string }> = []
+      for (let i = 0; i < ctransFiles.length; i++) {
+        const blob = await compressImage(ctransFiles[i])
+        const path = `evidencias/${solicitud.id}/cargotrans_paquete_${i + 1}.jpg`
+        const result = await uploadEvidenciaPath(path, blob)
+        fotos.push(result)
+      }
+      let factura: { url: string; pathStorage: string } | undefined
+      if (ctransFactura) {
+        const blob = await compressImage(ctransFactura)
+        const path = `evidencias/${solicitud.id}/cargotrans_factura.jpg`
+        factura = await uploadEvidenciaPath(path, blob)
+      }
+      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
+        evidenciasCargotrans: {
+          fotos,
+          ...(factura ? { factura } : {}),
+          subidasAt: serverTimestamp(),
+          subidasPorUid: auth.currentUser?.uid ?? '',
+        },
+        updatedAt: serverTimestamp(),
+      })
+      setCtransFiles([]); setCtransFactura(null)
+    } catch (e) {
+      console.error(e)
+      setCtransErr('Error al subir las fotos. Intentá de nuevo.')
+    } finally {
+      setCtransUploading(false)
+    }
+  }
 
   // Ranking de sugerencia — función pura, sin I/O
   const rankingCalculado = useMemo<MotorizadoRankeado[]>(() => {
@@ -742,38 +825,89 @@ export function SolicitudDrawer({
               </Section>
 
               {/* Entrega */}
-              <Section title="Entrega" accent="emerald">
+              <Section
+                title={
+                  solicitud.tipoServicio === 'fuera_managua'
+                    ? solicitud.fueraManagua?.metodoEnvio === 'cargotrans'
+                      ? 'Entrega — Sucursal Cargotrans'
+                      : 'Entrega — Terminal / Bus'
+                    : 'Entrega'
+                }
+                accent="emerald"
+              >
                 <div className="space-y-2.5">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
-                      <Package size={15} />
+                  {solicitud.tipoServicio === 'fuera_managua' && solicitud.fueraManagua ? (
+                    <div className="flex items-start gap-3">
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-violet-100 text-violet-600">
+                        <Package size={15} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-gray-900 leading-tight">
+                          {solicitud.fueraManagua.puntoLogisticoNombre || solicitud.fueraManagua.terminalSugerida || '—'}
+                        </div>
+                        {solicitud.fueraManagua.direccionPuntoLogistico && (
+                          <div className="mt-1 text-xs text-gray-500 leading-snug">
+                            📌 {solicitud.fueraManagua.direccionPuntoLogistico}
+                          </div>
+                        )}
+                        {solicitud.fueraManagua.destinoFinal && (
+                          <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-violet-50 border border-violet-200 px-2 py-0.5 text-xs font-semibold text-violet-700">
+                            Destino: {solicitud.fueraManagua.destinoFinal}
+                          </div>
+                        )}
+                        {(solicitud.fueraManagua.horarioApertura || solicitud.fueraManagua.horarioCierre) && (
+                          <div className="mt-1 text-xs text-gray-500">
+                            🕐 {solicitud.fueraManagua.horarioApertura || '?'}–{solicitud.fueraManagua.horarioCierre || '?'}
+                          </div>
+                        )}
+                        {solicitud.fueraManagua.cantidadPaquetes != null && (
+                          <div className="mt-1 text-xs text-gray-600">📦 Paquetes: {solicitud.fueraManagua.cantidadPaquetes}</div>
+                        )}
+                        {solicitud.zonaEntregaNombre && (
+                          <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-indigo-50 border border-indigo-200 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                            <MapPin size={10} />
+                            {solicitud.zonaEntregaNombre}
+                          </div>
+                        )}
+                        {solicitud.cobroContraEntrega?.aplica && (
+                          <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                            CE: {money(solicitud.cobroContraEntrega.monto)}
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-semibold text-gray-900 leading-tight">{solicitud.entrega?.nombreApellido || '—'}</div>
-                      {solicitud.entrega?.celular && (
-                        <div className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
-                          <Phone size={10} />{solicitud.entrega.celular}
-                        </div>
-                      )}
-                      {solicitud.cobroContraEntrega?.aplica && (
-                        <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-xs font-semibold text-emerald-700">
-                          CE: {money(solicitud.cobroContraEntrega.monto)}
-                        </div>
-                      )}
-                      {solicitud.entrega?.direccionEscrita && (
-                        <div className="mt-1 text-xs text-gray-500 leading-snug">{solicitud.entrega.direccionEscrita}</div>
-                      )}
-                      {solicitud.zonaEntregaNombre && (
-                        <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-indigo-50 border border-indigo-200 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
-                          <MapPin size={10} />
-                          {solicitud.zonaEntregaNombre}
-                        </div>
-                      )}
-                      {solicitud.entrega?.nota && (
-                        <div className="mt-1 rounded-lg bg-emerald-50 border border-emerald-100 px-2.5 py-1.5 text-xs text-emerald-700 italic">{solicitud.entrega.nota}</div>
-                      )}
+                  ) : (
+                    <div className="flex items-start gap-3">
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                        <Package size={15} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-gray-900 leading-tight">{solicitud.entrega?.nombreApellido || '—'}</div>
+                        {solicitud.entrega?.celular && (
+                          <div className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                            <Phone size={10} />{solicitud.entrega.celular}
+                          </div>
+                        )}
+                        {solicitud.cobroContraEntrega?.aplica && (
+                          <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                            CE: {money(solicitud.cobroContraEntrega.monto)}
+                          </div>
+                        )}
+                        {solicitud.entrega?.direccionEscrita && (
+                          <div className="mt-1 text-xs text-gray-500 leading-snug">{solicitud.entrega.direccionEscrita}</div>
+                        )}
+                        {solicitud.zonaEntregaNombre && (
+                          <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-indigo-50 border border-indigo-200 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                            <MapPin size={10} />
+                            {solicitud.zonaEntregaNombre}
+                          </div>
+                        )}
+                        {solicitud.entrega?.nota && (
+                          <div className="mt-1 rounded-lg bg-emerald-50 border border-emerald-100 px-2.5 py-1.5 text-xs text-emerald-700 italic">{solicitud.entrega.nota}</div>
+                        )}
+                      </div>
                     </div>
-                  </div>
+                  )}
                   {entregaMaps && (
                     <div className="flex gap-2 pt-0.5">
                       <a href={entregaMaps} target="_blank" rel="noreferrer"
@@ -816,6 +950,44 @@ export function SolicitudDrawer({
                 )}
               </Section>
 
+              {/* Boucher de pago delivery (transferencia) */}
+              {solicitud.pagoDelivery?.quienPaga === 'transferencia' && (
+                <Section title="Pago delivery — Transferencia" accent="blue">
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                      <InfoRow label="Estado" value={
+                        solicitud.cobroDelivery?.estado === 'pagado' ? '✓ Confirmado'
+                        : solicitud.cobroDelivery?.estado === 'en_revision_deposito' ? '🔍 En revisión'
+                        : '⏳ Pendiente'
+                      } />
+                      <InfoRow label="Monto" value={solicitud.cobroDelivery?.monto != null ? money(solicitud.cobroDelivery.monto) : solicitud.confirmacion?.precioFinalCordobas != null ? money(solicitud.confirmacion.precioFinalCordobas) : undefined} />
+                      {solicitud.cobroDelivery?.pagadoAt && <InfoRow label="Confirmado" value={formatDateTime(solicitud.cobroDelivery.pagadoAt)} />}
+                      {solicitud.cobroDelivery?.subidoPor && <InfoRow label="Subido por" value={solicitud.cobroDelivery.subidoPor === 'gestor' ? 'Gestor' : 'Comercio'} />}
+                      {solicitud.cobroDelivery?.boucherAt && <InfoRow label="Fecha boucher" value={formatDateTime(solicitud.cobroDelivery.boucherAt)} />}
+                    </div>
+                    {solicitud.cobroDelivery?.boucherUrl ? (
+                      <div className="space-y-2">
+                        <div className="text-[10px] font-bold uppercase tracking-wide text-blue-500">📎 Boucher adjunto</div>
+                        <a href={solicitud.cobroDelivery.boucherUrl} target="_blank" rel="noopener noreferrer" className="block">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={solicitud.cobroDelivery.boucherUrl}
+                            alt="Boucher de transferencia"
+                            className="w-full max-h-48 object-contain rounded-xl border border-blue-100 bg-blue-50"
+                            loading="lazy"
+                          />
+                          <p className="text-xs text-center text-blue-600 mt-1 hover:underline">Ver imagen completa →</p>
+                        </a>
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-dashed border-blue-200 py-5 text-center text-xs text-blue-400">
+                        Sin boucher adjunto aún
+                      </div>
+                    )}
+                  </div>
+                </Section>
+              )}
+
               {/* Fuera de Managua */}
               {solicitud.tipoServicio === 'fuera_managua' && solicitud.fueraManagua && (
                 <Section title={solicitud.fueraManagua.metodoEnvio === 'cargotrans' ? '📦 Envío fuera de Managua — Cargotrans' : '🚌 Envío fuera de Managua — Bus / terminal'} accent="indigo">
@@ -832,27 +1004,111 @@ export function SolicitudDrawer({
                     {solicitud.fueraManagua.transporteHoraSalida && <InfoRow label="Hora salida Managua" value={solicitud.fueraManagua.transporteHoraSalida} />}
                     {solicitud.fueraManagua.transporteNota && <InfoRow label="Nota transporte" value={solicitud.fueraManagua.transporteNota} />}
                     {solicitud.fueraManagua.cantidadPaquetes != null && <InfoRow label="Paquetes" value={String(solicitud.fueraManagua.cantidadPaquetes)} />}
+                    {solicitud.fueraManagua.pagoCargotrans && <InfoRow label="Pago flete Cargotrans" value={solicitud.fueraManagua.pagoCargotrans === 'efectivo_motorizado' ? '💵 Efectivo (comercio entrega al motorizado)' : '🏦 Transferencia del comercio'} />}
                     {solicitud.fueraManagua.notaCargotrans && <InfoRow label="Nota Cargotrans" value={solicitud.fueraManagua.notaCargotrans} />}
                   </div>
                   {solicitud.evidenciasTerminal && (
-                    <div className="mt-2 space-y-1.5">
-                      <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400">Evidencias terminales</div>
-                      <div className="flex gap-2 flex-wrap">
-                        {solicitud.evidenciasTerminal.fotoBus && (
-                          <a href={solicitud.evidenciasTerminal.fotoBus.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 underline">📷 Foto bus</a>
-                        )}
+                    <div className="mt-3 space-y-3 border-t border-gray-100 pt-3">
+                      <div className="text-[10px] font-bold uppercase tracking-wide text-violet-500">📸 Evidencias de entrega al bus</div>
+                      <div className="grid grid-cols-3 gap-2">
                         {solicitud.evidenciasTerminal.fotoPaquete && (
-                          <a href={solicitud.evidenciasTerminal.fotoPaquete.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 underline">📷 Foto paquete</a>
+                          <button onClick={() => window.open(solicitud.evidenciasTerminal!.fotoPaquete!.url, '_blank')} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={solicitud.evidenciasTerminal.fotoPaquete.url} alt="Paquete" className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
+                            <span className="text-[10px] text-gray-500 uppercase font-medium">📦 Paquete</span>
+                          </button>
                         )}
                         {solicitud.evidenciasTerminal.fotoTicket && (
-                          <a href={solicitud.evidenciasTerminal.fotoTicket.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 underline">📷 Ticket</a>
+                          <button onClick={() => window.open(solicitud.evidenciasTerminal!.fotoTicket!.url, '_blank')} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={solicitud.evidenciasTerminal.fotoTicket.url} alt="Ticket" className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
+                            <span className="text-[10px] text-gray-500 uppercase font-medium">🎫 Ticket</span>
+                          </button>
                         )}
-                        {solicitud.evidenciasTerminal.sinTicket && (
-                          <span className="text-xs text-gray-500 bg-gray-100 rounded px-2 py-0.5">Sin ticket</span>
+                        {solicitud.evidenciasTerminal.fotoBus && (
+                          <button onClick={() => window.open(solicitud.evidenciasTerminal!.fotoBus!.url, '_blank')} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={solicitud.evidenciasTerminal.fotoBus.url} alt="Bus" className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
+                            <span className="text-[10px] text-gray-500 uppercase font-medium">🚌 Bus</span>
+                          </button>
                         )}
                       </div>
-                      {solicitud.evidenciasTerminal.horaEntregaBus && <InfoRow label="Hora entrega al bus" value={solicitud.evidenciasTerminal.horaEntregaBus} />}
-                      {solicitud.evidenciasTerminal.nota && <p className="text-xs text-gray-600 mt-1">📝 {solicitud.evidenciasTerminal.nota}</p>}
+                      {solicitud.evidenciasTerminal.sinTicket && (
+                        <div className="rounded-lg bg-amber-50 border border-amber-200 p-2.5 space-y-1.5">
+                          <div className="text-[10px] font-bold uppercase text-amber-600">Sin ticket — datos del transporte</div>
+                          {solicitud.evidenciasTerminal.busNombre && <InfoRow label="Bus / empresa" value={solicitud.evidenciasTerminal.busNombre} />}
+                          {solicitud.evidenciasTerminal.busNumero && <InfoRow label="Número / placa" value={solicitud.evidenciasTerminal.busNumero} />}
+                          {solicitud.evidenciasTerminal.busCelular && <InfoRow label="Celular cobrador" value={solicitud.evidenciasTerminal.busCelular} />}
+                          {solicitud.evidenciasTerminal.horaLlegadaDestino && <InfoRow label="Hora llegada destino" value={solicitud.evidenciasTerminal.horaLlegadaDestino} />}
+                          {solicitud.evidenciasTerminal.costoFlete != null && <InfoRow label="Costo flete (informativo)" value={`C$ ${solicitud.evidenciasTerminal.costoFlete}`} />}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* Cargotrans: subida de fotos por el gestor */}
+                  {solicitud.fueraManagua?.metodoEnvio === 'cargotrans' && (
+                    <div className="mt-3 border-t border-gray-100 pt-3 space-y-3">
+                      <div className="text-[10px] font-bold uppercase tracking-wide text-violet-500">📸 Fotos de entrega en Cargotrans</div>
+                      {solicitud.evidenciasCargotrans ? (
+                        <div className="space-y-2">
+                          {(solicitud.evidenciasCargotrans.fotos ?? []).length > 0 && (
+                            <div>
+                              <div className="text-[10px] font-semibold text-gray-400 uppercase mb-1.5">Paquetes ({solicitud.evidenciasCargotrans.fotos!.length})</div>
+                              <div className="grid grid-cols-3 gap-2">
+                                {solicitud.evidenciasCargotrans.fotos!.map((f, i) => (
+                                  <button key={i} onClick={() => window.open(f.url, '_blank')} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
+                                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                                    <img src={f.url} alt={`Paquete ${i + 1}`} className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
+                                    <span className="text-[10px] text-gray-500 uppercase font-medium">📦 #{i + 1}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {solicitud.evidenciasCargotrans.factura && (
+                            <button onClick={() => window.open(solicitud.evidenciasCargotrans!.factura!.url, '_blank')} className="flex items-center gap-2 text-xs text-indigo-600 underline font-semibold">
+                              🧾 Ver factura
+                            </button>
+                          )}
+                          {solicitud.evidenciasCargotrans.costoCargotrans != null && (
+                            <div className="flex items-center gap-1.5 text-xs">
+                              <span className="text-gray-500">Costo Cargotrans:</span>
+                              <span className="font-bold text-violet-700">C$ {solicitud.evidenciasCargotrans.costoCargotrans}</span>
+                            </div>
+                          )}
+                        </div>
+                      ) : solicitud.estado === 'entregado' ? (
+                        <div className="space-y-2.5">
+                          <div>
+                            <label className="text-[11px] font-semibold text-gray-600 block mb-1">Fotos de paquetes <span className="text-red-500">*</span></label>
+                            <input
+                              type="file" accept="image/*" multiple
+                              onChange={e => setCtransFiles(e.target.files ? Array.from(e.target.files) : [])}
+                              className="block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-violet-50 file:text-violet-700 hover:file:bg-violet-100"
+                            />
+                            {ctransFiles.length > 0 && <p className="text-[11px] text-violet-600 mt-1">{ctransFiles.length} foto(s) seleccionada(s)</p>}
+                          </div>
+                          <div>
+                            <label className="text-[11px] font-semibold text-gray-600 block mb-1">Factura de Cargotrans</label>
+                            <input
+                              type="file" accept="image/*"
+                              onChange={e => setCtransFactura(e.target.files?.[0] ?? null)}
+                              className="block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-violet-50 file:text-violet-700 hover:file:bg-violet-100"
+                            />
+                          </div>
+                          {ctransErr && <p className="text-xs text-red-500 font-semibold">{ctransErr}</p>}
+                          <button
+                            type="button"
+                            onClick={handleCargotransUpload}
+                            disabled={ctransFiles.length === 0 || ctransUploading}
+                            className={`w-full rounded-xl px-4 py-2.5 text-sm font-bold transition ${ctransFiles.length === 0 || ctransUploading ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-violet-600 text-white hover:bg-violet-700'}`}
+                          >
+                            {ctransUploading ? 'Subiendo...' : '📤 Subir fotos de entrega'}
+                          </button>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-400">Disponible cuando la orden esté entregada.</p>
+                      )}
                     </div>
                   )}
                 </Section>
@@ -906,6 +1162,41 @@ export function SolicitudDrawer({
                         )}
                       </div>
                     ))}
+                  </div>
+                </Section>
+              )}
+
+              {/* Gastos operativos vinculados */}
+              {gastosOperativos.length > 0 && (
+                <Section title="Gastos operativos" accent="red">
+                  <div className="space-y-2">
+                    {gastosOperativos.map((g) => {
+                      const tipoLabel = LABELS_TIPO_GASTO[g.tipo] ?? g.tipo
+                      const fecha = typeof (g.fecha as any)?.toDate === 'function'
+                        ? (g.fecha as any).toDate()
+                        : g.fecha instanceof Date ? g.fecha : null
+                      return (
+                        <div key={g.id} className="rounded-lg border border-red-100 bg-red-50 px-3 py-2.5 space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-bold text-red-800">{tipoLabel}</span>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <span className="text-sm font-black text-red-700">C$ {g.monto}</span>
+                              <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${g.estado === 'aprobado' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                                {g.estado === 'aprobado' ? 'Aprobado' : 'Anulado'}
+                              </span>
+                            </div>
+                          </div>
+                          {g.nota && (
+                            <p className="text-xs text-red-700 italic">{g.nota}</p>
+                          )}
+                          {fecha && (
+                            <p className="text-[11px] text-gray-400">
+                              {fecha.toLocaleDateString('es-NI', { day: '2-digit', month: 'short', year: 'numeric' })}
+                            </p>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 </Section>
               )}

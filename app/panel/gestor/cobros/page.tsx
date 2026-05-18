@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   collection,
   onSnapshot,
@@ -27,7 +27,9 @@ import {
   ArrowRightLeft,
   ChevronDown,
   ChevronUp,
+  Upload,
 } from 'lucide-react'
+import { compressImage, uploadEvidenciaPath } from '@/fb/storage'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -49,12 +51,15 @@ type CobroDelivery = {
   monto: number
   tipoCliente: 'contado' | 'credito'
   quienPaga: string
-  estado: 'pendiente' | 'pagado' | 'no_cobrar'
+  estado: 'pendiente' | 'pagado' | 'no_cobrar' | 'en_revision_deposito'
   registradoAt?: Timestamp
   pagadoAt?: Timestamp
   semanaKey?: string
   formaPago?: 'efectivo' | 'transferencia' | string
   notaPago?: string
+  boucherUrl?: string
+  boucherPath?: string
+  boucherAt?: Timestamp
 }
 
 type Solicitud = {
@@ -410,6 +415,191 @@ function PagoModal({
   )
 }
 
+// ─── Boucher Modal (transferencia comercio) ───────────────────────────────────
+
+function BoucherModal({
+  orden,
+  nombres,
+  onClose,
+}: {
+  orden: Solicitud
+  nombres: Record<string, string>
+  onClose: () => void
+}) {
+  const [saving, setSaving] = useState(false)
+  const [removing, setRemoving] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [localBoucherUrl, setLocalBoucherUrl] = useState(orden.cobroDelivery?.boucherUrl)
+  const [err, setErr] = useState<string | null>(null)
+  const replaceInputRef = useRef<HTMLInputElement>(null)
+  const nombre = getClienteNombre(orden, nombres)
+  const monto = orden.cobroDelivery?.monto ?? (orden as any).confirmacion?.precioFinalCordobas
+
+  async function handleQuitar() {
+    setRemoving(true); setErr(null)
+    try {
+      await updateDoc(doc(db, 'solicitudes_envio', orden.id), {
+        'cobroDelivery.estado': 'pendiente',
+        'cobroDelivery.boucherUrl': deleteField(),
+        'cobroDelivery.boucherPath': deleteField(),
+        'cobroDelivery.boucherAt': deleteField(),
+        'cobroDelivery.subidoPor': deleteField(),
+        updatedAt: serverTimestamp(),
+      })
+      onClose()
+    } catch (e: any) {
+      setErr(e?.message || 'Error al quitar')
+    } finally {
+      setRemoving(false)
+    }
+  }
+
+  async function handleReemplazar(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    setUploading(true); setErr(null)
+    try {
+      const blob = await compressImage(file)
+      const path = `evidencias/${orden.id}/delivery_boucher.jpg`
+      const { url, pathStorage } = await uploadEvidenciaPath(path, blob)
+      setLocalBoucherUrl(url)
+      await updateDoc(doc(db, 'solicitudes_envio', orden.id), {
+        'cobroDelivery.boucherUrl': url,
+        'cobroDelivery.boucherPath': pathStorage,
+        'cobroDelivery.boucherAt': serverTimestamp(),
+        'cobroDelivery.subidoPor': 'gestor',
+        updatedAt: serverTimestamp(),
+      })
+    } catch (e: any) {
+      setErr(e?.message || 'Error al subir')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function handleConfirmar() {
+    setSaving(true); setErr(null)
+    try {
+      const uid = auth.currentUser?.uid || 'desconocido'
+      const montoFinal = monto ?? 0
+      const depositoRef = doc(collection(db, 'ordenes_deposito'))
+      const depositoId = depositoRef.id
+      const b = writeBatch(db)
+      b.set(depositoRef, {
+        creadoAt: serverTimestamp(),
+        tipo: 'pago_delivery_deposito',
+        estado: 'confirmado',
+        destinatario: 'storkhub',
+        destinatarioId: 'storkhub',
+        destinatarioNombre: 'Storkhub',
+        cuentasDestino: [],
+        motorizadoUid: orden.asignacion?.motorizadoId ?? '',
+        motorizadoNombre: orden.asignacion?.motorizadoNombre ?? '',
+        solicitudIds: [orden.id],
+        montoTotal: montoFinal,
+        confirmadoMotorizado: false,
+        confirmadoGestor: true,
+        confirmadoGestorAt: serverTimestamp(),
+        confirmadoGestorUid: uid,
+        boucherUrl: orden.cobroDelivery?.boucherUrl ?? null,
+        metadata: { clienteNombre: nombre },
+      })
+      b.update(doc(db, 'solicitudes_envio', orden.id), {
+        'cobroDelivery.estado': 'pagado',
+        'cobroDelivery.pagadoAt': serverTimestamp(),
+        'cobroDelivery.formaPago': 'transferencia',
+        'cobroDelivery.confirmadoPor': uid,
+        'cobroDelivery.confirmadoAt': serverTimestamp(),
+        'registro.deposito.confirmadoStorkhub': true,
+        'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
+        'registro.deposito.storkhubDepositoId': depositoId,
+      })
+      await b.commit()
+      await registrarMovimiento('pago_recibido', montoFinal, uid,
+        `Pago delivery por transferencia confirmado · ${nombre}`,
+        { solicitudId: orden.id, depositoId })
+      onClose()
+    } catch (e: any) {
+      setErr(e?.message || 'Error al guardar')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm px-4">
+      <input ref={replaceInputRef} type="file" accept="image/*" className="hidden" onChange={handleReemplazar} />
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-base font-black text-gray-900">Revisar boucher</h3>
+          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-full border border-gray-200 hover:bg-gray-50">
+            <X className="h-4 w-4 text-gray-500" />
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mb-3">
+          Orden <span className="font-mono">{orden.id.slice(0, 8)}</span> · {nombre} · <span className="font-semibold text-gray-700">{fmt(monto)}</span>
+        </p>
+
+        {localBoucherUrl ? (
+          <>
+            <a href={localBoucherUrl} target="_blank" rel="noreferrer" className="block mb-2">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={localBoucherUrl}
+                alt="Boucher de transferencia"
+                className="w-full rounded-xl border border-gray-200 object-contain max-h-64"
+              />
+              <p className="text-xs text-center text-blue-600 mt-1 hover:underline">Ver imagen completa →</p>
+            </a>
+            <div className="flex gap-2 mb-3">
+              <button
+                onClick={() => replaceInputRef.current?.click()}
+                disabled={uploading}
+                className="flex-1 text-xs font-semibold px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition disabled:opacity-40"
+              >
+                {uploading ? 'Subiendo…' : '↺ Reemplazar'}
+              </button>
+              <button
+                onClick={handleQuitar}
+                disabled={removing}
+                className="flex-1 text-xs font-semibold px-3 py-1.5 rounded-lg border border-red-200 text-red-600 bg-red-50 hover:bg-red-100 transition disabled:opacity-40"
+              >
+                {removing ? '…' : '✕ Quitar boucher'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="mb-3 rounded-xl border border-dashed border-gray-300 py-6 text-center">
+            <p className="text-sm text-gray-400 mb-2">Sin boucher adjunto</p>
+            <button
+              onClick={() => replaceInputRef.current?.click()}
+              disabled={uploading}
+              className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition disabled:opacity-40"
+            >
+              {uploading ? 'Subiendo…' : <><Upload className="inline h-3 w-3 mr-1" />Subir boucher</>}
+            </button>
+          </div>
+        )}
+
+        {err && <p className="text-xs text-red-600 mb-2">{err}</p>}
+        <div className="flex gap-2">
+          <button onClick={onClose} className="flex-1 border border-gray-200 text-gray-600 text-sm font-semibold py-2.5 rounded-xl hover:bg-gray-50 transition">
+            Cancelar
+          </button>
+          <button
+            onClick={handleConfirmar}
+            disabled={saving || !localBoucherUrl}
+            className="flex-1 bg-green-600 text-white text-sm font-semibold py-2.5 rounded-xl hover:bg-green-700 transition disabled:opacity-40"
+          >
+            {saving ? 'Confirmando…' : '✓ Confirmar pago'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Pago Contado Modal ───────────────────────────────────────────────────────
 
 function PagoContadoModal({
@@ -596,7 +786,12 @@ export default function CobrosPage() {
   const [resolvingIncidencia, setResolvingIncidencia] = useState<Solicitud | null>(null)
   const [pagandoSemana, setPagandoSemana] = useState<CobroSemanal | null>(null)
   const [marcandoPago, setMarcandoPago] = useState<Solicitud | null>(null)
+  const [viendoBoucher, setViendoBoucher] = useState<Solicitud | null>(null)
   const [expandedSemana, setExpandedSemana] = useState<string | null>(null)
+
+  // Subida de boucher por el gestor
+  const [uploadingBoucherId, setUploadingBoucherId] = useState<string | null>(null)
+  const boucherInputRef = useRef<HTMLInputElement>(null)
 
   // ── Queries ────────────────────────────────────────────────────────────────
 
@@ -802,6 +997,36 @@ export default function CobrosPage() {
     await b.commit()
   }
 
+  // ── Subida de boucher por gestor ───────────────────────────────────────────
+
+  async function handleGestorBoucherUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file || !uploadingBoucherId) return
+    const targetId = uploadingBoucherId
+    setUploadingBoucherId(null)
+    e.target.value = ''
+    try {
+      const blob = await compressImage(file)
+      const path = `evidencias/${targetId}/delivery_boucher.jpg`
+      const { url, pathStorage } = await uploadEvidenciaPath(path, blob)
+      const orden = contadoRaw.find((s) => s.id === targetId)
+      await updateDoc(doc(db, 'solicitudes_envio', targetId), {
+        'cobroDelivery.estado': 'en_revision_deposito',
+        'cobroDelivery.boucherUrl': url,
+        'cobroDelivery.boucherPath': pathStorage,
+        'cobroDelivery.boucherAt': serverTimestamp(),
+        'cobroDelivery.monto': (orden as any)?.confirmacion?.precioFinalCordobas ?? 0,
+        'cobroDelivery.tipoCliente': 'contado',
+        'cobroDelivery.quienPaga': 'transferencia',
+        'cobroDelivery.registradoAt': serverTimestamp(),
+        'cobroDelivery.subidoPor': 'gestor',
+        updatedAt: serverTimestamp(),
+      })
+    } catch (err) {
+      console.error('[cobros] Error subiendo boucher del gestor:', err)
+    }
+  }
+
   // ── KPIs ───────────────────────────────────────────────────────────────────
 
   const kpis = [
@@ -835,6 +1060,15 @@ export default function CobrosPage() {
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Input oculto para subida de boucher por el gestor */}
+      <input
+        ref={boucherInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleGestorBoucherUpload}
+      />
+
       {resolvingIncidencia && (
         <ResolveModal solicitud={resolvingIncidencia} onClose={() => setResolvingIncidencia(null)} />
       )}
@@ -843,6 +1077,9 @@ export default function CobrosPage() {
       )}
       {marcandoPago && (
         <PagoContadoModal orden={marcandoPago} nombres={comercioNames} onClose={() => setMarcandoPago(null)} />
+      )}
+      {viendoBoucher && (
+        <BoucherModal orden={viendoBoucher} nombres={comercioNames} onClose={() => setViendoBoucher(null)} />
       )}
 
       {/* Header */}
@@ -959,16 +1196,24 @@ export default function CobrosPage() {
                   <tbody className="divide-y divide-gray-100">
                     {contadoOrdenes.map((s) => {
                       const esTransferencia = s.cobroDelivery?.quienPaga === 'transferencia' || s.pagoDelivery?.quienPaga === 'transferencia'
+                      const tieneBoucher = s.cobroDelivery?.estado === 'en_revision_deposito' || !!s.cobroDelivery?.boucherUrl
                       return (
-                        <tr key={s.id} className="hover:bg-gray-50 transition-colors">
+                        <tr key={s.id} className={`hover:bg-gray-50 transition-colors ${tieneBoucher ? 'bg-blue-50/40' : ''}`}>
                           <td className={tdCls}>{fmtDate(s.entregadoAt)}</td>
                           <td className={`${tdCls} font-mono text-xs text-gray-400`}>{s.id.slice(0, 8)}</td>
                           <td className={`${tdCls} font-semibold text-gray-900`}>{getClienteNombre(s, comercioNames)}</td>
                           <td className={tdCls}>
                             {esTransferencia ? (
-                              <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-                                <ArrowRightLeft className="h-3 w-3" /> Transferencia
-                              </span>
+                              <div className="flex flex-col gap-1">
+                                <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                                  <ArrowRightLeft className="h-3 w-3" /> Transferencia
+                                </span>
+                                {tieneBoucher ? (
+                                  <span className="text-[11px] font-semibold text-blue-600">📎 Boucher adjunto</span>
+                                ) : (
+                                  <span className="text-[11px] font-semibold text-amber-500">⏳ Esperando boucher</span>
+                                )}
+                              </div>
                             ) : (
                               <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 border border-gray-200">
                                 <Banknote className="h-3 w-3" /> Efectivo
@@ -979,12 +1224,32 @@ export default function CobrosPage() {
                             {fmt(s.cobroDelivery?.monto ?? (s as any).confirmacion?.precioFinalCordobas)}
                           </td>
                           <td className="px-4 py-3">
-                            <button
-                              onClick={() => setMarcandoPago(s)}
-                              className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 transition"
-                            >
-                              Marcar pagada
-                            </button>
+                            {tieneBoucher ? (
+                              <button
+                                onClick={() => setViendoBoucher(s)}
+                                className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
+                              >
+                                🔍 Ver boucher
+                              </button>
+                            ) : esTransferencia ? (
+                              <button
+                                onClick={() => {
+                                  setUploadingBoucherId(s.id)
+                                  setTimeout(() => boucherInputRef.current?.click(), 0)
+                                }}
+                                className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition flex items-center gap-1"
+                              >
+                                <Upload className="h-3 w-3" />
+                                Subir boucher
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => setMarcandoPago(s)}
+                                className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 transition"
+                              >
+                                Marcar pagada
+                              </button>
+                            )}
                           </td>
                         </tr>
                       )
@@ -1077,13 +1342,14 @@ export default function CobrosPage() {
                   <tbody className="divide-y divide-gray-100">
                     {contadoPagados.map((s) => {
                       const fp = s.cobroDelivery?.formaPago
+                      const esTrans = fp === 'transferencia' || s.pagoDelivery?.quienPaga === 'transferencia'
                       return (
                         <tr key={s.id} className="hover:bg-gray-50 transition-colors">
                           <td className={tdCls}>{fmtDate(s.cobroDelivery?.pagadoAt)}</td>
                           <td className={`${tdCls} font-mono text-xs text-gray-400`}>{s.id.slice(0, 8)}</td>
                           <td className={`${tdCls} font-semibold text-gray-900`}>{getClienteNombre(s, comercioNames)}</td>
                           <td className={tdCls}>
-                            {fp === 'transferencia' ? (
+                            {esTrans ? (
                               <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
                                 <ArrowRightLeft className="h-3 w-3" /> Trans.
                               </span>
@@ -1105,12 +1371,22 @@ export default function CobrosPage() {
                             {fmt(s.cobroDelivery?.monto ?? (s as any).confirmacion?.precioFinalCordobas)}
                           </td>
                           <td className="px-4 py-3">
-                            <button
-                              onClick={() => revertirPagada(s)}
-                              className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 transition"
-                            >
-                              Revertir
-                            </button>
+                            <div className="flex items-center gap-2">
+                              {esTrans && s.cobroDelivery?.boucherUrl && (
+                                <button
+                                  onClick={() => setViendoBoucher(s)}
+                                  className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 transition"
+                                >
+                                  Ver boucher
+                                </button>
+                              )}
+                              <button
+                                onClick={() => revertirPagada(s)}
+                                className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 transition"
+                              >
+                                Revertir
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       )

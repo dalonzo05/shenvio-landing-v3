@@ -13,10 +13,21 @@ import {
   Timestamp,
   orderBy,
   limit,
+  getDocs,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
-import { registrarMovimiento } from '@/lib/financial-writes'
-import { Receipt, ChevronDown, ChevronUp, CheckCircle2 } from 'lucide-react'
+import { registrarMovimiento, registrarAbonoSaldo, crearSaldoCargo } from '@/lib/financial-writes'
+import {
+  Receipt,
+  ChevronDown,
+  ChevronUp,
+  CheckCircle2,
+  AlertTriangle,
+  PlusCircle,
+  CreditCard,
+} from 'lucide-react'
+import type { SaldoCargoMotorizado } from '@/lib/financial-types'
+import { LABELS_TIPO_SALDO } from '@/lib/financial-types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -37,10 +48,17 @@ type Solicitud = {
     motorizadoNombre?: string
   } | null
   confirmacion?: { precioFinalCordobas?: number }
+  precioDesglose?: {
+    deliveryBase?: number
+    recargoZona?: number
+    recargoServicio?: number
+    totalCobrado?: number
+  } | null
   cobrosMotorizado?: {
     delivery?: { recibio: boolean; monto: number }
     producto?: { recibio: boolean; monto: number }
   }
+  pagoDelivery?: { quienPaga?: string }
 }
 
 type DepositoOrderDoc = {
@@ -52,6 +70,8 @@ type DepositoOrderDoc = {
   creadoAt?: Timestamp
   tipo?: string
 }
+
+type GastoSemana = { id: string; monto: number; tipo: string; fecha: any; estado: string }
 
 type Liquidacion = {
   id: string
@@ -68,12 +88,20 @@ type Liquidacion = {
   adelantos: number
   faltantesDeposito: number
   otrosDescuentos: number
+  deudasAplicadas: number
+  deudasAplicadasIds: string[]
+  gastosAprobados?: number
+  gastosAsumidosStorkhub?: number
+  gastosIds?: string[]
   netoAPagar: number
   estado: 'pendiente' | 'pagado'
   creadoAt?: Timestamp
   pagadoAt?: Timestamp
   pagadoPor?: string
+  saldoGeneradoId?: string
 }
+
+type Saldo = SaldoCargoMotorizado & { id: string }
 
 // ─── Semana helpers (ISO 8601) ────────────────────────────────────────────────
 
@@ -109,7 +137,6 @@ function formatSemana(semanaKey: string): string {
   } catch { return semanaKey }
 }
 
-// Semanas recientes para el selector (últimas 8)
 function getSemanasRecientes(): string[] {
   const semanas: string[] = []
   const now = new Date()
@@ -149,12 +176,25 @@ export default function LiquidacionesPage() {
   const [selectedMotoId, setSelectedMotoId] = useState<string>('')
   const [selectedSemana, setSelectedSemana] = useState<string>(getSemanaKey(new Date()))
 
-  // Data for the selected motorizado + semana
   const [ordenes, setOrdenes] = useState<Solicitud[]>([])
   const [depositos, setDepositos] = useState<DepositoOrderDoc[]>([])
   const [adelantos, setAdelantos] = useState<number>(0)
   const [loading, setLoading] = useState(false)
   const [expanded, setExpanded] = useState(false)
+
+  // Gastos operativos de la semana
+  const [gastos, setGastos] = useState<GastoSemana[]>([])
+
+  // Saldos pendientes del motorizado
+  const [saldosPendientes, setSaldosPendientes] = useState<Saldo[]>([])
+  const [saldosSeleccionados, setSaldosSeleccionados] = useState<Set<string>>(new Set())
+  const [abonosParciales, setAbonosParciales] = useState<Record<string, string>>({})
+
+  // Adelanto rápido desde liquidaciones
+  const [showAdelanto, setShowAdelanto] = useState(false)
+  const [montoAdelanto, setMontoAdelanto] = useState('')
+  const [notaAdelanto, setNotaAdelanto] = useState('')
+  const [savingAdelanto, setSavingAdelanto] = useState(false)
 
   // Liquidaciones existentes
   const [liquidaciones, setLiquidaciones] = useState<Liquidacion[]>([])
@@ -194,6 +234,25 @@ export default function LiquidacionesPage() {
     })
   }, [selectedMotoId, motorizados])
 
+  // ── Load saldos pendientes del motorizado ─────────────────────────────────
+
+  useEffect(() => {
+    if (!selectedMotoId) { setSaldosPendientes([]); return }
+    const moto = motorizados.find((m) => m.id === selectedMotoId)
+    if (!moto?.authUid) return
+
+    const q = query(
+      collection(db, 'saldos_cargo_motorizado'),
+      where('motorizadoUid', '==', moto.authUid),
+      where('estado', 'in', ['pendiente', 'abonado_parcial'])
+    )
+    return onSnapshot(q, (snap) => {
+      setSaldosPendientes(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Saldo)))
+      setSaldosSeleccionados(new Set())
+      setAbonosParciales({})
+    })
+  }, [selectedMotoId, motorizados])
+
   // ── Load órdenes del motorizado en la semana seleccionada ─────────────────
 
   useEffect(() => {
@@ -208,7 +267,6 @@ export default function LiquidacionesPage() {
     )
     return onSnapshot(q, (snap) => {
       const all = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Solicitud))
-      // Filtrar por semana en cliente (entregadoAt en rango)
       const filtradas = all.filter((o) => {
         const d = tsToDate(o.entregadoAt)
         if (!d) return false
@@ -247,8 +305,6 @@ export default function LiquidacionesPage() {
 
   useEffect(() => {
     if (!selectedMotoId) { setAdelantos(0); return }
-    const moto = motorizados.find((m) => m.id === selectedMotoId)
-    if (!moto?.authUid) return
 
     const q = query(
       collection(db, 'movimientos_financieros'),
@@ -265,34 +321,82 @@ export default function LiquidacionesPage() {
       }, 0)
       setAdelantos(total)
     })
-  }, [selectedMotoId, selectedSemana, motorizados])
+  }, [selectedMotoId, selectedSemana])
+
+  // ── Load gastos operativos del motorizado en la semana ───────────────────
+
+  useEffect(() => {
+    if (!selectedMotoId) { setGastos([]); return }
+    const q = query(
+      collection(db, 'gastos_motorizado'),
+      where('motorizadoId', '==', selectedMotoId),
+      where('estado', '==', 'aprobado')
+    )
+    const { inicio, fin } = getSemanaRange(selectedSemana)
+    return onSnapshot(q, (snap) => {
+      const all = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as GastoSemana))
+      setGastos(all.filter((g) => {
+        const d = tsToDate(g.fecha)
+        return d !== null && d >= inicio && d <= fin
+      }))
+    })
+  }, [selectedMotoId, selectedSemana])
+
+  // ── Cálculo de deudas a aplicar ────────────────────────────────────────────
+
+  const deudasAplicar = useMemo(() => {
+    let total = 0
+    for (const sid of saldosSeleccionados) {
+      const s = saldosPendientes.find((x) => x.id === sid)
+      if (!s) continue
+      const parcialStr = abonosParciales[sid]
+      const parcial = parcialStr ? parseFloat(parcialStr) : NaN
+      total += isNaN(parcial) ? s.saldoPendiente : Math.min(parcial, s.saldoPendiente)
+    }
+    return total
+  }, [saldosSeleccionados, saldosPendientes, abonosParciales])
 
   // ── Cálculos ──────────────────────────────────────────────────────────────
 
   const calculo = useMemo(() => {
     const totalGenerado = ordenes.reduce((s, o) => s + (o.confirmacion?.precioFinalCordobas || 0), 0)
+    // Efectivo recaudado: solo órdenes donde el motorizado cobró en mano (no transferencia)
+    const totalEfectivo = ordenes
+      .filter((o) => o.pagoDelivery?.quienPaga !== 'transferencia')
+      .reduce((s, o) => s + (o.confirmacion?.precioFinalCordobas || 0), 0)
+    const totalGastos = gastos.reduce((s, g) => s + g.monto, 0)
+    // Gastos reducen el depósito; si superan el efectivo, Storkhub asume el excedente
+    const gastosAsumidosStorkhub = Math.max(0, totalGastos - totalEfectivo)
+    const totalADepositar = Math.max(0, totalEfectivo - totalGastos)
     const totalDepositado = depositos
       .filter((d) => !d.tipo || d.tipo === 'recaudacion_motorizado_storkhub')
       .reduce((s, d) => s + d.montoTotal, 0)
+    const comision = ordenes.reduce((s, o) => {
+      const base = o.precioDesglose?.deliveryBase
+      if (base != null) return s + base * 0.8
+      return s + (o.confirmacion?.precioFinalCordobas || 0) * 0.8
+    }, 0)
     const comisionPct = 0.8
-    const comision = totalGenerado * comisionPct
-    const faltantesDeposito = Math.max(0, totalGenerado - totalDepositado)
-    const netoAPagar = Math.max(0, comision - adelantos - faltantesDeposito)
+    const faltantesDeposito = Math.max(0, totalADepositar - totalDepositado)
+    const netoAPagar = comision - adelantos - faltantesDeposito + gastosAsumidosStorkhub - deudasAplicar
 
     return {
       totalViajes: ordenes.length,
       totalGenerado,
+      totalEfectivo,
+      totalGastos,
+      gastosAsumidosStorkhub,
+      totalADepositar,
       totalDepositado,
       comisionPct,
       comision,
       adelantos,
       faltantesDeposito,
       otrosDescuentos: 0,
+      deudasAplicar,
       netoAPagar,
     }
-  }, [ordenes, depositos, adelantos])
-
-  // ── Verificar si ya existe liquidación para esta semana ───────────────────
+  }, [ordenes, depositos, adelantos, deudasAplicar, gastos])
 
   const liquidacionExistente = useMemo(
     () => liquidaciones.find((l) => l.semanaKey === selectedSemana),
@@ -310,6 +414,30 @@ export default function LiquidacionesPage() {
     try {
       const uid = auth.currentUser?.uid ?? ''
       const { inicio, fin } = getSemanaRange(selectedSemana)
+
+      // Calcular IDs de saldos seleccionados y sus montos reales
+      const deudasAplicadasIds: string[] = []
+      for (const sid of saldosSeleccionados) {
+        const saldo = saldosPendientes.find((x) => x.id === sid)
+        if (!saldo) continue
+        const parcialStr = abonosParciales[sid]
+        const parcial = parcialStr ? parseFloat(parcialStr) : NaN
+        const montoAbono = isNaN(parcial) ? saldo.saldoPendiente : Math.min(parcial, saldo.saldoPendiente)
+
+        // Registrar el abono en el saldo
+        await registrarAbonoSaldo({
+          saldoId: sid,
+          montoAbono,
+          saldoPendienteActual: saldo.saldoPendiente,
+          metodo: 'descuento_liquidacion',
+          nota: `Descontado en liquidación ${selectedSemana}`,
+          operadorId: uid,
+          motorizadoId: selectedMotoId,
+          motorizadoNombre: moto.nombre || moto.authUid,
+        })
+        deudasAplicadasIds.push(sid)
+      }
+
       const docRef = await addDoc(collection(db, 'liquidaciones_motorizado'), {
         motorizadoId: selectedMotoId,
         motorizadoUid: moto.authUid,
@@ -324,6 +452,11 @@ export default function LiquidacionesPage() {
         adelantos: calculo.adelantos,
         faltantesDeposito: calculo.faltantesDeposito,
         otrosDescuentos: 0,
+        deudasAplicadas: calculo.deudasAplicar,
+        deudasAplicadasIds,
+        gastosAprobados: calculo.totalGastos,
+        gastosAsumidosStorkhub: calculo.gastosAsumidosStorkhub,
+        gastosIds: gastos.map((g) => g.id),
         netoAPagar: calculo.netoAPagar,
         estado: 'pendiente',
         creadoAt: serverTimestamp(),
@@ -345,11 +478,33 @@ export default function LiquidacionesPage() {
     setSaving(true); setErr(null)
     try {
       const uid = auth.currentUser?.uid ?? ''
+
+      // Si ya tiene saldo generado no volver a crear uno
+      let saldoGeneradoId = liq.saldoGeneradoId ?? undefined
+
+      // Cuando el motorizado queda debiendo (netoAPagar < 0), crear deuda persistente
+      if (liq.netoAPagar < 0 && !saldoGeneradoId) {
+        const montoDeuda = Math.abs(liq.netoAPagar)
+        saldoGeneradoId = await crearSaldoCargo({
+          motorizadoId: liq.motorizadoId,
+          motorizadoUid: liq.motorizadoUid,
+          motorizadoNombre: liq.motorizadoNombre,
+          tipo: 'deposito_no_realizado',
+          monto: montoDeuda,
+          origen: 'liquidacion',
+          liquidacionId: liq.id,
+          nota: `Saldo pendiente liquidación ${liq.semanaKey}`,
+          operadorId: uid,
+        })
+      }
+
       await updateDoc(doc(db, 'liquidaciones_motorizado', liq.id), {
         estado: 'pagado',
         pagadoAt: serverTimestamp(),
         pagadoPor: uid,
+        ...(saldoGeneradoId ? { saldoGeneradoId } : {}),
       })
+
       await registrarMovimiento('liquidacion_pagada', liq.netoAPagar, uid,
         `Liquidación pagada sem ${liq.semanaKey} · ${liq.motorizadoNombre}`,
         { motorizadoId: liq.motorizadoId })
@@ -360,7 +515,36 @@ export default function LiquidacionesPage() {
     }
   }
 
+  // ── Registrar adelanto rápido ─────────────────────────────────────────────
+
+  async function handleAdelanto() {
+    const monto = parseFloat(montoAdelanto)
+    if (isNaN(monto) || monto <= 0 || !selectedMotoId) return
+    const moto = motorizados.find((m) => m.id === selectedMotoId)
+    if (!moto) return
+    setSavingAdelanto(true)
+    try {
+      const uid = auth.currentUser?.uid ?? ''
+      // Movimiento financiero (para compatibilidad con el cálculo existente)
+      await registrarMovimiento(
+        'adelanto_motorizado',
+        monto,
+        uid,
+        `Adelanto C$${monto} · ${moto.nombre || moto.authUid} · Sem ${selectedSemana}`,
+        { motorizadoId: selectedMotoId }
+      )
+      setMontoAdelanto('')
+      setNotaAdelanto('')
+      setShowAdelanto(false)
+    } catch (e: any) {
+      console.error('Error registrando adelanto:', e)
+    } finally {
+      setSavingAdelanto(false)
+    }
+  }
+
   const selectedMoto = motorizados.find((m) => m.id === selectedMotoId)
+  const totalSaldosPendientes = saldosPendientes.reduce((s, x) => s + x.saldoPendiente, 0)
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -373,7 +557,7 @@ export default function LiquidacionesPage() {
           Liquidaciones
         </h1>
         <p className="text-sm text-gray-500 mt-0.5">
-          Cálculo y pago semanal de motorizados · Comisión 80%
+          Cálculo y pago semanal de motorizados
         </p>
       </div>
 
@@ -409,84 +593,237 @@ export default function LiquidacionesPage() {
       {/* Cálculo */}
       {selectedMotoId && (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between gap-2">
             <div>
               <p className="text-sm font-bold text-gray-900">{selectedMoto?.nombre}</p>
               <p className="text-xs text-gray-400">{selectedSemana} · {formatSemana(selectedSemana)}</p>
             </div>
-            {liquidacionExistente && (
-              <span className={`text-xs font-bold px-2 py-1 rounded-full ${
-                liquidacionExistente.estado === 'pagado'
-                  ? 'bg-green-100 text-green-700'
-                  : 'bg-orange-100 text-orange-700'
-              }`}>
-                {liquidacionExistente.estado === 'pagado' ? '✓ Pagado' : '⏳ Pendiente'}
-              </span>
-            )}
+            <div className="flex items-center gap-2">
+              {liquidacionExistente && (
+                <span className={`text-xs font-bold px-2 py-1 rounded-full ${
+                  liquidacionExistente.estado === 'pagado'
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-orange-100 text-orange-700'
+                }`}>
+                  {liquidacionExistente.estado === 'pagado' ? '✓ Pagado' : '⏳ Pendiente'}
+                </span>
+              )}
+              {!liquidacionExistente && (
+                <button
+                  onClick={() => setShowAdelanto((v) => !v)}
+                  className="flex items-center gap-1 text-xs font-semibold text-[#004aad] border border-[#004aad]/30 rounded-lg px-2 py-1 hover:bg-blue-50 transition"
+                >
+                  <CreditCard className="h-3 w-3" />
+                  Adelanto
+                </button>
+              )}
+            </div>
           </div>
+
+          {/* Formulario adelanto rápido */}
+          {showAdelanto && !liquidacionExistente && (
+            <div className="px-4 py-3 border-b border-gray-100 bg-amber-50 flex flex-col gap-2">
+              <p className="text-xs font-semibold text-amber-800">Registrar adelanto para esta semana</p>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={montoAdelanto}
+                  onChange={(e) => setMontoAdelanto(e.target.value)}
+                  placeholder="Monto C$"
+                  className="flex-1 border border-amber-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-amber-400"
+                />
+                <input
+                  type="text"
+                  value={notaAdelanto}
+                  onChange={(e) => setNotaAdelanto(e.target.value)}
+                  placeholder="Nota (opcional)"
+                  className="flex-1 border border-amber-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-amber-400"
+                />
+                <button
+                  onClick={handleAdelanto}
+                  disabled={savingAdelanto || !montoAdelanto}
+                  className="bg-amber-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-amber-700 transition disabled:opacity-40"
+                >
+                  {savingAdelanto ? '…' : 'Registrar'}
+                </button>
+                <button
+                  onClick={() => setShowAdelanto(false)}
+                  className="text-xs text-gray-500 hover:text-gray-700 px-2"
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="text-[11px] text-amber-700">
+                El adelanto reduce la ganancia del motorizado en esta semana. <strong>No reduce el depósito a Storkhub.</strong>
+              </p>
+            </div>
+          )}
 
           {loading ? (
             <div className="py-10 text-center text-sm text-gray-400">Cargando datos…</div>
           ) : (
-            <div className="p-4">
+            <div className="p-4 flex flex-col gap-4">
               {/* KPIs grid */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 <KpiCard label="Viajes" value={calculo.totalViajes.toString()} color="blue" />
                 <KpiCard label="Total delivery" value={fmt(calculo.totalGenerado)} color="gray" />
-                <KpiCard label="Comisión (80%)" value={fmt(calculo.comision)} color="green" />
+                <KpiCard label="Ganancia motorizado (80%)" value={fmt(calculo.comision)} color="green" />
                 <KpiCard label="Total depositado" value={fmt(calculo.totalDepositado)} color="gray" />
                 <KpiCard label="Faltante depósito" value={fmt(calculo.faltantesDeposito)} color={calculo.faltantesDeposito > 0 ? 'red' : 'gray'} />
-                <KpiCard label="Adelantos" value={fmt(calculo.adelantos)} color={calculo.adelantos > 0 ? 'orange' : 'gray'} />
+                <KpiCard label="Adelantos esta semana" value={fmt(calculo.adelantos)} color={calculo.adelantos > 0 ? 'orange' : 'gray'} />
+                {calculo.totalGastos > 0 && (
+                  <KpiCard label="Gastos semana" value={fmt(calculo.totalGastos)} color="orange" />
+                )}
+                {calculo.gastosAsumidosStorkhub > 0 && (
+                  <KpiCard label="Asume Storkhub" value={fmt(calculo.gastosAsumidosStorkhub)} color="green" />
+                )}
               </div>
 
+              {/* Saldos pendientes del motorizado */}
+              {saldosPendientes.length > 0 && !liquidacionExistente && (
+                <div className="rounded-xl border-2 border-red-200 bg-red-50 overflow-hidden">
+                  <div className="px-4 py-2.5 border-b border-red-100 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="h-4 w-4 text-red-500" />
+                      <p className="text-sm font-bold text-red-800">
+                        Saldos pendientes del motorizado
+                      </p>
+                    </div>
+                    <span className="text-sm font-black text-red-700">{fmt(totalSaldosPendientes)}</span>
+                  </div>
+                  <div className="p-3 flex flex-col gap-2">
+                    <p className="text-xs text-red-600">
+                      Seleccioná los saldos que querés descontar en esta liquidación. Podés aplicar abono parcial.
+                    </p>
+                    {saldosPendientes.map((s) => {
+                      const sel = saldosSeleccionados.has(s.id)
+                      const parcialStr = abonosParciales[s.id] ?? ''
+                      return (
+                        <div key={s.id} className={`bg-white rounded-lg border p-3 flex flex-col gap-2 transition ${sel ? 'border-red-400' : 'border-red-100'}`}>
+                          <div className="flex items-start gap-2">
+                            <input
+                              type="checkbox"
+                              checked={sel}
+                              onChange={(e) => {
+                                setSaldosSeleccionados((prev) => {
+                                  const next = new Set(prev)
+                                  e.target.checked ? next.add(s.id) : next.delete(s.id)
+                                  return next
+                                })
+                              }}
+                              className="mt-0.5 accent-red-600"
+                            />
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-xs font-semibold text-gray-800">
+                                  {LABELS_TIPO_SALDO[s.tipo]}
+                                </span>
+                                <span className="text-[11px] text-gray-400">{fmtDate(s.fecha || s.createdAt)}</span>
+                                {s.nota && (
+                                  <span className="text-[11px] text-gray-500 italic">{s.nota}</span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-3 mt-1">
+                                <span className="text-xs text-gray-500">Saldo: <strong className="text-red-700">{fmt(s.saldoPendiente)}</strong></span>
+                                {s.montoOriginal !== s.saldoPendiente && (
+                                  <span className="text-[11px] text-gray-400">Original: {fmt(s.montoOriginal)}</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          {sel && (
+                            <div className="flex items-center gap-2 pl-6">
+                              <label className="text-[11px] text-gray-500 shrink-0">Abono:</label>
+                              <input
+                                type="number"
+                                min="0"
+                                max={s.saldoPendiente}
+                                step="0.01"
+                                value={parcialStr}
+                                onChange={(e) => setAbonosParciales((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                                placeholder={`Máx C$${s.saldoPendiente} (vacío = total)`}
+                                className="flex-1 border border-red-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-red-400"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                    {saldosSeleccionados.size > 0 && (
+                      <p className="text-xs font-semibold text-red-700 px-1">
+                        Se descontarán <strong>{fmt(deudasAplicar)}</strong> de la ganancia del motorizado.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Neto a pagar */}
-              <div className="rounded-xl bg-[#004aad] text-white px-4 py-4 flex items-center justify-between mb-4">
+              <div className={`rounded-xl px-4 py-4 flex items-center justify-between ${calculo.netoAPagar < 0 ? 'bg-red-600' : 'bg-[#004aad]'} text-white`}>
                 <div>
-                  <p className="text-xs font-semibold opacity-70">NETO A PAGAR</p>
-                  <p className="text-2xl font-black mt-0.5">{fmt(calculo.netoAPagar)}</p>
+                  <p className="text-xs font-semibold opacity-70">
+                    {calculo.netoAPagar < 0 ? 'SALDO A CARGO DEL MOTORIZADO' : 'NETO A PAGAR'}
+                  </p>
+                  <p className="text-2xl font-black mt-0.5">{fmt(Math.abs(calculo.netoAPagar))}</p>
+                  {calculo.netoAPagar < 0 && (
+                    <p className="text-xs opacity-80 mt-0.5">El motorizado debe depositar este monto adicional</p>
+                  )}
                 </div>
                 <div className="text-right text-xs opacity-70 space-y-0.5">
-                  <p>Comisión {fmt(calculo.comision)}</p>
+                  <p>Ganancia {fmt(calculo.comision)}</p>
                   {calculo.adelantos > 0 && <p>− Adelantos {fmt(calculo.adelantos)}</p>}
-                  {calculo.faltantesDeposito > 0 && <p>− Faltante {fmt(calculo.faltantesDeposito)}</p>}
+                  {calculo.faltantesDeposito > 0 && <p>− Faltante depósito {fmt(calculo.faltantesDeposito)}</p>}
+                  {calculo.deudasAplicar > 0 && <p>− Deudas aplicadas {fmt(calculo.deudasAplicar)}</p>}
+                  {calculo.gastosAsumidosStorkhub > 0 && <p>+ Gastos asumidos Storkhub {fmt(calculo.gastosAsumidosStorkhub)}</p>}
                 </div>
               </div>
 
               {/* Desglose de órdenes colapsable */}
               <button
                 onClick={() => setExpanded((v) => !v)}
-                className="flex items-center gap-1 text-xs text-[#004aad] font-semibold mb-2"
+                className="flex items-center gap-1 text-xs text-[#004aad] font-semibold"
               >
                 {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                 {calculo.totalViajes} viaje{calculo.totalViajes !== 1 ? 's' : ''} en esta semana
               </button>
 
               {expanded && ordenes.length > 0 && (
-                <div className="rounded-xl border border-gray-100 overflow-hidden mb-4">
+                <div className="rounded-xl border border-gray-100 overflow-hidden">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="bg-gray-50 border-b">
                         <th className="px-3 py-2 text-left font-semibold text-gray-500">Orden</th>
                         <th className="px-3 py-2 text-left font-semibold text-gray-500">Entregado</th>
                         <th className="px-3 py-2 text-right font-semibold text-gray-500">Delivery</th>
+                        <th className="px-3 py-2 text-right font-semibold text-green-600">Ganancia</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-50">
-                      {ordenes.map((o) => (
-                        <tr key={o.id}>
-                          <td className="px-3 py-2 font-mono text-gray-400">{o.id.slice(0, 10)}</td>
-                          <td className="px-3 py-2 text-gray-600">{fmtDate(o.entregadoAt)}</td>
-                          <td className="px-3 py-2 text-right font-semibold text-gray-800">
-                            {fmt(o.confirmacion?.precioFinalCordobas)}
-                          </td>
-                        </tr>
-                      ))}
+                      {ordenes.map((o) => {
+                        const ganancia = (o.precioDesglose?.deliveryBase != null
+                          ? o.precioDesglose.deliveryBase
+                          : (o.confirmacion?.precioFinalCordobas || 0)) * 0.8
+                        return (
+                          <tr key={o.id}>
+                            <td className="px-3 py-2 font-mono text-gray-400">{o.id.slice(0, 10)}</td>
+                            <td className="px-3 py-2 text-gray-600">{fmtDate(o.entregadoAt)}</td>
+                            <td className="px-3 py-2 text-right font-semibold text-gray-800">
+                              {fmt(o.confirmacion?.precioFinalCordobas)}
+                            </td>
+                            <td className="px-3 py-2 text-right font-semibold text-green-700">
+                              {fmt(ganancia)}
+                            </td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>
               )}
 
-              {err && <p className="text-xs text-red-600 mb-3">{err}</p>}
+              {err && <p className="text-xs text-red-600">{err}</p>}
 
               {/* Acciones */}
               {liquidacionExistente ? (
@@ -513,8 +850,43 @@ export default function LiquidacionesPage() {
                   {saving ? 'Creando…' : calculo.totalViajes === 0 ? 'Sin viajes en esta semana' : '+ Crear liquidación'}
                 </button>
               )}
+
+              {/* Resumen deudas de la liquidación existente */}
+              {liquidacionExistente && (liquidacionExistente.deudasAplicadas ?? 0) > 0 && (
+                <div className="rounded-xl border border-orange-200 bg-orange-50 px-4 py-3 text-xs text-orange-700">
+                  <p className="font-semibold mb-1">Deudas descontadas en esta liquidación</p>
+                  <p>Monto aplicado: <strong>{fmt(liquidacionExistente.deudasAplicadas)}</strong></p>
+                </div>
+              )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Saldos pendientes — vista siempre visible cuando hay motorizado seleccionado */}
+      {selectedMotoId && saldosPendientes.length > 0 && liquidacionExistente && (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-red-500" />
+              <p className="text-sm font-bold text-gray-900">Saldos pendientes</p>
+            </div>
+            <span className="text-sm font-black text-red-700">{fmt(totalSaldosPendientes)}</span>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {saldosPendientes.map((s) => (
+              <div key={s.id} className="px-4 py-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-gray-800">{LABELS_TIPO_SALDO[s.tipo]}</p>
+                  <p className="text-[11px] text-gray-400 mt-0.5">{s.nota || '—'} · {fmtDate(s.fecha || s.createdAt)}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-sm font-black text-red-700">{fmt(s.saldoPendiente)}</p>
+                  <p className="text-[11px] text-gray-400">{s.estado === 'abonado_parcial' ? 'Abonado parcial' : 'Pendiente'}</p>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -534,6 +906,8 @@ export default function LiquidacionesPage() {
                 <tr className="border-b bg-gray-50">
                   <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Semana</th>
                   <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Viajes</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Deudas desc.</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Gastos Storkhub</th>
                   <th className="px-4 py-2.5 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Neto</th>
                   <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Estado</th>
                 </tr>
@@ -546,6 +920,12 @@ export default function LiquidacionesPage() {
                       <p className="text-xs text-gray-400">{formatSemana(l.semanaKey)}</p>
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-700">{l.totalViajes}</td>
+                    <td className="px-4 py-3 text-right text-xs font-semibold text-red-600">
+                      {(l.deudasAplicadas ?? 0) > 0 ? fmt(l.deudasAplicadas) : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-right text-xs font-semibold text-green-600">
+                      {(l.gastosAsumidosStorkhub ?? 0) > 0 ? fmt(l.gastosAsumidosStorkhub) : '—'}
+                    </td>
                     <td className="px-4 py-3 text-right font-semibold text-gray-900">{fmt(l.netoAPagar)}</td>
                     <td className="px-4 py-3">
                       <span className={`text-xs font-semibold px-2 py-1 rounded-full ${

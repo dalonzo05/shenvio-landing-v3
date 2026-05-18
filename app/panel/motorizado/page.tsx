@@ -8,7 +8,7 @@ import {
   runTransaction, increment, arrayUnion, limit,
 } from 'firebase/firestore';
 import { auth, db } from '@/fb/config';
-import { compressImage, uploadEvidencia, uploadDepositoBoucher, type TipoEvidencia } from '@/fb/storage'
+import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBoucher, type TipoEvidencia } from '@/fb/storage'
 import { registrarMovimiento } from '@/lib/financial-writes';
 import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
 
@@ -92,6 +92,9 @@ type Solicitud = {
     puntoLogisticoNombre?: string | null;
     puntoLogisticoTipo?: string | null;
     coordsPuntoLogistico?: { lat: number; lng: number } | null;
+    direccionPuntoLogistico?: string | null;
+    horarioApertura?: string | null;
+    horarioCierre?: string | null;
     terminalSugerida?: string | null;
     transporteNombre?: string | null;
     transporteCelular?: string | null;
@@ -99,6 +102,8 @@ type Solicitud = {
     transporteNota?: string | null;
     cantidadPaquetes?: number;
     notaCargotrans?: string | null;
+    pagoCargotrans?: 'efectivo_motorizado' | 'transferencia_comercio' | null;
+    efectivoRecibidoMotorizado?: number;
   };
   precioDesglose?: {
     deliveryBase?: number;
@@ -113,6 +118,18 @@ type Solicitud = {
     sinTicket?: boolean;
     nota?: string | null;
     horaEntregaBus?: string | null;
+    busNombre?: string | null;
+    busNumero?: string | null;
+    busCelular?: string | null;
+    horaLlegadaDestino?: string | null;
+    costoFlete?: number | null;
+  };
+  evidenciasCargotrans?: {
+    fotos?: Array<{ url: string; pathStorage: string }>;
+    factura?: { url: string; pathStorage: string };
+    costoCargotrans?: number | null;
+    subidasAt?: any;
+    subidasPorUid?: string;
   };
   gastosEspeciales?: {
     tipo: string;
@@ -135,12 +152,14 @@ type PendingConfirm = {
   esRetiro: boolean;
   showDelivery: boolean;
   showProducto: boolean;
+  showCargotransCobro: boolean;
   montoDelivery: number;
   montoProducto: number;
   recibioDelivery: boolean;
   recibioProducto: boolean;
   justDelivery: string;
   justProducto: string;
+  montoCargotrans: string;
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -332,16 +351,27 @@ export default function PanelMotorizadoPage() {
   const [photoSuccess, setPhotoSuccess] = useState(false);
   const [photoErr, setPhotoErr] = useState<string | null>(null);
 
-  // ── Terminal bus evidences + peaje ──
-  const [terminalEvidOrdenId, setTerminalEvidOrdenId] = useState<string | null>(null);
-  const [terminalSinTicket, setTerminalSinTicket] = useState(false);
-  const [terminalNota, setTerminalNota] = useState('');
-  const [terminalHoraEntrega, setTerminalHoraEntrega] = useState('');
-  const [terminalUploading, setTerminalUploading] = useState(false);
-  const [peajeOrdenId, setPeajeOrdenId] = useState<string | null>(null);
-  const [peajeMonto, setPeajeMonto] = useState<number | ''>('');
-  const [peajeNota, setPeajeNota] = useState('');
-  const [peajeSaving, setPeajeSaving] = useState(false);
+  // ── Terminal bus delivery gate ──
+  const [terminalGate, setTerminalGate] = useState<Solicitud | null>(null);
+  const [termFotoPaquete, setTermFotoPaquete] = useState<File | null>(null);
+  const [termFotoTicket, setTermFotoTicket] = useState<File | null>(null);
+  const [termFotoBus, setTermFotoBus] = useState<File | null>(null);
+  const [termSinTicket, setTermSinTicket] = useState(false);
+  const [termBusNombre, setTermBusNombre] = useState('');
+  const [termBusNumero, setTermBusNumero] = useState('');
+  const [termBusCelular, setTermBusCelular] = useState('');
+  const [termHoraLlegada, setTermHoraLlegada] = useState('');
+  const [termCosto, setTermCosto] = useState<number | ''>('');
+  const [termUploading, setTermUploading] = useState(false);
+  const [termErr, setTermErr] = useState<string | null>(null);
+  // ── Cargotrans delivery gate ──
+  const [cargotransGate, setCargotransGate] = useState<Solicitud | null>(null);
+  const [ctransFotos, setCtransFotos] = useState<(File | null)[]>([]);
+  const [ctransFactura, setCtransFactura] = useState<File | null>(null);
+  const [ctransCosto, setCtransCosto] = useState<number | ''>('');
+  const [ctransUploading, setCtransUploading] = useState(false);
+  const [ctransErr, setCtransErr] = useState<string | null>(null);
+
 
   // Motorizado doc (estado propio)
   const [motorizadoDocId, setMotorizadoDocId] = useState<string | null>(null);
@@ -351,6 +381,13 @@ export default function PanelMotorizadoPage() {
   // Historial filters
   const [histFecha, setHistFecha] = useState<'hoy' | 'ayer' | 'personalizado'>('hoy');
   const [histDesde, setHistDesde] = useState(fmtDateInput(new Date()));
+
+  // Liquidaciones del motorizado
+  const [liquidaciones, setLiquidaciones] = useState<Array<{
+    id: string; semanaKey: string; semanaInicio: any; semanaFin: any;
+    totalViajes: number; totalGenerado: number; comision: number;
+    netoAPagar: number; estado: 'pendiente' | 'pagado'; pagadoAt?: any; creadoAt?: any;
+  }>>([]);
 
   useEffect(() => { const id = setInterval(() => setTick(Date.now()), 1000); return () => clearInterval(id); }, []);
   useEffect(() => {
@@ -390,6 +427,21 @@ export default function PanelMotorizadoPage() {
     const unsub = cargar();
     return () => { if (typeof unsub === 'function') unsub(); };
   }, [user, cargar]);
+
+  useEffect(() => {
+    if (!user) { setLiquidaciones([]); return; }
+    const q = query(
+      collection(db, 'liquidaciones_motorizado'),
+      where('motorizadoUid', '==', user.uid),
+    );
+    const unsub = onSnapshot(q, (s) => {
+      const list = s.docs
+        .map((d) => ({ id: d.id, ...(d.data() as any) }))
+        .sort((a: any, b: any) => (b.semanaKey > a.semanaKey ? 1 : -1));
+      setLiquidaciones(list as any);
+    });
+    return () => unsub();
+  }, [user?.uid]);
 
   async function aceptar(o: Solicitud) {
     if (!o.id) return;
@@ -441,12 +493,16 @@ export default function PanelMotorizadoPage() {
   async function executeCambiar(
     o: Solicitud,
     nuevo: EstadoSolicitud,
-    cobros?: { delivery?: { monto: number; recibio: boolean; justificacion?: string }; producto?: { monto: number; recibio: boolean; justificacion?: string } }
+    cobros?: { delivery?: { monto: number; recibio: boolean; justificacion?: string }; producto?: { monto: number; recibio: boolean; justificacion?: string } },
+    cargotransCobro?: { monto: number }
   ) {
     if (!o.id) return;
     setErr(null); setActionId(`${o.id}:${nuevo}`);
     try {
       const p: any = { estado: nuevo, updatedAt: serverTimestamp(), [`historial.${nuevo}At`]: serverTimestamp() };
+      if (cargotransCobro) {
+        p['fueraManagua.efectivoRecibidoMotorizado'] = cargotransCobro.monto;
+      }
       if (nuevo === 'entregado') p.entregadoAt = serverTimestamp();
       let hayPendiente = false;
       if (cobros) {
@@ -538,8 +594,11 @@ export default function PanelMotorizadoPage() {
           await registrarMovimiento('cobro_generado', precioDelivery, uid,
             `Cobro generado al entregar orden ${o.id} (crédito semanal)`,
             { solicitudId: o.id, motorizadoId: motorizadoDocId ?? o.asignacion?.motorizadoId })
-          if (motorizadoDocId && o.entrega?.coord) {
-            actualizarUbicacionOperativa(motorizadoDocId, o.entrega.coord);
+          const coordFinalCredito =
+            o.entrega?.coord ??
+            (o.tipoServicio === 'fuera_managua' ? o.fueraManagua?.coordsPuntoLogistico ?? null : null)
+          if (motorizadoDocId && coordFinalCredito) {
+            actualizarUbicacionOperativa(motorizadoDocId, coordFinalCredito);
           }
           return
         }
@@ -562,8 +621,11 @@ export default function PanelMotorizadoPage() {
         await registrarMovimiento('cobro_generado', precioDelivery, auth.currentUser?.uid ?? '',
           `Cobro generado al entregar orden ${o.id}`,
           { solicitudId: o.id, motorizadoId: motorizadoDocId ?? o.asignacion?.motorizadoId })
-        if (motorizadoDocId && o.entrega?.coord) {
-          actualizarUbicacionOperativa(motorizadoDocId, o.entrega.coord);
+        const coordFinal =
+          o.entrega?.coord ??
+          (o.tipoServicio === 'fuera_managua' ? o.fueraManagua?.coordsPuntoLogistico ?? null : null)
+        if (motorizadoDocId && coordFinal) {
+          actualizarUbicacionOperativa(motorizadoDocId, coordFinal);
         }
       }
     } catch (e) { console.error(e); setErr('No se pudo cambiar.'); }
@@ -576,7 +638,27 @@ export default function PanelMotorizadoPage() {
       setPhotoGate({ solicitudId: o.id, tipo: 'retiro', order: o, nextEstado: nuevo });
       return;
     }
-    if (nuevo === 'entregado' && !o.evidencias?.entrega) {
+    // Bus terminal: collect delivery evidence before marking entregado
+    if (nuevo === 'entregado' && o.tipoServicio === 'fuera_managua' && o.fueraManagua?.metodoEnvio === 'bus_terminal' && !o.evidenciasTerminal?.fotoPaquete) {
+      setTerminalGate(o);
+      setTermFotoPaquete(null); setTermFotoTicket(null); setTermFotoBus(null);
+      setTermSinTicket(false); setTermBusNombre(''); setTermBusNumero(''); setTermBusCelular('');
+      setTermHoraLlegada(''); setTermCosto(''); setTermErr(null);
+      return;
+    }
+    // Cargotrans: collect per-package photos + invoice before marking entregado
+    if (nuevo === 'entregado' && o.tipoServicio === 'fuera_managua' && o.fueraManagua?.metodoEnvio === 'cargotrans' && !o.evidenciasCargotrans?.fotos?.length) {
+      const n = o.fueraManagua?.cantidadPaquetes ?? 1;
+      setCargotransGate(o);
+      setCtransFotos(Array(n).fill(null));
+      setCtransFactura(null);
+      setCtransCosto('');
+      setCtransErr(null);
+      return;
+    }
+    if (nuevo === 'entregado' && !o.evidencias?.entrega &&
+      !(o.tipoServicio === 'fuera_managua' && o.fueraManagua?.metodoEnvio === 'bus_terminal') &&
+      !(o.tipoServicio === 'fuera_managua' && o.fueraManagua?.metodoEnvio === 'cargotrans')) {
       setPhotoFile(null); setPhotoErr(null);
       setPhotoGate({ solicitudId: o.id, tipo: 'entrega', order: o, nextEstado: nuevo });
       return;
@@ -590,8 +672,13 @@ export default function PanelMotorizadoPage() {
       dep.tieneDelivery &&
       ((nuevo === 'retirado' && esRetiro) || (nuevo === 'entregado' && !esRetiro));
     const showProducto = nuevo === 'entregado' && dep.tieneProducto;
+    const showCargotransCobro =
+      nuevo === 'retirado' &&
+      o.tipoServicio === 'fuera_managua' &&
+      o.fueraManagua?.metodoEnvio === 'cargotrans' &&
+      o.fueraManagua?.pagoCargotrans === 'efectivo_motorizado';
 
-    if (!showDelivery && !showProducto) {
+    if (!showDelivery && !showProducto && !showCargotransCobro) {
       executeCambiar(o, nuevo);
       return;
     }
@@ -602,52 +689,106 @@ export default function PanelMotorizadoPage() {
       esRetiro,
       showDelivery,
       showProducto,
+      showCargotransCobro,
       montoDelivery: dep.montoDelivery,
       montoProducto: dep.montoProducto,
       recibioDelivery: true,
       recibioProducto: true,
       justDelivery: '',
       justProducto: '',
+      montoCargotrans: '',
     });
   }
 
-  async function handleReportarPeaje(ordenId: string, existingGastos: Solicitud['gastosEspeciales']) {
-    if (!peajeMonto || Number(peajeMonto) <= 0) return;
-    setPeajeSaving(true);
+  async function handleTerminalEntregarOrden() {
+    if (!terminalGate || !user) return;
+    const o = terminalGate;
+    if (!termFotoPaquete) { setTermErr('Subí la foto del paquete antes de continuar.'); return; }
+    if (!termSinTicket && !termFotoTicket) { setTermErr('Subí la foto del ticket o marcá "No dieron ticket".'); return; }
+    if (!termFotoBus) { setTermErr('Subí la foto del bus antes de continuar.'); return; }
+    setTermUploading(true); setTermErr(null);
     try {
-      const nuevosGastos = [...(existingGastos ?? []), {
-        tipo: 'peaje',
-        monto: Number(peajeMonto),
-        reportadoPorMotorizado: true,
-        autorizadoPorGestor: false,
-        nota: peajeNota.trim() || null,
-        estado: 'reportado' as const,
-        montoOficial: null,
-        reportadoAt: serverTimestamp(),
-      }];
-      await updateDoc(doc(db, 'solicitudes_envio', ordenId), { gastosEspeciales: nuevosGastos, updatedAt: serverTimestamp() });
-      setPeajeOrdenId(null); setPeajeMonto(''); setPeajeNota('');
-    } catch (e) { console.error(e); }
-    finally { setPeajeSaving(false); }
-  }
+      const evid: NonNullable<Solicitud['evidenciasTerminal']> = {};
+      const uid = auth.currentUser?.uid ?? '';
 
-  async function handleGuardarEvidenciasTerminal(orden: Solicitud) {
-    if (!user) return;
-    setTerminalUploading(true);
-    try {
-      const existing = orden.evidenciasTerminal ?? {};
-      await updateDoc(doc(db, 'solicitudes_envio', orden.id), {
-        evidenciasTerminal: {
-          ...existing,
-          sinTicket: terminalSinTicket,
-          nota: terminalNota.trim() || null,
-          horaEntregaBus: terminalHoraEntrega.trim() || null,
-        },
+      const blobPaquete = await compressImage(termFotoPaquete);
+      const { url: urlPaq, pathStorage: pathPaq } = await uploadEvidencia(o.id, 'terminal_paquete', blobPaquete);
+      evid.fotoPaquete = { url: urlPaq, pathStorage: pathPaq, uploadedAt: serverTimestamp() as any, motorizadoUid: uid };
+
+      if (!termSinTicket && termFotoTicket) {
+        const blobTicket = await compressImage(termFotoTicket);
+        const { url: urlTick, pathStorage: pathTick } = await uploadEvidencia(o.id, 'terminal_ticket', blobTicket);
+        evid.fotoTicket = { url: urlTick, pathStorage: pathTick, uploadedAt: serverTimestamp() as any, motorizadoUid: uid };
+      }
+      evid.sinTicket = termSinTicket;
+
+      const blobBus = await compressImage(termFotoBus);
+      const { url: urlBus, pathStorage: pathBus } = await uploadEvidencia(o.id, 'terminal_bus', blobBus);
+      evid.fotoBus = { url: urlBus, pathStorage: pathBus, uploadedAt: serverTimestamp() as any, motorizadoUid: uid };
+
+      if (termSinTicket) {
+        evid.busNombre = termBusNombre.trim() || null;
+        evid.busNumero = termBusNumero.trim() || null;
+        evid.busCelular = termBusCelular.trim() || null;
+        evid.horaLlegadaDestino = termHoraLlegada.trim() || null;
+        evid.costoFlete = termCosto !== '' ? Number(termCosto) : null;
+      }
+
+      await updateDoc(doc(db, 'solicitudes_envio', o.id), {
+        evidenciasTerminal: evid,
         updatedAt: serverTimestamp(),
       });
-      setTerminalEvidOrdenId(null); setTerminalSinTicket(false); setTerminalNota(''); setTerminalHoraEntrega('');
-    } catch (e) { console.error(e); }
-    finally { setTerminalUploading(false); }
+
+      const updatedOrder: Solicitud = {
+        ...o,
+        evidencias: { ...o.evidencias, entrega: { url: urlPaq, pathStorage: pathPaq } },
+        evidenciasTerminal: evid,
+      };
+      setTerminalGate(null);
+      cambiar(updatedOrder, 'entregado');
+    } catch (e) {
+      console.error(e);
+      setTermErr('No se pudo guardar. Intentá de nuevo.');
+    } finally {
+      setTermUploading(false);
+    }
+  }
+
+  async function handleCargotransEntregarOrden() {
+    if (!cargotransGate || !user) return;
+    const o = cargotransGate;
+    if (ctransFotos.some(f => !f)) { setCtransErr('Subí la foto de cada paquete antes de continuar.'); return; }
+    if (!ctransFactura) { setCtransErr('La foto de la factura es obligatoria.'); return; }
+    if (ctransCosto === '') { setCtransErr('Ingresá el costo pagado en Cargotrans.'); return; }
+    setCtransUploading(true); setCtransErr(null);
+    try {
+      const uid = auth.currentUser?.uid ?? '';
+      const fotos: Array<{ url: string; pathStorage: string }> = [];
+      for (let i = 0; i < ctransFotos.length; i++) {
+        const blob = await compressImage(ctransFotos[i]!);
+        const path = `evidencias/${o.id}/cargotrans_paquete_${i + 1}.jpg`;
+        fotos.push(await uploadEvidenciaPath(path, blob));
+      }
+      const facturaBlob = await compressImage(ctransFactura);
+      const factura = await uploadEvidenciaPath(`evidencias/${o.id}/cargotrans_factura.jpg`, facturaBlob);
+      const evidCargotrans = { fotos, factura, costoCargotrans: Number(ctransCosto), subidasAt: serverTimestamp(), subidasPorUid: uid };
+      await updateDoc(doc(db, 'solicitudes_envio', o.id), {
+        evidenciasCargotrans: evidCargotrans,
+        updatedAt: serverTimestamp(),
+      });
+      const updatedOrder: Solicitud = {
+        ...o,
+        evidencias: { ...o.evidencias, entrega: { url: fotos[0].url, pathStorage: fotos[0].pathStorage } },
+        evidenciasCargotrans: evidCargotrans,
+      };
+      setCargotransGate(null);
+      cambiar(updatedOrder, 'entregado');
+    } catch (e) {
+      console.error(e);
+      setCtransErr('No se pudo guardar. Intentá de nuevo.');
+    } finally {
+      setCtransUploading(false);
+    }
   }
 
   const todas = useMemo(() => (!user ? [] : sortDesc(ordenes)), [ordenes, user]);
@@ -873,10 +1014,25 @@ export default function PanelMotorizadoPage() {
                       <CobroBox o={o} dep={dep} />
 
                       <PaqueteBadge paquete={o.paquete} />
-                      {o.tipoServicio === 'fuera_managua' && <FueraManaguaInfo fueraManagua={o.fueraManagua} />}
                       <RoutePoint type="pickup" point={o.recoleccion} fallbackName={o.cliente?.nombre} retiroCoord={o.cotizacion?.origenCoord} />
                       <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
-                      <RoutePoint type="dropoff" point={o.entrega} entregaCoord={o.cotizacion?.destinoCoord} />
+                      <RoutePoint
+                        type="dropoff"
+                        point={o.tipoServicio === 'fuera_managua' && o.fueraManagua
+                          ? {
+                              nombreApellido: o.fueraManagua.puntoLogisticoNombre || o.fueraManagua.terminalSugerida || undefined,
+                              direccionEscrita: o.fueraManagua.direccionPuntoLogistico || undefined,
+                              nota: o.fueraManagua.destinoFinal ? `Destino final: ${o.fueraManagua.destinoFinal}` : undefined,
+                            }
+                          : o.entrega}
+                        entregaCoord={o.fueraManagua?.coordsPuntoLogistico ?? o.cotizacion?.destinoCoord}
+                        headerLabel={o.tipoServicio === 'fuera_managua'
+                          ? (o.fueraManagua?.metodoEnvio === 'cargotrans' ? '📦 Cargotrans' : '🚌 Bus / Terminal')
+                          : undefined}
+                        headerColor={o.tipoServicio === 'fuera_managua'
+                          ? (o.fueraManagua?.metodoEnvio === 'cargotrans' ? '#7c3aed' : '#1d4ed8')
+                          : undefined}
+                      />
                     </div>
                     <div style={{ display: 'flex', gap: 10, padding: 16 }}>
                       <button onClick={() => rechazar(o)} disabled={isLoading} style={btnSecondary}>✕ Rechazar</button>
@@ -942,10 +1098,25 @@ export default function PanelMotorizadoPage() {
                       <CobroBox o={o} dep={dep} />
 
                       <PaqueteBadge paquete={o.paquete} />
-                      {o.tipoServicio === 'fuera_managua' && <FueraManaguaInfo fueraManagua={o.fueraManagua} />}
                       <RoutePoint type="pickup" point={o.recoleccion} fallbackName={o.cliente?.nombre} retiroCoord={o.cotizacion?.origenCoord} />
                       <div style={{ width: 2, height: 18, background: '#e5e7eb', marginLeft: 13, marginTop: 3, marginBottom: 3 }} />
-                      <RoutePoint type="dropoff" point={o.entrega} entregaCoord={o.cotizacion?.destinoCoord} />
+                      <RoutePoint
+                        type="dropoff"
+                        point={o.tipoServicio === 'fuera_managua' && o.fueraManagua
+                          ? {
+                              nombreApellido: o.fueraManagua.puntoLogisticoNombre || o.fueraManagua.terminalSugerida || undefined,
+                              direccionEscrita: o.fueraManagua.direccionPuntoLogistico || undefined,
+                              nota: o.fueraManagua.destinoFinal ? `Destino final: ${o.fueraManagua.destinoFinal}` : undefined,
+                            }
+                          : o.entrega}
+                        entregaCoord={o.fueraManagua?.coordsPuntoLogistico ?? o.cotizacion?.destinoCoord}
+                        headerLabel={o.tipoServicio === 'fuera_managua'
+                          ? (o.fueraManagua?.metodoEnvio === 'cargotrans' ? '📦 Cargotrans' : '🚌 Bus / Terminal')
+                          : undefined}
+                        headerColor={o.tipoServicio === 'fuera_managua'
+                          ? (o.fueraManagua?.metodoEnvio === 'cargotrans' ? '#7c3aed' : '#1d4ed8')
+                          : undefined}
+                      />
 
                       {pendingConfirm?.order.id === o.id ? (
                         /* ── Confirmación de cobro ── */
@@ -957,7 +1128,8 @@ export default function PanelMotorizadoPage() {
                           const razonesList = pc.esRetiro ? RAZONES_DELIVERY_RETIRO : RAZONES_DELIVERY_ENTREGA;
                           const bloqueadoDelivery = pc.showDelivery && !pc.recibioDelivery && !pc.justDelivery.trim();
                           const bloqueadoProducto = pc.showProducto && !pc.recibioProducto && !pc.justProducto.trim();
-                          const bloqueado = !!actionId || bloqueadoDelivery || bloqueadoProducto;
+                          const bloqueadoCargotrans = pc.showCargotransCobro && !pc.montoCargotrans.trim();
+                          const bloqueado = !!actionId || bloqueadoDelivery || bloqueadoProducto || bloqueadoCargotrans;
                           return (
                             <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 14, padding: '14px 16px', margin: '14px 0 16px' }}>
                               <p style={{ fontSize: 13, fontWeight: 800, color: '#15803d', margin: '0 0 12px' }}>💰 Confirmar cobro</p>
@@ -1028,6 +1200,27 @@ export default function PanelMotorizadoPage() {
                                 </div>
                               )}
 
+                              {pc.showCargotransCobro && (
+                                <div style={{ marginBottom: 14, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 12, padding: '12px 14px' }}>
+                                  <p style={{ fontSize: 13, fontWeight: 800, color: '#1d4ed8', margin: '0 0 6px' }}>📦 Dinero de Cargotrans</p>
+                                  <p style={{ fontSize: 13, color: '#374151', fontWeight: 600, margin: '0 0 10px' }}>
+                                    ¿Cobraste el dinero del flete al comercio? ¿Cuánto recibiste?
+                                  </p>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    value={pc.montoCargotrans}
+                                    onChange={(e) => setPendingConfirm((p) => p ? { ...p, montoCargotrans: e.target.value } : p)}
+                                    placeholder="Monto recibido (C$) *"
+                                    style={{ width: '100%', padding: '9px 12px', borderRadius: 10, border: `2px solid ${bloqueadoCargotrans ? '#93c5fd' : '#3b82f6'}`, fontSize: 14, fontWeight: 700, outline: 'none', boxSizing: 'border-box' as const, color: '#1e40af' }}
+                                  />
+                                  {bloqueadoCargotrans && (
+                                    <p style={{ fontSize: 11, color: '#2563eb', margin: '6px 0 0', fontWeight: 600 }}>* Ingresá el monto para continuar</p>
+                                  )}
+                                </div>
+                              )}
+
                               <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
                                 <button onClick={() => setPendingConfirm(null)}
                                   style={{ flexShrink: 0, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '12px 16px', color: '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
@@ -1037,13 +1230,18 @@ export default function PanelMotorizadoPage() {
                                   disabled={bloqueado}
                                   onClick={() => {
                                     setPendingConfirm(null);
-                                    executeCambiar(pc.order, pc.nuevo, {
-                                      delivery: pc.showDelivery ? { monto: pc.montoDelivery, recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? pc.justDelivery : undefined } : undefined,
-                                      producto: pc.showProducto ? { monto: pc.montoProducto, recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? pc.justProducto : undefined } : undefined,
-                                    });
+                                    executeCambiar(
+                                      pc.order,
+                                      pc.nuevo,
+                                      {
+                                        delivery: pc.showDelivery ? { monto: pc.montoDelivery, recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? pc.justDelivery : undefined } : undefined,
+                                        producto: pc.showProducto ? { monto: pc.montoProducto, recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? pc.justProducto : undefined } : undefined,
+                                      },
+                                      pc.showCargotransCobro ? { monto: Number(pc.montoCargotrans) } : undefined,
+                                    );
                                   }}
                                   style={{ flex: 1, background: bloqueado ? '#d1d5db' : '#16a34a', border: 'none', borderRadius: 12, padding: '12px 16px', color: '#fff', fontSize: 14, fontWeight: 800, cursor: bloqueado ? 'not-allowed' : 'pointer', transition: 'background 0.2s' }}>
-                                  {actionId ? 'Guardando…' : bloqueadoDelivery || bloqueadoProducto ? 'Indica la razón para continuar' : 'Confirmar y avanzar →'}
+                                  {actionId ? 'Guardando…' : bloqueadoDelivery || bloqueadoProducto || bloqueadoCargotrans ? 'Completa los campos para continuar' : 'Confirmar y avanzar →'}
                                 </button>
                               </div>
                             </div>
@@ -1062,84 +1260,6 @@ export default function PanelMotorizadoPage() {
                         </div>
                       )}
 
-                      {/* ── Secciones especiales fuera de Managua ── */}
-                      {o.tipoServicio === 'fuera_managua' && o.fueraManagua?.metodoEnvio === 'bus_terminal' && (
-                        <div style={{ borderTop: '1px solid #e5e7eb', paddingTop: 12, marginTop: 4, display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
-
-                          {/* Evidencias terminal */}
-                          {terminalEvidOrdenId === o.id ? (
-                            <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 12, padding: '12px 14px' }}>
-                              <p style={{ fontSize: 12, fontWeight: 800, color: '#7c3aed', margin: '0 0 10px' }}>📷 Evidencias de entrega terminal</p>
-                              <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                  <button
-                                    type="button"
-                                    onClick={() => setTerminalSinTicket(v => !v)}
-                                    style={{ width: 18, height: 18, borderRadius: 4, border: `2px solid ${terminalSinTicket ? '#7c3aed' : '#d1d5db'}`, background: terminalSinTicket ? '#7c3aed' : '#fff', cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                                  >
-                                    {terminalSinTicket && <span style={{ color: '#fff', fontSize: 10, fontWeight: 900 }}>✓</span>}
-                                  </button>
-                                  <label style={{ fontSize: 12, color: '#374151', cursor: 'pointer' }} onClick={() => setTerminalSinTicket(v => !v)}>No dieron ticket</label>
-                                </div>
-                                <div>
-                                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Hora entrega al bus</label>
-                                  <input type="time" value={terminalHoraEntrega} onChange={e => setTerminalHoraEntrega(e.target.value)} style={{ width: '100%', border: '1px solid #ddd6fe', borderRadius: 8, padding: '8px 10px', fontSize: 13, outline: 'none', boxSizing: 'border-box' as const }} />
-                                </div>
-                                <div>
-                                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Nota adicional</label>
-                                  <textarea value={terminalNota} onChange={e => setTerminalNota(e.target.value)} placeholder="Detalles de la entrega..." style={{ width: '100%', border: '1px solid #ddd6fe', borderRadius: 8, padding: '8px 10px', fontSize: 12, resize: 'none' as const, height: 56, outline: 'none', boxSizing: 'border-box' as const }} />
-                                </div>
-                              </div>
-                              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                                <button onClick={() => setTerminalEvidOrdenId(null)} style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, padding: '8px 12px', fontSize: 12, color: '#6b7280', cursor: 'pointer' }}>Cancelar</button>
-                                <button onClick={() => handleGuardarEvidenciasTerminal(o)} disabled={terminalUploading} style={{ flex: 1, background: '#7c3aed', border: 'none', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer' }}>
-                                  {terminalUploading ? 'Guardando...' : '✓ Guardar'}
-                                </button>
-                              </div>
-                            </div>
-                          ) : (
-                            <button
-                              onClick={() => { setTerminalEvidOrdenId(o.id); setTerminalSinTicket(!!o.evidenciasTerminal?.sinTicket); setTerminalNota(o.evidenciasTerminal?.nota ?? ''); setTerminalHoraEntrega(o.evidenciasTerminal?.horaEntregaBus ?? ''); }}
-                              style={{ background: o.evidenciasTerminal?.horaEntregaBus || o.evidenciasTerminal?.sinTicket ? '#f0fdf4' : '#faf5ff', border: `1px solid ${o.evidenciasTerminal?.horaEntregaBus || o.evidenciasTerminal?.sinTicket ? '#bbf7d0' : '#ddd6fe'}`, borderRadius: 10, padding: '9px 14px', fontSize: 12, fontWeight: 700, color: o.evidenciasTerminal?.horaEntregaBus || o.evidenciasTerminal?.sinTicket ? '#15803d' : '#7c3aed', cursor: 'pointer', textAlign: 'left' as const }}
-                            >
-                              {o.evidenciasTerminal?.horaEntregaBus ? `✓ Entregado al bus ${o.evidenciasTerminal.horaEntregaBus}` : '📷 Registrar entrega al bus'}
-                            </button>
-                          )}
-
-                          {/* Peaje */}
-                          {peajeOrdenId === o.id ? (
-                            <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 12, padding: '12px 14px' }}>
-                              <p style={{ fontSize: 12, fontWeight: 800, color: '#c2410c', margin: '0 0 10px' }}>🛣️ Reportar peaje</p>
-                              <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
-                                <div>
-                                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Monto del peaje (C$) *</label>
-                                  <input type="number" value={peajeMonto} onChange={e => setPeajeMonto(e.target.value === '' ? '' : Number(e.target.value))} placeholder="Ej: 20" style={{ width: '100%', border: '1px solid #fed7aa', borderRadius: 8, padding: '8px 10px', fontSize: 13, outline: 'none', boxSizing: 'border-box' as const }} />
-                                </div>
-                                <div>
-                                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Nota (opcional)</label>
-                                  <textarea value={peajeNota} onChange={e => setPeajeNota(e.target.value)} placeholder="Ej: Peaje en carretera norte..." style={{ width: '100%', border: '1px solid #fed7aa', borderRadius: 8, padding: '8px 10px', fontSize: 12, resize: 'none' as const, height: 50, outline: 'none', boxSizing: 'border-box' as const }} />
-                                </div>
-                                <p style={{ fontSize: 10, color: '#9ca3af', margin: 0, fontStyle: 'italic' as const }}>El gestor validará este gasto antes de procesarlo.</p>
-                              </div>
-                              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                                <button onClick={() => setPeajeOrdenId(null)} style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, padding: '8px 12px', fontSize: 12, color: '#6b7280', cursor: 'pointer' }}>Cancelar</button>
-                                <button onClick={() => handleReportarPeaje(o.id, o.gastosEspeciales)} disabled={peajeSaving || !peajeMonto} style={{ flex: 1, background: !peajeMonto ? '#d1d5db' : '#d46b08', border: 'none', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 700, color: '#fff', cursor: 'pointer' }}>
-                                  {peajeSaving ? 'Guardando...' : '📤 Reportar peaje'}
-                                </button>
-                              </div>
-                            </div>
-                          ) : (
-                            <button
-                              onClick={() => { setPeajeOrdenId(o.id); setPeajeMonto(''); setPeajeNota(''); }}
-                              style={{ background: (o.gastosEspeciales ?? []).some((g: any) => g.tipo === 'peaje') ? '#fff7ed' : '#fff', border: `1px solid ${(o.gastosEspeciales ?? []).some((g: any) => g.tipo === 'peaje') ? '#fed7aa' : '#e5e7eb'}`, borderRadius: 10, padding: '9px 14px', fontSize: 12, fontWeight: 700, color: '#d46b08', cursor: 'pointer', textAlign: 'left' as const }}
-                            >
-                              {(o.gastosEspeciales ?? []).some((g: any) => g.tipo === 'peaje')
-                                ? `🛣️ Peaje reportado (pendiente validación)`
-                                : '🛣️ Reportar peaje'}
-                            </button>
-                          )}
-                        </div>
-                      )}
                     </div>
                   </div>
                 );
@@ -1178,6 +1298,11 @@ export default function PanelMotorizadoPage() {
                     <p style={{ fontSize: 13, color: '#16a34a', margin: '4px 0 0' }}>
                       Total delivery: {fmt(historialFiltrado.reduce((s, o) => s + (o.confirmacion?.precioFinalCordobas || 0), 0))}
                     </p>
+                    {historialFiltrado.some(o => o.precioDesglose?.deliveryBase != null) && (
+                      <p style={{ fontSize: 13, fontWeight: 700, color: '#15803d', margin: '2px 0 0' }}>
+                        💰 Tu ganancia: {fmt(historialFiltrado.reduce((s, o) => s + (o.precioDesglose?.deliveryBase ?? o.confirmacion?.precioFinalCordobas ?? 0) * 0.8, 0))}
+                      </p>
+                    )}
                   </div>
 
                   {historialFiltrado.map((o) => {
@@ -1200,12 +1325,17 @@ export default function PanelMotorizadoPage() {
                               )}
                               {/* Destinatario */}
                               <p style={{ fontSize: 11, color: '#9ca3af', margin: '0 0 2px' }}>
-                                Para: {o.entrega?.nombreApellido || '-'}
+                                Para: {o.tipoServicio === 'fuera_managua' && o.fueraManagua
+                                  ? (o.fueraManagua.puntoLogisticoNombre || o.fueraManagua.terminalSugerida || '-')
+                                  : (o.entrega?.nombreApellido || '-')}
                               </p>
                               <p style={{ fontSize: 11, color: '#d1d5db', margin: 0 }}>{fmtTime(o.entregadoAt)}</p>
                             </div>
                             <div style={{ textAlign: 'right' as const, flexShrink: 0, marginLeft: 12 }}>
                               <p style={{ fontSize: 15, fontWeight: 800, color: '#16a34a', margin: '0 0 2px' }}>{fmt(o.confirmacion?.precioFinalCordobas)}</p>
+                              {o.precioDesglose?.deliveryBase != null && (
+                                <p style={{ fontSize: 11, fontWeight: 700, color: '#15803d', margin: '0 0 2px' }}>💰 {fmt(o.precioDesglose.deliveryBase * 0.8)}</p>
+                              )}
                               {dep.tieneProducto && <p style={{ fontSize: 12, color: '#7c3aed', margin: 0, fontWeight: 700 }}>+{fmt(dep.montoProducto)}</p>}
                             </div>
                           </div>
@@ -1224,6 +1354,55 @@ export default function PanelMotorizadoPage() {
         {/* ── DEPÓSITOS ── */}
         {tab === 'depositos' && (
           <>
+            {/* ── Liquidaciones del motorizado ── */}
+            {liquidaciones.length > 0 && (() => {
+              const semanaActual = getSemanaKey(new Date());
+              const liqActual = liquidaciones.find(l => l.semanaKey === semanaActual);
+              const liqRecientes = liquidaciones.slice(0, 4);
+              // Recalcular neto real desde los campos guardados (por si se guardó con Math.max antes del fix)
+              const netoReal = (l: typeof liqRecientes[0]) =>
+                (l.comision ?? 0) - ((l as any).adelantos ?? 0) - ((l as any).faltantesDeposito ?? 0);
+              const netoActual = liqActual ? netoReal(liqActual) : null;
+              const deuda = netoActual !== null && netoActual < 0;
+              return (
+                <div style={{ background: '#fff', border: `1px solid ${deuda ? '#fca5a5' : '#e5e7eb'}`, borderRadius: 16, padding: '16px', marginBottom: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+                  <p style={{ fontSize: 12, fontWeight: 700, color: deuda ? '#dc2626' : '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>
+                    {deuda ? '⚠️ Saldo pendiente con Storkhub' : '📋 Mis liquidaciones'}
+                  </p>
+                  {deuda && liqActual && (
+                    <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 12, padding: '12px 14px', marginBottom: 12 }}>
+                      <p style={{ fontSize: 11, color: '#dc2626', fontWeight: 700, margin: '0 0 4px', textTransform: 'uppercase' as const }}>Debes depositar esta semana</p>
+                      <p style={{ fontSize: 24, fontWeight: 900, color: '#dc2626', margin: 0 }}>{fmt(Math.abs(netoActual!))}</p>
+                      <p style={{ fontSize: 11, color: '#f87171', margin: '4px 0 0' }}>Tu ganancia ({fmt(liqActual.comision)}) no cubre el faltante de depósito</p>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
+                    {liqRecientes.map((l) => {
+                      const esPagado = l.estado === 'pagado';
+                      const neto = netoReal(l);
+                      const esNegativo = neto < 0;
+                      return (
+                        <div key={l.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 10px', background: '#f8fafc', borderRadius: 10, border: '1px solid #e2e8f0' }}>
+                          <div>
+                            <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: 0 }}>{l.semanaKey}</p>
+                            <p style={{ fontSize: 11, color: '#9ca3af', margin: '1px 0 0' }}>{l.totalViajes} viaje{l.totalViajes !== 1 ? 's' : ''} · Delivery {fmt(l.totalGenerado)}</p>
+                          </div>
+                          <div style={{ textAlign: 'right' as const }}>
+                            <p style={{ fontSize: 14, fontWeight: 800, color: esNegativo ? '#dc2626' : (esPagado ? '#16a34a' : '#004aad'), margin: 0 }}>
+                              {esNegativo ? `−${fmt(Math.abs(neto))}` : fmt(neto)}
+                            </p>
+                            <p style={{ fontSize: 10, fontWeight: 600, color: esPagado ? '#16a34a' : (esNegativo ? '#dc2626' : '#f59e0b'), margin: '1px 0 0' }}>
+                              {esPagado ? '✓ Pagado' : (esNegativo ? 'Debes depositar' : 'Pendiente')}
+                            </p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Summary banner */}
             <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: '16px', marginBottom: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
               <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Resumen de hoy</p>
@@ -1592,6 +1771,51 @@ export default function PanelMotorizadoPage() {
         />
       )}
 
+      {/* ── Terminal Bus Delivery Gate ── */}
+      {terminalGate && (
+        <TerminalEntregaModal
+          sinTicket={termSinTicket}
+          fotoPaquete={termFotoPaquete}
+          fotoTicket={termFotoTicket}
+          fotoBus={termFotoBus}
+          busNombre={termBusNombre}
+          busNumero={termBusNumero}
+          busCelular={termBusCelular}
+          horaLlegada={termHoraLlegada}
+          costo={termCosto}
+          uploading={termUploading}
+          err={termErr}
+          onSinTicket={() => { setTermSinTicket(v => !v); setTermFotoTicket(null); }}
+          onFotoPaquete={setTermFotoPaquete}
+          onFotoTicket={setTermFotoTicket}
+          onFotoBus={setTermFotoBus}
+          onBusNombre={setTermBusNombre}
+          onBusNumero={setTermBusNumero}
+          onBusCelular={setTermBusCelular}
+          onHoraLlegada={setTermHoraLlegada}
+          onCosto={setTermCosto}
+          onSubmit={handleTerminalEntregarOrden}
+          onCancel={() => setTerminalGate(null)}
+        />
+      )}
+
+      {/* ── Cargotrans Delivery Gate ── */}
+      {cargotransGate && (
+        <CargotransEntregaModal
+          cantidadPaquetes={cargotransGate.fueraManagua?.cantidadPaquetes ?? 1}
+          fotos={ctransFotos}
+          factura={ctransFactura}
+          costo={ctransCosto}
+          uploading={ctransUploading}
+          err={ctransErr}
+          onFoto={(i, f) => setCtransFotos(prev => { const next = [...prev]; next[i] = f; return next; })}
+          onFactura={setCtransFactura}
+          onCosto={setCtransCosto}
+          onSubmit={handleCargotransEntregarOrden}
+          onCancel={() => setCargotransGate(null)}
+        />
+      )}
+
       <BottomNav
         tab={tab}
         setTab={setTab}
@@ -1740,6 +1964,12 @@ function FueraManaguaInfo({ fueraManagua }: { fueraManagua?: Solicitud['fueraMan
         {!fueraManagua.puntoLogisticoNombre && esBus && fueraManagua.terminalSugerida && (
           <p style={{ fontSize: 12, color: '#7c3aed', margin: 0, fontWeight: 700 }}>🏢 Terminal: <strong>{fueraManagua.terminalSugerida}</strong></p>
         )}
+        {fueraManagua.direccionPuntoLogistico && (
+          <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>📌 {fueraManagua.direccionPuntoLogistico}</p>
+        )}
+        {(fueraManagua.horarioApertura || fueraManagua.horarioCierre) && (
+          <p style={{ fontSize: 12, color: '#374151', margin: 0 }}>🕐 Horario: {fueraManagua.horarioApertura || '?'}–{fueraManagua.horarioCierre || '?'}</p>
+        )}
         {fueraManagua.coordsPuntoLogistico && (
           <a
             href={`https://www.google.com/maps?q=${fueraManagua.coordsPuntoLogistico.lat},${fueraManagua.coordsPuntoLogistico.lng}`}
@@ -1786,12 +2016,14 @@ function PaqueteBadge({ paquete }: { paquete?: Solicitud['paquete'] }) {
   );
 }
 
-function RoutePoint({ type, point, fallbackName, retiroCoord, entregaCoord }: {
+function RoutePoint({ type, point, fallbackName, retiroCoord, entregaCoord, headerLabel, headerColor }: {
   type: 'pickup' | 'dropoff';
   point: PointData;
   fallbackName?: string;
   retiroCoord?: { lat: number; lng: number } | null;
   entregaCoord?: { lat: number; lng: number } | null;
+  headerLabel?: string;
+  headerColor?: string;
 }) {
   const ip = type === 'pickup';
   const coordOverride = ip ? retiroCoord : entregaCoord;
@@ -1807,7 +2039,7 @@ function RoutePoint({ type, point, fallbackName, retiroCoord, entregaCoord }: {
         <span style={{ fontSize: 10, fontWeight: 900, color: ip ? '#d97706' : '#16a34a' }}>{ip ? 'A' : 'B'}</span>
       </div>
       <div style={{ flex: 1, paddingBottom: 6 }}>
-        <p style={{ fontSize: 10, fontWeight: 800, color: '#9ca3af', letterSpacing: 1, textTransform: 'uppercase', margin: '0 0 2px' }}>{ip ? 'RETIRO' : 'ENTREGA'}</p>
+        <p style={{ fontSize: 10, fontWeight: 800, color: headerColor ?? '#9ca3af', letterSpacing: 1, textTransform: 'uppercase', margin: '0 0 2px' }}>{headerLabel ?? (ip ? 'RETIRO' : 'ENTREGA')}</p>
         <p style={{ fontSize: 14, fontWeight: 700, color: '#111827', margin: '0 0 2px' }}>{name}</p>
         <a href={`tel:${phone}`} style={{ fontSize: 13, color: '#2563eb', textDecoration: 'none', fontWeight: 600, display: 'block', marginBottom: 3 }}>📞 {phone}</a>
         <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 4px', lineHeight: 1.4 }}>📍 {address}</p>
@@ -1828,6 +2060,8 @@ function RoutePoint({ type, point, fallbackName, retiroCoord, entregaCoord }: {
 
 function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
   const delivery = o.confirmacion?.precioFinalCordobas ?? 0;
+  const deliveryBase = o.precioDesglose?.deliveryBase ?? null;
+  const ganancia = deliveryBase !== null ? deliveryBase * 0.8 : null;
   const totalCliente = (dep.tieneDelivery ? delivery : 0) + (dep.tieneProducto ? dep.montoProducto : 0);
 
   return (
@@ -1836,6 +2070,12 @@ function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
         <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Delivery</span>
         <span style={{ fontSize: 18, fontWeight: 900, color: '#111827' }}>{fmt(delivery)}</span>
       </div>
+      {ganancia !== null && delivery > 0 && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+          <span style={{ fontSize: 11, color: '#16a34a', fontWeight: 700 }}>💰 Tu ganancia</span>
+          <span style={{ fontSize: 14, fontWeight: 800, color: '#16a34a' }}>{fmt(ganancia)}</span>
+        </div>
+      )}
       {dep.tieneProducto && (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
           <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Cobro producto</span>
@@ -1859,6 +2099,225 @@ function EmptyState({ icon, title, subtitle }: { icon: string; title: string; su
       <span style={{ fontSize: 44 }}>{icon}</span>
       <p style={{ fontSize: 17, fontWeight: 700, color: '#111827', margin: '6px 0 0' }}>{title}</p>
       <p style={{ fontSize: 14, color: '#9ca3af', textAlign: 'center', margin: 0, lineHeight: 1.5 }}>{subtitle}</p>
+    </div>
+  );
+}
+
+// ─── Terminal Bus Delivery Modal ─────────────────────────────────────────────
+
+function FotoSlot({ label, emoji, file, onFile, optional }: { label: string; emoji: string; file: File | null; onFile: (f: File) => void; optional?: boolean }) {
+  const ref = useRef<HTMLInputElement>(null);
+  const preview = file ? URL.createObjectURL(file) : null;
+  return (
+    <div style={{ background: file ? '#f0fdf4' : '#f9fafb', border: `1.5px solid ${file ? '#86efac' : '#e5e7eb'}`, borderRadius: 12, padding: '10px 12px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: preview ? 8 : 0 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: file ? '#15803d' : '#374151' }}>
+          {emoji} {label}{optional && <span style={{ fontSize: 11, fontWeight: 400, color: '#9ca3af' }}> (opcional)</span>}
+        </span>
+        <button type="button" onClick={() => ref.current?.click()} style={{ background: file ? '#dcfce7' : '#004aad', border: 'none', borderRadius: 8, padding: '5px 10px', fontSize: 11, fontWeight: 700, color: file ? '#15803d' : '#fff', cursor: 'pointer' }}>
+          {file ? '🔄 Cambiar' : '📷 Tomar foto'}
+        </button>
+      </div>
+      {preview && <img src={preview} alt="" style={{ width: '100%', height: 80, objectFit: 'cover', borderRadius: 8 }} />}
+      <input ref={ref} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
+    </div>
+  );
+}
+
+function CargotransEntregaModal({
+  cantidadPaquetes, fotos, factura, costo, uploading, err,
+  onFoto, onFactura, onCosto, onSubmit, onCancel,
+}: {
+  cantidadPaquetes: number;
+  fotos: (File | null)[];
+  factura: File | null;
+  costo: number | '';
+  uploading: boolean;
+  err: string | null;
+  onFoto: (i: number, f: File) => void;
+  onFactura: (f: File) => void;
+  onCosto: (v: number | '') => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const todosSubidos = fotos.length > 0 && fotos.every(f => !!f);
+  const canConfirm = todosSubidos && !!factura && costo !== '' && !uploading;
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', zIndex: 1000, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+      <div style={{ background: '#fff', borderRadius: '24px 24px 0 0', width: '100%', maxWidth: 480, maxHeight: '92vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {/* Header */}
+        <div style={{ padding: '16px 20px 12px', borderBottom: '1px solid #f3f4f6', flexShrink: 0 }}>
+          <p style={{ fontSize: 16, fontWeight: 900, color: '#111827', margin: 0 }}>📦 Confirmar entrega en Cargotrans</p>
+          <p style={{ fontSize: 12, color: '#6b7280', margin: '2px 0 0' }}>Subí una foto por cada paquete antes de marcar como entregado</p>
+        </div>
+
+        {/* Scrollable content */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+          {/* Paquetes */}
+          <div>
+            <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: '0 0 10px' }}>
+              Fotos de paquetes ({cantidadPaquetes} paquete{cantidadPaquetes !== 1 ? 's' : ''}) <span style={{ color: '#dc2626' }}>*</span>
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {fotos.map((f, i) => (
+                <FotoSlot
+                  key={i}
+                  label={`Paquete #${i + 1}`}
+                  emoji="📦"
+                  file={f}
+                  onFile={file => onFoto(i, file)}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Factura */}
+          <div>
+            <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 8px' }}>
+              Factura de Cargotrans <span style={{ color: '#dc2626' }}>*</span>
+            </p>
+            <FotoSlot label="Factura" emoji="🧾" file={factura} onFile={onFactura} />
+          </div>
+
+          {/* Costo pagado */}
+          <div>
+            <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 8px' }}>
+              Costo pagado en Cargotrans (C$) <span style={{ color: '#dc2626' }}>*</span>
+            </p>
+            <input
+              type="number"
+              min={0}
+              value={costo}
+              onChange={e => onCosto(e.target.value === '' ? '' : Number(e.target.value))}
+              placeholder="Ej: 150"
+              style={{ width: '100%', border: '1px solid #e5e7eb', borderRadius: 8, padding: '9px 12px', fontSize: 14, outline: 'none', boxSizing: 'border-box' as const }}
+            />
+          </div>
+
+          {err && <p style={{ fontSize: 12, color: '#dc2626', fontWeight: 600, margin: 0 }}>⚠️ {err}</p>}
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: '12px 20px 24px', borderTop: '1px solid #f3f4f6', display: 'flex', gap: 10, flexShrink: 0 }}>
+          <button onClick={onCancel} disabled={uploading} style={{ flex: 1, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: 13, fontSize: 14, fontWeight: 700, color: '#6b7280', cursor: uploading ? 'not-allowed' : 'pointer' }}>
+            Cancelar
+          </button>
+          <button onClick={onSubmit} disabled={!canConfirm}
+            style={{ flex: 2, background: !canConfirm ? '#d1d5db' : '#16a34a', border: 'none', borderRadius: 14, padding: 13, fontSize: 14, fontWeight: 800, color: '#fff', cursor: !canConfirm ? 'not-allowed' : 'pointer' }}>
+            {uploading ? 'Subiendo fotos...' : '✅ Confirmar entrega'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TerminalEntregaModal({
+  sinTicket, fotoPaquete, fotoTicket, fotoBus,
+  busNombre, busNumero, busCelular, horaLlegada, costo,
+  uploading, err,
+  onSinTicket, onFotoPaquete, onFotoTicket, onFotoBus,
+  onBusNombre, onBusNumero, onBusCelular, onHoraLlegada, onCosto,
+  onSubmit, onCancel,
+}: {
+  sinTicket: boolean; fotoPaquete: File | null; fotoTicket: File | null; fotoBus: File | null;
+  busNombre: string; busNumero: string; busCelular: string; horaLlegada: string; costo: number | '';
+  uploading: boolean; err: string | null;
+  onSinTicket: () => void; onFotoPaquete: (f: File) => void; onFotoTicket: (f: File) => void; onFotoBus: (f: File) => void;
+  onBusNombre: (v: string) => void; onBusNumero: (v: string) => void; onBusCelular: (v: string) => void; onHoraLlegada: (v: string) => void; onCosto: (v: number | '') => void;
+  onSubmit: () => void; onCancel: () => void;
+}) {
+  const celularValido = /^\d{8}$/.test(busCelular.replace(/[-\s]/g, ''));
+  const sinTicketCompleto = !sinTicket || (
+    !!busNombre.trim() && !!busNumero.trim() && celularValido && !!horaLlegada && costo !== ''
+  );
+  const canConfirm = !!fotoPaquete && (sinTicket || !!fotoTicket) && !!fotoBus && sinTicketCompleto;
+  const inp: React.CSSProperties = { width: '100%', border: '1px solid #e5e7eb', borderRadius: 8, padding: '9px 12px', fontSize: 13, outline: 'none', boxSizing: 'border-box' };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', zIndex: 1000, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+      <div style={{ background: '#fff', borderRadius: '24px 24px 0 0', width: '100%', maxWidth: 480, maxHeight: '92vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {/* Header */}
+        <div style={{ padding: '16px 20px 12px', borderBottom: '1px solid #f3f4f6', flexShrink: 0 }}>
+          <p style={{ fontSize: 16, fontWeight: 900, color: '#111827', margin: 0 }}>🚌 Confirmar entrega al bus</p>
+          <p style={{ fontSize: 12, color: '#6b7280', margin: '2px 0 0' }}>Subí las fotos antes de marcar como entregado</p>
+        </div>
+
+        {/* Scrollable content */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+          {/* Foto paquete */}
+          <FotoSlot label="Foto del paquete" emoji="📦" file={fotoPaquete} onFile={onFotoPaquete} />
+
+          {/* Ticket section */}
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: sinTicket ? 10 : 8 }}>
+              <button type="button" onClick={onSinTicket}
+                style={{ width: 18, height: 18, borderRadius: 4, border: `2px solid ${sinTicket ? '#7c3aed' : '#d1d5db'}`, background: sinTicket ? '#7c3aed' : '#fff', cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                {sinTicket && <span style={{ color: '#fff', fontSize: 10, fontWeight: 900 }}>✓</span>}
+              </button>
+              <span style={{ fontSize: 13, color: '#374151', cursor: 'pointer', fontWeight: 600 }} onClick={onSinTicket}>No dieron ticket</span>
+            </div>
+            {!sinTicket && <FotoSlot label="Foto del ticket" emoji="🎫" file={fotoTicket} onFile={onFotoTicket} />}
+            {sinTicket && (
+              <div style={{ background: '#faf5ff', border: '1px solid #ddd6fe', borderRadius: 12, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <p style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed', margin: 0 }}>Datos del transporte</p>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Nombre del bus / empresa <span style={{ color: '#dc2626' }}>*</span></label>
+                  <input value={busNombre} onChange={e => onBusNombre(e.target.value)} placeholder="Ej: Cotran Norte, El Chato..." style={inp} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Número del bus / placa <span style={{ color: '#dc2626' }}>*</span></label>
+                  <input value={busNumero} onChange={e => onBusNumero(e.target.value)} placeholder="Ej: CK-1234 o número de ruta" style={inp} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>
+                    Celular del transporte / cobrador <span style={{ color: '#dc2626' }}>*</span>
+                    <span style={{ color: '#6b7280', fontWeight: 400 }}> (para que el destinatario pueda llamar)</span>
+                  </label>
+                  <input
+                    type="tel"
+                    value={busCelular}
+                    onChange={e => onBusCelular(e.target.value)}
+                    placeholder="Ej: 8888-0000"
+                    maxLength={9}
+                    style={{ ...inp, borderColor: busCelular && !celularValido ? '#dc2626' : '#e5e7eb' }}
+                  />
+                  {busCelular && !celularValido && (
+                    <p style={{ fontSize: 11, color: '#dc2626', margin: '3px 0 0', fontWeight: 500 }}>Debe ser exactamente 8 dígitos</p>
+                  )}
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Hora estimada de llegada al destino <span style={{ color: '#dc2626' }}>*</span></label>
+                  <input type="time" value={horaLlegada} onChange={e => onHoraLlegada(e.target.value)} style={inp} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: '#374151', display: 'block', marginBottom: 4 }}>Costo del flete (C$) <span style={{ color: '#dc2626' }}>*</span> <span style={{ color: '#6b7280', fontWeight: 400 }}>(solo informativo)</span></label>
+                  <input type="number" value={costo} onChange={e => onCosto(e.target.value === '' ? '' : Number(e.target.value))} placeholder="Ej: 120" style={inp} />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Foto bus */}
+          <FotoSlot label="Foto del bus" emoji="🚌" file={fotoBus} onFile={onFotoBus} />
+
+          {err && <p style={{ fontSize: 12, color: '#dc2626', fontWeight: 600, margin: 0 }}>⚠️ {err}</p>}
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: '12px 20px 24px', borderTop: '1px solid #f3f4f6', display: 'flex', gap: 10, flexShrink: 0 }}>
+          <button onClick={onCancel} disabled={uploading} style={{ flex: 1, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: 13, fontSize: 14, fontWeight: 700, color: '#6b7280', cursor: uploading ? 'not-allowed' : 'pointer' }}>
+            Cancelar
+          </button>
+          <button onClick={onSubmit} disabled={!canConfirm || uploading}
+            style={{ flex: 2, background: !canConfirm || uploading ? '#d1d5db' : '#16a34a', border: 'none', borderRadius: 14, padding: 13, fontSize: 14, fontWeight: 800, color: '#fff', cursor: !canConfirm || uploading ? 'not-allowed' : 'pointer' }}>
+            {uploading ? 'Subiendo fotos...' : '✅ Confirmar entrega'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

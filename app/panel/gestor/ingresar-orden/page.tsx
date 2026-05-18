@@ -1252,6 +1252,8 @@ export default function GestorIngresarOrdenPage() {
   const [montoCE, setMontoCE] = useState<number | ''>('')
   const [quienPagaDelivery, setQuienPagaDelivery] = useState<QuienPagaDelivery>('')
   const [deducirDelivery, setDeducirDelivery] = useState<DeducirDelivery>('no_deducir')
+  type PagoCargotrans = 'efectivo_motorizado' | 'transferencia_comercio' | 'transferencia_storkhub' | ''
+  const [pagoCargotrans, setPagoCargotrans] = useState<PagoCargotrans>('')
   const [detalle, setDetalle] = useState('')
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
@@ -1481,20 +1483,6 @@ export default function GestorIngresarOrdenPage() {
     setPuntoLogisticoSeleccionado(cercano)
   }, [retiro.coord, puntosLogisticos, esFueraManagua, metodoFueraManagua])
 
-  // Auto-calcular cuando se selecciona punto logístico + retiro (fuera_managua)
-  useEffect(() => {
-    if (!esFueraManagua || !puntoLogisticoSeleccionado || !retiro.coord) return
-    const o = retiro.coord
-    const d = puntoLogisticoSeleccionado.coord
-    const key = `${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${d.lat.toFixed(5)},${d.lng.toFixed(5)}`
-    if (key === lastCalcKey.current && calcResult) return
-    lastCalcKey.current = key
-    setCalcLoading(true); setCalcError(null)
-    calcularDistancia(o, d)
-      .then(result => { if (result) setCalcResult(result) })
-      .catch(() => {})
-      .finally(() => setCalcLoading(false))
-  }, [puntoLogisticoSeleccionado, retiro.coord, esFueraManagua])
 
   // ── Favoritos: auto-seleccionar el primero cuando cambia el comercio ──
   const didAutoSelect = useRef(false)
@@ -1613,6 +1601,14 @@ export default function GestorIngresarOrdenPage() {
     setMsg({ type: 'info', text: 'Cotización quitada. El sistema calculará el precio con los puntos del mapa.' })
   }
 
+  useEffect(() => {
+    if (esFueraManagua) {
+      setCobroCE(false)
+      if (quienPagaDelivery === 'entrega') setQuienPagaDelivery('')
+    }
+    if (!esFueraManagua || metodoFueraManagua !== 'cargotrans') setPagoCargotrans('')
+  }, [esFueraManagua, metodoFueraManagua])
+
   // ── Validation ──
   const camposFaltantes = useMemo(() => {
     const f: string[] = []
@@ -1629,12 +1625,13 @@ export default function GestorIngresarOrdenPage() {
     } else if (metodoFueraManagua === 'bus_terminal' && !destinoFinal.trim()) {
       f.push('Destino del paquete (fuera de Managua)')
     }
-    if (cobroCE && (montoCE === '' || Number(montoCE) <= 0)) f.push('Monto del cobro contra entrega')
+    if (!esFueraManagua && cobroCE && (montoCE === '' || Number(montoCE) <= 0)) f.push('Monto del cobro contra entrega')
+    if (esFueraManagua && metodoFueraManagua === 'cargotrans' && !pagoCargotrans) f.push('Forma de pago del flete de Cargotrans')
     if (tipoCliente === 'contado' && !quienPagaDelivery) f.push('Quién paga el delivery')
     if (esProgramado && (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && !fechaRetiro) f.push('Fecha de retiro programado')
     if (esProgramado && (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && !fechaEntrega) f.push('Fecha de entrega programada')
     return f
-  }, [selectedOwnerUid, retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega, esFueraManagua, metodoFueraManagua, destinoFinal])
+  }, [selectedOwnerUid, retiro, entrega, cobroCE, montoCE, pagoCargotrans, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega, esFueraManagua, metodoFueraManagua, destinoFinal])
 
   const formularioCompleto = camposFaltantes.length === 0
 
@@ -1666,7 +1663,9 @@ export default function GestorIngresarOrdenPage() {
   // ── Preview de zona (se actualiza al cambiar coords de retiro o entrega) ──
   useEffect(() => {
     const retiroCoord = retiro.coord || null
-    const entregaCoord = entrega.coord || null
+    const entregaCoord = esFueraManagua && puntoLogisticoSeleccionado
+      ? puntoLogisticoSeleccionado.coord
+      : entrega.coord || null
     if (!retiroCoord && !entregaCoord) { setZonaPreview(null); return }
     let cancelled = false
     getZonasActivas().then((zonas) => {
@@ -1675,7 +1674,7 @@ export default function GestorIngresarOrdenPage() {
       setZonaPreview({ zonaRetiroNombre, zonaEntregaNombre, macroZonaRetiroNombre, macroZonaEntregaNombre })
     }).catch(() => setZonaPreview(null))
     return () => { cancelled = true }
-  }, [retiro.coord, entrega.coord])
+  }, [retiro.coord, entrega.coord, esFueraManagua, puntoLogisticoSeleccionado])
 
   // ── Save ──
   const handleGuardar = async () => {
@@ -1696,7 +1695,11 @@ export default function GestorIngresarOrdenPage() {
         zonaEntregaId, zonaEntregaNombre,
         macroZonaRetiroId, macroZonaRetiroNombre,
         macroZonaEntregaId, macroZonaEntregaNombre,
-      } = clasificarOrdenCompleto(retiro.coord || null, entrega.coord || null, zonasActivas)
+      } = clasificarOrdenCompleto(
+        retiro.coord || null,
+        esFueraManagua && puntoLogisticoSeleccionado ? puntoLogisticoSeleccionado.coord : entrega.coord || null,
+        zonasActivas
+      )
 
       const recargoFinal = calcularRecargoZona(
         zonaRetiroNombre ?? macroZonaRetiroNombre ?? null,
@@ -1757,8 +1760,8 @@ export default function GestorIngresarOrdenPage() {
           puntoGoogleTipo: entrega.tipoUbicacion,
         },
         cobroContraEntrega: {
-          aplica: cobroCE,
-          monto: cobroCE ? Number(montoCE) : 0,
+          aplica: esFueraManagua ? false : cobroCE,
+          monto: esFueraManagua ? 0 : (cobroCE ? Number(montoCE) : 0),
         },
         pagoDelivery:
           tipoCliente === 'credito'
@@ -1807,6 +1810,10 @@ export default function GestorIngresarOrdenPage() {
             puntoLogisticoNombre: puntoLogisticoSeleccionado?.nombre ?? null,
             puntoLogisticoTipo: puntoLogisticoSeleccionado?.tipo ?? null,
             coordsPuntoLogistico: puntoLogisticoSeleccionado?.coord ?? null,
+            direccionPuntoLogistico: puntoLogisticoSeleccionado?.direccion ?? null,
+            horarioApertura: puntoLogisticoSeleccionado?.horarioApertura ?? null,
+            horarioCierre: puntoLogisticoSeleccionado?.horarioCierre ?? null,
+            notaPuntoLogistico: puntoLogisticoSeleccionado?.notas ?? null,
             ...(metodoFueraManagua === 'bus_terminal' ? {
               terminalSugerida: puntoLogisticoSeleccionado?.nombre ?? null,
               transporteNombre: transporteNombre.trim() || null,
@@ -1816,6 +1823,7 @@ export default function GestorIngresarOrdenPage() {
             } : {
               cantidadPaquetes: Number(cantidadPaquetes) || 1,
               notaCargotrans: notaCargotrans.trim() || null,
+              pagoCargotrans: pagoCargotrans || null,
             }),
           },
         } : {}),
@@ -1981,13 +1989,33 @@ export default function GestorIngresarOrdenPage() {
       )
     }
     if (desde === 4) {
+      if (esFueraManagua && metodoFueraManagua === 'cargotrans' && !pagoCargotrans) return false
       if (tipoCliente === 'contado' && !quienPagaDelivery) return false
-      if (cobroCE && (montoCE === '' || Number(montoCE) <= 0)) return false
+      if (!esFueraManagua && cobroCE && (montoCE === '' || Number(montoCE) <= 0)) return false
       if (esProgramado && (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && !fechaRetiro) return false
       if (esProgramado && (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && !fechaEntrega) return false
       return true
     }
     return true
+  }
+
+  const handleSiguiente = async () => {
+    if (!puedeAvanzar(paso)) return
+    if (paso === 3 && esFueraManagua && puntoLogisticoSeleccionado && retiro.coord) {
+      const o = retiro.coord
+      const d = puntoLogisticoSeleccionado.coord
+      const key = `${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${d.lat.toFixed(5)},${d.lng.toFixed(5)}`
+      if (key !== lastCalcKey.current || !calcResult) {
+        lastCalcKey.current = key
+        setCalcLoading(true); setCalcError(null)
+        try {
+          const result = await calcularDistancia(o, d)
+          if (result) setCalcResult(result)
+        } catch {}
+        setCalcLoading(false)
+      }
+    }
+    setPaso(p => p + 1)
   }
 
   // ─── Render ───────────────────────────────────────────────────────────────
@@ -2311,7 +2339,30 @@ export default function GestorIngresarOrdenPage() {
                   <button
                     key={String(opt.val)}
                     type="button"
-                    onClick={() => { setEsFueraManagua(opt.val); if (opt.val) setEntrega(blankEntrega()) }}
+                    onClick={() => {
+                      if (opt.val === esFueraManagua) return
+                      if (opt.val) {
+                        // → Fuera de Managua
+                        if (entrega.coord || entrega.nombre || calcResult || draft) {
+                          const ok = window.confirm('¿Cambiar a envío fuera de Managua?\n\nSe borrará el punto de entrega y la cotización. Tendrás que empezar de nuevo.')
+                          if (!ok) return
+                        }
+                        setCalcResult(null); lastCalcKey.current = null
+                        setDraft(null); try { sessionStorage.removeItem('draftEnvio') } catch {}
+                        setEntrega(blankEntrega())
+                      } else {
+                        // → Dentro de Managua
+                        if (destinoFinal || puntoLogisticoSeleccionado) {
+                          const ok = window.confirm('¿Volver a envío dentro de Managua?\n\nSe borrará la información del envío fuera de Managua. Tendrás que empezar de nuevo.')
+                          if (!ok) return
+                        }
+                        setDestinoFinal(''); setMetodoFueraManagua('bus_terminal'); setShowDetallesTransporte(false)
+                        setTransporteNombre(''); setTransporteCelular(''); setTransporteHoraSalida(''); setTransporteNota('')
+                        setCantidadPaquetes('1'); setNotaCargotrans(''); setPuntoLogisticoSeleccionado(null)
+                        setTerminalesSugeridas([]); setPagoCargotrans('')
+                      }
+                      setEsFueraManagua(opt.val)
+                    }}
                     style={{ flex: 1, textAlign: 'left' as const, padding: '12px 14px', borderRadius: 12, cursor: 'pointer', border: `2px solid ${esFueraManagua === opt.val ? (opt.val ? '#7c3aed' : '#004aad') : '#e5e7eb'}`, background: esFueraManagua === opt.val ? (opt.val ? '#f5f3ff' : '#eff6ff') : '#fff' }}
                   >
                     <p style={{ fontSize: 13, fontWeight: 700, color: esFueraManagua === opt.val ? (opt.val ? '#7c3aed' : '#004aad') : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
@@ -2854,48 +2905,77 @@ export default function GestorIngresarOrdenPage() {
 
       {/* ── PAGOS ── */}
       <SectionCard title="Pagos" icon="💰">
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <button
-              type="button"
-              onClick={() => setCobroCE(!cobroCE)}
-              style={{
-                width: 20,
-                height: 20,
-                borderRadius: 4,
-                border: `2px solid ${cobroCE ? '#004aad' : '#d1d5db'}`,
-                background: cobroCE ? '#004aad' : '#fff',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                flexShrink: 0,
-              }}
-            >
-              {cobroCE && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
-            </button>
-            <label
-              style={{ fontSize: 14, fontWeight: 600, color: '#111827', cursor: 'pointer' }}
-              onClick={() => setCobroCE(!cobroCE)}
-            >
-              Hay cobro contra entrega (el motorizado cobra el producto)
-            </label>
-          </div>
-          {cobroCE && (
-            <div style={{ marginLeft: 30 }}>
-              <label style={S.label}>
-                Monto del producto (C$) <span style={{ color: '#dc2626' }}>*</span>
+        {!esFueraManagua && (
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <button
+                type="button"
+                onClick={() => setCobroCE(!cobroCE)}
+                style={{
+                  width: 20,
+                  height: 20,
+                  borderRadius: 4,
+                  border: `2px solid ${cobroCE ? '#004aad' : '#d1d5db'}`,
+                  background: cobroCE ? '#004aad' : '#fff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}
+              >
+                {cobroCE && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+              </button>
+              <label
+                style={{ fontSize: 14, fontWeight: 600, color: '#111827', cursor: 'pointer' }}
+                onClick={() => setCobroCE(!cobroCE)}
+              >
+                Hay cobro contra entrega (el motorizado cobra el producto)
               </label>
-              <input
-                type="number"
-                value={montoCE}
-                onChange={(e) => setMontoCE(e.target.value === '' ? '' : Number(e.target.value))}
-                placeholder="Ej: 1500"
-                style={{ ...S.input, maxWidth: 200 }}
-              />
             </div>
-          )}
-        </div>
+            {cobroCE && (
+              <div style={{ marginLeft: 30 }}>
+                <label style={S.label}>
+                  Monto del producto (C$) <span style={{ color: '#dc2626' }}>*</span>
+                </label>
+                <input
+                  type="number"
+                  value={montoCE}
+                  onChange={(e) => setMontoCE(e.target.value === '' ? '' : Number(e.target.value))}
+                  placeholder="Ej: 1500"
+                  style={{ ...S.input, maxWidth: 200 }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {esFueraManagua && metodoFueraManagua === 'cargotrans' && (
+          <div>
+            <label style={S.label}>¿Cómo se paga el flete de Cargotrans? <span style={{ color: '#dc2626' }}>*</span></label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {([
+                { value: 'efectivo_motorizado', label: '💵 El comercio entrega el efectivo al motorizado', desc: 'El motorizado recibirá el efectivo y pagará en Cargotrans al llegar.' },
+                { value: 'transferencia_comercio', label: '📲 El comercio transfiere directamente a Cargotrans', desc: 'Cuando estemos llegando al punto te avisaremos para que el comercio realice la transferencia a las cuentas de Cargotrans.' },
+                { value: 'transferencia_storkhub', label: '🏢 Storkhub realiza la transferencia', desc: 'Storkhub cubre el costo del flete de Cargotrans y lo gestiona internamente.' },
+              ] as { value: PagoCargotrans; label: string; desc: string }[]).map(opt => (
+                <button key={opt.value} type="button" onClick={() => setPagoCargotrans(opt.value)}
+                  style={{ textAlign: 'left' as const, padding: '12px 14px', borderRadius: 10, cursor: 'pointer', border: `1px solid ${pagoCargotrans === opt.value ? '#004aad' : '#e5e7eb'}`, background: pagoCargotrans === opt.value ? '#eff6ff' : '#fff' }}>
+                  <p style={{ fontSize: 13, fontWeight: 700, color: pagoCargotrans === opt.value ? '#004aad' : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
+                  <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>{opt.desc}</p>
+                </button>
+              ))}
+            </div>
+            {pagoCargotrans === 'transferencia_comercio' && (
+              <div style={{ marginTop: 10, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 10, padding: '12px 14px' }}>
+                <p style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', margin: '0 0 4px' }}>⚠️ Importante para el comercio</p>
+                <p style={{ fontSize: 12, color: '#92400e', margin: 0, lineHeight: 1.5 }}>
+                  Cuando el motorizado esté llegando al punto de Cargotrans, notificaremos al comercio para que realice la transferencia a las cuentas indicadas. Asegurar que el comercio esté pendiente del aviso.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
         {tipoCliente === 'credito' ? (
           <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '12px 14px' }}>
@@ -2910,7 +2990,7 @@ export default function GestorIngresarOrdenPage() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {[
                 { value: 'recoleccion', label: '🏁 Se paga en la recolección', desc: 'El motorizado cobra el delivery al retirar' },
-                { value: 'entrega', label: '🏠 Lo paga el destinatario (entrega)', desc: 'El motorizado cobra el delivery al entregar' },
+                ...(!esFueraManagua ? [{ value: 'entrega', label: '🏠 Lo paga el destinatario (entrega)', desc: 'El motorizado cobra el delivery al entregar' }] : []),
                 { value: 'transferencia', label: '🏦 Ya se pagó por transferencia', desc: 'El delivery fue pagado previamente' },
               ].map((opt) => (
                 <button
@@ -3218,24 +3298,22 @@ export default function GestorIngresarOrdenPage() {
           {paso < 5 && (
             <button
               type="button"
-              disabled={!puedeAvanzar(paso)}
-              onClick={() => {
-                if (puedeAvanzar(paso)) setPaso(p => p + 1)
-              }}
+              disabled={!puedeAvanzar(paso) || calcLoading}
+              onClick={() => handleSiguiente()}
               style={{
                 flex: 1,
                 height: 48,
-                background: puedeAvanzar(paso) ? '#004aad' : '#d1d5db',
+                background: puedeAvanzar(paso) && !calcLoading ? '#004aad' : '#d1d5db',
                 border: 'none',
                 borderRadius: 12,
                 color: '#fff',
                 fontSize: 15,
                 fontWeight: 700,
-                cursor: puedeAvanzar(paso) ? 'pointer' : 'not-allowed',
+                cursor: puedeAvanzar(paso) && !calcLoading ? 'pointer' : 'not-allowed',
                 transition: 'background 0.15s',
               }}
             >
-              Siguiente →
+              {calcLoading && paso === 3 && esFueraManagua ? '⏳ Calculando...' : 'Siguiente →'}
             </button>
           )}
           {paso === 5 && (

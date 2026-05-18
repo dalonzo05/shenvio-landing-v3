@@ -16,8 +16,25 @@ type Solicitud = {
   createdAt?: Timestamp
   entregadoAt?: Timestamp
   tipoCliente?: string
+  tipoServicio?: 'normal' | 'fuera_managua' | 'compra_gestion'
   recoleccion?: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null }
   entrega?: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null }
+  fueraManagua?: {
+    metodoEnvio?: 'bus_terminal' | 'cargotrans'
+    destinoFinal?: string | null
+    puntoLogisticoNombre?: string | null
+    direccionPuntoLogistico?: string | null
+    horarioApertura?: string | null
+    horarioCierre?: string | null
+    coordsPuntoLogistico?: { lat: number; lng: number } | null
+    transporteNombre?: string | null
+    transporteCelular?: string | null
+    transporteHoraSalida?: string | null
+    cantidadPaquetes?: number
+    notaCargotrans?: string | null
+    terminalSugerida?: string | null
+    pagoCargotrans?: 'efectivo_motorizado' | 'transferencia_comercio' | null
+  }
   confirmacion?: { precioFinalCordobas?: number }
   cobroContraEntrega?: { aplica?: boolean; monto?: number }
   pagoDelivery?: { tipo?: string; quienPaga?: string; montoSugerido?: number | null }
@@ -35,11 +52,35 @@ type Solicitud = {
     retiro?: { url: string; pathStorage: string }
     entrega?: { url: string; pathStorage: string }
   }
+  evidenciasTerminal?: {
+    fotoBus?: { url: string; pathStorage: string }
+    fotoPaquete?: { url: string; pathStorage: string }
+    fotoTicket?: { url: string; pathStorage: string }
+    sinTicket?: boolean
+    busNombre?: string | null
+    busNumero?: string | null
+    busCelular?: string | null
+    horaLlegadaDestino?: string | null
+    costoFlete?: number | null
+  }
+  evidenciasCargotrans?: {
+    fotos?: Array<{ url: string; pathStorage: string }>
+    factura?: { url: string; pathStorage: string }
+    costoCargotrans?: number | null
+  }
   rechazo?: {
     motivoTexto?: string
     detalle?: string | null
     rechazadoAt?: any
     visibleParaComercio?: boolean
+  }
+  cobroDelivery?: {
+    estado?: string
+    boucherUrl?: string
+    boucherAt?: any
+    subidoPor?: string
+    pagadoAt?: any
+    monto?: number
   }
 }
 
@@ -160,25 +201,87 @@ export default function OrdenDetallePage() {
       {/* Ruta */}
       <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-4">
         <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wide">Ruta</h2>
-        {[
-          { tipo: 'Retiro', color: 'bg-yellow-400', data: orden.recoleccion },
-          { tipo: 'Entrega', color: 'bg-green-500', data: orden.entrega },
-        ].map(({ tipo, color, data }) => (
-          <div key={tipo} className="flex items-start gap-3">
-            <div className={`w-3 h-3 rounded-full ${color} mt-1.5 flex-shrink-0`} />
+        {/* Retiro — siempre igual */}
+        <div className="flex items-start gap-3">
+          <div className="w-3 h-3 rounded-full bg-yellow-400 mt-1.5 flex-shrink-0" />
+          <div>
+            <p className="text-xs font-bold text-gray-500 uppercase">Retiro</p>
+            <p className="text-sm font-semibold text-gray-900">{orden.recoleccion?.nombreApellido || '—'}</p>
+            {orden.recoleccion?.celular && <p className="text-sm text-gray-500">{orden.recoleccion.celular}</p>}
+            <p className="text-sm text-gray-600">{orden.recoleccion?.direccionEscrita || '—'}</p>
+            {orden.recoleccion?.nota && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 mt-1">
+                📝 {orden.recoleccion.nota}
+              </p>
+            )}
+          </div>
+        </div>
+        {/* Entrega — normal o punto logístico */}
+        {orden.tipoServicio === 'fuera_managua' && orden.fueraManagua ? (
+          <div className="flex items-start gap-3">
+            <div className="w-3 h-3 rounded-full bg-violet-500 mt-1.5 flex-shrink-0" />
             <div>
-              <p className="text-xs font-bold text-gray-500 uppercase">{tipo}</p>
-              <p className="text-sm font-semibold text-gray-900">{data?.nombreApellido || '—'}</p>
-              {data?.celular && <p className="text-sm text-gray-500">{data.celular}</p>}
-              <p className="text-sm text-gray-600">{data?.direccionEscrita || '—'}</p>
-              {data?.nota && (
+              <p className="text-xs font-bold text-gray-500 uppercase">
+                {orden.fueraManagua.metodoEnvio === 'cargotrans' ? 'Sucursal Cargotrans' : 'Terminal / Bus'}
+              </p>
+              <p className="text-sm font-semibold text-gray-900">
+                {orden.fueraManagua.puntoLogisticoNombre || orden.fueraManagua.terminalSugerida || '—'}
+              </p>
+              {orden.fueraManagua.direccionPuntoLogistico && (
+                <p className="text-sm text-gray-600">📌 {orden.fueraManagua.direccionPuntoLogistico}</p>
+              )}
+              {orden.fueraManagua.destinoFinal && (
+                <p className="text-sm text-violet-700 font-semibold">Destino: {orden.fueraManagua.destinoFinal}</p>
+              )}
+              {(orden.fueraManagua.horarioApertura || orden.fueraManagua.horarioCierre) && (
+                <p className="text-xs text-gray-500">🕐 {orden.fueraManagua.horarioApertura || '?'}–{orden.fueraManagua.horarioCierre || '?'}</p>
+              )}
+              {orden.fueraManagua.metodoEnvio === 'bus_terminal' && orden.fueraManagua.transporteNombre && (
+                <p className="text-xs text-gray-600 mt-1">🚌 Transporte: {orden.fueraManagua.transporteNombre}</p>
+              )}
+              {orden.fueraManagua.metodoEnvio === 'bus_terminal' && orden.fueraManagua.transporteHoraSalida && (
+                <p className="text-xs text-gray-600">⏰ Salida: {orden.fueraManagua.transporteHoraSalida}</p>
+              )}
+              {orden.fueraManagua.metodoEnvio === 'cargotrans' && orden.fueraManagua.cantidadPaquetes != null && (
+                <p className="text-xs text-gray-600">📦 Paquetes: {orden.fueraManagua.cantidadPaquetes}</p>
+              )}
+              {orden.fueraManagua.metodoEnvio === 'cargotrans' && orden.fueraManagua.pagoCargotrans && (
+                <p className="text-xs text-gray-600">
+                  {orden.fueraManagua.pagoCargotrans === 'efectivo_motorizado' ? '💵 Pago flete: Efectivo (motorizado adelanta)' : '🏦 Pago flete: Transferencia del comercio'}
+                </p>
+              )}
+              {orden.fueraManagua.metodoEnvio === 'cargotrans' && orden.fueraManagua.notaCargotrans && (
                 <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 mt-1">
-                  📝 {data.nota}
+                  📝 {orden.fueraManagua.notaCargotrans}
+                </p>
+              )}
+              {orden.fueraManagua.coordsPuntoLogistico && (
+                <a
+                  href={`https://www.google.com/maps?q=${orden.fueraManagua.coordsPuntoLogistico.lat},${orden.fueraManagua.coordsPuntoLogistico.lng}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-xs text-blue-700 font-semibold mt-1 underline"
+                >
+                  🗺️ Ver en Maps
+                </a>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-start gap-3">
+            <div className="w-3 h-3 rounded-full bg-green-500 mt-1.5 flex-shrink-0" />
+            <div>
+              <p className="text-xs font-bold text-gray-500 uppercase">Entrega</p>
+              <p className="text-sm font-semibold text-gray-900">{orden.entrega?.nombreApellido || '—'}</p>
+              {orden.entrega?.celular && <p className="text-sm text-gray-500">{orden.entrega.celular}</p>}
+              <p className="text-sm text-gray-600">{orden.entrega?.direccionEscrita || '—'}</p>
+              {orden.entrega?.nota && (
+                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 mt-1">
+                  📝 {orden.entrega.nota}
                 </p>
               )}
             </div>
           </div>
-        ))}
+        )}
         {orden.detalle && (
           <div className="pt-2 border-t border-gray-100">
             <p className="text-xs font-bold text-gray-500 uppercase mb-1">Instrucciones adicionales</p>
@@ -224,6 +327,46 @@ export default function OrdenDetallePage() {
             )}
           </div>
         </div>
+
+        {/* Boucher de transferencia */}
+        {orden.pagoDelivery?.quienPaga === 'transferencia' && (
+          <div className="py-3 border-b border-gray-100 space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold text-gray-900">Boucher de transferencia</p>
+                <p className={`text-xs mt-0.5 ${
+                  orden.cobroDelivery?.estado === 'pagado' ? 'text-green-600'
+                  : orden.cobroDelivery?.estado === 'en_revision_deposito' ? 'text-blue-600'
+                  : 'text-gray-400'
+                }`}>
+                  {orden.cobroDelivery?.estado === 'pagado' ? '✓ Pago confirmado'
+                  : orden.cobroDelivery?.estado === 'en_revision_deposito' ? '🔍 En revisión por el gestor'
+                  : '⏳ Pendiente — sube el boucher de tu transferencia'}
+                </p>
+              </div>
+              {orden.cobroDelivery?.boucherUrl && (
+                <a
+                  href={orden.cobroDelivery.boucherUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs font-semibold text-blue-600 hover:underline"
+                >
+                  Ver boucher →
+                </a>
+              )}
+            </div>
+            {orden.cobroDelivery?.boucherUrl && (
+              <a href={orden.cobroDelivery.boucherUrl} target="_blank" rel="noreferrer" className="block">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={orden.cobroDelivery.boucherUrl}
+                  alt="Boucher de transferencia"
+                  className="w-full max-h-40 object-contain rounded-xl border border-blue-100 bg-blue-50"
+                />
+              </a>
+            )}
+          </div>
+        )}
 
         {/* Producto CCE */}
         {orden.cobroContraEntrega?.aplica && (
@@ -315,6 +458,78 @@ export default function OrdenDetallePage() {
               </button>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Evidencias entrega bus/terminal */}
+      {orden.tipoServicio === 'fuera_managua' && orden.fueraManagua?.metodoEnvio === 'bus_terminal' && orden.evidenciasTerminal?.fotoPaquete && (
+        <div className="rounded-xl border border-violet-200 bg-violet-50 p-4 space-y-3">
+          <h2 className="text-xs font-bold text-violet-700 uppercase tracking-wide">📸 Fotos de entrega al bus</h2>
+          <div className="flex gap-3">
+            {orden.evidenciasTerminal.fotoPaquete && (
+              <button onClick={() => window.open(orden.evidenciasTerminal!.fotoPaquete!.url, '_blank')} className="flex flex-col items-center gap-1 flex-1">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={orden.evidenciasTerminal.fotoPaquete.url} alt="Paquete" className="w-full aspect-square object-cover rounded-xl border border-violet-200" loading="lazy" />
+                <span className="text-xs text-violet-700 font-medium">📦 Paquete</span>
+              </button>
+            )}
+            {orden.evidenciasTerminal.fotoTicket && (
+              <button onClick={() => window.open(orden.evidenciasTerminal!.fotoTicket!.url, '_blank')} className="flex flex-col items-center gap-1 flex-1">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={orden.evidenciasTerminal.fotoTicket.url} alt="Ticket" className="w-full aspect-square object-cover rounded-xl border border-violet-200" loading="lazy" />
+                <span className="text-xs text-violet-700 font-medium">🎫 Ticket</span>
+              </button>
+            )}
+            {orden.evidenciasTerminal.fotoBus && (
+              <button onClick={() => window.open(orden.evidenciasTerminal!.fotoBus!.url, '_blank')} className="flex flex-col items-center gap-1 flex-1">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={orden.evidenciasTerminal.fotoBus.url} alt="Bus" className="w-full aspect-square object-cover rounded-xl border border-violet-200" loading="lazy" />
+                <span className="text-xs text-violet-700 font-medium">🚌 Bus</span>
+              </button>
+            )}
+          </div>
+          {orden.evidenciasTerminal.sinTicket && (
+            <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-1.5">
+              <p className="text-xs font-bold text-amber-700">Sin ticket — datos del transporte</p>
+              {orden.evidenciasTerminal.busNombre && <p className="text-sm text-gray-800"><span className="text-xs text-gray-500">Bus/empresa: </span>{orden.evidenciasTerminal.busNombre}</p>}
+              {orden.evidenciasTerminal.busNumero && <p className="text-sm text-gray-800"><span className="text-xs text-gray-500">Número/placa: </span>{orden.evidenciasTerminal.busNumero}</p>}
+              {orden.evidenciasTerminal.busCelular && <p className="text-sm text-gray-800"><span className="text-xs text-gray-500">Celular cobrador: </span>{orden.evidenciasTerminal.busCelular}</p>}
+              {orden.evidenciasTerminal.horaLlegadaDestino && <p className="text-sm text-gray-800"><span className="text-xs text-gray-500">Llega a destino: </span>{orden.evidenciasTerminal.horaLlegadaDestino}</p>}
+              {orden.evidenciasTerminal.costoFlete != null && <p className="text-sm text-gray-800"><span className="text-xs text-gray-500">Costo flete: </span>C$ {orden.evidenciasTerminal.costoFlete}</p>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Evidencias entrega Cargotrans */}
+      {orden.tipoServicio === 'fuera_managua' && orden.fueraManagua?.metodoEnvio === 'cargotrans' && orden.evidenciasCargotrans && (
+        <div className="rounded-xl border border-violet-200 bg-violet-50 p-4 space-y-3">
+          <h2 className="text-xs font-bold text-violet-700 uppercase tracking-wide">📸 Fotos de entrega en Cargotrans</h2>
+          {(orden.evidenciasCargotrans.fotos ?? []).length > 0 && (
+            <div>
+              <p className="text-xs text-gray-500 mb-2">Paquetes ({orden.evidenciasCargotrans.fotos!.length})</p>
+              <div className="flex gap-2 flex-wrap">
+                {orden.evidenciasCargotrans.fotos!.map((f, i) => (
+                  <button key={i} onClick={() => window.open(f.url, '_blank')} className="flex flex-col items-center gap-1 w-24">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={f.url} alt={`Paquete ${i + 1}`} className="w-full aspect-square object-cover rounded-xl border border-violet-200" loading="lazy" />
+                    <span className="text-xs text-violet-700 font-medium">📦 #{i + 1}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {orden.evidenciasCargotrans.factura && (
+            <button onClick={() => window.open(orden.evidenciasCargotrans!.factura!.url, '_blank')} className="inline-flex items-center gap-1.5 text-sm text-indigo-700 font-semibold underline">
+              🧾 Ver factura
+            </button>
+          )}
+          {orden.evidenciasCargotrans.costoCargotrans != null && (
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-gray-500">Costo pagado en Cargotrans:</span>
+              <span className="font-bold text-violet-700">C$ {orden.evidenciasCargotrans.costoCargotrans}</span>
+            </div>
+          )}
         </div>
       )}
 

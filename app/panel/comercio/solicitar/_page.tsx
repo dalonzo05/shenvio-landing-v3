@@ -250,12 +250,14 @@ function MiniMap({
   onGeocode,
   color = '#004aad',
   label = 'R',
+  locked = false,
 }: {
   coord: LatLng | null
   onSelect: (c: LatLng) => void
   onGeocode?: (addr: string) => void
   color?: string
   label?: string
+  locked?: boolean
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -265,9 +267,11 @@ function MiniMap({
   const onSelectRef = useRef(onSelect)
   const onGeocodeRef = useRef(onGeocode)
   const coordRef = useRef(coord)
+  const lockedRef = useRef(locked)
   useEffect(() => { onSelectRef.current = onSelect })
   useEffect(() => { onGeocodeRef.current = onGeocode })
   useEffect(() => { coordRef.current = coord })
+  useEffect(() => { lockedRef.current = locked })
 
   const reverseGeocode = useCallback((c: LatLng) => {
     geocoderRef.current?.geocode({ location: c }, (results, status) => {
@@ -278,6 +282,7 @@ function MiniMap({
   }, [])
 
   const placeMarker = useCallback((c: LatLng, goog: typeof google, geocodedAddr?: string) => {
+    if (lockedRef.current) return
     markerRef.current?.setMap(null)
     markerRef.current = new goog.maps.Marker({
       map: mapRef.current!,
@@ -287,6 +292,7 @@ function MiniMap({
       label: { text: label, color: '#fff', fontWeight: 'bold', fontSize: '11px' },
     })
     markerRef.current.addListener('dragend', () => {
+      if (lockedRef.current) { markerRef.current?.setPosition(coordRef.current!); return }
       const pos = markerRef.current?.getPosition()
       if (!pos) return
       const dc = { lat: pos.lat(), lng: pos.lng() }
@@ -344,6 +350,7 @@ function MiniMap({
           label: { text: label, color: '#fff', fontWeight: 'bold', fontSize: '11px' },
         })
         markerRef.current.addListener('dragend', () => {
+          if (lockedRef.current) { markerRef.current?.setPosition(coordRef.current!); return }
           const pos = markerRef.current?.getPosition()
           if (!pos) return
           const dc = { lat: pos.lat(), lng: pos.lng() }
@@ -353,7 +360,7 @@ function MiniMap({
       }
 
       mapRef.current.addListener('click', (e: google.maps.MapMouseEvent) => {
-        if (!e.latLng) return
+        if (lockedRef.current || !e.latLng) return
         const c = { lat: e.latLng.lat(), lng: e.latLng.lng() }
         placeMarker(c, google)
       })
@@ -389,16 +396,27 @@ function MiniMap({
 
   return (
     <div>
-      <input
-        ref={searchRef}
-        type="text"
-        placeholder="🔍 Buscar dirección en Google Maps..."
-        style={{ ...S.input, marginBottom: 8 }}
-      />
-      <div ref={containerRef} style={{ width: '100%', height: 220, borderRadius: 12, overflow: 'hidden', border: '1px solid #e5e7eb' }} />
-      <p style={{ fontSize: 11, color: '#9ca3af', margin: '5px 0 0' }}>
-        Tocá el mapa para marcar el punto exacto. Podés arrastrar el pin para ajustar.
-      </p>
+      {!locked && (
+        <input
+          ref={searchRef}
+          type="text"
+          placeholder="🔍 Buscar dirección en Google Maps..."
+          style={{ ...S.input, marginBottom: 8 }}
+        />
+      )}
+      <div style={{ position: 'relative' as const }}>
+        <div ref={containerRef} style={{ width: '100%', height: 220, borderRadius: 12, overflow: 'hidden', border: '1px solid #e5e7eb' }} />
+        {locked && (
+          <div style={{ position: 'absolute' as const, inset: 0, borderRadius: 12, background: 'rgba(0,0,0,0.18)', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' as const }}>
+            <span style={{ background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 11, fontWeight: 600, padding: '4px 10px', borderRadius: 20 }}>🔒 Punto de la cotización</span>
+          </div>
+        )}
+      </div>
+      {!locked && (
+        <p style={{ fontSize: 11, color: '#9ca3af', margin: '5px 0 0' }}>
+          Tocá el mapa para marcar el punto exacto. Podés arrastrar el pin para ajustar.
+        </p>
+      )}
     </div>
   )
 }
@@ -757,6 +775,8 @@ export default function SolicitarEnvioPage() {
   const [montoCE, setMontoCE] = useState<number | ''>('')
   const [quienPagaDelivery, setQuienPagaDelivery] = useState<QuienPagaDelivery>('')
   const [deducirDelivery, setDeducirDelivery] = useState<DeducirDelivery>('no_deducir')
+  type PagoCargotrans = 'efectivo_motorizado' | 'transferencia_comercio' | ''
+  const [pagoCargotrans, setPagoCargotrans] = useState<PagoCargotrans>('')
   const [detalle, setDetalle] = useState('')
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
@@ -910,18 +930,21 @@ export default function SolicitarEnvioPage() {
   // Reactive zone classification
   const [zonaInfo, setZonaInfo] = useState<{ retiroNombre: string | null; entregaNombre: string | null }>({ retiroNombre: null, entregaNombre: null })
   useEffect(() => {
-    if (!retiro.coord && !entrega.coord) { setZonaInfo({ retiroNombre: null, entregaNombre: null }); return }
+    const entregaCoordForZona = esFueraManagua && puntoLogisticoSeleccionado
+      ? puntoLogisticoSeleccionado.coord
+      : entrega.coord || null
+    if (!retiro.coord && !entregaCoordForZona) { setZonaInfo({ retiroNombre: null, entregaNombre: null }); return }
     let cancelled = false
     getZonasActivas().then(zonasActivas => {
       if (cancelled) return
-      const r = clasificarOrdenCompleto(retiro.coord || null, entrega.coord || null, zonasActivas)
+      const r = clasificarOrdenCompleto(retiro.coord || null, entregaCoordForZona, zonasActivas)
       setZonaInfo({
         retiroNombre: r.zonaRetiroNombre || r.macroZonaRetiroNombre || null,
         entregaNombre: r.zonaEntregaNombre || r.macroZonaEntregaNombre || null,
       })
     }).catch(() => {})
     return () => { cancelled = true }
-  }, [retiro.coord, entrega.coord])
+  }, [retiro.coord, entrega.coord, esFueraManagua, puntoLogisticoSeleccionado])
 
   const handleCalcular = async () => {
     const o = retiro.coord
@@ -964,21 +987,6 @@ export default function SolicitarEnvioPage() {
       ? puntoLogisticoSeleccionado.coord
       : entrega.coord
 
-  // Auto-calcular cuando el punto logístico se selecciona y hay retiro
-  useEffect(() => {
-    if (!esFueraManagua || !puntoLogisticoSeleccionado || !retiro.coord) return
-    const o = retiro.coord
-    const d = puntoLogisticoSeleccionado.coord
-    const key = `${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${d.lat.toFixed(5)},${d.lng.toFixed(5)}`
-    if (key === lastCalcKey.current && calcResult) return
-    lastCalcKey.current = key
-    setCalcLoading(true)
-    setCalcError(null)
-    calcularDistancia(o, d)
-      .then(result => { if (result) setCalcResult(result) })
-      .catch(() => {})
-      .finally(() => setCalcLoading(false))
-  }, [puntoLogisticoSeleccionado, retiro.coord, esFueraManagua])
 
   useEffect(() => {
     if (!puntosFavoritos.length) return
@@ -1041,7 +1049,16 @@ export default function SolicitarEnvioPage() {
       coord: c.coord || null,
       tipoUbicacion: c.tipoUbicacion || 'referencial',
     })
+    if (c.coord) { setCalcResult(null); lastCalcKey.current = null }
   }
+
+  useEffect(() => {
+    if (esFueraManagua) {
+      setCobroCE(false)
+      if (quienPagaDelivery === 'entrega') setQuienPagaDelivery('')
+    }
+    if (!esFueraManagua || metodoFueraManagua !== 'cargotrans') setPagoCargotrans('')
+  }, [esFueraManagua, metodoFueraManagua])
 
   // ── Validation ──
   const camposFaltantes = useMemo(() => {
@@ -1056,7 +1073,8 @@ export default function SolicitarEnvioPage() {
       else if (!validarCelular(entrega.celular)) f.push('Celular de entrega — 8 dígitos')
       if (!entrega.direccion.trim()) f.push('Dirección de entrega')
     }
-    if (cobroCE && (montoCE === '' || Number(montoCE) <= 0)) f.push('Monto del cobro contra entrega')
+    if (!esFueraManagua && cobroCE && (montoCE === '' || Number(montoCE) <= 0)) f.push('Monto del cobro contra entrega')
+    if (esFueraManagua && metodoFueraManagua === 'cargotrans' && !pagoCargotrans) f.push('Forma de pago del flete de Cargotrans')
     if (tipoCliente === 'contado' && !quienPagaDelivery) f.push('Quién paga el delivery')
     if (esProgramado && (tipoProgramado === 'retiro' || tipoProgramado === 'ambos') && !fechaRetiro) f.push('Fecha de retiro programado')
     if (esProgramado && (tipoProgramado === 'entrega' || tipoProgramado === 'ambos') && !fechaEntrega) f.push('Fecha de entrega programada')
@@ -1065,7 +1083,7 @@ export default function SolicitarEnvioPage() {
       else if (!puntoLogisticoSeleccionado) f.push('Seleccioná la terminal de buses')
     }
     return f
-  }, [retiro, entrega, cobroCE, montoCE, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega, esFueraManagua, metodoFueraManagua, destinoFinal, puntoLogisticoSeleccionado])
+  }, [retiro, entrega, cobroCE, montoCE, pagoCargotrans, tipoCliente, quienPagaDelivery, esProgramado, tipoProgramado, fechaRetiro, fechaEntrega, esFueraManagua, metodoFueraManagua, destinoFinal, puntoLogisticoSeleccionado])
 
   const formularioCompleto = camposFaltantes.length === 0
 
@@ -1085,17 +1103,32 @@ export default function SolicitarEnvioPage() {
       return entrega.nombre.trim() !== '' && validarCelular(entrega.celular) && entrega.direccion.trim() !== ''
     }
     if (desde === 3) {
+      if (esFueraManagua && metodoFueraManagua === 'cargotrans' && !pagoCargotrans) return false
       if (tipoCliente === 'credito') return true
       return quienPagaDelivery !== ''
     }
     return true
   }
 
-  const handleSiguiente = () => {
-    if (puedeAvanzar(paso)) {
-      setPaso(p => Math.min(p + 1, 4))
-      window.scrollTo({ top: 0, behavior: 'smooth' })
+  const handleSiguiente = async () => {
+    if (!puedeAvanzar(paso)) return
+    if (paso === 2 && esFueraManagua && puntoLogisticoSeleccionado && retiro.coord) {
+      const o = retiro.coord
+      const d = puntoLogisticoSeleccionado.coord
+      const key = `${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${d.lat.toFixed(5)},${d.lng.toFixed(5)}`
+      if (key !== lastCalcKey.current || !calcResult) {
+        lastCalcKey.current = key
+        setCalcLoading(true)
+        setCalcError(null)
+        try {
+          const result = await calcularDistancia(o, d)
+          if (result) setCalcResult(result)
+        } catch {}
+        setCalcLoading(false)
+      }
     }
+    setPaso(p => Math.min(p + 1, 4))
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   const handleAtras = () => {
@@ -1136,7 +1169,11 @@ export default function SolicitarEnvioPage() {
         zonaEntregaId, zonaEntregaNombre,
         macroZonaRetiroId, macroZonaRetiroNombre,
         macroZonaEntregaId, macroZonaEntregaNombre,
-      } = clasificarOrdenCompleto(retiro.coord || null, entrega.coord || null, zonasActivas)
+      } = clasificarOrdenCompleto(
+        retiro.coord || null,
+        esFueraManagua && puntoLogisticoSeleccionado ? puntoLogisticoSeleccionado.coord : entrega.coord || null,
+        zonasActivas
+      )
 
       const recargoFinal = calcularRecargoZona(
         zonaRetiroNombre ?? macroZonaRetiroNombre ?? null,
@@ -1189,7 +1226,7 @@ export default function SolicitarEnvioPage() {
           puntoGoogleTipo: entrega.tipoUbicacion,
           notaMotorizado: notaEntrega.trim() || null,
         },
-        cobroContraEntrega: { aplica: cobroCE, monto: cobroCE ? Number(montoCE) : 0 },
+        cobroContraEntrega: { aplica: esFueraManagua ? false : cobroCE, monto: esFueraManagua ? 0 : (cobroCE ? Number(montoCE) : 0) },
         pagoDelivery: tipoCliente === 'credito'
           ? { tipo: 'credito_semanal', quienPaga: 'credito_semanal', montoSugerido: precioEfectivo }
           : { tipo: 'contado', quienPaga: quienPagaDelivery, montoSugerido: precioEfectivo, deducirDelCobroContraEntrega: deducirAplica },
@@ -1231,6 +1268,10 @@ export default function SolicitarEnvioPage() {
             puntoLogisticoNombre: puntoLogisticoSeleccionado?.nombre ?? null,
             puntoLogisticoTipo: puntoLogisticoSeleccionado?.tipo ?? null,
             coordsPuntoLogistico: puntoLogisticoSeleccionado?.coord ?? null,
+            direccionPuntoLogistico: puntoLogisticoSeleccionado?.direccion ?? null,
+            horarioApertura: puntoLogisticoSeleccionado?.horarioApertura ?? null,
+            horarioCierre: puntoLogisticoSeleccionado?.horarioCierre ?? null,
+            notaPuntoLogistico: puntoLogisticoSeleccionado?.notas ?? null,
             ...(metodoFueraManagua === 'bus_terminal' ? {
               terminalSugerida: puntoLogisticoSeleccionado?.nombre ?? null,
               transporteNombre: transporteNombre.trim() || null,
@@ -1240,6 +1281,7 @@ export default function SolicitarEnvioPage() {
             } : {
               cantidadPaquetes: Number(cantidadPaquetes) || 1,
               notaCargotrans: notaCargotrans.trim() || null,
+              pagoCargotrans: pagoCargotrans || null,
             }),
           },
         } : {}),
@@ -1472,7 +1514,30 @@ export default function SolicitarEnvioPage() {
                 <button
                   key={String(opt.val)}
                   type="button"
-                  onClick={() => { setEsFueraManagua(opt.val); if (opt.val) setEntrega(blankEntrega()) }}
+                  onClick={() => {
+                    if (opt.val === esFueraManagua) return
+                    if (opt.val) {
+                      // → Fuera de Managua
+                      if (entrega.coord || entrega.nombre || calcResult || draft) {
+                        const ok = window.confirm('¿Cambiar a envío fuera de Managua?\n\nSe borrará el punto de entrega y la cotización. Tendrás que empezar de nuevo.')
+                        if (!ok) return
+                      }
+                      setCalcResult(null); lastCalcKey.current = null
+                      setDraft(null); try { sessionStorage.removeItem('draftEnvio') } catch {}
+                      setEntrega(blankEntrega())
+                    } else {
+                      // → Dentro de Managua
+                      if (destinoFinal || puntoLogisticoSeleccionado) {
+                        const ok = window.confirm('¿Volver a envío dentro de Managua?\n\nSe borrará la información del envío fuera de Managua. Tendrás que empezar de nuevo.')
+                        if (!ok) return
+                      }
+                      setDestinoFinal(''); setMetodoFueraManagua('bus_terminal'); setShowDetallesTransporte(false)
+                      setTransporteNombre(''); setTransporteCelular(''); setTransporteHoraSalida(''); setTransporteNota('')
+                      setCantidadPaquetes('1'); setNotaCargotrans(''); setPuntoLogisticoSeleccionado(null)
+                      setTerminalesSugeridas([]); setPagoCargotrans('')
+                    }
+                    setEsFueraManagua(opt.val)
+                  }}
                   style={{ flex: 1, textAlign: 'left' as const, padding: '12px 14px', borderRadius: 12, cursor: 'pointer', border: `2px solid ${esFueraManagua === opt.val ? (opt.val ? '#7c3aed' : '#004aad') : '#e5e7eb'}`, background: esFueraManagua === opt.val ? (opt.val ? '#f5f3ff' : '#eff6ff') : '#fff' }}
                 >
                   <p style={{ fontSize: 13, fontWeight: 700, color: esFueraManagua === opt.val ? (opt.val ? '#7c3aed' : '#004aad') : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
@@ -1538,15 +1603,34 @@ export default function SolicitarEnvioPage() {
             </Field>
 
             <div>
-              <label style={{ ...S.label, marginBottom: 8 }}>
-                Ubicación en el mapa
-                {entrega.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
-              </label>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <label style={{ ...S.label, marginBottom: 0 }}>
+                  Ubicación en el mapa
+                  {entrega.coord && <span style={{ color: '#16a34a', fontWeight: 700, marginLeft: 8 }}>✓ Marcada</span>}
+                </label>
+                {(calcResult || draft) && entrega.coord && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const ok = window.confirm('¿Cambiar el punto de entrega?\n\nSe perderá el precio y la distancia de la cotización. Tendrás que calcular de nuevo.')
+                      if (!ok) return
+                      setCalcResult(null)
+                      lastCalcKey.current = null
+                      setDraft(null)
+                      try { sessionStorage.removeItem('draftEnvio') } catch {}
+                    }}
+                    style={{ fontSize: 11, fontWeight: 600, color: '#d97706', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8, padding: '4px 10px', cursor: 'pointer' }}
+                  >
+                    ✏️ Cambiar punto
+                  </button>
+                )}
+              </div>
               <MiniMap
                 coord={entrega.coord}
                 color="#16a34a"
                 label="E"
-                onSelect={(c) => setEntrega(prev => ({ ...prev, coord: c }))}
+                locked={!!(calcResult || draft)}
+                onSelect={(c) => { setEntrega(prev => ({ ...prev, coord: c })); setCalcResult(null); lastCalcKey.current = null }}
                 onGeocode={(addr) => setGeoEntrega(addr)}
               />
             </div>
@@ -1817,22 +1901,50 @@ export default function SolicitarEnvioPage() {
           </div>
 
           <SectionCard title="Pagos" icon="💰">
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                <button type="button" onClick={() => setCobroCE(!cobroCE)} style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${cobroCE ? '#004aad' : '#d1d5db'}`, background: cobroCE ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
-                  {cobroCE && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
-                </button>
-                <label style={{ fontSize: 14, fontWeight: 600, color: '#111827', cursor: 'pointer' }} onClick={() => setCobroCE(!cobroCE)}>
-                  Hay cobro contra entrega (el motorizado cobra el producto)
-                </label>
-              </div>
-              {cobroCE && (
-                <div style={{ marginLeft: 30 }}>
-                  <label style={S.label}>Monto del producto (C$) <span style={{ color: '#dc2626' }}>*</span></label>
-                  <input type="number" value={montoCE} onChange={e => setMontoCE(e.target.value === '' ? '' : Number(e.target.value))} placeholder="Ej: 1500" style={{ ...S.input, maxWidth: 200 }} />
+            {!esFueraManagua && (
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                  <button type="button" onClick={() => setCobroCE(!cobroCE)} style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${cobroCE ? '#004aad' : '#d1d5db'}`, background: cobroCE ? '#004aad' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
+                    {cobroCE && <span style={{ color: '#fff', fontSize: 12, fontWeight: 900 }}>✓</span>}
+                  </button>
+                  <label style={{ fontSize: 14, fontWeight: 600, color: '#111827', cursor: 'pointer' }} onClick={() => setCobroCE(!cobroCE)}>
+                    Hay cobro contra entrega (el motorizado cobra el producto)
+                  </label>
                 </div>
-              )}
-            </div>
+                {cobroCE && (
+                  <div style={{ marginLeft: 30 }}>
+                    <label style={S.label}>Monto del producto (C$) <span style={{ color: '#dc2626' }}>*</span></label>
+                    <input type="number" value={montoCE} onChange={e => setMontoCE(e.target.value === '' ? '' : Number(e.target.value))} placeholder="Ej: 1500" style={{ ...S.input, maxWidth: 200 }} />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {esFueraManagua && metodoFueraManagua === 'cargotrans' && (
+              <div>
+                <label style={S.label}>¿Cómo se paga el flete de Cargotrans? <span style={{ color: '#dc2626' }}>*</span></label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {([
+                    { value: 'efectivo_motorizado', label: '💵 El comercio entrega el efectivo al motorizado', desc: 'El motorizado recibirá el efectivo y pagará en Cargotrans al llegar.' },
+                    { value: 'transferencia_comercio', label: '📲 El comercio transfiere directamente a Cargotrans', desc: 'Cuando estemos llegando al punto te avisaremos para que realices la transferencia a las cuentas de Cargotrans.' },
+                  ] as { value: PagoCargotrans; label: string; desc: string }[]).map(opt => (
+                    <button key={opt.value} type="button" onClick={() => setPagoCargotrans(opt.value)}
+                      style={{ textAlign: 'left' as const, padding: '12px 14px', borderRadius: 10, cursor: 'pointer', border: `1px solid ${pagoCargotrans === opt.value ? '#004aad' : '#e5e7eb'}`, background: pagoCargotrans === opt.value ? '#eff6ff' : '#fff' }}>
+                      <p style={{ fontSize: 13, fontWeight: 700, color: pagoCargotrans === opt.value ? '#004aad' : '#111827', margin: '0 0 2px' }}>{opt.label}</p>
+                      <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>{opt.desc}</p>
+                    </button>
+                  ))}
+                </div>
+                {pagoCargotrans === 'transferencia_comercio' && (
+                  <div style={{ marginTop: 10, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 10, padding: '12px 14px' }}>
+                    <p style={{ fontSize: 13, fontWeight: 700, color: '#d46b08', margin: '0 0 4px' }}>⚠️ Importante</p>
+                    <p style={{ fontSize: 12, color: '#92400e', margin: 0, lineHeight: 1.5 }}>
+                      Cuando el motorizado esté llegando al punto de Cargotrans, te notificaremos para que realices la transferencia a las cuentas indicadas. Asegurate de estar pendiente del aviso.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
 
             {tipoCliente === 'credito' ? (
               <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '12px 14px' }}>
@@ -1845,7 +1957,7 @@ export default function SolicitarEnvioPage() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {[
                     { value: 'recoleccion', label: '🏁 Se paga en la recolección', desc: 'El motorizado cobra el delivery al retirar' },
-                    { value: 'entrega', label: '🏠 Lo paga el destinatario (entrega)', desc: 'El motorizado cobra el delivery al entregar' },
+                    ...(!esFueraManagua ? [{ value: 'entrega', label: '🏠 Lo paga el destinatario (entrega)', desc: 'El motorizado cobra el delivery al entregar' }] : []),
                     { value: 'transferencia', label: '🏦 Ya se pagó por transferencia', desc: 'El delivery fue pagado previamente' },
                   ].map(opt => (
                     <button key={opt.value} type="button" onClick={() => setQuienPagaDelivery(opt.value as QuienPagaDelivery)} style={{ textAlign: 'left' as const, padding: '12px 14px', borderRadius: 10, cursor: 'pointer', border: `1px solid ${quienPagaDelivery === opt.value ? '#004aad' : '#e5e7eb'}`, background: quienPagaDelivery === opt.value ? '#eff6ff' : '#fff' }}>
@@ -1863,15 +1975,19 @@ export default function SolicitarEnvioPage() {
                           value: 'no_deducir',
                           label: 'No deducir',
                           desc: montoCE !== '' && montoDelivery > 0
-                            ? `El destinatario pagará C$ ${montoProducto + montoDelivery} (producto + delivery). Se te depositará C$ ${montoProducto}.`
-                            : 'El destinatario paga el producto y el delivery por separado. Se te deposita el monto del producto.',
+                            ? `Destinatario paga C$ ${montoProducto} (producto) + C$ ${montoDelivery} (delivery) = C$ ${montoProducto + montoDelivery}. Se te deposita C$ ${montoProducto}.`
+                            : montoCE !== ''
+                              ? `Destinatario paga C$ ${montoProducto} (producto) + delivery por separado. Se te deposita C$ ${montoProducto}.`
+                              : 'Destinatario paga producto + delivery por separado. Se te deposita el monto del producto.',
                         },
                         {
                           value: 'deducir_del_cobro',
                           label: 'Sí, deducir',
                           desc: montoCE !== '' && montoDelivery > 0
-                            ? `El destinatario paga solo C$ ${montoProducto} (el delivery sale de ahí). Se te depositará C$ ${Math.max(montoProducto - montoDelivery, 0)}.`
-                            : 'El costo del delivery se descuenta del cobro del producto. El destinatario paga menos.',
+                            ? `Destinatario paga solo C$ ${montoProducto}. El delivery (C$ ${montoDelivery}) sale de ahí. Se te deposita C$ ${Math.max(montoProducto - montoDelivery, 0)}.`
+                            : montoCE !== ''
+                              ? `Destinatario paga solo C$ ${montoProducto}. El delivery sale de ahí. Se te deposita C$ ${montoProducto} − delivery.`
+                              : 'El delivery se descuenta del cobro. El destinatario paga menos y vos recibís menos.',
                         },
                       ] as { value: string; label: string; desc: string }[]).map(opt => (
                         <button
@@ -2189,6 +2305,86 @@ export default function SolicitarEnvioPage() {
             </div>
           </div>
 
+          {/* Condiciones de pago */}
+          <div style={{ ...S.sectionCard, background: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: 16 }}>
+            <p style={{ fontSize: 13, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Condiciones de pago</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {/* Tipo de cliente */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 13, color: '#6b7280' }}>Tipo de cliente</span>
+                <span style={{
+                  fontSize: 12, fontWeight: 700, padding: '3px 10px', borderRadius: 8,
+                  background: tipoCliente === 'credito' ? '#f5f3ff' : '#f1f5f9',
+                  color: tipoCliente === 'credito' ? '#7c3aed' : '#374151',
+                  border: `1px solid ${tipoCliente === 'credito' ? '#ddd6fe' : '#e2e8f0'}`,
+                }}>
+                  {tipoCliente === 'credito' ? '🗓 Crédito semanal' : '💵 Contado'}
+                </span>
+              </div>
+
+              {/* Quien paga el delivery (contado) */}
+              {tipoCliente === 'contado' && quienPagaDelivery && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 13, color: '#6b7280' }}>Pago delivery</span>
+                  <span style={{
+                    fontSize: 12, fontWeight: 700, padding: '3px 10px', borderRadius: 8,
+                    background: quienPagaDelivery === 'transferencia' ? '#eff6ff' : quienPagaDelivery === 'recoleccion' ? '#f0fdf4' : '#fff7ed',
+                    color: quienPagaDelivery === 'transferencia' ? '#1d4ed8' : quienPagaDelivery === 'recoleccion' ? '#15803d' : '#c2410c',
+                    border: `1px solid ${quienPagaDelivery === 'transferencia' ? '#bfdbfe' : quienPagaDelivery === 'recoleccion' ? '#bbf7d0' : '#fed7aa'}`,
+                  }}>
+                    {quienPagaDelivery === 'recoleccion' && '🟢 Al retiro'}
+                    {quienPagaDelivery === 'entrega' && '🟠 En entrega'}
+                    {quienPagaDelivery === 'transferencia' && '🔵 Transferencia bancaria'}
+                  </span>
+                </div>
+              )}
+
+              {/* Descripción del modo de pago */}
+              {tipoCliente === 'contado' && quienPagaDelivery && (
+                <p style={{ fontSize: 12, color: '#6b7280', margin: 0, paddingLeft: 0 }}>
+                  {quienPagaDelivery === 'recoleccion' && 'El comercio le paga el delivery al motorizado al retirar el paquete.'}
+                  {quienPagaDelivery === 'entrega' && (deducirDelivery === 'deducir_del_cobro' && cobroCE
+                    ? 'El motorizado cobra al destinatario y descuenta el delivery del monto del producto.'
+                    : 'El destinatario paga el delivery directamente al motorizado al recibir.')}
+                  {quienPagaDelivery === 'transferencia' && 'El comercio realiza una transferencia bancaria a Storkhub por el monto del delivery.'}
+                </p>
+              )}
+
+              {/* Cobro contra entrega */}
+              {cobroCE && montoCE !== '' && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid #e2e8f0', paddingTop: 8, marginTop: 2 }}>
+                  <span style={{ fontSize: 13, color: '#6b7280' }}>Cobro contra entrega</span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed' }}>C$ {montoProducto}</span>
+                </div>
+              )}
+              {cobroCE && tipoCliente === 'contado' && quienPagaDelivery === 'entrega' && montoDelivery > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 12, color: '#6b7280' }}>
+                    {deducirDelivery === 'deducir_del_cobro' ? 'Delivery deducido del cobro' : 'Delivery se cobra aparte'}
+                  </span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: deducirDelivery === 'deducir_del_cobro' ? '#d97706' : '#6b7280' }}>
+                    {deducirDelivery === 'deducir_del_cobro' ? `− C$ ${montoDelivery}` : `+ C$ ${montoDelivery}`}
+                  </span>
+                </div>
+              )}
+
+              {/* Pago flete Cargotrans */}
+              {esFueraManagua && metodoFueraManagua === 'cargotrans' && pagoCargotrans && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid #e2e8f0', paddingTop: 8, marginTop: 2 }}>
+                  <span style={{ fontSize: 13, color: '#6b7280' }}>Flete Cargotrans</span>
+                  <span style={{
+                    fontSize: 12, fontWeight: 700, padding: '3px 10px', borderRadius: 8,
+                    background: pagoCargotrans === 'transferencia_comercio' ? '#eff6ff' : '#f0fdf4',
+                    color: pagoCargotrans === 'transferencia_comercio' ? '#1d4ed8' : '#15803d',
+                    border: `1px solid ${pagoCargotrans === 'transferencia_comercio' ? '#bfdbfe' : '#bbf7d0'}`,
+                  }}>
+                    {pagoCargotrans === 'efectivo_motorizado' ? '💵 Efectivo (comercio → motorizado)' : '🔵 Transferencia comercio'}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* Campos faltantes */}
           {!formularioCompleto && (
             <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 14, padding: '14px 16px', marginBottom: 16 }}>
@@ -2214,6 +2410,7 @@ export default function SolicitarEnvioPage() {
         puedeAvanzar={puedeAvanzar(paso)}
         formularioCompleto={formularioCompleto}
         saving={saving}
+        loading={calcLoading && paso === 2 && esFueraManagua}
         onAtras={handleAtras}
         onSiguiente={handleSiguiente}
         onGuardar={handleGuardar}
