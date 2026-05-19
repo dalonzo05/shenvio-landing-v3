@@ -1840,44 +1840,87 @@ export default function GestorSolicitudesPage() {
                         </td>
 
                         <td className="px-3 py-2 border-r border-gray-100 overflow-hidden">
-                          <div className="text-xs font-medium text-gray-900 truncate">{s.entrega.nombreApellido || '—'}</div>
-                          <div className="text-[11px] text-gray-600 mt-0.5 flex items-center gap-1 min-w-0">
-                            <span className="truncate shrink">{s.entrega.celular}</span>
-                            {s.cobroContraEntrega?.aplica && (
-                              <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
-                                <Wallet className="h-2.5 w-2.5" />{money(s.cobroContraEntrega.monto)}
-                              </span>
-                            )}
-                            {quienPagaDelivery === 'entrega' && deliveryPrice !== null && (
-                              <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-blue-50 border border-blue-200 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">
-                                <Truck className="h-2.5 w-2.5" />{money(deliveryPrice)}
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-[11px] text-gray-500 mt-0.5 truncate" title={s.entrega.direccionEscrita}>{s.entrega.direccionEscrita}</div>
-                          {(s.macroZonaEntregaNombre || s.zonaEntregaNombre) && (
-                            <div className="flex flex-wrap gap-1 mt-0.5">
-                              {s.macroZonaEntregaNombre && (
-                                <span className="inline-flex items-center rounded-full bg-violet-50 border border-violet-200 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">
-                                  {s.macroZonaEntregaNombre}
-                                </span>
+                          {s.tipoServicio === 'fuera_managua' && s.fueraManagua ? (
+                            <>
+                              <div className="text-xs font-medium text-violet-700 truncate">
+                                {s.fueraManagua.metodoEnvio === 'cargotrans' ? '📦 Cargotrans' : '🚌 Terminal / Bus'}
+                              </div>
+                              {s.fueraManagua.puntoLogisticoNombre && (
+                                <div className="text-[11px] font-semibold text-gray-900 truncate">{s.fueraManagua.puntoLogisticoNombre}</div>
                               )}
-                              {s.zonaEntregaNombre && (
-                                <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
-                                  {s.zonaEntregaNombre}
-                                </span>
+                              {s.fueraManagua.destinoFinal && (
+                                <div className="text-[11px] text-gray-500 truncate">Destino: {s.fueraManagua.destinoFinal}</div>
                               )}
-                            </div>
-                          )}
-                          {entregaMaps && (
-                            <div className="mt-1 flex gap-1">
-                              <a href={entregaMaps} target="_blank" rel="noreferrer" title="Ver en Maps" className="rounded p-1 text-blue-600 bg-blue-50 hover:bg-blue-100 transition">
-                                <MapPin className="h-3 w-3" />
-                              </a>
-                              <button onClick={() => handleCopy(entregaMaps, 'Link entrega copiado')} title="Copiar link" className="rounded p-1 text-gray-500 bg-gray-100 hover:bg-gray-200 transition">
-                                <Copy className="h-3 w-3" />
-                              </button>
-                            </div>
+                              {s.fueraManagua.metodoEnvio === 'cargotrans' && (s.fueraManagua as any).cantidadPaquetes != null && (
+                                <div className="text-[11px] text-violet-700 font-semibold">📦 {(s.fueraManagua as any).cantidadPaquetes} paquete(s)</div>
+                              )}
+                              {(s.macroZonaEntregaNombre || s.zonaEntregaNombre) && (
+                                <div className="flex flex-wrap gap-1 mt-0.5">
+                                  {s.macroZonaEntregaNombre && (
+                                    <span className="inline-flex items-center rounded-full bg-violet-50 border border-violet-200 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">
+                                      {s.macroZonaEntregaNombre}
+                                    </span>
+                                  )}
+                                  {s.zonaEntregaNombre && (
+                                    <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
+                                      {s.zonaEntregaNombre}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                              {entregaMaps && (
+                                <div className="mt-1 flex gap-1">
+                                  <a href={entregaMaps} target="_blank" rel="noreferrer" title="Ver en Maps" className="rounded p-1 text-blue-600 bg-blue-50 hover:bg-blue-100 transition">
+                                    <MapPin className="h-3 w-3" />
+                                  </a>
+                                  <button onClick={() => handleCopy(entregaMaps, 'Link punto logístico copiado')} title="Copiar link" className="rounded p-1 text-gray-500 bg-gray-100 hover:bg-gray-200 transition">
+                                    <Copy className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <div className="text-xs font-medium text-gray-900 truncate">{s.entrega.nombreApellido || '—'}</div>
+                              <div className="text-[11px] text-gray-600 mt-0.5 flex items-center gap-1 min-w-0">
+                                <span className="truncate shrink">{s.entrega.celular}</span>
+                                {s.cobroContraEntrega?.aplica && (
+                                  <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                    <Wallet className="h-2.5 w-2.5" />{money(s.cobroContraEntrega.monto)}
+                                  </span>
+                                )}
+                                {quienPagaDelivery === 'entrega' && deliveryPrice !== null && (
+                                  <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-blue-50 border border-blue-200 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">
+                                    <Truck className="h-2.5 w-2.5" />{money(deliveryPrice)}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-gray-500 mt-0.5 truncate" title={s.entrega.direccionEscrita}>{s.entrega.direccionEscrita}</div>
+                              {(s.macroZonaEntregaNombre || s.zonaEntregaNombre) && (
+                                <div className="flex flex-wrap gap-1 mt-0.5">
+                                  {s.macroZonaEntregaNombre && (
+                                    <span className="inline-flex items-center rounded-full bg-violet-50 border border-violet-200 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">
+                                      {s.macroZonaEntregaNombre}
+                                    </span>
+                                  )}
+                                  {s.zonaEntregaNombre && (
+                                    <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
+                                      {s.zonaEntregaNombre}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                              {entregaMaps && (
+                                <div className="mt-1 flex gap-1">
+                                  <a href={entregaMaps} target="_blank" rel="noreferrer" title="Ver en Maps" className="rounded p-1 text-blue-600 bg-blue-50 hover:bg-blue-100 transition">
+                                    <MapPin className="h-3 w-3" />
+                                  </a>
+                                  <button onClick={() => handleCopy(entregaMaps, 'Link entrega copiado')} title="Copiar link" className="rounded p-1 text-gray-500 bg-gray-100 hover:bg-gray-200 transition">
+                                    <Copy className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              )}
+                            </>
                           )}
                         </td>
 

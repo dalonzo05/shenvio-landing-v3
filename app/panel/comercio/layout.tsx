@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import { auth, db } from '@/fb/config'
-import { doc, getDoc } from 'firebase/firestore'
+import { doc, getDoc, collection, onSnapshot, query, where } from 'firebase/firestore'
 import { useUser } from '@/app/Components/UserProvider'
 import {
   Home,
@@ -25,7 +25,10 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
   const [loading, setLoading] = useState(true)
   const [collapsed, setCollapsed] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [activeCount, setActiveCount] = useState(0)
   const { profile, signOut } = useUser()
+
+  const ESTADOS_ACTIVOS = ['pendiente_confirmacion', 'confirmada', 'asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega']
 
   useEffect(() => {
     const run = async () => {
@@ -44,6 +47,17 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
     }
     run()
   }, [router])
+
+  useEffect(() => {
+    const user = auth.currentUser
+    if (!user) return
+    const q = query(
+      collection(db, 'solicitudes_envio'),
+      where('userId', '==', user.uid),
+      where('estado', 'in', ESTADOS_ACTIVOS)
+    )
+    return onSnapshot(q, (snap) => setActiveCount(snap.size))
+  }, [])
 
   if (loading) return <div className="w-full px-6 py-6 text-sm text-gray-600">Cargando...</div>
 
@@ -78,7 +92,8 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
             <NavItem href="/panel/comercio" icon={<Home size={18} />} label="Inicio"
               active={pathname === '/panel/comercio'} collapsed={collapsed} />
             <NavItem href="/panel/comercio/mis-ordenes" icon={<Package size={18} />} label="Mis órdenes"
-              active={pathname.startsWith('/panel/comercio/mis-ordenes')} collapsed={collapsed} />
+              active={pathname.startsWith('/panel/comercio/mis-ordenes')} collapsed={collapsed}
+              badge={activeCount > 0 ? activeCount : undefined} />
             <NavItem href="/panel/comercio/depositos" icon={<Wallet size={18} />} label="Depósitos"
               active={pathname.startsWith('/panel/comercio/depositos')} collapsed={collapsed} />
             <NavItem href="/panel/comercio/solicitar" icon={<Send size={18} />} label="Solicitar envío"
@@ -117,7 +132,7 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
       {/* Bottom tab bar — solo móvil */}
       <div className="md:hidden fixed bottom-0 inset-x-0 z-50 bg-white border-t border-gray-200 flex items-stretch h-16">
         <BottomTab href="/panel/comercio" icon={<Home size={20} />} label="Inicio" active={pathname === '/panel/comercio'} />
-        <BottomTab href="/panel/comercio/mis-ordenes" icon={<Package size={20} />} label="Órdenes" active={pathname.startsWith('/panel/comercio/mis-ordenes')} />
+        <BottomTab href="/panel/comercio/mis-ordenes" icon={<Package size={20} />} label="Órdenes" active={pathname.startsWith('/panel/comercio/mis-ordenes')} badge={activeCount > 0 ? activeCount : undefined} />
         <BottomTab href="/panel/comercio/solicitar" icon={<Send size={20} />} label="Solicitar" active={pathname.startsWith('/panel/comercio/solicitar')} />
         <BottomTab href="/panel/comercio/calculadora" icon={<Calculator size={20} />} label="Calcular" active={pathname.startsWith('/panel/comercio/calculadora')} />
         <button
@@ -179,32 +194,54 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
   )
 }
 
-function NavItem({ href, icon, label, active, collapsed }: {
-  href: string; icon: React.ReactNode; label: string; active: boolean; collapsed: boolean
+function NavItem({ href, icon, label, active, collapsed, badge }: {
+  href: string; icon: React.ReactNode; label: string; active: boolean; collapsed: boolean; badge?: number
 }) {
   return (
     <Link
       href={href}
       title={collapsed ? label : undefined}
-      className={`flex items-center rounded-xl px-3 py-3 text-sm font-medium transition ${
+      className={`relative flex items-center rounded-xl px-3 py-3 text-sm font-medium transition ${
         active ? 'bg-[#004aad] text-white shadow-sm' : 'text-gray-700 hover:bg-gray-100'
       } ${collapsed ? 'justify-center' : 'gap-3'}`}
     >
-      <span className="shrink-0">{icon}</span>
-      {!collapsed && <span>{label}</span>}
+      <span className="relative shrink-0">
+        {icon}
+        {badge != null && collapsed && (
+          <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center">
+            <span className="absolute inset-0 rounded-full bg-orange-500 opacity-70" style={{ animation: 'pulse-ring 1.5s ease-out infinite' }} />
+            <span className="relative text-[9px] font-black text-white bg-orange-500 rounded-full h-4 w-4 flex items-center justify-center leading-none">{badge > 9 ? '9+' : badge}</span>
+          </span>
+        )}
+      </span>
+      {!collapsed && <span className="flex-1">{label}</span>}
+      {!collapsed && badge != null && (
+        <span className="relative flex h-5 min-w-[20px] items-center justify-center">
+          <span className="absolute inset-0 rounded-full bg-orange-500 opacity-60" style={{ animation: 'pulse-ring 1.5s ease-out infinite' }} />
+          <span className="relative text-[11px] font-black text-white bg-orange-500 rounded-full px-1.5 py-0.5 leading-none">{badge > 9 ? '9+' : badge}</span>
+        </span>
+      )}
     </Link>
   )
 }
 
-function BottomTab({ href, icon, label, active }: {
-  href: string; icon: React.ReactNode; label: string; active: boolean
+function BottomTab({ href, icon, label, active, badge }: {
+  href: string; icon: React.ReactNode; label: string; active: boolean; badge?: number
 }) {
   return (
     <Link
       href={href}
       className={`flex flex-1 flex-col items-center justify-center gap-1 transition-colors ${active ? 'text-[#004aad]' : 'text-gray-400'}`}
     >
-      {icon}
+      <span className="relative">
+        {icon}
+        {badge != null && (
+          <span className="absolute -top-1.5 -right-2 flex h-4 min-w-[16px] items-center justify-center">
+            <span className="absolute inset-0 rounded-full bg-orange-500 opacity-70" style={{ animation: 'pulse-ring 1.5s ease-out infinite' }} />
+            <span className="relative text-[9px] font-black text-white bg-orange-500 rounded-full px-1 leading-none h-4 flex items-center">{badge > 9 ? '9+' : badge}</span>
+          </span>
+        )}
+      </span>
       <span className={`text-[10px] font-semibold ${active ? 'text-[#004aad]' : 'text-gray-400'}`}>{label}</span>
     </Link>
   )

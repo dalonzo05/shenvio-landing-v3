@@ -357,6 +357,7 @@ export function SolicitudDrawer({
   const [ctransUploading, setCtransUploading] = useState(false)
   const [ctransErr, setCtransErr] = useState<string | null>(null)
   const [gastosOperativos, setGastosOperativos] = useState<(GastoMotorizado & { id: string })[]>([])
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
 
   useEffect(() => {
     const t = setInterval(() => setTick(Date.now()), 1000)
@@ -633,6 +634,28 @@ export function SolicitudDrawer({
 
   return (
     <>
+      {/* Lightbox */}
+      {lightboxUrl && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/85 backdrop-blur-sm p-4"
+          onClick={() => setLightboxUrl(null)}
+        >
+          <button
+            onClick={() => setLightboxUrl(null)}
+            className="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition text-white"
+          >
+            <X size={18} />
+          </button>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={lightboxUrl}
+            alt="Vista ampliada"
+            className="max-w-full max-h-[90vh] object-contain rounded-2xl shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
+
       {/* Overlay */}
       <div className="fixed inset-0 z-40 bg-black/25 backdrop-blur-[1px]" onClick={onClose} />
 
@@ -945,6 +968,43 @@ export function SolicitudDrawer({
                   <InfoRow label="Quién paga delivery" value={solicitud.tipoCliente === 'credito' ? 'Crédito semanal' : solicitud.pagoDelivery?.quienPaga} />
                   <InfoRow label="Creada" value={formatDateTime(solicitud.createdAt)} />
                 </div>
+                {/* Lógica de deducción delivery ↔ cobro producto */}
+                {solicitud.cobroContraEntrega?.aplica && solicitud.pagoDelivery?.quienPaga === 'entrega' && (() => {
+                  const montoProducto = solicitud.cobroContraEntrega.monto ?? 0
+                  const precioDelivery = solicitud.confirmacion?.precioFinalCordobas ?? solicitud.pagoDelivery?.montoSugerido ?? 0
+                  const deducir = solicitud.pagoDelivery.deducirDelCobroContraEntrega === true
+                  const clientePaga = deducir ? montoProducto : montoProducto + precioDelivery
+                  const deposito = deducir ? Math.max(montoProducto - precioDelivery, 0) : montoProducto
+                  return (
+                    <div className={`mt-3 rounded-xl border p-3 space-y-2 ${deducir ? 'bg-orange-50 border-orange-200' : 'bg-blue-50 border-blue-200'}`}>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[10px] font-black uppercase tracking-wide ${deducir ? 'text-orange-700' : 'text-blue-700'}`}>
+                          {deducir ? 'Delivery deducido del cobro' : 'Delivery cobrado aparte'}
+                        </span>
+                        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${deducir ? 'bg-orange-200 text-orange-800' : 'bg-blue-200 text-blue-800'}`}>
+                          {deducir ? 'Incluido en el cobro' : 'Cobro adicional'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        <div className="rounded-lg bg-white border border-gray-200 p-2">
+                          <p className="text-[9px] font-bold uppercase text-gray-400 mb-0.5">Cliente paga</p>
+                          <p className="text-sm font-black text-gray-900">{precioDelivery > 0 ? money(clientePaga) : '—'}</p>
+                          <p className="text-[9px] text-gray-400">{deducir ? 'todo incluido' : 'producto + delivery'}</p>
+                        </div>
+                        <div className="rounded-lg bg-white border border-gray-200 p-2">
+                          <p className="text-[9px] font-bold uppercase text-gray-400 mb-0.5">Delivery</p>
+                          <p className="text-sm font-black text-[#004aad]">{precioDelivery > 0 ? money(precioDelivery) : '—'}</p>
+                          <p className="text-[9px] text-gray-400">{deducir ? 'sale del cobro' : 'cobra aparte'}</p>
+                        </div>
+                        <div className="rounded-lg bg-white border border-gray-200 p-2">
+                          <p className="text-[9px] font-bold uppercase text-gray-400 mb-0.5">Depósito comercio</p>
+                          <p className={`text-sm font-black ${deducir && precioDelivery > 0 ? 'text-orange-700' : 'text-green-700'}`}>{precioDelivery > 0 ? money(deposito) : money(montoProducto)}</p>
+                          <p className="text-[9px] text-gray-400">{deducir ? 'ya descontado' : 'monto producto'}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
                 {solicitud.detalle?.trim() && (
                   <div className="mt-1 rounded-lg border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800 whitespace-pre-wrap leading-relaxed">{solicitud.detalle.trim()}</div>
                 )}
@@ -968,16 +1028,16 @@ export function SolicitudDrawer({
                     {solicitud.cobroDelivery?.boucherUrl ? (
                       <div className="space-y-2">
                         <div className="text-[10px] font-bold uppercase tracking-wide text-blue-500">📎 Boucher adjunto</div>
-                        <a href={solicitud.cobroDelivery.boucherUrl} target="_blank" rel="noopener noreferrer" className="block">
+                        <button onClick={() => setLightboxUrl(solicitud.cobroDelivery!.boucherUrl!)} className="block w-full text-left">
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img
                             src={solicitud.cobroDelivery.boucherUrl}
                             alt="Boucher de transferencia"
-                            className="w-full max-h-48 object-contain rounded-xl border border-blue-100 bg-blue-50"
+                            className="w-full max-h-48 object-contain rounded-xl border border-blue-100 bg-blue-50 hover:opacity-90 transition"
                             loading="lazy"
                           />
                           <p className="text-xs text-center text-blue-600 mt-1 hover:underline">Ver imagen completa →</p>
-                        </a>
+                        </button>
                       </div>
                     ) : (
                       <div className="rounded-xl border border-dashed border-blue-200 py-5 text-center text-xs text-blue-400">
@@ -1012,21 +1072,21 @@ export function SolicitudDrawer({
                       <div className="text-[10px] font-bold uppercase tracking-wide text-violet-500">📸 Evidencias de entrega al bus</div>
                       <div className="grid grid-cols-3 gap-2">
                         {solicitud.evidenciasTerminal.fotoPaquete && (
-                          <button onClick={() => window.open(solicitud.evidenciasTerminal!.fotoPaquete!.url, '_blank')} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
+                          <button onClick={() => setLightboxUrl(solicitud.evidenciasTerminal!.fotoPaquete!.url)} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
                             {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img src={solicitud.evidenciasTerminal.fotoPaquete.url} alt="Paquete" className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
                             <span className="text-[10px] text-gray-500 uppercase font-medium">📦 Paquete</span>
                           </button>
                         )}
                         {solicitud.evidenciasTerminal.fotoTicket && (
-                          <button onClick={() => window.open(solicitud.evidenciasTerminal!.fotoTicket!.url, '_blank')} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
+                          <button onClick={() => setLightboxUrl(solicitud.evidenciasTerminal!.fotoTicket!.url)} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
                             {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img src={solicitud.evidenciasTerminal.fotoTicket.url} alt="Ticket" className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
                             <span className="text-[10px] text-gray-500 uppercase font-medium">🎫 Ticket</span>
                           </button>
                         )}
                         {solicitud.evidenciasTerminal.fotoBus && (
-                          <button onClick={() => window.open(solicitud.evidenciasTerminal!.fotoBus!.url, '_blank')} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
+                          <button onClick={() => setLightboxUrl(solicitud.evidenciasTerminal!.fotoBus!.url)} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
                             {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img src={solicitud.evidenciasTerminal.fotoBus.url} alt="Bus" className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
                             <span className="text-[10px] text-gray-500 uppercase font-medium">🚌 Bus</span>
@@ -1056,7 +1116,7 @@ export function SolicitudDrawer({
                               <div className="text-[10px] font-semibold text-gray-400 uppercase mb-1.5">Paquetes ({solicitud.evidenciasCargotrans.fotos!.length})</div>
                               <div className="grid grid-cols-3 gap-2">
                                 {solicitud.evidenciasCargotrans.fotos!.map((f, i) => (
-                                  <button key={i} onClick={() => window.open(f.url, '_blank')} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
+                                  <button key={i} onClick={() => setLightboxUrl(f.url)} className="flex flex-col items-center gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 transition">
                                     {/* eslint-disable-next-line @next/next/no-img-element */}
                                     <img src={f.url} alt={`Paquete ${i + 1}`} className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
                                     <span className="text-[10px] text-gray-500 uppercase font-medium">📦 #{i + 1}</span>
@@ -1066,7 +1126,7 @@ export function SolicitudDrawer({
                             </div>
                           )}
                           {solicitud.evidenciasCargotrans.factura && (
-                            <button onClick={() => window.open(solicitud.evidenciasCargotrans!.factura!.url, '_blank')} className="flex items-center gap-2 text-xs text-indigo-600 underline font-semibold">
+                            <button onClick={() => setLightboxUrl(solicitud.evidenciasCargotrans!.factura!.url)} className="flex items-center gap-2 text-xs text-indigo-600 underline font-semibold">
                               🧾 Ver factura
                             </button>
                           )}
@@ -1284,7 +1344,7 @@ export function SolicitudDrawer({
                       return (
                         <button
                           key={key}
-                          onClick={() => window.open(ev.url, '_blank')}
+                          onClick={() => setLightboxUrl(ev.url)}
                           className="flex flex-col items-center gap-1.5 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 hover:border-gray-300 transition cursor-pointer"
                         >
                           {/* eslint-disable-next-line @next/next/no-img-element */}

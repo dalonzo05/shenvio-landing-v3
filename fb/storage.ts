@@ -66,6 +66,19 @@ export async function uploadDepositoBoucher(
 }
 
 /**
+ * Uploads a blob to an arbitrary Storage path (useful for indexed items like cargotrans packages).
+ */
+export async function uploadEvidenciaPath(
+  path: string,
+  blob: Blob,
+): Promise<{ url: string; pathStorage: string }> {
+  const storageRef = ref(storage, path)
+  await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' })
+  const url = await getDownloadURL(storageRef)
+  return { url, pathStorage: path }
+}
+
+/**
  * Uploads a motorizado profile photo to Firebase Storage under
  * motorizados/{motorizadoId}/foto.jpg
  */

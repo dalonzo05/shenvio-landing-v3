@@ -389,6 +389,11 @@ export default function PanelMotorizadoPage() {
     netoAPagar: number; estado: 'pendiente' | 'pagado'; pagadoAt?: any; creadoAt?: any;
   }>>([]);
 
+  // Gastos aprobados no liquidados (para deducir del depósito pendiente a Storkhub)
+  const [gastosNoLiquidados, setGastosNoLiquidados] = useState<Array<{
+    id: string; monto: number; tipo: string; liquidacionId?: string;
+  }>>([]);
+
   useEffect(() => { const id = setInterval(() => setTick(Date.now()), 1000); return () => clearInterval(id); }, []);
   useEffect(() => {
     return onAuthStateChanged(auth, (u) => { setUser(u); setLoading(false); });
@@ -442,6 +447,23 @@ export default function PanelMotorizadoPage() {
     });
     return () => unsub();
   }, [user?.uid]);
+
+  // Cargar gastos aprobados no liquidados para deducir del depósito pendiente
+  useEffect(() => {
+    if (!motorizadoDocId) { setGastosNoLiquidados([]); return; }
+    const q = query(
+      collection(db, 'gastos_motorizado'),
+      where('motorizadoId', '==', motorizadoDocId),
+      where('estado', '==', 'aprobado'),
+    );
+    const unsub = onSnapshot(q, (s) => {
+      const list = s.docs
+        .map((d) => ({ id: d.id, ...(d.data() as any) }))
+        .filter((g: any) => !g.liquidacionId); // excluir los ya descontados en liquidación
+      setGastosNoLiquidados(list as any);
+    });
+    return () => unsub();
+  }, [motorizadoDocId]);
 
   async function aceptar(o: Solicitud) {
     if (!o.id) return;
@@ -843,15 +865,21 @@ export default function PanelMotorizadoPage() {
       return !comercioOk || !storkhubOk;
     }), [entregadas]);
 
+  const totalGastosDeducibles = useMemo(
+    () => gastosNoLiquidados.reduce((s, g) => s + (g.monto || 0), 0),
+    [gastosNoLiquidados],
+  );
+
   const resumenDepositos = useMemo(() => {
-    let alComercio = 0, aStorkhub = 0;
+    let alComercio = 0, aStorkhubBruto = 0;
     depositosPendientes.forEach((o) => {
       const d = calcDeposito(o);
       alComercio += d.totalAlComercio;
-      aStorkhub += d.totalAStorkhub;
+      aStorkhubBruto += d.totalAStorkhub;
     });
-    return { alComercio, aStorkhub, total: alComercio + aStorkhub };
-  }, [depositosPendientes]);
+    const aStorkhub = Math.max(0, aStorkhubBruto - totalGastosDeducibles);
+    return { alComercio, aStorkhub, aStorkhubBruto, total: alComercio + aStorkhub };
+  }, [depositosPendientes, totalGastosDeducibles]);
 
   // Load comercio bank accounts and names for deposit orders
   const [comercioAccounts, setComercioAccounts] = useState<Record<string, BankAccount[]>>({});
@@ -890,8 +918,10 @@ export default function PanelMotorizadoPage() {
         if (comercioAccounts[uid]) comerciosMap[uid].accounts = comercioAccounts[uid]
       }
     })
+    // Descontar gastos aprobados del total a depositar a Storkhub
+    storkhub.total = Math.max(0, storkhub.total - totalGastosDeducibles)
     return { storkhub, comercios: Object.values(comerciosMap) }
-  }, [depositosPendientes, comercioAccounts, comercioNames]);
+  }, [depositosPendientes, comercioAccounts, comercioNames, totalGastosDeducibles]);
 
   const [expandidos, setExpandidos] = useState<Record<string, boolean>>({})
   const toggleExpandido = (key: string) => setExpandidos((p) => ({ ...p, [key]: !p[key] }))
@@ -1415,9 +1445,21 @@ export default function PanelMotorizadoPage() {
                 <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 12, padding: '12px 14px' }}>
                   <p style={{ fontSize: 11, color: '#2563eb', fontWeight: 700, textTransform: 'uppercase' as const, margin: '0 0 4px', letterSpacing: 0.5 }}>A Storkhub</p>
                   <p style={{ fontSize: 22, fontWeight: 900, color: '#2563eb', margin: 0 }}>{fmt(resumenDepositos.aStorkhub)}</p>
-                  <p style={{ fontSize: 11, color: '#60a5fa', margin: '4px 0 0' }}>Delivery en efectivo</p>
+                  {totalGastosDeducibles > 0 ? (
+                    <p style={{ fontSize: 11, color: '#60a5fa', margin: '4px 0 0' }}>
+                      {fmt(resumenDepositos.aStorkhubBruto)} delivery − {fmt(totalGastosDeducibles)} gastos
+                    </p>
+                  ) : (
+                    <p style={{ fontSize: 11, color: '#60a5fa', margin: '4px 0 0' }}>Delivery en efectivo</p>
+                  )}
                 </div>
               </div>
+              {totalGastosDeducibles > 0 && (
+                <div style={{ background: '#fefce8', border: '1px solid #fde68a', borderRadius: 10, padding: '8px 12px', marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 11, color: '#92400e', fontWeight: 600 }}>⚡ Gastos operativos descontados</span>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: '#b45309' }}>− {fmt(totalGastosDeducibles)}</span>
+                </div>
+              )}
               <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '12px 14px', marginTop: 10 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontSize: 13, color: '#374151', fontWeight: 600 }}>Total a depositar hoy</span>
@@ -1464,6 +1506,12 @@ export default function PanelMotorizadoPage() {
                                   </div>
                                 );
                               })}
+                              {totalGastosDeducibles > 0 && (
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderTop: '1px solid #bfdbfe', marginTop: 4 }}>
+                                  <p style={{ fontSize: 12, fontWeight: 600, color: '#b45309', margin: 0 }}>⚡ Gastos operativos ({gastosNoLiquidados.length})</p>
+                                  <p style={{ fontSize: 13, fontWeight: 700, color: '#b45309', margin: 0, flexShrink: 0 }}>− {fmt(totalGastosDeducibles)}</p>
+                                </div>
+                              )}
                             </div>
                           )}
                           <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6, marginBottom: 12 }}>
@@ -1526,7 +1574,10 @@ export default function PanelMotorizadoPage() {
                                   motorizadoUid: auth.currentUser?.uid ?? '',
                                   motorizadoNombre: user?.displayName ?? user?.email ?? '',
                                   solicitudIds: g.orders.map((o) => o.id),
-                                  montoTotal: g.total,
+                                  montoTotal: g.total, // neto: delivery - gastos descontados
+                                  montoBruto: resumenDepositos.aStorkhubBruto,
+                                  gastosDescontados: totalGastosDeducibles,
+                                  gastosIds: gastosNoLiquidados.map((g) => g.id),
                                   boucher: boucherData,
                                   confirmadoMotorizado: true,
                                   confirmadoMotorizadoAt: serverTimestamp(),

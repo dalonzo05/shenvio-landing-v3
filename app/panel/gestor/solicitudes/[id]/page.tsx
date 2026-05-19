@@ -136,6 +136,32 @@ type Solicitud = {
     deposito?: { url: string; pathStorage: string; uploadedAt?: any; motorizadoUid?: string }
   }
 
+  tipoServicio?: 'normal' | 'fuera_managua' | 'compra_gestion'
+  fueraManagua?: {
+    metodoEnvio?: 'bus_terminal' | 'cargotrans'
+    destinoFinal?: string | null
+    puntoLogisticoNombre?: string | null
+    terminalSugerida?: string | null
+    direccionPuntoLogistico?: string | null
+    horarioApertura?: string | null
+    horarioCierre?: string | null
+    coordsPuntoLogistico?: { lat: number; lng: number } | null
+    transporteNombre?: string | null
+    transporteCelular?: string | null
+    transporteHoraSalida?: string | null
+    cantidadPaquetes?: number
+    notaCargotrans?: string | null
+    pagoCargotrans?: 'efectivo_motorizado' | 'transferencia_comercio' | null
+  }
+
+  evidenciasCargotrans?: {
+    fotos?: Array<{ url: string; pathStorage: string }>
+    factura?: { url: string; pathStorage: string }
+    costoCargotrans?: number | null
+    subidasAt?: any
+    subidasPorUid?: string
+  }
+
   userId?: string
   requiereBolso?: boolean
   zonaRetiroId?: string | null
@@ -1033,7 +1059,11 @@ export default function GestorSolicitudDetallePage() {
 
           <MapaOrden
             retiro={solicitud.cotizacion?.origenCoord ?? (solicitud.recoleccion as any)?.coord ?? null}
-            entrega={solicitud.cotizacion?.destinoCoord ?? (solicitud.entrega as any)?.coord ?? null}
+            entrega={
+              solicitud.tipoServicio === 'fuera_managua'
+                ? solicitud.fueraManagua?.coordsPuntoLogistico ?? solicitud.cotizacion?.destinoCoord ?? null
+                : solicitud.cotizacion?.destinoCoord ?? (solicitud.entrega as any)?.coord ?? null
+            }
           />
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
@@ -1098,59 +1128,166 @@ export default function GestorSolicitudDetallePage() {
             <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
               <div className="flex items-center gap-2 mb-4">
                 <User className="h-4 w-4 text-gray-500" />
-                <h2 className="font-semibold text-gray-900">Entrega</h2>
+                <h2 className="font-semibold text-gray-900">
+                  {solicitud.tipoServicio === 'fuera_managua'
+                    ? (solicitud.fueraManagua?.metodoEnvio === 'cargotrans' ? '📦 Entrega — Sucursal Cargotrans' : '🚌 Entrega — Bus / Terminal')
+                    : 'Entrega'}
+                </h2>
               </div>
 
-              <div className="space-y-3 text-sm">
-                <div>
-                  <div className="text-gray-500">Nombre</div>
-                  <div className="font-medium text-gray-900">{solicitud.entrega.nombreApellido || '—'}</div>
-                </div>
+              {solicitud.tipoServicio === 'fuera_managua' && solicitud.fueraManagua ? (
+                <div className="space-y-3 text-sm">
+                  <div>
+                    <div className="text-gray-500">{solicitud.fueraManagua.metodoEnvio === 'cargotrans' ? 'Sucursal Cargotrans' : 'Terminal / Bus'}</div>
+                    <div className="font-medium text-gray-900">{solicitud.fueraManagua.puntoLogisticoNombre || solicitud.fueraManagua.terminalSugerida || '—'}</div>
+                  </div>
 
-                <div>
-                  <div className="text-gray-500">Teléfono</div>
-                  <div className="font-medium text-gray-900 flex items-center gap-2">
-                    <Phone className="h-4 w-4 text-gray-400" />
-                    {solicitud.entrega.celular}
+                  {solicitud.fueraManagua.destinoFinal && (
+                    <div>
+                      <div className="text-gray-500">Destino final</div>
+                      <div className="font-medium text-violet-700">{solicitud.fueraManagua.destinoFinal}</div>
+                    </div>
+                  )}
+
+                  {solicitud.fueraManagua.direccionPuntoLogistico && (
+                    <div>
+                      <div className="text-gray-500">Dirección</div>
+                      <div className="font-medium text-gray-900 flex items-start gap-2">
+                        <MapPin className="h-4 w-4 text-gray-400 mt-0.5" />
+                        <span>{solicitud.fueraManagua.direccionPuntoLogistico}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {(solicitud.fueraManagua.horarioApertura || solicitud.fueraManagua.horarioCierre) && (
+                    <div>
+                      <div className="text-gray-500">Horario</div>
+                      <div className="font-medium text-gray-900">
+                        {solicitud.fueraManagua.horarioApertura || '?'}–{solicitud.fueraManagua.horarioCierre || '?'}
+                      </div>
+                    </div>
+                  )}
+
+                  {solicitud.fueraManagua.metodoEnvio === 'bus_terminal' && solicitud.fueraManagua.transporteNombre && (
+                    <div>
+                      <div className="text-gray-500">Transporte</div>
+                      <div className="font-medium text-gray-900">{solicitud.fueraManagua.transporteNombre}</div>
+                    </div>
+                  )}
+
+                  {solicitud.fueraManagua.metodoEnvio === 'bus_terminal' && solicitud.fueraManagua.transporteCelular && (
+                    <div>
+                      <div className="text-gray-500">Celular transporte</div>
+                      <div className="font-medium text-gray-900 flex items-center gap-2">
+                        <Phone className="h-4 w-4 text-gray-400" />
+                        {solicitud.fueraManagua.transporteCelular}
+                      </div>
+                    </div>
+                  )}
+
+                  {solicitud.fueraManagua.metodoEnvio === 'bus_terminal' && solicitud.fueraManagua.transporteHoraSalida && (
+                    <div>
+                      <div className="text-gray-500">Hora de salida</div>
+                      <div className="font-medium text-gray-900">{solicitud.fueraManagua.transporteHoraSalida}</div>
+                    </div>
+                  )}
+
+                  {solicitud.fueraManagua.metodoEnvio === 'cargotrans' && solicitud.fueraManagua.cantidadPaquetes != null && (
+                    <div>
+                      <div className="text-gray-500">Cantidad de paquetes</div>
+                      <div className="font-medium text-violet-700">📦 {solicitud.fueraManagua.cantidadPaquetes} paquete(s)</div>
+                    </div>
+                  )}
+
+                  {solicitud.fueraManagua.metodoEnvio === 'cargotrans' && solicitud.fueraManagua.pagoCargotrans && (
+                    <div>
+                      <div className="text-gray-500">Pago flete Cargotrans</div>
+                      <div className="font-medium text-gray-900">
+                        {solicitud.fueraManagua.pagoCargotrans === 'efectivo_motorizado' ? '💵 Efectivo (motorizado adelanta)' : '🏦 Transferencia del comercio'}
+                      </div>
+                    </div>
+                  )}
+
+                  {solicitud.fueraManagua.metodoEnvio === 'cargotrans' && solicitud.fueraManagua.notaCargotrans && (
+                    <div>
+                      <div className="text-gray-500">Nota Cargotrans</div>
+                      <div className="font-medium text-gray-900">{solicitud.fueraManagua.notaCargotrans}</div>
+                    </div>
+                  )}
+
+                  {solicitud.fueraManagua.metodoEnvio === 'cargotrans' && (solicitud as any).evidenciasCargotrans?.costoCargotrans != null && (
+                    <div>
+                      <div className="text-gray-500">Costo pagado en Cargotrans</div>
+                      <div className="font-medium text-violet-700">C$ {(solicitud as any).evidenciasCargotrans.costoCargotrans}</div>
+                    </div>
+                  )}
+
+                  {solicitud.fueraManagua.coordsPuntoLogistico && (
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <a
+                        href={`https://www.google.com/maps?q=${solicitud.fueraManagua.coordsPuntoLogistico.lat},${solicitud.fueraManagua.coordsPuntoLogistico.lng}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm text-blue-700 hover:bg-gray-50"
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                        Abrir Maps
+                      </a>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-3 text-sm">
+                  <div>
+                    <div className="text-gray-500">Nombre</div>
+                    <div className="font-medium text-gray-900">{solicitud.entrega.nombreApellido || '—'}</div>
+                  </div>
+
+                  <div>
+                    <div className="text-gray-500">Teléfono</div>
+                    <div className="font-medium text-gray-900 flex items-center gap-2">
+                      <Phone className="h-4 w-4 text-gray-400" />
+                      {solicitud.entrega.celular}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-gray-500">Dirección</div>
+                    <div className="font-medium text-gray-900 flex items-start gap-2">
+                      <MapPin className="h-4 w-4 text-gray-400 mt-0.5" />
+                      <span>{solicitud.entrega.direccionEscrita}</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-gray-500">Tipo punto</div>
+                    <div className="font-medium text-gray-900">{solicitud.entrega.puntoGoogleTipo || '—'}</div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {entregaMaps && (
+                      <a
+                        href={entregaMaps}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm text-blue-700 hover:bg-gray-50"
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                        Abrir Maps
+                      </a>
+                    )}
+                    {entregaMaps && (
+                      <button
+                        onClick={() => copyToClipboard(entregaMaps)}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                      >
+                        <Copy className="h-4 w-4" />
+                        Copiar link
+                      </button>
+                    )}
                   </div>
                 </div>
-
-                <div>
-                  <div className="text-gray-500">Dirección</div>
-                  <div className="font-medium text-gray-900 flex items-start gap-2">
-                    <MapPin className="h-4 w-4 text-gray-400 mt-0.5" />
-                    <span>{solicitud.entrega.direccionEscrita}</span>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="text-gray-500">Tipo punto</div>
-                  <div className="font-medium text-gray-900">{solicitud.entrega.puntoGoogleTipo || '—'}</div>
-                </div>
-
-                <div className="flex flex-wrap gap-2 pt-1">
-                  {entregaMaps && (
-                    <a
-                      href={entregaMaps}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm text-blue-700 hover:bg-gray-50"
-                    >
-                      <ExternalLink className="h-4 w-4" />
-                      Abrir Maps
-                    </a>
-                  )}
-                  {entregaMaps && (
-                    <button
-                      onClick={() => copyToClipboard(entregaMaps)}
-                      className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                    >
-                      <Copy className="h-4 w-4" />
-                      Copiar link
-                    </button>
-                  )}
-                </div>
-              </div>
+              )}
             </div>
           </div>
 
@@ -1616,6 +1753,49 @@ export default function GestorSolicitudDetallePage() {
                     </button>
                   )
                 })}
+              </div>
+            </div>
+          )}
+
+          {/* Evidencias Cargotrans */}
+          {(solicitud as any).evidenciasCargotrans && (
+            <div className="rounded-2xl border border-violet-200 bg-white p-5 shadow-sm">
+              <h2 className="font-semibold text-violet-800 mb-4">📸 Evidencias entrega Cargotrans</h2>
+              <div className="space-y-4">
+                {((solicitud as any).evidenciasCargotrans.fotos ?? []).length > 0 && (
+                  <div>
+                    <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                      Paquetes ({(solicitud as any).evidenciasCargotrans.fotos.length})
+                    </div>
+                    <div className="grid grid-cols-3 gap-3">
+                      {(solicitud as any).evidenciasCargotrans.fotos.map((f: { url: string }, i: number) => (
+                        <button
+                          key={i}
+                          onClick={() => window.open(f.url, '_blank')}
+                          className="flex flex-col items-center gap-1.5 rounded-xl border border-violet-200 bg-violet-50 p-2 hover:bg-violet-100 transition cursor-pointer"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={f.url} alt={`Paquete ${i + 1}`} className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
+                          <span className="text-xs text-violet-600 font-medium">📦 #{i + 1}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {(solicitud as any).evidenciasCargotrans.factura && (
+                  <button
+                    onClick={() => window.open((solicitud as any).evidenciasCargotrans.factura.url, '_blank')}
+                    className="inline-flex items-center gap-2 text-sm text-indigo-700 font-semibold underline"
+                  >
+                    🧾 Ver factura
+                  </button>
+                )}
+                {(solicitud as any).evidenciasCargotrans.costoCargotrans != null && (
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="text-gray-500">Costo pagado en Cargotrans:</span>
+                    <span className="font-bold text-violet-700">C$ {(solicitud as any).evidenciasCargotrans.costoCargotrans}</span>
+                  </div>
+                )}
               </div>
             </div>
           )}

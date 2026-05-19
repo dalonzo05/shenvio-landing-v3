@@ -13,9 +13,16 @@ type Solicitud = {
   estado?: string
   createdAt?: Timestamp
   entregadoAt?: Timestamp
+  tipoServicio?: 'normal' | 'fuera_managua' | 'compra_gestion'
   recoleccion?: { direccionEscrita?: string }
   entrega?: { nombreApellido?: string; direccionEscrita?: string }
+  fueraManagua?: {
+    metodoEnvio?: 'bus_terminal' | 'cargotrans'
+    destinoFinal?: string | null
+    puntoLogisticoNombre?: string | null
+  }
   confirmacion?: { precioFinalCordobas?: number }
+  pagoDelivery?: { montoSugerido?: number | null }
   cobroContraEntrega?: { aplica?: boolean }
   registro?: {
     deposito?: {
@@ -169,17 +176,30 @@ export default function ComercioDashboard() {
             <tbody className="divide-y divide-gray-100">
               {ultimas.map((o) => {
                 const cls = estadoCls[o.estado || ''] || 'bg-gray-100 text-gray-600'
+                const esFuera = o.tipoServicio === 'fuera_managua'
+                const destinatario = esFuera
+                  ? (o.fueraManagua?.puntoLogisticoNombre || o.fueraManagua?.destinoFinal || '—')
+                  : (o.entrega?.nombreApellido || '—')
+                const direccion = esFuera
+                  ? [
+                      o.fueraManagua?.metodoEnvio === 'bus_terminal' ? 'Bus/Terminal' : 'Cargotrans',
+                      o.fueraManagua?.destinoFinal,
+                    ].filter(Boolean).join(' · ')
+                  : (o.entrega?.direccionEscrita || '—')
+                const precio = o.confirmacion?.precioFinalCordobas ?? o.pagoDelivery?.montoSugerido
                 return (
                   <tr key={o.id} className="hover:bg-gray-50 transition-colors cursor-pointer"
                     onClick={() => router.push(`/panel/comercio/mis-ordenes/${o.id}`)}>
                     <td className="px-4 py-3 font-semibold text-gray-900">
-                      {o.entrega?.nombreApellido || '—'}
+                      {destinatario}
                     </td>
                     <td className="px-4 py-3 text-gray-500 max-w-[200px] truncate">
-                      {o.entrega?.direccionEscrita || '—'}
+                      {direccion || '—'}
                     </td>
-                    <td className="px-4 py-3 text-[#004aad] font-semibold">
-                      {fmt(o.confirmacion?.precioFinalCordobas)}
+                    <td className="px-4 py-3 font-semibold">
+                      {typeof precio === 'number'
+                        ? <span className={o.confirmacion?.precioFinalCordobas ? 'text-[#004aad]' : 'text-gray-400'}>{fmt(precio)}</span>
+                        : <span className="text-gray-300">—</span>}
                     </td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex text-xs font-semibold px-2.5 py-1 rounded-full ${cls}`}>

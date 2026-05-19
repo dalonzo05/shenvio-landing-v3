@@ -17,7 +17,7 @@ import {
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { compressImage, uploadDepositoBoucher } from '@/fb/storage'
-import { registrarMovimiento } from '@/lib/financial-writes'
+import { registrarMovimiento, convertirDepositoEnDeuda } from '@/lib/financial-writes'
 import { getDepositoEstado } from '@/lib/financial-types'
 import {
   Wallet,
@@ -245,6 +245,8 @@ export default function DepositosPage() {
   const [confirmandoId, setConfirmandoId] = useState<string | null>(null)
   const [devolviendoId, setDevolviendoId] = useState<string | null>(null)
   const [motivoDevolucion, setMotivoDevolucion] = useState<string>('')
+  const [convirtiendo, setConvirtiendo] = useState<string | null>(null)
+  const [motivoConversion, setMotivoConversion] = useState<string>('')
   const [editingBoucherId, setEditingBoucherId] = useState<string | null>(null)
   const [replacingBoucherId, setReplacingBoucherId] = useState<string | null>(null)
   const boucherReplaceRef = useRef<HTMLInputElement>(null)
@@ -730,6 +732,37 @@ export default function DepositosPage() {
     }
   }
 
+  // ── Convertir depósito pendiente en saldo a cargo del motorizado ─────────
+
+  async function convertirEnDeuda(dep: DepositoOrderDoc, motivo: string) {
+    if (!motivo.trim()) return
+    setConvirtiendo(dep.id)
+    try {
+      // Buscar el motorizadoId (doc ID en colección motorizado) a partir del authUid
+      const { getDocs: _getDocs, query: _query, collection: _col, where: _where } = await import('firebase/firestore')
+      const snap = await _getDocs(_query(_col(db, 'motorizado'), _where('authUid', '==', dep.motorizadoUid)))
+      const motDoc = snap.docs[0]
+      const motorizadoId = motDoc?.id ?? dep.motorizadoUid
+
+      await convertirDepositoEnDeuda({
+        depositoId: dep.id,
+        solicitudIds: dep.solicitudIds ?? [],
+        destinatario: dep.destinatario,
+        monto: dep.montoTotal,
+        motorizadoId,
+        motorizadoUid: dep.motorizadoUid,
+        motorizadoNombre: dep.motorizadoNombre,
+        nota: motivo,
+        operadorId: auth.currentUser?.uid ?? '',
+      })
+    } catch (e) {
+      console.error('Error convirtiendo en deuda:', e)
+    } finally {
+      setConvirtiendo(null)
+      setMotivoConversion('')
+    }
+  }
+
   // ── Reemplazar boucher de un depósito en "Por revisar" ────────────────────
 
   async function reemplazarBoucher(dep: DepositoOrderDoc, file: File) {
@@ -1042,7 +1075,7 @@ export default function DepositosPage() {
                         </button>
                       </div>
                     )}
-                    {/* Botones de acción: devolver al motorizado / confirmar */}
+                    {/* Botones de acción: devolver / confirmar / convertir en deuda */}
                     {devolviendoId === dep.id ? (
                       <div className="flex flex-col gap-2">
                         <input
@@ -1068,8 +1101,36 @@ export default function DepositosPage() {
                           </button>
                         </div>
                       </div>
+                    ) : convirtiendo === dep.id ? (
+                      <div className="flex flex-col gap-2">
+                        <p className="text-[11px] font-semibold text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                          ⚠️ El depósito se marcará como <strong>saldo a cargo</strong> del motorizado. Registrá el motivo.
+                        </p>
+                        <input
+                          value={motivoConversion}
+                          onChange={(e) => setMotivoConversion(e.target.value)}
+                          placeholder="Motivo (ej: motorizado justificó uso del dinero)…"
+                          className="text-xs border border-red-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-300"
+                          autoFocus
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => { setConvirtiendo(null); setMotivoConversion('') }}
+                            className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition"
+                          >
+                            Cancelar
+                          </button>
+                          <button
+                            onClick={() => convertirEnDeuda(dep, motivoConversion)}
+                            disabled={!motivoConversion.trim()}
+                            className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            Confirmar — crear deuda
+                          </button>
+                        </div>
+                      </div>
                     ) : (
-                      <div className="flex gap-2">
+                      <div className="flex gap-2 flex-wrap">
                         <button
                           onClick={() => setDevolviendoId(dep.id)}
                           disabled={confirmandoId === dep.id}
@@ -1084,6 +1145,16 @@ export default function DepositosPage() {
                         >
                           {confirmandoId === dep.id ? 'Confirmando…' : '✓ Confirmar'}
                         </button>
+                        {esStorkhub && (
+                          <button
+                            onClick={() => setConvirtiendo(dep.id)}
+                            disabled={confirmandoId === dep.id}
+                            className="text-xs font-semibold px-3 py-2.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                            title="El motorizado no depositó — convertir en saldo a cargo"
+                          >
+                            → Deuda
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>

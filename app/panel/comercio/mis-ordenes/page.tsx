@@ -280,6 +280,25 @@ export default function MisOrdenesPage() {
         </Link>
       </div>
 
+      {/* Banner órdenes activas */}
+      {!loading && ordenes.filter((o) => activas.includes(o.estado || '')).length > 0 && (
+        <div className="flex items-center gap-3 rounded-xl bg-orange-50 border border-orange-200 px-4 py-3">
+          <span className="relative flex h-3 w-3 shrink-0">
+            <span className="absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75" style={{ animation: 'pulse-ring 1.5s ease-out infinite' }} />
+            <span className="relative inline-flex h-3 w-3 rounded-full bg-orange-500" />
+          </span>
+          <p className="text-sm font-semibold text-orange-800">
+            Tenés <span className="font-black">{ordenes.filter((o) => activas.includes(o.estado || '')).length}</span> {ordenes.filter((o) => activas.includes(o.estado || '')).length === 1 ? 'orden activa' : 'órdenes activas'} en este momento
+          </p>
+          <button
+            onClick={() => setFiltro('activas')}
+            className="ml-auto text-xs font-bold text-orange-700 hover:text-orange-900 underline underline-offset-2"
+          >
+            Ver activas →
+          </button>
+        </div>
+      )}
+
       {/* Filtros */}
       <div className="flex gap-2">
         <button onClick={() => setFiltro('todas')} className={btnFiltro('todas')}>Todas ({ordenes.length})</button>

@@ -2,12 +2,13 @@
 import { useEffect, useState } from 'react'
 
 export default function StickyBottomNav({
-  paso, puedeAvanzar, formularioCompleto, saving, onAtras, onSiguiente, onGuardar,
+  paso, puedeAvanzar, formularioCompleto, saving, loading, onAtras, onSiguiente, onGuardar,
 }: {
   paso: number
   puedeAvanzar: boolean
   formularioCompleto: boolean
   saving: boolean
+  loading?: boolean
   onAtras: () => void
   onSiguiente: () => void
   onGuardar: () => void
@@ -23,7 +24,7 @@ export default function StickyBottomNav({
   }, [])
 
   const esPasoFinal = paso === 4
-  const canNext = esPasoFinal ? (formularioCompleto && !saving) : puedeAvanzar
+  const canNext = esPasoFinal ? (formularioCompleto && !saving) : (puedeAvanzar && !loading)
 
   return (
     <div style={{
@@ -70,7 +71,7 @@ export default function StickyBottomNav({
         >
           {esPasoFinal
             ? (saving ? 'Guardando...' : formularioCompleto ? '✓ Crear orden' : '⚠️ Completar info')
-            : (puedeAvanzar ? 'Siguiente →' : '⚠️ Completá los datos')}
+            : loading ? '⏳ Calculando...' : (puedeAvanzar ? 'Siguiente →' : '⚠️ Completá los datos')}
         </button>
       </div>
     </div>
