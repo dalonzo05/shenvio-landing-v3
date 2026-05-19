@@ -15,13 +15,63 @@ export type TipoDeposito =
 // ─── Estados del depósito ──────────────────────────────────────────────────────
 export type EstadoDeposito =
   | 'pendiente_boucher' // creado, esperando que motorizado suba boucher
-  | 'en_revision' // boucher subido, esperando al gestor
-  | 'confirmado' // gestor confirmó
-  | 'rechazado' // gestor rechazó
+  | 'en_revision'       // boucher subido, esperando al gestor
+  | 'confirmado'        // gestor confirmó
+  | 'rechazado'         // gestor rechazó
   | 'convertido_en_deuda' // gestor convirtió el pendiente en saldo a cargo del motorizado
 
+// ─── Tipos de cartera comercial ───────────────────────────────────────────────
+// Más flexible que solo 'contado' | 'crédito', permite convenios futuros.
+export type TipoCartera =
+  | 'diaria'     // pago esperado cada día (clásico contado)
+  | 'semanal'    // cobro agrupado semanal (clásico crédito)
+  | 'quincenal'
+  | 'mensual'
+  | 'libre'      // términos especiales acordados
+
+// ─── Propietario del efectivo ──────────────────────────────────────────────────
+// Quién es el dueño real de un monto en custodia del motorizado.
+// El motorizado puede tener C$500 donde C$200 son de StorkHub,
+// C$250 de comercio A y C$50 de comercio B.
+export type PropietarioEfectivo =
+  | 'storkhub'
+  | `comercio:${string}` // comercio:{comercioId}
+  | `motorizado:${string}` // motorizado:{motorizadoId} (ej: su propia comisión)
+
+// ─── Cuentas del ledger ────────────────────────────────────────────────────────
+// Helpers para construir los identificadores de cuenta. Usamos strings con prefijo
+// en vez de enums para soportar IDs dinámicos (por motorizado, comercio, etc.).
+//
+// IMPORTANTE: el motorizado NO tiene una "caja chica propia". El efectivo bajo
+// su custodia pertenece parcialmente a StorkHub, parcialmente a comercios, y
+// parcialmente puede incluir vueltos. Usamos "efectivo_en_poder" para reflejar
+// esa realidad: es dinero en tránsito bajo su responsabilidad, no suyo.
+export const cuentas = {
+  // Motorizado
+  efectivoEnPoder:    (motorizadoId: string) => `efectivo_en_poder:${motorizadoId}`,
+  deudaMotorizado:    (motorizadoId: string) => `deuda_motorizado:${motorizadoId}`,
+  comisionPendiente:  (motorizadoId: string) => `comision_pendiente:${motorizadoId}`,
+
+  // Comercio
+  saldoComercio:      (comercioId: string)   => `saldo_comercio:${comercioId}`,
+  // Dinero de producto cobrado: es retención temporal, NO deuda del comercio.
+  // Solo transita por el motorizado hasta que lo deposita al comercio.
+  transitorioProducto:(comercioId: string)   => `transitorio_producto:${comercioId}`,
+
+  // StorkHub (cuentas estáticas)
+  ingresos:      'ingresos_storkhub'  as const,
+  banco:         'banco_storkhub'     as const,
+  gastosOp:      'gastos_operativos'  as const,
+  // Origen/destino para dinero que entra o sale del sistema (ej: comercio paga en efectivo)
+  externo:       'externo'            as const,
+} as const
+
 // ─── Tipos de movimiento financiero ───────────────────────────────────────────
+// Los tipos más específicos (delivery_efectivo_cobrado, etc.) coexisten con los
+// genéricos legacy (cobro_generado, pago_recibido) para no romper el flujo actual.
+// Fase 1: el ledger es auditoría enriquecida. Fase 4+ lo convierte en fuente de verdad.
 export type TipoMovimiento =
+  // ── Legacy (mantener para compatibilidad) ──────────────────────────────────
   | 'cobro_generado'
   | 'pago_recibido'
   | 'pago_revertido'
@@ -37,25 +87,93 @@ export type TipoMovimiento =
   | 'gasto_aprobado'
   | 'saldo_creado'
   | 'abono_saldo'
-  | 'aporte_empresa_motorizado' // empresa entrega dinero al motorizado para cubrir gasto > delivery disponible
-  | 'ajuste_manual_saldo' // corrección contable sobre un saldo
+  | 'aporte_empresa_motorizado'
+  | 'ajuste_manual_saldo'
+
+  // ── Delivery ────────────────────────────────────────────────────────────────
+  | 'delivery_efectivo_cobrado'        // motorizado recibe efectivo delivery → efectivo_en_poder (owner: storkhub)
+  | 'delivery_transferencia_cobrado'   // delivery pagado por transferencia → banco_storkhub directamente
+  | 'delivery_credito_generado'        // delivery a crédito → saldo_comercio (se cobra después)
+
+  // ── Producto ────────────────────────────────────────────────────────────────
+  | 'producto_cobrado_efectivo'        // motorizado recibe efectivo de producto → transitorio_producto (owner: comercio)
+  // El dinero de producto NUNCA entra a gastos ni caja de StorkHub.
+  // Es retención temporal hasta que el motorizado lo deposita al comercio.
+
+  // ── Depósitos (enriquecidos) ────────────────────────────────────────────────
+  | 'deposito_efectivo_storkhub'       // efectivo_en_poder → banco_storkhub
+  | 'deposito_efectivo_comercio'       // efectivo_en_poder → externo (entregado al comercio)
+
+  // ── Cargotrans ─────────────────────────────────────────────────────────────
+  | 'vuelto_cargotrans_a_efectivo'     // vuelto de Cargotrans → efectivo_en_poder
+  | 'vuelto_cargotrans_a_comercio'     // vuelto devuelto al comercio → saldo_comercio o externo
+  | 'pago_cargotrans_por_comercio'     // comercio paga Cargotrans directamente
+  | 'pago_cargotrans_por_storkhub'     // StorkHub paga/transfiere Cargotrans → gastos_operativos
+
+  // ── Terminales ─────────────────────────────────────────────────────────────
+  | 'peaje_terminal'                   // recargo C$20 → efectivo_en_poder o comision_pendiente
+  | 'peaje_terminal_sin_efectivo'      // motorizado no tenía efectivo → pasa a favor en liquidación
+
+  // ── Gastos operativos ───────────────────────────────────────────────────────
+  | 'gasto_operativo_aprobado'         // gasto aprobado por gestor (más específico que gasto_aprobado)
+
+  // ── Liquidación ─────────────────────────────────────────────────────────────
+  | 'liquidacion_comision_calculada'   // ingresos_storkhub → comision_pendiente
+  | 'liquidacion_pago_efectivo'        // comision_pendiente → externo
+  | 'liquidacion_pago_transferencia'   // comision_pendiente → externo
+
+  // ── Saldos y deudas ─────────────────────────────────────────────────────────
+  | 'abono_deuda_motorizado'           // comision_pendiente → deuda_motorizado
+  | 'aporte_empresa_gasto'             // gastos_operativos → comision_pendiente (empresa asume gasto)
+
+  // ── Cobros comercios ────────────────────────────────────────────────────────
+  | 'cobro_contado_registrado'         // saldo_comercio → banco_storkhub
+  | 'cobro_credito_registrado'         // saldo_comercio → ingresos_storkhub
+
+  // ── Ajustes ─────────────────────────────────────────────────────────────────
+  | 'ajuste_manual'                    // corrección contable libre (requiere nota)
+  | 'anulacion'                        // contra-movimiento para revertir otro movimiento
 
 // ─── Movimiento financiero (colección movimientos_financieros) ─────────────────
+// Fase 1: ledger como auditoría enriquecida. Los campos cuentaOrigen/cuentaDestino
+// son opcionales para no romper el flujo actual mientras se migra gradualmente.
 export interface MovimientoFinanciero {
   id?: string
   tipo: TipoMovimiento
   monto: number
-  at: unknown // Firestore Timestamp / serverTimestamp()
-  operadorId: string // UID de quien disparó la escritura
+  at: unknown // siempre serverTimestamp() — nunca Date ni Timestamp.fromDate()
+  creadoPorUid: string  // UID de quien disparó la escritura
+  creadoPorRol: 'gestor' | 'motorizado' | 'sistema'
   descripcion: string
-  // Referencias opcionales
+  estado: 'activo' | 'anulado'
+  anuladoPorMovimientoId?: string // si fue revertido por otro movimiento
+
+  // ── Doble entrada (opcional en Fase 1, requerido en Fase 4+) ────────────────
+  cuentaOrigen?: string  // ej: "efectivo_en_poder:moto123"
+  cuentaDestino?: string // ej: "banco_storkhub"
+
+  // ── Ownership del efectivo ─────────────────────────────────────────────────
+  // A qué entidad pertenece el dinero que se mueve. Crítico para saber
+  // "de los C$500 que tiene el motorizado, quién es dueño de cada peso".
+  propietario?: PropietarioEfectivo
+
+  // ── Semana operativa ────────────────────────────────────────────────────────
+  semanaKey?: string // ej: "2025-W14" — para filtrar por período
+
+  // ── Referencias (contexto operacional) ─────────────────────────────────────
   solicitudId?: string
   depositoId?: string
   motorizadoId?: string
   comercioId?: string
   saldoId?: string
   gastoId?: string
+  liquidacionId?: string
+
+  // ── Datos extra sin schema fijo ─────────────────────────────────────────────
   metadata?: Record<string, unknown>
+
+  // @deprecated usar creadoPorUid
+  operadorId?: string
 }
 
 // ─── Estado de la liquidación semanal ─────────────────────────────────────────
@@ -64,47 +182,37 @@ export type EstadoLiquidacion = 'pendiente' | 'pagado'
 // ─── Liquidación semanal del motorizado (colección liquidaciones_motorizado) ──
 export interface LiquidacionMotorizado {
   id?: string
-  motorizadoId: string // ID del doc en colección motorizado
-  motorizadoUid: string // auth UID
+  motorizadoId: string
+  motorizadoUid: string
   motorizadoNombre: string
-  semanaKey: string // e.g. "2025-W14"
-  semanaInicio: unknown // Firestore Timestamp
-  semanaFin: unknown // Firestore Timestamp
-  // Totales
+  semanaKey: string
+  semanaInicio: unknown
+  semanaFin: unknown
   totalViajes: number
-  totalGenerado: number // suma de tarifas de delivery de la semana
-  comisionPct: number // 0.8 = 80%
-  comision: number // totalGenerado * comisionPct
-  // Descuentos
-  adelantos: number // anticipos en efectivo entregados
-  faltantesDeposito: number // diferencia entre recaudado y depositado
+  totalGenerado: number
+  comisionPct: number
+  comision: number
+  adelantos: number
+  faltantesDeposito: number
   otrosDescuentos: number
-  // Deudas aplicadas en esta liquidación
-  deudasAplicadas: number // monto total de deudas descontadas en esta liquidación
-  deudasAplicadasIds: string[] // IDs de saldos_cargo_motorizado aplicados
-  // Gastos operativos de la semana
-  gastosAprobados?: number          // suma de gastos_motorizado aprobados de la semana
-  gastosAsumidosStorkhub?: number   // porción que Storkhub asume (cuando gastos > efectivo recaudado)
-  gastosIds?: string[]              // IDs de gastos_motorizado aplicados
-  // Neto
-  netoAPagar: number // comision - adelantos - faltantesDeposito + gastosAsumidosStorkhub - deudasAplicadas - otrosDescuentos
-  // Estado
+  deudasAplicadas: number
+  deudasAplicadasIds: string[]
+  gastosAprobados?: number
+  gastosAsumidosStorkhub?: number
+  gastosIds?: string[]
+  netoAPagar: number
   estado: EstadoLiquidacion
   creadoAt: unknown
   creadoPor: string
   pagadoAt?: unknown
   pagadoPor?: string
-  saldoGeneradoId?: string // ID en saldos_cargo_motorizado si netoAPagar < 0
-  // Referencias
+  saldoGeneradoId?: string
   ordenesIds: string[]
   depositosIds?: string[]
   movimientosIds?: string[]
 }
 
 // ─── Gastos operativos del motorizado (colección gastos_motorizado) ────────────
-// Solo incluye gastos operativos reales vinculables a órdenes.
-// ajuste_manual → usar TipoSaldo en saldos_cargo_motorizado
-// aporte_empresa → usar TipoMovimiento 'aporte_empresa_motorizado' en movimientos_financieros
 export type TipoGasto =
   | 'peaje_terminal'
   | 'pago_cargotrans'
@@ -112,13 +220,12 @@ export type TipoGasto =
 
 export type EstadoGasto = 'aprobado' | 'anulado'
 
-// Snapshot de la orden al momento de crear el gasto (para trazabilidad sin re-consultar)
 export interface OrdenSnapshot {
   ordenId: string
   comercioNombre?: string
   comercioId?: string
   clienteNombre?: string
-  entregadoAt?: unknown // Timestamp
+  entregadoAt?: unknown
   tipoEnvio?: string
   metodoEnvio?: string
   puntoLogistico?: string
@@ -129,13 +236,13 @@ export interface GastoMotorizado {
   id?: string
   motorizadoId: string
   motorizadoNombre: string
-  ordenId?: string // orden relacionada si aplica
-  ordenSnapshot?: OrdenSnapshot // snapshot de datos clave de la orden
+  ordenId?: string
+  ordenSnapshot?: OrdenSnapshot
   tipo: TipoGasto
   monto: number
-  estado: EstadoGasto // solo gestor/admin crea gastos → nacen aprobados
+  estado: EstadoGasto
   nota?: string
-  fecha: unknown // Timestamp del gasto
+  fecha: unknown // Timestamp del gasto (puede ser distinto a createdAt)
   creadoPorUid: string
   createdAt: unknown
   updatedAt?: unknown
@@ -143,8 +250,8 @@ export interface GastoMotorizado {
 
 // ─── Saldos a cargo del motorizado (colección saldos_cargo_motorizado) ─────────
 export type TipoSaldo =
-  | 'deposito_no_realizado' // depósito pendiente que el motorizado no hizo
-  | 'adelanto' // anticipo entregado al motorizado
+  | 'deposito_no_realizado'
+  | 'adelanto'
   | 'ajuste_manual'
   | 'otro'
 
@@ -154,8 +261,8 @@ export type OrigenSaldo = 'deposito' | 'liquidacion' | 'manual'
 
 export interface AbonoSaldo {
   monto: number
-  fecha: unknown // Timestamp
-  metodo?: string // efectivo, transferencia, etc.
+  fecha: unknown
+  metodo?: string
   nota?: string
   creadoPorUid: string
 }
@@ -170,9 +277,9 @@ export interface SaldoCargoMotorizado {
   saldoPendiente: number
   estado: EstadoSaldo
   origen: OrigenSaldo
-  depositoId?: string // si vino de un depósito convertido
-  liquidacionId?: string // si se aplicó en una liquidación
-  fecha: unknown // Timestamp
+  depositoId?: string
+  liquidacionId?: string
+  fecha: unknown
   nota?: string
   creadoPorUid: string
   createdAt: unknown
@@ -187,28 +294,12 @@ export interface AdelantoMotorizado {
   motorizadoUid: string
   motorizadoNombre: string
   monto: number
-  semanaKey: string // semana a la que se imputa
+  semanaKey: string
   nota?: string
   fecha: unknown
   creadoPorUid: string
   createdAt: unknown
-  // Se crea un SaldoCargoMotorizado de tipo 'adelanto' en paralelo
   saldoId?: string
-}
-
-// ─── Helper de retrocompatibilidad para depósitos legacy ──────────────────────
-// Docs antiguos no tienen campo `estado`, solo `confirmadoMotorizado` y `confirmadoGestor`
-export function getDepositoEstado(dep: {
-  estado?: string
-  confirmadoGestor?: boolean
-  boucher?: { url?: string } | null
-}): EstadoDeposito {
-  if (!dep.estado) {
-    if (dep.confirmadoGestor === true) return 'confirmado'
-    if (dep.boucher?.url) return 'en_revision'
-    return 'pendiente_boucher'
-  }
-  return dep.estado as EstadoDeposito
 }
 
 // ─── Helpers de display ────────────────────────────────────────────────────────
@@ -223,4 +314,26 @@ export const LABELS_TIPO_SALDO: Record<TipoSaldo, string> = {
   adelanto: 'Adelanto',
   ajuste_manual: 'Ajuste manual',
   otro: 'Otro',
+}
+
+export const LABELS_TIPO_CARTERA: Record<TipoCartera, string> = {
+  diaria:     'Contado diario',
+  semanal:    'Crédito semanal',
+  quincenal:  'Crédito quincenal',
+  mensual:    'Crédito mensual',
+  libre:      'Convenio especial',
+}
+
+// ─── Helper de retrocompatibilidad para depósitos legacy ──────────────────────
+// Docs antiguos no tienen campo `estado`, solo `confirmadoMotorizado` y `confirmadoGestor`.
+// Solo usar para LEER docs; escrituras nuevas siempre usan el campo `estado`.
+export function getDepositoEstado(dep: {
+  estado?: string
+  confirmadoGestor?: boolean
+  boucher?: { url?: string } | null
+}): EstadoDeposito {
+  if (dep.estado) return dep.estado as EstadoDeposito
+  if (dep.confirmadoGestor === true) return 'confirmado'
+  if (dep.boucher?.url) return 'en_revision'
+  return 'pendiente_boucher'
 }

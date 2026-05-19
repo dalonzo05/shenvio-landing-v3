@@ -739,6 +739,7 @@ export default function SolicitarEnvioPage() {
     try {
       const raw = sessionStorage.getItem('draftEnvio')
       if (!raw) return
+      sessionStorage.removeItem('draftEnvio')
       const d = JSON.parse(raw)
       setDraft(d)
       if (d.origenCoord) {

@@ -18,15 +18,33 @@ import type {
   SaldoCargoMotorizado,
   AbonoSaldo,
   OrigenSaldo,
+  PropietarioEfectivo,
 } from './financial-types'
+import { cuentas } from './financial-types'
+
+// ─── Tipos auxiliares ─────────────────────────────────────────────────────────
+
+type Cuentas = {
+  origen: string
+  destino: string
+}
+
+type RefsMovimiento = Pick<
+  MovimientoFinanciero,
+  'solicitudId' | 'depositoId' | 'motorizadoId' | 'comercioId' | 'saldoId' | 'gastoId' | 'liquidacionId'
+>
+
+// ─── Registrar movimiento ─────────────────────────────────────────────────────
 
 /**
- * Registra un evento financiero en la colección movimientos_financieros.
- * Solo gestor/admin puede leer esta colección (ver firestore.rules).
+ * Registra un evento financiero en el ledger (movimientos_financieros).
+ * Solo gestor/admin puede leer esta colección.
  *
- * Esta función nunca lanza — los errores se logean en consola sin interrumpir
- * la operación principal del llamador.
+ * Estrategia Fase 1: el ledger es auditoría enriquecida.
+ * Las cuentas (origen/destino) son opcionales mientras se migra gradualmente.
+ * A partir de Fase 4, todas las escrituras deben incluirlas.
  *
+ * Esta función nunca lanza — los errores se logean sin interrumpir al llamador.
  * @returns ID del documento creado, o null si hubo error
  */
 export async function registrarMovimiento(
@@ -34,19 +52,35 @@ export async function registrarMovimiento(
   monto: number,
   operadorId: string,
   descripcion: string,
-  refs?: Pick<MovimientoFinanciero, 'solicitudId' | 'depositoId' | 'motorizadoId' | 'comercioId' | 'saldoId' | 'gastoId'>,
-  metadata?: Record<string, unknown>
+  refs?: Partial<RefsMovimiento>,
+  opciones?: {
+    cuentas?: Cuentas
+    propietario?: PropietarioEfectivo
+    semanaKey?: string
+    metadata?: Record<string, unknown>
+    rol?: MovimientoFinanciero['creadoPorRol']
+  }
 ): Promise<string | null> {
   try {
-    const docRef = await addDoc(collection(db, 'movimientos_financieros'), {
+    const payload: Omit<MovimientoFinanciero, 'id'> = {
       tipo,
       monto,
       at: serverTimestamp(),
-      operadorId,
+      creadoPorUid: operadorId,
+      creadoPorRol: opciones?.rol ?? 'gestor',
       descripcion,
+      estado: 'activo',
       ...(refs ?? {}),
-      ...(metadata ? { metadata } : {}),
-    } satisfies Omit<MovimientoFinanciero, 'id'>)
+      ...(opciones?.cuentas ? {
+        cuentaOrigen: opciones.cuentas.origen,
+        cuentaDestino: opciones.cuentas.destino,
+      } : {}),
+      ...(opciones?.propietario ? { propietario: opciones.propietario } : {}),
+      ...(opciones?.semanaKey ? { semanaKey: opciones.semanaKey } : {}),
+      ...(opciones?.metadata ? { metadata: opciones.metadata } : {}),
+    }
+
+    const docRef = await addDoc(collection(db, 'movimientos_financieros'), payload)
     return docRef.id
   } catch (err) {
     console.error('[financial-writes] Error registrando movimiento:', err)
@@ -58,8 +92,13 @@ export async function registrarMovimiento(
 
 /**
  * Crea un gasto operativo para un motorizado.
- * Solo gestor/admin puede llamar esto.
- * Los gastos nacen directamente como 'aprobado'.
+ * Solo gestor puede llamar esto. Los gastos nacen como 'aprobado'.
+ *
+ * Cuenta origen varía por tipo:
+ * - peaje_terminal: efectivo_en_poder (motorizado pagó en efectivo)
+ * - pago_cargotrans: puede ser externo (comercio pagó) o efectivo_en_poder
+ * - otro_gasto_operativo: efectivo_en_poder
+ * destino siempre: gastos_operativos
  */
 export async function crearGastoMotorizado(params: {
   motorizadoId: string
@@ -80,9 +119,10 @@ export async function crearGastoMotorizado(params: {
     tipo,
     monto,
     estado: 'aprobado',
-    nota: nota || '',
+    nota: nota ?? '',
     ...(ordenId ? { ordenId } : {}),
     ...(ordenSnapshot ? { ordenSnapshot } : {}),
+    // fecha es el momento del gasto (puede ser ingresado por el gestor retroactivamente)
     fecha: fecha ? Timestamp.fromDate(fecha) : serverTimestamp(),
     creadoPorUid: operadorId,
     createdAt: serverTimestamp(),
@@ -95,7 +135,13 @@ export async function crearGastoMotorizado(params: {
     monto,
     operadorId,
     `Gasto ${tipo} · ${motorizadoNombre}`,
-    { motorizadoId, gastoId: ref.id, ...(ordenId ? { solicitudId: ordenId } : {}) }
+    { motorizadoId, gastoId: ref.id, ...(ordenId ? { solicitudId: ordenId } : {}) },
+    {
+      cuentas: {
+        origen: cuentas.efectivoEnPoder(motorizadoId),
+        destino: cuentas.gastosOp,
+      },
+    }
   )
 
   return ref.id
@@ -103,6 +149,7 @@ export async function crearGastoMotorizado(params: {
 
 /**
  * Anula un gasto operativo existente.
+ * No genera movimiento inverso en Fase 1 — se hace en Fase 4+.
  */
 export async function anularGastoMotorizado(
   gastoId: string,
@@ -150,7 +197,7 @@ export async function crearSaldoCargo(params: {
     ...(depositoId ? { depositoId } : {}),
     ...(liquidacionId ? { liquidacionId } : {}),
     fecha: fecha ? Timestamp.fromDate(fecha) : serverTimestamp(),
-    nota: nota || '',
+    nota: nota ?? '',
     creadoPorUid: operadorId,
     createdAt: serverTimestamp(),
     abonos: [],
@@ -158,12 +205,21 @@ export async function crearSaldoCargo(params: {
 
   const ref = await addDoc(collection(db, 'saldos_cargo_motorizado'), saldoData)
 
+  // Las cuentas varían según el tipo de saldo
+  const cuentasMovimiento: Cuentas | undefined =
+    tipo === 'adelanto'
+      ? { origen: cuentas.efectivoEnPoder(motorizadoId), destino: cuentas.deudaMotorizado(motorizadoId) }
+      : tipo === 'deposito_no_realizado'
+      ? { origen: cuentas.deudaMotorizado(motorizadoId), destino: cuentas.banco }
+      : undefined // ajuste_manual y otro no tienen cuentas predefinidas
+
   await registrarMovimiento(
     'saldo_creado',
     monto,
     operadorId,
     `Saldo a cargo (${tipo}) · ${motorizadoNombre}`,
-    { motorizadoId, saldoId: ref.id, ...(depositoId ? { depositoId } : {}) }
+    { motorizadoId, saldoId: ref.id, ...(depositoId ? { depositoId } : {}) },
+    { cuentas: cuentasMovimiento }
   )
 
   return ref.id
@@ -193,8 +249,8 @@ export async function registrarAbonoSaldo(params: {
   const abono: AbonoSaldo = {
     monto: montoAbono,
     fecha: serverTimestamp(),
-    metodo: metodo || 'efectivo',
-    nota: nota || '',
+    metodo: metodo ?? 'efectivo',
+    nota: nota ?? '',
     creadoPorUid: operadorId,
   }
 
@@ -210,7 +266,13 @@ export async function registrarAbonoSaldo(params: {
     montoAbono,
     operadorId,
     `Abono saldo · ${motorizadoNombre}`,
-    { motorizadoId, saldoId }
+    { motorizadoId, saldoId },
+    {
+      cuentas: {
+        origen: cuentas.comisionPendiente(motorizadoId),
+        destino: cuentas.deudaMotorizado(motorizadoId),
+      },
+    }
   )
 }
 
@@ -224,7 +286,7 @@ export async function anularSaldoCargo(
 ): Promise<void> {
   await updateDoc(doc(db, 'saldos_cargo_motorizado', saldoId), {
     estado: 'anulado',
-    nota: nota || '',
+    nota: nota ?? '',
     updatedAt: serverTimestamp(),
   })
 }
@@ -234,11 +296,13 @@ export async function anularSaldoCargo(
 /**
  * Convierte un depósito pendiente en un saldo a cargo del motorizado.
  *
- * Reglas:
  * - Marca el depósito como `convertido_en_deuda` en ordenes_deposito
- * - Marca las solicitudes como confirmadas en Storkhub para sacarlas de pendientes
+ * - Marca las solicitudes como confirmadas (para sacarlas de pendientes)
  * - Crea un SaldoCargoMotorizado de tipo 'deposito_no_realizado'
- * - Registra movimiento de auditoría
+ * - Registra movimiento en el ledger
+ *
+ * NOTA: ya no escribe campos booleanos `confirmadoGestor` (legacy).
+ * Los docs nuevos solo usan el campo `estado`.
  */
 export async function convertirDepositoEnDeuda(params: {
   depositoId: string
@@ -258,16 +322,16 @@ export async function convertirDepositoEnDeuda(params: {
 
   const b = writeBatch(db)
 
-  // 1. Marcar el depósito como convertido_en_deuda
+  // 1. Marcar el depósito como convertido_en_deuda (solo campo `estado`)
   b.update(doc(db, 'ordenes_deposito', depositoId), {
     estado: 'convertido_en_deuda',
-    confirmadoGestor: true,
     confirmadoGestorAt: serverTimestamp(),
     confirmadoGestorUid: operadorId,
     notaConversion: nota,
+    updatedAt: serverTimestamp(),
   })
 
-  // 2. Marcar las solicitudes como "depósito confirmado" para sacarlas de pendientes
+  // 2. Marcar las solicitudes como "depósito gestionado" para sacarlas de pendientes
   const fieldKey = destinatario === 'storkhub'
     ? 'registro.deposito.confirmadoStorkhub'
     : 'registro.deposito.confirmadoComercio'
@@ -288,7 +352,7 @@ export async function convertirDepositoEnDeuda(params: {
 
   await b.commit()
 
-  // 3. Crear el saldo a cargo
+  // 3. Crear el saldo a cargo (genera su propio movimiento interno)
   const saldoId = await crearSaldoCargo({
     motorizadoId,
     motorizadoUid,
@@ -301,13 +365,20 @@ export async function convertirDepositoEnDeuda(params: {
     operadorId,
   })
 
-  // 4. Auditoría
+  // 4. Movimiento de auditoría enriquecido
   await registrarMovimiento(
     'deposito_convertido_en_deuda',
     monto,
     operadorId,
     `Depósito convertido en deuda · ${motorizadoNombre} · ${nota}`,
-    { motorizadoId, depositoId, saldoId }
+    { motorizadoId, depositoId, saldoId },
+    {
+      cuentas: {
+        origen: cuentas.efectivoEnPoder(motorizadoId),
+        destino: cuentas.deudaMotorizado(motorizadoId),
+      },
+      propietario: destinatario === 'storkhub' ? 'storkhub' : undefined,
+    }
   )
 
   return saldoId
@@ -318,6 +389,10 @@ export async function convertirDepositoEnDeuda(params: {
 /**
  * Registra un adelanto al motorizado.
  * Crea un movimiento financiero y un saldo a cargo de tipo 'adelanto'.
+ *
+ * Flujo contable:
+ * StorkHub entrega efectivo al motorizado → efectivo_en_poder (owner: motorizado)
+ * Se crea deuda → deuda_motorizado
  */
 export async function registrarAdelanto(params: {
   motorizadoId: string
@@ -330,16 +405,25 @@ export async function registrarAdelanto(params: {
 }): Promise<{ movimientoId: string | null; saldoId: string }> {
   const { motorizadoId, motorizadoUid, motorizadoNombre, monto, semanaKey, nota, operadorId } = params
 
-  // Registrar como movimiento financiero (para compatibilidad con liquidaciones actuales)
   const movimientoId = await registrarMovimiento(
     'adelanto_motorizado',
     monto,
     operadorId,
     `Adelanto C$${monto} · ${motorizadoNombre} · Sem ${semanaKey}`,
-    { motorizadoId }
+    { motorizadoId },
+    {
+      semanaKey,
+      cuentas: {
+        // StorkHub desembolsa → entra a efectivo_en_poder del motorizado
+        // La propiedad de ese efectivo es del motorizado (su anticipo de comisión)
+        origen: cuentas.ingresos,
+        destino: cuentas.efectivoEnPoder(motorizadoId),
+      },
+      propietario: `motorizado:${motorizadoId}`,
+    }
   )
 
-  // Crear saldo a cargo de tipo adelanto
+  // El adelanto genera deuda automáticamente
   const saldoId = await crearSaldoCargo({
     motorizadoId,
     motorizadoUid,
@@ -347,7 +431,7 @@ export async function registrarAdelanto(params: {
     tipo: 'adelanto',
     monto,
     origen: 'manual',
-    nota: nota || `Adelanto semana ${semanaKey}`,
+    nota: nota ?? `Adelanto semana ${semanaKey}`,
     operadorId,
   })
 

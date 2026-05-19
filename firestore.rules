@@ -265,16 +265,41 @@ service cloud.firestore {
       allow delete: if isAdminOrGestor();
     }
 
-    // Trail de auditoría financiera
+    // Ledger financiero — solo gestor/admin puede leer o escribir.
+    // El motorizado NUNCA escribe aquí directamente: toda auditoría se genera
+    // desde el servidor o desde funciones llamadas por el gestor.
+    // Esto evita registros de auditoría falsos o manipulados.
     match /movimientos_financieros/{id} {
       allow read, write: if isAdminOrGestor();
-      // Motorizado puede crear registros de auditoría (cobros generados, depósitos subidos)
-      // pero no puede leer ni modificar registros existentes
-      allow create: if isMotorizadoRole();
+      allow delete: if false;
     }
 
     // Liquidaciones semanales de motorizado: gestor/admin escribe, motorizado puede leer la suya
     match /liquidaciones_motorizado/{id} {
+      allow read: if isAdminOrGestor()
+        || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid);
+      allow create, update: if isAdminOrGestor();
+      allow delete: if false;
+    }
+
+    // Gastos operativos del motorizado: solo gestor/admin crea y modifica
+    match /gastos_motorizado/{id} {
+      allow read: if isAdminOrGestor()
+        || (isMotorizadoRole() && resource.data.motorizadoId == request.auth.uid);
+      allow create, update: if isAdminOrGestor();
+      allow delete: if false;
+    }
+
+    // Saldos a cargo del motorizado (deudas): solo gestor/admin gestiona
+    match /saldos_cargo_motorizado/{id} {
+      allow read: if isAdminOrGestor()
+        || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid);
+      allow create, update: if isAdminOrGestor();
+      allow delete: if false;
+    }
+
+    // Adelantos al motorizado: solo gestor/admin
+    match /adelantos_motorizado/{id} {
       allow read: if isAdminOrGestor()
         || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid);
       allow create, update: if isAdminOrGestor();

@@ -1222,6 +1222,9 @@ export default function GestorIngresarOrdenPage() {
     try {
       const raw = sessionStorage.getItem('draftEnvio')
       if (!raw) return
+      // Consumir el draft y borrarlo de inmediato para que no persista
+      // si el usuario navega fuera sin crear la orden.
+      sessionStorage.removeItem('draftEnvio')
       const d = JSON.parse(raw) as DraftEnvio
       setDraft(d)
       if (d.origenCoord) {
@@ -1451,11 +1454,14 @@ export default function GestorIngresarOrdenPage() {
 
   const precioEfectivo = (() => {
     if (calcResult) return calcResult.precio === -1 ? -1 : calcResult.precio + recargoMonto + recargoServicioMonto
+    // El precio del draft solo aplica si ya hay comercio seleccionado.
+    // Sin comercio, el header muestra "—" para evitar datos huérfanos.
+    if (!selectedOwnerUid) return null
     const base = precioSugerido ?? null
     if (base === null) return null
     return base + recargoServicioMonto
   })()
-  const distanciaEfectiva = calcResult?.km ?? draft?.distanciaKm ?? null
+  const distanciaEfectiva = calcResult?.km ?? (selectedOwnerUid ? draft?.distanciaKm : null) ?? null
 
   const entregaCoordEfectiva: LatLng | null =
     esFueraManagua && puntoLogisticoSeleccionado
