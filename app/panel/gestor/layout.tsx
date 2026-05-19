@@ -24,6 +24,8 @@ import {
   DollarSign,
   Map,
   Calculator,
+  FileText,
+  BadgeDollarSign,
 } from 'lucide-react'
 import { ToastNuevaOrden, type ToastData } from './_components/ToastNuevaOrden'
 
@@ -321,6 +323,22 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               icon={<Receipt size={18} />}
               label="Liquidaciones"
               active={pathname.startsWith('/panel/gestor/liquidaciones')}
+              collapsed={collapsed}
+            />
+
+            <NavItem
+              href="/panel/gestor/gastos"
+              icon={<FileText size={18} />}
+              label="Gastos motorizados"
+              active={pathname.startsWith('/panel/gestor/gastos')}
+              collapsed={collapsed}
+            />
+
+            <NavItem
+              href="/panel/gestor/saldos"
+              icon={<BadgeDollarSign size={18} />}
+              label="Saldos a cargo"
+              active={pathname.startsWith('/panel/gestor/saldos')}
               collapsed={collapsed}
             />
 
