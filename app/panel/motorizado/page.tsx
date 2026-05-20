@@ -1631,9 +1631,8 @@ export default function PanelMotorizadoPage() {
                                   'registro.deposito.storkhubDepositoId': depositoId,
                                 }));
                                 await b.commit();
-                                await registrarMovimiento('deposito_subido', g.total, auth.currentUser?.uid ?? '',
-                                  `Motorizado subió depósito a Storkhub · ${g.orders.length} órdenes`,
-                                  { depositoId, motorizadoId: auth.currentUser?.uid })
+                                // registrarMovimiento omitido: el motorizado no tiene permiso de escritura
+                                // en movimientos_financieros. El gestor registra el movimiento al confirmar.
                                 setGroupBoucher((prev) => ({ ...prev, [key]: null }));
                                 setGroupBoucherPreview((prev) => { const n = { ...prev }; delete n[key]; return n; });
                               } catch (e: any) {
@@ -1767,9 +1766,8 @@ export default function PanelMotorizadoPage() {
                                   'registro.deposito.comercioDepositoId': depositoId,
                                 }));
                                 await b.commit();
-                                await registrarMovimiento('deposito_subido', g.total, auth.currentUser?.uid ?? '',
-                                  `Motorizado subió depósito a comercio ${g.nombre} · ${g.orders.length} órdenes`,
-                                  { depositoId, motorizadoId: auth.currentUser?.uid })
+                                // registrarMovimiento omitido: el motorizado no tiene permiso de escritura
+                                // en movimientos_financieros. El gestor registra el movimiento al confirmar.
                                 setGroupBoucher((prev) => ({ ...prev, [key]: null }));
                                 setGroupBoucherPreview((prev) => { const n = { ...prev }; delete n[key]; return n; });
                               } catch (e: any) {

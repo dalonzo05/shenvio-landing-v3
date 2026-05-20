@@ -243,9 +243,14 @@ service cloud.firestore {
 
     // Órdenes de depósito: agrupan viajes por motorizado + destino, almacenan boucher único
     match /ordenes_deposito/{depositoId} {
-      allow create: if isMotorizadoRole() || isAdminOrGestor();
+      // El motorizado crea su propio depósito (motorizadoUid == auth UID).
+      // Usamos UID directo en lugar de isMotorizadoRole() para no depender del
+      // cross-read a /usuarios — si ese doc falla, el create quedaría bloqueado.
+      allow create: if isAdminOrGestor()
+        || (signedIn() && request.resource.data.motorizadoUid == request.auth.uid);
+
       allow read: if isAdminOrGestor()
-        || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid)
+        || (signedIn() && resource.data.motorizadoUid == request.auth.uid)
         || (isComercioRole()
             && resource.data.destinatario == 'comercio'
             && resource.data.destinatarioId == request.auth.uid);
@@ -254,7 +259,8 @@ service cloud.firestore {
       allow update: if isAdminOrGestor();
 
       // Motorizado: solo puede subir boucher y pasar a en_revision
-      allow update: if isMotorizadoRole()
+      // También usa UID directo para no depender del cross-read a /usuarios.
+      allow update: if signedIn()
         && resource.data.motorizadoUid == request.auth.uid
         && resource.data.estado in ['pendiente_boucher', 'rechazado']
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
