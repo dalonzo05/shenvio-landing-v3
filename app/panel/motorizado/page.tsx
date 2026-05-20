@@ -288,7 +288,10 @@ type DepositoInfo = {
 function calcDeposito(s: Solicitud): DepositoInfo {
   const ceAplica = !!s.cobroContraEntrega?.aplica;
   const montoProducto = ceAplica ? (s.cobroContraEntrega?.monto || 0) : 0;
-  const precioDelivery = s.confirmacion?.precioFinalCordobas || 0;
+  // Para fuera_managua: fallback a montoSugerido si aún no hay precioFinalCordobas confirmado
+  const precioDelivery =
+    s.confirmacion?.precioFinalCordobas ||
+    (s.tipoServicio === 'fuera_managua' ? (s.pagoDelivery?.montoSugerido || 0) : 0);
   const quienPaga = s.pagoDelivery?.quienPaga || '';
   const deducir = !!s.pagoDelivery?.deducirDelCobroContraEntrega;
   const esPorTransferencia = quienPaga === 'transferencia';
@@ -688,7 +691,9 @@ export default function PanelMotorizadoPage() {
     const dep = calcDeposito(o);
     const tipo = o.pagoDelivery?.tipo || '';
     const quienPaga = o.pagoDelivery?.quienPaga || '';
-    const esRetiro = quienPaga === 'recoleccion';
+    const esFueraManagua = o.tipoServicio === 'fuera_managua';
+    // Para fuera_managua: regla de negocio = el comercio siempre paga en recolección
+    const esRetiro = quienPaga === 'recoleccion' || esFueraManagua;
 
     const showDelivery =
       dep.tieneDelivery &&
@@ -1152,10 +1157,14 @@ export default function PanelMotorizadoPage() {
                         /* ── Confirmación de cobro ── */
                         (() => {
                           const pc = pendingConfirm;
+                          const esPcFueraManagua = pc.order.tipoServicio === 'fuera_managua';
                           const RAZONES_DELIVERY_RETIRO = ['Se acordó cobrar en la entrega', 'Comercio ya pagó por transferencia', 'El comercio tiene crédito / cobrará luego', 'Error en el monto acordado', 'Otro'];
+                          const RAZONES_DELIVERY_RETIRO_FUERA = ['Comercio no estaba al momento del retiro', 'Se acordará el cobro luego', 'Comercio ya pagó por transferencia', 'Error en el monto acordado', 'Otro'];
                           const RAZONES_DELIVERY_ENTREGA = ['El cliente no estaba / no atendió', 'El cliente no tenía efectivo', 'El cliente rechazó el producto', 'Error en el monto acordado', 'Otro'];
                           const RAZONES_PRODUCTO = ['El cliente no estaba / no atendió', 'El cliente no tenía efectivo', 'El cliente rechazó el producto', 'Error en el monto acordado', 'Otro'];
-                          const razonesList = pc.esRetiro ? RAZONES_DELIVERY_RETIRO : RAZONES_DELIVERY_ENTREGA;
+                          const razonesList = pc.esRetiro
+                            ? (esPcFueraManagua ? RAZONES_DELIVERY_RETIRO_FUERA : RAZONES_DELIVERY_RETIRO)
+                            : RAZONES_DELIVERY_ENTREGA;
                           const bloqueadoDelivery = pc.showDelivery && !pc.recibioDelivery && !pc.justDelivery.trim();
                           const bloqueadoProducto = pc.showProducto && !pc.recibioProducto && !pc.justProducto.trim();
                           const bloqueadoCargotrans = pc.showCargotransCobro && !pc.montoCargotrans.trim();
@@ -1167,7 +1176,9 @@ export default function PanelMotorizadoPage() {
                               {pc.showDelivery && (
                                 <div style={{ marginBottom: 14 }}>
                                   <p style={{ fontSize: 13, color: '#374151', fontWeight: 600, margin: '0 0 8px' }}>
-                                    ¿Recibiste {fmt(pc.montoDelivery)} de delivery?
+                                    {esPcFueraManagua
+                                      ? `¿Cobró el comercio el delivery (${fmt(pc.montoDelivery)}) al retirarte el paquete?`
+                                      : `¿Recibiste ${fmt(pc.montoDelivery)} de delivery?`}
                                   </p>
                                   <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
                                     <button onClick={() => setPendingConfirm((p) => p ? { ...p, recibioDelivery: true, justDelivery: '' } : p)}
