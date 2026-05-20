@@ -237,10 +237,12 @@ export async function registrarAbonoSaldo(params: {
   operadorId: string
   motorizadoId: string
   motorizadoNombre: string
+  comprobanteUrl?: string
+  comprobantePath?: string
 }): Promise<void> {
   const {
     saldoId, montoAbono, saldoPendienteActual, metodo, nota, operadorId,
-    motorizadoId, motorizadoNombre,
+    motorizadoId, motorizadoNombre, comprobanteUrl, comprobantePath,
   } = params
 
   const nuevoSaldo = Math.max(0, saldoPendienteActual - montoAbono)
@@ -252,6 +254,8 @@ export async function registrarAbonoSaldo(params: {
     metodo: metodo ?? 'efectivo',
     nota: nota ?? '',
     creadoPorUid: operadorId,
+    ...(comprobanteUrl ? { comprobanteUrl } : {}),
+    ...(comprobantePath ? { comprobantePath } : {}),
   }
 
   await updateDoc(doc(db, 'saldos_cargo_motorizado', saldoId), {

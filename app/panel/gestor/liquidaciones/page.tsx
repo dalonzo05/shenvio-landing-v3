@@ -16,6 +16,7 @@ import {
   getDocs,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import { uploadLiquidacionPDF } from '@/fb/storage'
 import { registrarMovimiento, registrarAbonoSaldo, crearSaldoCargo } from '@/lib/financial-writes'
 import {
   Receipt,
@@ -25,6 +26,7 @@ import {
   AlertTriangle,
   PlusCircle,
   CreditCard,
+  FileDown,
 } from 'lucide-react'
 import type { SaldoCargoMotorizado } from '@/lib/financial-types'
 import { LABELS_TIPO_SALDO } from '@/lib/financial-types'
@@ -99,6 +101,8 @@ type Liquidacion = {
   pagadoAt?: Timestamp
   pagadoPor?: string
   saldoGeneradoId?: string
+  pdfUrl?: string
+  pdfPath?: string
 }
 
 type Saldo = SaldoCargoMotorizado & { id: string }
@@ -167,6 +171,235 @@ function fmtDate(v: any) {
   const d = tsToDate(v)
   if (!d) return '—'
   return d.toLocaleDateString('es-NI', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
+// ─── PDF Generator ────────────────────────────────────────────────────────────
+
+async function generateLiquidacionPDF(params: {
+  liq: Liquidacion
+  ordenes: Solicitud[]
+  gastos: GastoSemana[]
+  calculo: {
+    totalViajes: number
+    totalGenerado: number
+    comision: number
+    comisionPct: number
+    totalDepositado: number
+    faltantesDeposito: number
+    adelantos: number
+    totalGastos: number
+    gastosAsumidosStorkhub: number
+    deudasAplicar: number
+    netoAPagar: number
+  }
+}): Promise<Blob> {
+  const { liq, ordenes, gastos, calculo } = params
+
+  // Lazy import jsPDF — solo en browser (client component)
+  const jsPDFModule = await import('jspdf')
+  const jsPDF = jsPDFModule.default
+  const autoTableModule = await import('jspdf-autotable')
+  const autoTable = autoTableModule.default
+
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' })
+  const pageW = doc.internal.pageSize.getWidth()
+  const blue = [0, 74, 173] as [number, number, number]
+  const gray = [100, 100, 100] as [number, number, number]
+  const lightGray = [240, 240, 240] as [number, number, number]
+
+  let y = 15
+
+  // ── Header ──────────────────────────────────────────────────────────────────
+  doc.setFillColor(...blue)
+  doc.rect(0, 0, pageW, 28, 'F')
+  doc.setTextColor(255, 255, 255)
+  doc.setFontSize(16)
+  doc.setFont('helvetica', 'bold')
+  doc.text('STORKHUB', 14, 12)
+  doc.setFontSize(9)
+  doc.setFont('helvetica', 'normal')
+  doc.text('Comprobante de Liquidación', 14, 19)
+  doc.setFontSize(10)
+  doc.setFont('helvetica', 'bold')
+  doc.text(`Semana ${liq.semanaKey}`, pageW - 14, 12, { align: 'right' })
+  doc.setFontSize(8)
+  doc.setFont('helvetica', 'normal')
+  doc.text(formatSemana(liq.semanaKey), pageW - 14, 19, { align: 'right' })
+  y = 36
+
+  // ── Info motorizado ──────────────────────────────────────────────────────────
+  doc.setTextColor(30, 30, 30)
+  doc.setFontSize(11)
+  doc.setFont('helvetica', 'bold')
+  doc.text(liq.motorizadoNombre, 14, y)
+  y += 6
+
+  doc.setFontSize(8)
+  doc.setFont('helvetica', 'normal')
+  doc.setTextColor(...gray)
+  const pagadoDate = tsToDate(liq.pagadoAt)
+  doc.text(`Liquidación: ${pagadoDate ? pagadoDate.toLocaleDateString('es-NI', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}`, 14, y)
+  doc.text(`Generado: ${new Date().toLocaleDateString('es-NI', { day: '2-digit', month: 'short', year: 'numeric' })}`, pageW - 14, y, { align: 'right' })
+  y += 8
+
+  // Separador
+  doc.setDrawColor(...lightGray)
+  doc.line(14, y, pageW - 14, y)
+  y += 6
+
+  // ── Resumen financiero ───────────────────────────────────────────────────────
+  doc.setTextColor(30, 30, 30)
+  doc.setFontSize(9)
+  doc.setFont('helvetica', 'bold')
+  doc.text('RESUMEN FINANCIERO', 14, y)
+  y += 5
+
+  const resumenRows: [string, string][] = [
+    ['Total delivery generado', `C$ ${calculo.totalGenerado.toLocaleString('es-NI')}`],
+    [`Comisión motorizado (${Math.round(calculo.comisionPct * 100)}%)`, `C$ ${calculo.comision.toLocaleString('es-NI')}`],
+    ['Total depositado', `C$ ${calculo.totalDepositado.toLocaleString('es-NI')}`],
+    ...(calculo.faltantesDeposito > 0 ? [['− Faltante depósito', `C$ ${calculo.faltantesDeposito.toLocaleString('es-NI')}`] as [string, string]] : []),
+    ...(calculo.totalGastos > 0 ? [['Gastos operativos', `C$ ${calculo.totalGastos.toLocaleString('es-NI')}`] as [string, string]] : []),
+    ...(calculo.gastosAsumidosStorkhub > 0 ? [['+ Gastos asumidos por StorkHub', `C$ ${calculo.gastosAsumidosStorkhub.toLocaleString('es-NI')}`] as [string, string]] : []),
+    ...(calculo.adelantos > 0 ? [['− Adelantos semana', `C$ ${calculo.adelantos.toLocaleString('es-NI')}`] as [string, string]] : []),
+    ...(calculo.deudasAplicar > 0 ? [['− Deudas/saldos descontados', `C$ ${calculo.deudasAplicar.toLocaleString('es-NI')}`] as [string, string]] : []),
+  ]
+
+  autoTable(doc, {
+    startY: y,
+    head: [],
+    body: resumenRows,
+    theme: 'plain',
+    styles: { fontSize: 8, cellPadding: 1.5, textColor: [50, 50, 50] },
+    columnStyles: {
+      0: { cellWidth: 100 },
+      1: { halign: 'right', fontStyle: 'bold' },
+    },
+    margin: { left: 14, right: 14 },
+  })
+
+  y = (doc as any).lastAutoTable.finalY + 4
+
+  // Neto a pagar — resaltado
+  const netoColor: [number, number, number] = calculo.netoAPagar < 0 ? [200, 40, 40] : [0, 130, 60]
+  doc.setFillColor(...netoColor)
+  doc.roundedRect(14, y, pageW - 28, 12, 2, 2, 'F')
+  doc.setTextColor(255, 255, 255)
+  doc.setFontSize(9)
+  doc.setFont('helvetica', 'bold')
+  doc.text(calculo.netoAPagar < 0 ? 'SALDO A CARGO DEL MOTORIZADO' : 'NETO A PAGAR AL MOTORIZADO', 20, y + 7.5)
+  doc.setFontSize(11)
+  doc.text(`C$ ${Math.abs(calculo.netoAPagar).toLocaleString('es-NI')}`, pageW - 20, y + 7.5, { align: 'right' })
+  y += 18
+
+  // ── Detalle de viajes ────────────────────────────────────────────────────────
+  doc.setTextColor(30, 30, 30)
+  doc.setFontSize(9)
+  doc.setFont('helvetica', 'bold')
+  doc.text(`DETALLE DE VIAJES (${calculo.totalViajes})`, 14, y)
+  y += 4
+
+  if (ordenes.length > 0) {
+    autoTable(doc, {
+      startY: y,
+      head: [['# Orden', 'Entregado', 'Delivery', `Ganancia (${Math.round(calculo.comisionPct * 100)}%)`]],
+      body: ordenes.map((o, i) => {
+        const delivery = o.confirmacion?.precioFinalCordobas ?? 0
+        const base = o.precioDesglose?.deliveryBase ?? delivery
+        const ganancia = base * calculo.comisionPct
+        return [
+          `${i + 1}. ${o.id.slice(0, 10)}…`,
+          fmtDate(o.entregadoAt),
+          `C$ ${delivery.toLocaleString('es-NI')}`,
+          `C$ ${ganancia.toLocaleString('es-NI')}`,
+        ]
+      }),
+      foot: [[
+        '',
+        `${ordenes.length} viajes`,
+        `C$ ${calculo.totalGenerado.toLocaleString('es-NI')}`,
+        `C$ ${calculo.comision.toLocaleString('es-NI')}`,
+      ]],
+      theme: 'striped',
+      headStyles: { fillColor: blue, textColor: [255, 255, 255], fontSize: 7.5, fontStyle: 'bold' },
+      footStyles: { fillColor: lightGray, textColor: [50, 50, 50], fontSize: 7.5, fontStyle: 'bold' },
+      styles: { fontSize: 7.5, cellPadding: 1.5 },
+      columnStyles: { 2: { halign: 'right' }, 3: { halign: 'right', textColor: [0, 120, 50] } },
+      margin: { left: 14, right: 14 },
+    })
+    y = (doc as any).lastAutoTable.finalY + 6
+  }
+
+  // ── Gastos operativos ────────────────────────────────────────────────────────
+  if (gastos.length > 0) {
+    if (y > 240) { doc.addPage(); y = 15 }
+    doc.setTextColor(30, 30, 30)
+    doc.setFontSize(9)
+    doc.setFont('helvetica', 'bold')
+    doc.text('GASTOS OPERATIVOS', 14, y)
+    y += 4
+
+    const labelGasto: Record<string, string> = {
+      peaje_terminal: 'Peaje terminal',
+      pago_cargotrans: 'Pago Cargotrans',
+      otro_gasto_operativo: 'Otro gasto',
+    }
+
+    autoTable(doc, {
+      startY: y,
+      head: [['Tipo', 'Fecha', 'Monto']],
+      body: gastos.map((g) => [
+        labelGasto[g.tipo] ?? g.tipo,
+        fmtDate(g.fecha),
+        `C$ ${g.monto.toLocaleString('es-NI')}`,
+      ]),
+      foot: [['', 'Total', `C$ ${calculo.totalGastos.toLocaleString('es-NI')}`]],
+      theme: 'striped',
+      headStyles: { fillColor: [180, 100, 0], textColor: [255, 255, 255], fontSize: 7.5 },
+      footStyles: { fillColor: lightGray, textColor: [50, 50, 50], fontSize: 7.5, fontStyle: 'bold' },
+      styles: { fontSize: 7.5, cellPadding: 1.5 },
+      columnStyles: { 2: { halign: 'right' } },
+      margin: { left: 14, right: 14 },
+    })
+    y = (doc as any).lastAutoTable.finalY + 6
+  }
+
+  // ── Observaciones / saldos aplicados ────────────────────────────────────────
+  if (calculo.deudasAplicar > 0 || liq.netoAPagar < 0) {
+    if (y > 250) { doc.addPage(); y = 15 }
+    const boxH = liq.netoAPagar < 0 ? 22 : 16
+    doc.setFillColor(255, 248, 235)
+    doc.roundedRect(14, y, pageW - 28, boxH, 2, 2, 'F')
+    doc.setDrawColor(230, 180, 60)
+    doc.roundedRect(14, y, pageW - 28, boxH, 2, 2, 'S')
+    doc.setTextColor(120, 80, 0)
+    doc.setFontSize(8)
+    doc.setFont('helvetica', 'bold')
+    doc.text('Observaciones', 18, y + 6)
+    doc.setFont('helvetica', 'normal')
+    if (calculo.deudasAplicar > 0) {
+      doc.text(`Deudas/saldos descontados en esta liquidación: C$ ${calculo.deudasAplicar.toLocaleString('es-NI')}`, 18, y + 12)
+    }
+    if (liq.netoAPagar < 0 || liq.saldoGeneradoId) {
+      doc.text(`Saldo pendiente generado: C$ ${Math.abs(liq.netoAPagar).toLocaleString('es-NI')}`, 18, y + 18)
+    }
+  }
+
+  // ── Footer ───────────────────────────────────────────────────────────────────
+  const pageCount = doc.getNumberOfPages()
+  for (let p = 1; p <= pageCount; p++) {
+    doc.setPage(p)
+    doc.setFillColor(...lightGray)
+    const ph = doc.internal.pageSize.getHeight()
+    doc.rect(0, ph - 10, pageW, 10, 'F')
+    doc.setTextColor(...gray)
+    doc.setFontSize(7)
+    doc.setFont('helvetica', 'normal')
+    doc.text('StorkHub · Comprobante de liquidación', 14, ph - 4)
+    doc.text(`Pág ${p}/${pageCount}`, pageW - 14, ph - 4, { align: 'right' })
+  }
+
+  return doc.output('blob')
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -498,6 +731,7 @@ export default function LiquidacionesPage() {
         })
       }
 
+      // Marcar como pagado en Firestore
       await updateDoc(doc(db, 'liquidaciones_motorizado', liq.id), {
         estado: 'pagado',
         pagadoAt: serverTimestamp(),
@@ -508,6 +742,25 @@ export default function LiquidacionesPage() {
       await registrarMovimiento('liquidacion_pagada', liq.netoAPagar, uid,
         `Liquidación pagada sem ${liq.semanaKey} · ${liq.motorizadoNombre}`,
         { motorizadoId: liq.motorizadoId })
+
+      // ── Generar y subir PDF ────────────────────────────────────────────────
+      try {
+        const pdfBlob = await generateLiquidacionPDF({
+          liq: { ...liq, estado: 'pagado' },
+          ordenes,
+          gastos,
+          calculo,
+        })
+        const { url, pathStorage } = await uploadLiquidacionPDF(liq.id, pdfBlob)
+        await updateDoc(doc(db, 'liquidaciones_motorizado', liq.id), {
+          pdfUrl: url,
+          pdfPath: pathStorage,
+          pdfGeneradoAt: serverTimestamp(),
+        })
+      } catch (pdfErr) {
+        // PDF falla silenciosamente — no bloquea el flujo principal
+        console.error('[liquidaciones] Error generando PDF:', pdfErr)
+      }
     } catch (e: any) {
       setErr(e?.message || 'Error')
     } finally {
@@ -836,9 +1089,22 @@ export default function LiquidacionesPage() {
                     {saving ? 'Guardando…' : '✓ Marcar como pagado'}
                   </button>
                 ) : (
-                  <div className="flex items-center gap-2 text-green-700 bg-green-50 rounded-xl px-4 py-3">
-                    <CheckCircle2 className="h-4 w-4" />
-                    <span className="text-sm font-semibold">Liquidación pagada · {fmtDate(liquidacionExistente.pagadoAt)}</span>
+                  <div className="flex items-center justify-between gap-2 bg-green-50 rounded-xl px-4 py-3">
+                    <div className="flex items-center gap-2 text-green-700">
+                      <CheckCircle2 className="h-4 w-4" />
+                      <span className="text-sm font-semibold">Liquidación pagada · {fmtDate(liquidacionExistente.pagadoAt)}</span>
+                    </div>
+                    {liquidacionExistente.pdfUrl && (
+                      <a
+                        href={liquidacionExistente.pdfUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1.5 text-xs font-bold text-[#004aad] bg-white border border-[#004aad]/30 px-3 py-1.5 rounded-lg hover:bg-blue-50 transition"
+                      >
+                        <FileDown className="h-3.5 w-3.5" />
+                        Descargar PDF
+                      </a>
+                    )}
                   </div>
                 )
               ) : (
@@ -910,6 +1176,7 @@ export default function LiquidacionesPage() {
                   <th className="px-4 py-2.5 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Gastos Storkhub</th>
                   <th className="px-4 py-2.5 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">Neto</th>
                   <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Estado</th>
+                  <th className="px-4 py-2.5 text-center text-xs font-semibold uppercase tracking-wide text-gray-500">PDF</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -935,6 +1202,22 @@ export default function LiquidacionesPage() {
                       }`}>
                         {l.estado === 'pagado' ? 'Pagado' : 'Pendiente'}
                       </span>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      {l.pdfUrl ? (
+                        <a
+                          href={l.pdfUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-[#004aad] hover:text-blue-800 transition"
+                          title="Descargar PDF"
+                        >
+                          <FileDown className="h-4 w-4" />
+                          PDF
+                        </a>
+                      ) : l.estado === 'pagado' ? (
+                        <span className="text-xs text-gray-300">—</span>
+                      ) : null}
                     </td>
                   </tr>
                 ))}

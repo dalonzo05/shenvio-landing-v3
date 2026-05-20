@@ -79,6 +79,37 @@ export async function uploadEvidenciaPath(
 }
 
 /**
+ * Uploads a comprobante/boucher image for an abono a saldo.
+ * Path: saldos/{saldoId}/abono_{index}.jpg
+ */
+export async function uploadComprobante(
+  saldoId: string,
+  index: number,
+  blob: Blob,
+): Promise<{ url: string; pathStorage: string }> {
+  const pathStorage = `saldos/${saldoId}/abono_${index}.jpg`
+  const storageRef = ref(storage, pathStorage)
+  await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' })
+  const url = await getDownloadURL(storageRef)
+  return { url, pathStorage }
+}
+
+/**
+ * Uploads a liquidacion PDF to Firebase Storage.
+ * Path: liquidaciones/{liquidacionId}/comprobante.pdf
+ */
+export async function uploadLiquidacionPDF(
+  liquidacionId: string,
+  blob: Blob,
+): Promise<{ url: string; pathStorage: string }> {
+  const pathStorage = `liquidaciones/${liquidacionId}/comprobante.pdf`
+  const storageRef = ref(storage, pathStorage)
+  await uploadBytes(storageRef, blob, { contentType: 'application/pdf' })
+  const url = await getDownloadURL(storageRef)
+  return { url, pathStorage }
+}
+
+/**
  * Uploads a motorizado profile photo to Firebase Storage under
  * motorizados/{motorizadoId}/foto.jpg
  */

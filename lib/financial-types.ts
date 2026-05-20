@@ -210,6 +210,9 @@ export interface LiquidacionMotorizado {
   ordenesIds: string[]
   depositosIds?: string[]
   movimientosIds?: string[]
+  pdfUrl?: string      // URL del PDF generado al marcar como pagado
+  pdfPath?: string     // path en Firebase Storage
+  pdfGeneradoAt?: unknown
 }
 
 // ─── Gastos operativos del motorizado (colección gastos_motorizado) ────────────
@@ -265,6 +268,8 @@ export interface AbonoSaldo {
   metodo?: string
   nota?: string
   creadoPorUid: string
+  comprobanteUrl?: string   // URL pública del comprobante/boucher subido a Storage
+  comprobantePath?: string  // path en Firebase Storage para referencia
 }
 
 export interface SaldoCargoMotorizado {
