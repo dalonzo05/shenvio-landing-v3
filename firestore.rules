@@ -283,9 +283,12 @@ service cloud.firestore {
     }
 
     // Gastos operativos del motorizado: solo gestor/admin crea y modifica
+    // NOTA: motorizadoId es el doc ID de la colección 'motorizado', NO el Auth UID.
+    // Por eso cruzamos con get() para verificar que el authUid coincide.
     match /gastos_motorizado/{id} {
       allow read: if isAdminOrGestor()
-        || (isMotorizadoRole() && resource.data.motorizadoId == request.auth.uid);
+        || (isMotorizadoRole()
+            && get(/databases/$(database)/documents/motorizado/$(resource.data.motorizadoId)).data.authUid == request.auth.uid);
       allow create, update: if isAdminOrGestor();
       allow delete: if false;
     }
