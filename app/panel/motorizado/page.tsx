@@ -687,9 +687,13 @@ export default function PanelMotorizadoPage() {
     const esFueraManagua = o.tipoServicio === 'fuera_managua';
     // Para fuera_managua: regla de negocio = el comercio siempre paga en recolección
     const esRetiro = quienPaga === 'recoleccion' || esFueraManagua;
+    // Si el delivery se deduce del cobro CE el motorizado NO lo cobra por separado:
+    // el cliente paga un solo monto total (producto) y el sistema descuenta el delivery internamente.
+    const deducirDelCE = !!o.pagoDelivery?.deducirDelCobroContraEntrega;
 
     const showDelivery =
       dep.tieneDelivery &&
+      !deducirDelCE &&   // cuando está deducido del CE, delivery va implícito en el cobro del producto
       ((nuevo === 'retirado' && esRetiro) || (nuevo === 'entregado' && !esRetiro));
     const showProducto = nuevo === 'entregado' && dep.tieneProducto;
     const showCargotransCobro =
@@ -1207,11 +1211,26 @@ export default function PanelMotorizadoPage() {
                                 </div>
                               )}
 
-                              {pc.showProducto && (
+                              {pc.showProducto && (() => {
+                                const deducirPC = !!pc.order.pagoDelivery?.deducirDelCobroContraEntrega;
+                                return (
                                 <div style={{ marginBottom: 14 }}>
+                                  {deducirPC && pc.montoDelivery > 0 && (
+                                    <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '8px 12px', marginBottom: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                      <span style={{ fontSize: 12, color: '#1d4ed8', fontWeight: 600 }}>📦 Delivery incluido en el cobro</span>
+                                      <span style={{ fontSize: 12, color: '#1d4ed8', fontWeight: 700 }}>− {fmt(pc.montoDelivery)}</span>
+                                    </div>
+                                  )}
                                   <p style={{ fontSize: 13, color: '#374151', fontWeight: 600, margin: '0 0 8px' }}>
-                                    ¿Recibiste {fmt(pc.montoProducto)} del producto?
+                                    {deducirPC
+                                      ? `¿Recibiste ${fmt(pc.montoProducto)} del cliente?`
+                                      : `¿Recibiste ${fmt(pc.montoProducto)} del producto?`}
                                   </p>
+                                  {deducirPC && pc.montoDelivery > 0 && (
+                                    <p style={{ fontSize: 11, color: '#6b7280', margin: '-4px 0 8px' }}>
+                                      Cobras {fmt(pc.montoProducto)} en total · el sistema descuenta {fmt(pc.montoDelivery)} de delivery internamente
+                                    </p>
+                                  )}
                                   <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
                                     <button onClick={() => setPendingConfirm((p) => p ? { ...p, recibioProducto: true, justProducto: '' } : p)}
                                       style={{ flex: 1, padding: '9px 0', borderRadius: 10, border: `2px solid ${pc.recibioProducto ? '#16a34a' : '#e5e7eb'}`, background: pc.recibioProducto ? '#16a34a' : '#fff', color: pc.recibioProducto ? '#fff' : '#6b7280', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
@@ -1238,7 +1257,8 @@ export default function PanelMotorizadoPage() {
                                     </div>
                                   )}
                                 </div>
-                              )}
+                                )
+                              })()}
 
                               {pc.showCargotransCobro && (
                                 <div style={{ marginBottom: 14, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 12, padding: '12px 14px' }}>
@@ -1270,11 +1290,20 @@ export default function PanelMotorizadoPage() {
                                   disabled={bloqueado}
                                   onClick={() => {
                                     setPendingConfirm(null);
+                                    const deducirPcConfirm = !!pc.order.pagoDelivery?.deducirDelCobroContraEntrega;
+                                    // Cuando el delivery está deducido del CE, no se pregunta por separado.
+                                    // Al confirmar el producto se registra el delivery implícitamente
+                                    // con el mismo resultado (recibido o no) que el producto.
+                                    const deliveryCobro = pc.showDelivery
+                                      ? { monto: pc.montoDelivery, recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? pc.justDelivery : undefined }
+                                      : (deducirPcConfirm && pc.showProducto && pc.montoDelivery > 0)
+                                        ? { monto: pc.montoDelivery, recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? pc.justProducto : undefined }
+                                        : undefined;
                                     executeCambiar(
                                       pc.order,
                                       pc.nuevo,
                                       {
-                                        delivery: pc.showDelivery ? { monto: pc.montoDelivery, recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? pc.justDelivery : undefined } : undefined,
+                                        delivery: deliveryCobro,
                                         producto: pc.showProducto ? { monto: pc.montoProducto, recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? pc.justProducto : undefined } : undefined,
                                       },
                                       pc.showCargotransCobro ? { monto: Number(pc.montoCargotrans) } : undefined,
