@@ -74,7 +74,9 @@ type DepositoCalc = {
 
 type GrupoStorkhub = {
   ordenes: Solicitud[]
-  total: number
+  total: number       // neto (bruto − gastos deducibles)
+  totalBruto: number  // antes de gastos
+  gastosDeducibles: number
 }
 
 type GrupoComercio = {
@@ -105,7 +107,10 @@ type DepositoOrderDoc = {
   motorizadoUid: string
   motorizadoNombre: string
   solicitudIds: string[]
-  montoTotal: number
+  montoTotal: number     // neto enviado por el motorizado
+  montoBruto?: number    // delivery bruto antes de gastos (guardado por motorizado)
+  gastosDescontados?: number  // gastos deducidos del bruto
+  gastosIds?: string[]   // IDs de gastos_motorizado descontados
   boucher?: { url: string; pathStorage: string } | null
   confirmadoMotorizado: boolean
   confirmadoMotorizadoAt?: Timestamp
@@ -264,6 +269,14 @@ export default function DepositosPage() {
   // Nombres reales de motorizados (authUid → nombre)
   const [motorizadoNames, setMotorizadoNames] = useState<Record<string, string>>({})
 
+  // Gastos aprobados no liquidados (para deducir del neto Storkhub)
+  const [gastosAprobados, setGastosAprobados] = useState<Array<{ id: string; motorizadoId: string; monto: number }>>([])
+
+  // Convertir pendiente en deuda (sin ordenes_deposito previo)
+  const [convertPendienteMotId, setConvertPendienteMotId] = useState<string | null>(null)
+  const [motivoConvertPendiente, setMotivoConvertPendiente] = useState('')
+  const [convertingPendienteId, setConvertingPendienteId] = useState<string | null>(null)
+
   // Filtros historial
   const [filtroMotorizado, setFiltroMotorizado] = useState<string>('todos')
 
@@ -302,6 +315,18 @@ export default function DepositosPage() {
     return onSnapshot(q, (snap) => {
       setOrdenes(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Solicitud)))
       setLoading(false)
+    })
+  }, [])
+
+  // Cargar gastos aprobados no liquidados para deducir del neto Storkhub
+  useEffect(() => {
+    const q = query(collection(db, 'gastos_motorizado'), where('estado', '==', 'aprobado'))
+    return onSnapshot(q, (snap) => {
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() as any) }))
+        .filter((g: any) => !g.liquidacionId)
+        .map((g: any) => ({ id: g.id, motorizadoId: g.motorizadoId as string, monto: g.monto as number }))
+      setGastosAprobados(list)
     })
   }, [])
 
@@ -398,35 +423,16 @@ export default function DepositosPage() {
     [ordenes]
   )
 
-  // ── KPIs ───────────────────────────────────────────────────────────────────
+  // ── Mapa de gastos deducibles por motorizado (doc ID) ─────────────────────
 
-  const kpis = useMemo(() => {
-    let pendStorkhub = 0
-    let pendComercios = 0
-    let confirmadosHoy = 0
-
-    ordenesConDeposito.forEach((o) => {
-      const dep = calcDeposito(o)
-      const legacyOk = !!o.registro?.deposito?.confirmadoMotorizado
-
-      if (!legacyOk) {
-        if (dep.totalAStorkhub > 0 && !o.registro?.deposito?.confirmadoStorkhub) {
-          pendStorkhub += dep.totalAStorkhub
-        }
-        if (dep.totalAlComercio > 0 && !o.registro?.deposito?.confirmadoComercio) {
-          pendComercios += dep.totalAlComercio
-        }
-      }
-
-      // Contabilizar confirmados hoy
-      const depR = o.registro?.deposito
-      if (isToday(depR?.confirmadoStorkhubAt) || isToday(depR?.confirmadoComercioAt) || isToday(depR?.confirmadoAt)) {
-        confirmadosHoy++
-      }
+  const gastosMap = useMemo(() => {
+    const map: Record<string, number> = {}
+    gastosAprobados.forEach((g) => {
+      if (!g.motorizadoId) return
+      map[g.motorizadoId] = (map[g.motorizadoId] || 0) + g.monto
     })
-
-    return { pendStorkhub, pendComercios, confirmadosHoy }
-  }, [ordenesConDeposito])
+    return map
+  }, [gastosAprobados])
 
   // ── Grupos pendientes ──────────────────────────────────────────────────────
 
@@ -442,7 +448,7 @@ export default function DepositosPage() {
         map.set(motId, {
           motorizadoId: motId,
           motorizadoNombre: motNombre,
-          storkhub: { ordenes: [], total: 0 },
+          storkhub: { ordenes: [], total: 0, totalBruto: 0, gastosDeducibles: 0 },
           comercios: [],
         })
       }
@@ -453,7 +459,7 @@ export default function DepositosPage() {
       // Storkhub pendiente
       if (dep.totalAStorkhub > 0 && !depoR?.confirmadoStorkhub && !depoR?.confirmadoMotorizado) {
         grupo.storkhub.ordenes.push(o)
-        grupo.storkhub.total += dep.totalAStorkhub
+        grupo.storkhub.totalBruto += dep.totalAStorkhub
       }
 
       // Comercio pendiente
@@ -470,10 +476,39 @@ export default function DepositosPage() {
       }
     })
 
+    // Aplicar gastos deducibles al neto de Storkhub
+    map.forEach((grupo) => {
+      const gastos = gastosMap[grupo.motorizadoId] || 0
+      grupo.storkhub.gastosDeducibles = gastos
+      grupo.storkhub.total = Math.max(0, grupo.storkhub.totalBruto - gastos)
+    })
+
     return [...map.values()].filter(
       (g) => g.storkhub.ordenes.length > 0 || g.comercios.length > 0
     )
-  }, [ordenesConDeposito, comercioNames])
+  }, [ordenesConDeposito, comercioNames, gastosMap])
+
+  // ── KPIs (deriva de gruposMotorizado para usar neto Storkhub) ──────────────
+
+  const kpis = useMemo(() => {
+    let pendStorkhub = 0
+    let pendComercios = 0
+    let confirmadosHoy = 0
+
+    gruposMotorizado.forEach((g) => {
+      pendStorkhub += g.storkhub.total       // ya es neto
+      g.comercios.forEach((c) => { pendComercios += c.total })
+    })
+
+    ordenesConDeposito.forEach((o) => {
+      const depR = o.registro?.deposito
+      if (isToday(depR?.confirmadoStorkhubAt) || isToday(depR?.confirmadoComercioAt) || isToday(depR?.confirmadoAt)) {
+        confirmadosHoy++
+      }
+    })
+
+    return { pendStorkhub, pendComercios, confirmadosHoy }
+  }, [gruposMotorizado, ordenesConDeposito])
 
   // ── Historial ──────────────────────────────────────────────────────────────
 
@@ -582,7 +617,10 @@ export default function DepositosPage() {
     const blob = await compressImage(boucherFile)
     const { url, pathStorage } = await uploadDepositoBoucher(depositoId, blob)
     const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motId }
-    const montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
+    const montoBruto = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
+    const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motId)
+    const gastosDescontados = gastosDeMotorizado.reduce((s, g) => s + g.monto, 0)
+    const montoTotal = Math.max(0, montoBruto - gastosDescontados)
     await setDoc(depositoRef, {
       creadoAt: serverTimestamp(),
       tipo: 'recaudacion_motorizado_storkhub',
@@ -595,6 +633,9 @@ export default function DepositosPage() {
       motorizadoNombre: motNombre,
       solicitudIds: ordenes.map((o) => o.id),
       montoTotal,
+      montoBruto,
+      gastosDescontados,
+      gastosIds: gastosDeMotorizado.map((g) => g.id),
       boucher: boucherData,
       confirmadoMotorizado: false,
       confirmadoGestor: true,
@@ -763,6 +804,58 @@ export default function DepositosPage() {
     }
   }
 
+  // ── Convertir grupo Storkhub pendiente (sin ordenes_deposito) en deuda ──────
+
+  async function convertirPendienteEnDeuda(gm: GrupoMotorizado, motivo: string) {
+    if (!motivo.trim()) return
+    setConvertingPendienteId(gm.motorizadoId)
+    try {
+      const ordenes = gm.storkhub.ordenes
+      const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid || gm.motorizadoId
+      const monto = gm.storkhub.total  // neto
+
+      // 1. Crear ordenes_deposito (convertirDepositoEnDeuda lo requiere existente)
+      const depositoRef = doc(collection(db, 'ordenes_deposito'))
+      const depositoId = depositoRef.id
+      await setDoc(depositoRef, {
+        creadoAt: serverTimestamp(),
+        tipo: 'recaudacion_motorizado_storkhub',
+        estado: 'pendiente_boucher',
+        destinatario: 'storkhub',
+        destinatarioId: 'storkhub',
+        destinatarioNombre: 'Storkhub',
+        motorizadoUid: motAuthUid,
+        motorizadoNombre: gm.motorizadoNombre,
+        solicitudIds: ordenes.map((o) => o.id),
+        montoTotal: monto,
+        montoBruto: gm.storkhub.totalBruto,
+        gastosDescontados: gm.storkhub.gastosDeducibles,
+        gastosIds: gastosAprobados.filter((g) => g.motorizadoId === gm.motorizadoId).map((g) => g.id),
+        confirmadoMotorizado: false,
+        confirmadoGestor: false,
+      })
+
+      // 2. Convertir en deuda
+      await convertirDepositoEnDeuda({
+        depositoId,
+        solicitudIds: ordenes.map((o) => o.id),
+        destinatario: 'storkhub',
+        monto,
+        motorizadoId: gm.motorizadoId,
+        motorizadoUid: motAuthUid,
+        motorizadoNombre: gm.motorizadoNombre,
+        nota: motivo,
+        operadorId: auth.currentUser?.uid ?? '',
+      })
+    } catch (e) {
+      console.error('Error convirtiendo pendiente en deuda:', e)
+    } finally {
+      setConvertingPendienteId(null)
+      setConvertPendienteMotId(null)
+      setMotivoConvertPendiente('')
+    }
+  }
+
   // ── Reemplazar boucher de un depósito en "Por revisar" ────────────────────
 
   async function reemplazarBoucher(dep: DepositoOrderDoc, file: File) {
@@ -909,6 +1002,7 @@ export default function DepositosPage() {
                 <div className="p-3 flex flex-col gap-3">
                   {/* Grupo Storkhub */}
                   {gm.storkhub.ordenes.length > 0 && (
+                    <>
                     <DepositoGrupo
                       icon={<Landmark className="h-4 w-4 text-blue-600" />}
                       titulo="Storkhub"
@@ -916,6 +1010,8 @@ export default function DepositosPage() {
                       colorBorder="border-blue-200"
                       colorBg="bg-blue-50"
                       total={gm.storkhub.total}
+                      totalBruto={gm.storkhub.totalBruto}
+                      gastosDeducibles={gm.storkhub.gastosDeducibles}
                       ordenes={gm.storkhub.ordenes}
                       expandKey={`${gm.motorizadoId}-storkhub`}
                       expanded={expandedGroups.has(`${gm.motorizadoId}-storkhub`)}
@@ -925,6 +1021,45 @@ export default function DepositosPage() {
                       onSelectOrden={setSelectedOrdenId}
                       comercioNames={comercioNames}
                     />
+                    {/* Convertir en deuda: para grupos Storkhub pendientes */}
+                    {convertPendienteMotId === gm.motorizadoId ? (
+                      <div className="flex flex-col gap-2 px-1">
+                        <p className="text-[11px] font-semibold text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                          ⚠️ El monto neto ({fmt(gm.storkhub.total)}) se registrará como <strong>saldo a cargo</strong> del motorizado.
+                        </p>
+                        <input
+                          value={motivoConvertPendiente}
+                          onChange={(e) => setMotivoConvertPendiente(e.target.value)}
+                          placeholder="Motivo (ej: no depositó, se acordó descuento)…"
+                          className="text-xs border border-red-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-300"
+                          autoFocus
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => { setConvertPendienteMotId(null); setMotivoConvertPendiente('') }}
+                            className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition"
+                          >
+                            Cancelar
+                          </button>
+                          <button
+                            onClick={() => convertirPendienteEnDeuda(gm, motivoConvertPendiente)}
+                            disabled={!motivoConvertPendiente.trim() || convertingPendienteId === gm.motorizadoId}
+                            className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            {convertingPendienteId === gm.motorizadoId ? 'Procesando…' : 'Confirmar — crear deuda'}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setConvertPendienteMotId(gm.motorizadoId)}
+                        className="text-[11px] font-semibold text-red-500 hover:text-red-700 hover:bg-red-50 border border-red-200 px-3 py-1.5 rounded-lg transition self-start"
+                        title="El motorizado no depositará — convertir en saldo a cargo"
+                      >
+                        → Convertir en deuda
+                      </button>
+                    )}
+                    </>
                   )}
 
                   {/* Grupos Comercio */}
@@ -1003,6 +1138,12 @@ export default function DepositosPage() {
                       <p className="text-xs text-gray-500">
                         Motorizado: {fmtNombreMotorizado(dep.motorizadoNombre, motorizadoNames, dep.motorizadoUid)} · {fmtDate(dep.creadoAt)} · {dep.solicitudIds?.length ?? 0} órdenes
                       </p>
+                      {/* Desglose gastos enviado por motorizado */}
+                      {esStorkhub && dep.montoBruto != null && dep.gastosDescontados != null && dep.gastosDescontados > 0 && (
+                        <p className="text-[11px] text-blue-600 mt-0.5">
+                          Bruto {fmt(dep.montoBruto)} − gastos {fmt(dep.gastosDescontados)} = <strong>neto {fmt(dep.montoTotal)}</strong>
+                        </p>
+                      )}
                       <p className="text-[11px] text-gray-400 font-mono mt-0.5">ID: {dep.id}</p>
                     </div>
                     <span className="text-sm font-black text-gray-900 whitespace-nowrap">{fmt(dep.montoTotal)}</span>
@@ -1357,6 +1498,8 @@ function DepositoGrupo({
   colorBorder,
   colorBg,
   total,
+  totalBruto,
+  gastosDeducibles,
   ordenes,
   expandKey,
   expanded,
@@ -1372,6 +1515,8 @@ function DepositoGrupo({
   colorBorder: string
   colorBg: string
   total: number
+  totalBruto?: number
+  gastosDeducibles?: number
   ordenes: Solicitud[]
   expandKey: string
   expanded: boolean
@@ -1406,6 +1551,8 @@ function DepositoGrupo({
     }
   }
 
+  const tieneGastos = tipoDeposito === 'storkhub' && gastosDeducibles && gastosDeducibles > 0
+
   return (
     <div className={`rounded-xl border-2 ${colorBorder} overflow-hidden`}>
       <div className={`px-4 py-3 ${colorBg} flex items-center gap-3`}>
@@ -1413,6 +1560,12 @@ function DepositoGrupo({
         <div className="flex-1 min-w-0">
           <p className="text-sm font-bold text-gray-900 truncate">{titulo}</p>
           <p className="text-xs text-gray-500">{subtitulo} · {ordenes.length} {ordenes.length === 1 ? 'orden' : 'órdenes'}</p>
+          {/* Desglose gastos cuando hay deducción */}
+          {tieneGastos && (
+            <p className="text-[11px] text-blue-600 mt-0.5">
+              Bruto {fmt(totalBruto!)} − gastos {fmt(gastosDeducibles!)} = <strong>neto {fmt(total)}</strong>
+            </p>
+          )}
         </div>
         <span className="text-sm font-black text-gray-900 whitespace-nowrap">{`C$ ${total.toLocaleString('es-NI')}`}</span>
         <button
