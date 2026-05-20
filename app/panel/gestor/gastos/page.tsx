@@ -36,11 +36,17 @@ type OrdenOption = {
   ownerSnapshot?: { companyName?: string; nombre?: string }
   entrega?: { nombreApellido?: string; direccionEscrita?: string }
   confirmacion?: { precioFinalCordobas?: number }
+  tipoServicio?: string
   tipoEnvio?: string
   metodoEnvio?: string
   puntoRetiroNombre?: string
   zonaEntregaNombre?: string
   asignacion?: { motorizadoId?: string }
+  fueraManagua?: {
+    destinoFinal?: string | null
+    puntoLogisticoNombre?: string | null
+    metodoEnvio?: string | null
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -48,6 +54,12 @@ type OrdenOption = {
 const TIPOS_GASTO: TipoGasto[] = ['peaje_terminal', 'pago_cargotrans', 'otro_gasto_operativo']
 
 function fmt(n: number) { return `C$ ${n.toLocaleString('es-NI')}` }
+
+/** Fecha local YYYY-MM-DD sin usar UTC (evita mostrar el día siguiente en UTC-6) */
+function todayLocal(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 
 function tsToDate(v: any): Date | null {
   if (!v) return null
@@ -64,7 +76,8 @@ function fmtDate(v: any): string {
 
 function fmtOrdenLabel(o: OrdenOption): string {
   const comercio = o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre || ''
-  const cliente = o.entrega?.nombreApellido || ''
+  const cliente = o.entrega?.nombreApellido ||
+    (o.tipoServicio === 'fuera_managua' ? (o.fueraManagua?.destinoFinal || '') : '')
   const fecha = fmtDate(o.entregadoAt || o.createdAt)
   const precio = o.confirmacion?.precioFinalCordobas ? fmt(o.confirmacion.precioFinalCordobas) : ''
   return [comercio, cliente, fecha, precio].filter(Boolean).join(' · ')
@@ -82,10 +95,12 @@ function OrdenSelector({
   motorizadoId,
   value,
   onChange,
+  fechaFiltro,
 }: {
   motorizadoId: string
   value: OrdenOption | null
   onChange: (o: OrdenOption | null) => void
+  fechaFiltro?: string   // YYYY-MM-DD local — filtra órdenes entregadas ese día
 }) {
   const [ordenes, setOrdenes] = useState<OrdenOption[]>([])
   const [loading, setLoading] = useState(false)
@@ -124,18 +139,29 @@ function OrdenSelector({
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  const filtradas = useMemo(() => {
-    if (!busqueda.trim()) return ordenes.slice(0, 60)
-    const q = busqueda.toLowerCase()
+  // Órdenes filtradas por fecha seleccionada en el formulario
+  const ordenesDeFecha = useMemo(() => {
+    if (!fechaFiltro) return ordenes
+    const [yyyy, mm, dd] = fechaFiltro.split('-').map(Number)
     return ordenes.filter((o) => {
+      const d = tsToDate(o.entregadoAt)
+      if (!d) return false
+      return d.getFullYear() === yyyy && d.getMonth() + 1 === mm && d.getDate() === dd
+    })
+  }, [ordenes, fechaFiltro])
+
+  const filtradas = useMemo(() => {
+    if (!busqueda.trim()) return ordenesDeFecha.slice(0, 60)
+    const q = busqueda.toLowerCase()
+    return ordenesDeFecha.filter((o) => {
       const id = o.id.toLowerCase()
       const comercio = (o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre || '').toLowerCase()
-      const cliente = (o.entrega?.nombreApellido || '').toLowerCase()
-      const dir = (o.entrega?.direccionEscrita || '').toLowerCase()
+      const cliente = (o.entrega?.nombreApellido || o.fueraManagua?.destinoFinal || '').toLowerCase()
+      const dir = (o.entrega?.direccionEscrita || o.fueraManagua?.puntoLogisticoNombre || '').toLowerCase()
       const fecha = fmtDate(o.entregadoAt).toLowerCase()
       return id.includes(q) || comercio.includes(q) || cliente.includes(q) || dir.includes(q) || fecha.includes(q)
     }).slice(0, 60)
-  }, [ordenes, busqueda])
+  }, [ordenesDeFecha, busqueda])
 
   if (!motorizadoId) {
     return (
@@ -161,7 +187,7 @@ function OrdenSelector({
         ) : (
           <span className="flex-1 text-gray-400 text-xs flex items-center gap-1.5">
             <Search className="h-3.5 w-3.5" />
-            {loading ? 'Cargando órdenes…' : `Buscar entre ${ordenes.length} órdenes entregadas`}
+            {loading ? 'Cargando órdenes…' : `Buscar entre ${ordenesDeFecha.length} órdenes entregadas`}
           </span>
         )}
         {value ? (
@@ -226,19 +252,26 @@ function OrdenSelector({
                         {o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre}
                       </span>
                     )}
-                    {o.entrega?.nombreApellido && (
-                      <span className="text-xs text-gray-500 truncate">→ {o.entrega.nombreApellido}</span>
+                    {(o.entrega?.nombreApellido || (o.tipoServicio === 'fuera_managua' && o.fueraManagua?.destinoFinal)) && (
+                      <span className="text-xs text-gray-500 truncate">
+                        → {o.entrega?.nombreApellido || o.fueraManagua?.destinoFinal}
+                      </span>
+                    )}
+                    {o.tipoServicio === 'fuera_managua' && (
+                      <span className="text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-semibold shrink-0">FM</span>
                     )}
                   </div>
-                  {o.entrega?.direccionEscrita && (
-                    <p className="text-[11px] text-gray-400 truncate mt-0.5">{o.entrega.direccionEscrita}</p>
+                  {(o.entrega?.direccionEscrita || (o.tipoServicio === 'fuera_managua' && o.fueraManagua?.puntoLogisticoNombre)) && (
+                    <p className="text-[11px] text-gray-400 truncate mt-0.5">
+                      {o.entrega?.direccionEscrita || o.fueraManagua?.puntoLogisticoNombre}
+                    </p>
                   )}
                 </button>
               ))
             )}
           </div>
           <div className="px-3 py-1.5 border-t border-gray-100 text-[10px] text-gray-400">
-            {filtradas.length} de {ordenes.length} órdenes
+            {filtradas.length} de {ordenesDeFecha.length} órdenes
           </div>
         </div>
       )}
@@ -260,7 +293,7 @@ export default function GastosPage() {
   const [fMonto, setFMonto] = useState('')
   const [fNota, setFNota] = useState('')
   const [fOrden, setFOrden] = useState<OrdenOption | null>(null)
-  const [fFecha, setFFecha] = useState(new Date().toISOString().slice(0, 10))
+  const [fFecha, setFFecha] = useState(todayLocal())
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -354,7 +387,7 @@ export default function GastosPage() {
         fecha: fFecha ? new Date(fFecha + 'T12:00:00') : undefined,
       })
       setFMonto(''); setFNota(''); setFOrden(null)
-      setFFecha(new Date().toISOString().slice(0, 10))
+      setFFecha(todayLocal())
       setShowForm(false)
     } catch (e: any) {
       setErr(e?.message || 'Error al crear gasto')
@@ -464,7 +497,7 @@ export default function GastosPage() {
               <label className="block text-xs font-semibold text-gray-500 mb-1">Fecha</label>
               <input
                 type="date" value={fFecha}
-                onChange={(e) => setFFecha(e.target.value)}
+                onChange={(e) => { setFFecha(e.target.value); setFOrden(null) }}
                 className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004aad]/30"
               />
             </div>
@@ -480,6 +513,7 @@ export default function GastosPage() {
               motorizadoId={fMotorizadoId}
               value={fOrden}
               onChange={setFOrden}
+              fechaFiltro={fFecha}
             />
             {fOrden && (
               <div className="mt-1.5 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 text-xs text-blue-700 flex flex-wrap gap-x-3 gap-y-0.5">
