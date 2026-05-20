@@ -191,6 +191,8 @@ service cloud.firestore {
           'historial',
           'entregadoAt',
           'evidencias',
+          'evidenciasTerminal',
+          'evidenciasCargotrans',
           'cobrosMotorizado',
           'cobroPendiente',
           'cobroDelivery',
