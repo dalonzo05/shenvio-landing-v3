@@ -616,9 +616,6 @@ export default function PanelMotorizadoPage() {
           if (motorizadoDocId) {
             await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: 'disponible', updatedAt: serverTimestamp() })
           }
-          await registrarMovimiento('cobro_generado', precioDelivery, uid,
-            `Cobro generado al entregar orden ${o.id} (crédito semanal)`,
-            { solicitudId: o.id, motorizadoId: motorizadoDocId ?? o.asignacion?.motorizadoId })
           const coordFinalCredito =
             o.entrega?.coord ??
             (o.tipoServicio === 'fuera_managua' ? o.fueraManagua?.coordsPuntoLogistico ?? null : null)
@@ -642,10 +639,6 @@ export default function PanelMotorizadoPage() {
         actualizarUbicacionOperativa(motorizadoDocId, o.recoleccion.coord);
       }
       if (nuevo === 'entregado') {
-        const precioDelivery = o.confirmacion?.precioFinalCordobas ?? 0
-        await registrarMovimiento('cobro_generado', precioDelivery, auth.currentUser?.uid ?? '',
-          `Cobro generado al entregar orden ${o.id}`,
-          { solicitudId: o.id, motorizadoId: motorizadoDocId ?? o.asignacion?.motorizadoId })
         const coordFinal =
           o.entrega?.coord ??
           (o.tipoServicio === 'fuera_managua' ? o.fueraManagua?.coordsPuntoLogistico ?? null : null)
@@ -2124,7 +2117,13 @@ function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
   const delivery = o.confirmacion?.precioFinalCordobas ?? 0;
   const deliveryBase = o.precioDesglose?.deliveryBase ?? null;
   const ganancia = deliveryBase !== null ? deliveryBase * 0.8 : null;
-  const totalCliente = (dep.tieneDelivery ? delivery : 0) + (dep.tieneProducto ? dep.montoProducto : 0);
+  const deducir = !!o.pagoDelivery?.deducirDelCobroContraEntrega;
+
+  // Con deducción: el cliente paga un solo monto (producto incluye delivery dentro)
+  // Sin deducción: el cliente paga producto + delivery por separado
+  const totalCliente = deducir
+    ? (dep.tieneProducto ? dep.montoProducto : 0)
+    : (dep.tieneDelivery ? delivery : 0) + (dep.tieneProducto ? dep.montoProducto : 0);
 
   return (
     <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
@@ -2142,6 +2141,12 @@ function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
           <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Cobro producto</span>
           <span style={{ fontSize: 18, fontWeight: 800, color: '#7c3aed' }}>{fmt(dep.montoProducto)}</span>
+        </div>
+      )}
+      {deducir && dep.tieneDelivery && dep.tieneProducto && (
+        <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 8, padding: '6px 10px', marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: '#c2410c', fontWeight: 600 }}>Delivery incluido en el cobro</span>
+          <span style={{ fontSize: 11, color: '#c2410c', fontWeight: 700 }}>− {fmt(delivery)}</span>
         </div>
       )}
       {totalCliente > 0 && (
