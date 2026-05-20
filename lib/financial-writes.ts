@@ -248,7 +248,7 @@ export async function registrarAbonoSaldo(params: {
 
   const abono: AbonoSaldo = {
     monto: montoAbono,
-    fecha: serverTimestamp(),
+    fecha: Timestamp.now(), // serverTimestamp() no puede usarse dentro de arrayUnion()
     metodo: metodo ?? 'efectivo',
     nota: nota ?? '',
     creadoPorUid: operadorId,

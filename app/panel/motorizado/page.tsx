@@ -872,8 +872,14 @@ export default function PanelMotorizadoPage() {
     let alComercio = 0, aStorkhubBruto = 0;
     depositosPendientes.forEach((o) => {
       const d = calcDeposito(o);
-      alComercio += d.totalAlComercio;
-      aStorkhubBruto += d.totalAStorkhub;
+      // Solo sumar el monto que aún no fue confirmado para evitar doble conteo
+      // tras convertirDepositoEnDeuda (que pone confirmadoStorkhub = true)
+      if (!o.registro?.deposito?.confirmadoStorkhub) {
+        aStorkhubBruto += d.totalAStorkhub;
+      }
+      if (!o.registro?.deposito?.confirmadoComercio) {
+        alComercio += d.totalAlComercio;
+      }
     });
     const aStorkhub = Math.max(0, aStorkhubBruto - totalGastosDeducibles);
     return { alComercio, aStorkhub, aStorkhubBruto, total: alComercio + aStorkhub };
