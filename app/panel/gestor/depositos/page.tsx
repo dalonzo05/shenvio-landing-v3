@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   collection,
   onSnapshot,
@@ -27,6 +27,11 @@ import {
   Landmark,
   Store,
   Clock,
+  Search,
+  X,
+  Users,
+  Zap,
+  Eye,
 } from 'lucide-react'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
 
@@ -277,6 +282,13 @@ export default function DepositosPage() {
   const [motivoConvertPendiente, setMotivoConvertPendiente] = useState('')
   const [convertingPendienteId, setConvertingPendienteId] = useState<string | null>(null)
 
+  // ── Tabla resumen: búsqueda, filtros y expansión por motorizado ─────────────
+  const [busqueda, setBusqueda] = useState('')
+  const [filtroTipoDeposito, setFiltroTipoDeposito] = useState<'todos' | 'storkhub' | 'comercio'>('todos')
+  const [expandedMotorizado, setExpandedMotorizado] = useState<Set<string>>(new Set())
+  const toggleExpandedMotorizado = (id: string) =>
+    setExpandedMotorizado((prev) => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s })
+
   // Filtros historial
   const [filtroMotorizado, setFiltroMotorizado] = useState<string>('todos')
 
@@ -509,6 +521,43 @@ export default function DepositosPage() {
 
     return { pendStorkhub, pendComercios, confirmadosHoy }
   }, [gruposMotorizado, ordenesConDeposito])
+
+  // ── Grupos filtrados (tabla resumen Pendientes) ────────────────────────────
+
+  const gruposFiltrados = useMemo(() => {
+    let list = gruposMotorizado
+    if (busqueda.trim()) {
+      const q = busqueda.toLowerCase()
+      list = list.filter((g) => {
+        if (g.motorizadoNombre.toLowerCase().includes(q)) return true
+        if (g.storkhub.ordenes.some((o) =>
+          o.id.toLowerCase().includes(q) ||
+          (o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre || '').toLowerCase().includes(q) ||
+          (o.entrega?.nombreApellido || '').toLowerCase().includes(q)
+        )) return true
+        if (g.comercios.some((c) =>
+          c.nombre.toLowerCase().includes(q) ||
+          c.ordenes.some((o) =>
+            o.id.toLowerCase().includes(q) ||
+            (o.entrega?.nombreApellido || '').toLowerCase().includes(q)
+          )
+        )) return true
+        return false
+      })
+    }
+    if (filtroTipoDeposito === 'storkhub') list = list.filter((g) => g.storkhub.ordenes.length > 0)
+    if (filtroTipoDeposito === 'comercio') list = list.filter((g) => g.comercios.length > 0)
+    return list
+  }, [gruposMotorizado, busqueda, filtroTipoDeposito])
+
+  // ── KPIs extendidos ────────────────────────────────────────────────────────
+
+  const kpisExtended = useMemo(() => ({
+    ...kpis,
+    totalGastosDescontados: gruposMotorizado.reduce((s, g) => s + g.storkhub.gastosDeducibles, 0),
+    motorizadosConPendientes: gruposMotorizado.length,
+    totalPorRevisar: porRevisar.length,
+  }), [kpis, gruposMotorizado, porRevisar])
 
   // ── Historial ──────────────────────────────────────────────────────────────
 
@@ -913,29 +962,35 @@ export default function DepositosPage() {
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         <div className="border rounded-xl px-4 py-3 bg-blue-50 border-blue-200">
-          <p className="text-2xl font-black text-[#004aad]">
-            {loading ? '…' : fmt(kpis.pendStorkhub)}
-          </p>
-          <p className="text-xs font-semibold mt-0.5 text-blue-500 flex items-center gap-1">
-            <Landmark className="h-3 w-3" /> Storkhub pendiente
+          <p className="text-xl font-black text-[#004aad]">{loading ? '…' : fmt(kpisExtended.pendStorkhub)}</p>
+          <p className="text-[11px] font-semibold mt-0.5 text-blue-500 flex items-center gap-1">
+            <Landmark className="h-3 w-3" /> Storkhub neto
           </p>
         </div>
         <div className="border rounded-xl px-4 py-3 bg-purple-50 border-purple-200">
-          <p className="text-2xl font-black text-purple-700">
-            {loading ? '…' : fmt(kpis.pendComercios)}
-          </p>
-          <p className="text-xs font-semibold mt-0.5 text-purple-400 flex items-center gap-1">
+          <p className="text-xl font-black text-purple-700">{loading ? '…' : fmt(kpisExtended.pendComercios)}</p>
+          <p className="text-[11px] font-semibold mt-0.5 text-purple-400 flex items-center gap-1">
             <Store className="h-3 w-3" /> Comercios pendiente
           </p>
         </div>
-        <div className="border rounded-xl px-4 py-3 bg-green-50 border-green-200">
-          <p className="text-2xl font-black text-green-700">
-            {loading ? '…' : kpis.confirmadosHoy}
+        <div className="border rounded-xl px-4 py-3 bg-amber-50 border-amber-200">
+          <p className="text-xl font-black text-amber-600">{loading ? '…' : kpisExtended.totalPorRevisar}</p>
+          <p className="text-[11px] font-semibold mt-0.5 text-amber-500 flex items-center gap-1">
+            <Clock className="h-3 w-3" /> Por revisar
           </p>
-          <p className="text-xs font-semibold mt-0.5 text-green-400 flex items-center gap-1">
-            <Clock className="h-3 w-3" /> Confirmados hoy
+        </div>
+        <div className="border rounded-xl px-4 py-3 bg-orange-50 border-orange-200">
+          <p className="text-xl font-black text-orange-600">{loading ? '…' : fmt(kpisExtended.totalGastosDescontados)}</p>
+          <p className="text-[11px] font-semibold mt-0.5 text-orange-400 flex items-center gap-1">
+            <Zap className="h-3 w-3" /> Gastos descontados
+          </p>
+        </div>
+        <div className="border rounded-xl px-4 py-3 bg-gray-50 border-gray-200">
+          <p className="text-xl font-black text-gray-700">{loading ? '…' : kpisExtended.motorizadosConPendientes}</p>
+          <p className="text-[11px] font-semibold mt-0.5 text-gray-400 flex items-center gap-1">
+            <Users className="h-3 w-3" /> Motorizados activos
           </p>
         </div>
       </div>
@@ -969,122 +1024,228 @@ export default function DepositosPage() {
 
       {/* ── TAB: PENDIENTES ────────────────────────────────────────────────── */}
       {tab === 'pendientes' && (
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3">
+
+          {/* Barra búsqueda + filtros */}
+          <div className="flex flex-wrap gap-2 items-center">
+            <div className="flex items-center border border-gray-200 rounded-lg px-3 py-2 bg-white gap-2 flex-1 min-w-[180px]">
+              <Search className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+              <input
+                value={busqueda}
+                onChange={(e) => setBusqueda(e.target.value)}
+                placeholder="Buscar motorizado, orden, comercio…"
+                className="text-xs flex-1 outline-none text-gray-700 placeholder:text-gray-400"
+              />
+              {busqueda && (
+                <button onClick={() => setBusqueda('')}><X className="h-3 w-3 text-gray-400" /></button>
+              )}
+            </div>
+            {(['todos', 'storkhub', 'comercio'] as const).map((t) => (
+              <button key={t} onClick={() => setFiltroTipoDeposito(t)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${filtroTipoDeposito === t ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
+                {t === 'todos' ? 'Todos' : t === 'storkhub' ? '🏦 Storkhub' : '🏪 Comercio'}
+              </button>
+            ))}
+            <span className="text-xs text-gray-400 ml-auto">{gruposFiltrados.length} motorizado{gruposFiltrados.length !== 1 ? 's' : ''}</span>
+          </div>
+
           {loading ? (
             <div className="bg-white rounded-xl border py-16 text-center text-sm text-gray-400">Cargando…</div>
-          ) : gruposMotorizado.length === 0 ? (
+          ) : gruposFiltrados.length === 0 ? (
             <div className="bg-white rounded-xl border flex flex-col items-center justify-center py-16 gap-2 text-gray-400">
               <CheckCircle2 className="h-12 w-12 opacity-25" />
-              <p className="text-sm font-semibold">Sin depósitos pendientes</p>
-              <p className="text-xs">Todos los motorizados han confirmado sus depósitos.</p>
+              <p className="text-sm font-semibold">{busqueda ? 'Sin resultados' : 'Sin depósitos pendientes'}</p>
+              <p className="text-xs">{busqueda ? 'Cambiá los filtros de búsqueda.' : 'Todos los motorizados confirmaron sus depósitos.'}</p>
             </div>
           ) : (
-            gruposMotorizado.map((gm) => (
-              <div key={gm.motorizadoId} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-                {/* Header motorizado */}
-                <div className="px-4 py-3 bg-gray-50 border-b border-gray-100 flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-full bg-[#004aad]/10 grid place-items-center flex-shrink-0">
-                    <span className="text-sm font-black text-[#004aad]">
-                      {gm.motorizadoNombre[0]?.toUpperCase() ?? '?'}
-                    </span>
-                  </div>
-                  <div>
-                    <p className="text-sm font-bold text-gray-900">{gm.motorizadoNombre}</p>
-                    <p className="text-xs text-gray-400">
-                      {[
-                        gm.storkhub.ordenes.length > 0 && `Storkhub: ${fmt(gm.storkhub.total)}`,
-                        ...gm.comercios.map((c) => `${c.nombre}: ${fmt(c.total)}`),
-                      ].filter(Boolean).join(' · ')}
-                    </p>
-                  </div>
-                </div>
+            /* ── TABLA RESUMEN ── */
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b bg-gray-50">
+                    <th className="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500 w-8"></th>
+                    <th className="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Motorizado</th>
+                    <th className="px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-blue-500">Storkhub neto</th>
+                    <th className="px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-purple-500">Comercios</th>
+                    <th className="px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-orange-400">Gastos desc.</th>
+                    <th className="px-4 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wide text-gray-500">Órdenes</th>
+                    <th className="px-4 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wide text-amber-500">Por revisar</th>
+                    <th className="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Último dep.</th>
+                    <th className="px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-gray-500">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {gruposFiltrados.map((gm) => {
+                    const comercioTotal = gm.comercios.reduce((s, c) => s + c.total, 0)
+                    const totalOrdenes = gm.storkhub.ordenes.length + gm.comercios.reduce((s, c) => s + c.ordenes.length, 0)
+                    const motAuthUid = gm.storkhub.ordenes[0]?.asignacion?.motorizadoAuthUid ?? ''
+                    const porRevisarCount = porRevisar.filter((d) =>
+                      d.motorizadoUid === motAuthUid || d.motorizadoNombre === gm.motorizadoNombre
+                    ).length
+                    const todasLasOrdenes = [...gm.storkhub.ordenes, ...gm.comercios.flatMap((c) => c.ordenes)]
+                    const ultimoTs = todasLasOrdenes
+                      .map((o) => getEntregadoAt(o))
+                      .filter(Boolean)
+                      .sort((a, b) => (b as Timestamp).toMillis() - (a as Timestamp).toMillis())[0]
+                    const isExp = expandedMotorizado.has(gm.motorizadoId)
 
-                <div className="p-3 flex flex-col gap-3">
-                  {/* Grupo Storkhub */}
-                  {gm.storkhub.ordenes.length > 0 && (
-                    <>
-                    <DepositoGrupo
-                      icon={<Landmark className="h-4 w-4 text-blue-600" />}
-                      titulo="Storkhub"
-                      subtitulo="Delivery en efectivo"
-                      colorBorder="border-blue-200"
-                      colorBg="bg-blue-50"
-                      total={gm.storkhub.total}
-                      totalBruto={gm.storkhub.totalBruto}
-                      gastosDeducibles={gm.storkhub.gastosDeducibles}
-                      ordenes={gm.storkhub.ordenes}
-                      expandKey={`${gm.motorizadoId}-storkhub`}
-                      expanded={expandedGroups.has(`${gm.motorizadoId}-storkhub`)}
-                      onToggle={() => toggleExpand(`${gm.motorizadoId}-storkhub`)}
-                      onConfirmar={(f) => confirmarStorkhub(gm.storkhub.ordenes, gm.motorizadoId, gm.motorizadoNombre, f)}
-                      tipoDeposito="storkhub"
-                      onSelectOrden={setSelectedOrdenId}
-                      comercioNames={comercioNames}
-                    />
-                    {/* Convertir en deuda: para grupos Storkhub pendientes */}
-                    {convertPendienteMotId === gm.motorizadoId ? (
-                      <div className="flex flex-col gap-2 px-1">
-                        <p className="text-[11px] font-semibold text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                          ⚠️ El monto neto ({fmt(gm.storkhub.total)}) se registrará como <strong>saldo a cargo</strong> del motorizado.
-                        </p>
-                        <input
-                          value={motivoConvertPendiente}
-                          onChange={(e) => setMotivoConvertPendiente(e.target.value)}
-                          placeholder="Motivo (ej: no depositó, se acordó descuento)…"
-                          className="text-xs border border-red-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-300"
-                          autoFocus
-                        />
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => { setConvertPendienteMotId(null); setMotivoConvertPendiente('') }}
-                            className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition"
-                          >
-                            Cancelar
-                          </button>
-                          <button
-                            onClick={() => convertirPendienteEnDeuda(gm, motivoConvertPendiente)}
-                            disabled={!motivoConvertPendiente.trim() || convertingPendienteId === gm.motorizadoId}
-                            className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            {convertingPendienteId === gm.motorizadoId ? 'Procesando…' : 'Confirmar — crear deuda'}
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => setConvertPendienteMotId(gm.motorizadoId)}
-                        className="text-[11px] font-semibold text-red-500 hover:text-red-700 hover:bg-red-50 border border-red-200 px-3 py-1.5 rounded-lg transition self-start"
-                        title="El motorizado no depositará — convertir en saldo a cargo"
-                      >
-                        → Convertir en deuda
-                      </button>
-                    )}
-                    </>
-                  )}
+                    return (
+                      <Fragment key={gm.motorizadoId}>
+                        {/* ── FILA RESUMEN ── */}
+                        <tr
+                          className={`hover:bg-gray-50 transition-colors cursor-pointer select-none ${isExp ? 'bg-blue-50/40' : ''}`}
+                          onClick={() => toggleExpandedMotorizado(gm.motorizadoId)}
+                        >
+                          <td className="px-4 py-3 text-center">
+                            {isExp
+                              ? <ChevronUp className="h-4 w-4 text-gray-400" />
+                              : <ChevronDown className="h-4 w-4 text-gray-400" />}
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <div className="w-7 h-7 rounded-full bg-[#004aad]/10 grid place-items-center shrink-0">
+                                <span className="text-xs font-black text-[#004aad]">{gm.motorizadoNombre[0]?.toUpperCase() ?? '?'}</span>
+                              </div>
+                              <span className="text-sm font-semibold text-gray-900">{gm.motorizadoNombre}</span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {gm.storkhub.ordenes.length > 0 ? (
+                              <div>
+                                <span className="text-sm font-black text-[#004aad]">{fmt(gm.storkhub.total)}</span>
+                                {gm.storkhub.gastosDeducibles > 0 && (
+                                  <p className="text-[10px] text-orange-500 mt-0.5">bruto {fmt(gm.storkhub.totalBruto)}</p>
+                                )}
+                              </div>
+                            ) : <span className="text-xs text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {comercioTotal > 0
+                              ? <span className="text-sm font-black text-purple-700">{fmt(comercioTotal)}</span>
+                              : <span className="text-xs text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {gm.storkhub.gastosDeducibles > 0
+                              ? <span className="text-xs font-semibold text-orange-500">− {fmt(gm.storkhub.gastosDeducibles)}</span>
+                              : <span className="text-xs text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-gray-100 text-xs font-black text-gray-700">{totalOrdenes}</span>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            {porRevisarCount > 0
+                              ? <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-amber-100 text-xs font-black text-amber-700">{porRevisarCount}</span>
+                              : <span className="text-xs text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-3 text-xs text-gray-500">{ultimoTs ? fmtDate(ultimoTs) : '—'}</td>
+                          <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                onClick={() => toggleExpandedMotorizado(gm.motorizadoId)}
+                                className="flex items-center gap-1 text-[11px] font-semibold text-[#004aad] bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded-lg transition"
+                              >
+                                <Eye className="h-3 w-3" />
+                                {isExp ? 'Cerrar' : 'Detalle'}
+                              </button>
+                              {gm.storkhub.ordenes.length > 0 && convertPendienteMotId !== gm.motorizadoId && (
+                                <button
+                                  onClick={() => setConvertPendienteMotId(gm.motorizadoId)}
+                                  className="text-[11px] font-semibold text-red-500 hover:text-red-700 hover:bg-red-50 border border-red-200 px-2 py-1 rounded-lg transition"
+                                  title="Convertir en saldo a cargo"
+                                >
+                                  → Deuda
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
 
-                  {/* Grupos Comercio */}
-                  {gm.comercios.map((gc) => (
-                    <DepositoGrupo
-                      key={gc.uid}
-                      icon={<Store className="h-4 w-4 text-purple-600" />}
-                      titulo={gc.nombre}
-                      subtitulo="Cobro contra entrega"
-                      colorBorder="border-purple-200"
-                      colorBg="bg-purple-50"
-                      total={gc.total}
-                      ordenes={gc.ordenes}
-                      expandKey={`${gm.motorizadoId}-${gc.uid}`}
-                      expanded={expandedGroups.has(`${gm.motorizadoId}-${gc.uid}`)}
-                      onToggle={() => toggleExpand(`${gm.motorizadoId}-${gc.uid}`)}
-                      onConfirmar={(f) => confirmarComercio(gc.ordenes, gc.uid, gc.nombre, gm.motorizadoId, gm.motorizadoNombre, f)}
-                      tipoDeposito="comercio"
-                      onSelectOrden={setSelectedOrdenId}
-                      comercioNames={comercioNames}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))
+                        {/* ── DETALLE EXPANDIDO ── */}
+                        {isExp && (
+                          <tr>
+                            <td colSpan={9} className="bg-gray-50/60 px-4 py-4">
+                              <div className="flex flex-col gap-3">
+
+                                {/* Convertir en deuda form (si activo) */}
+                                {convertPendienteMotId === gm.motorizadoId && (
+                                  <div className="flex flex-col gap-2">
+                                    <p className="text-[11px] font-semibold text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                                      ⚠️ El monto neto ({fmt(gm.storkhub.total)}) se registrará como <strong>saldo a cargo</strong> del motorizado.
+                                    </p>
+                                    <input
+                                      value={motivoConvertPendiente}
+                                      onChange={(e) => setMotivoConvertPendiente(e.target.value)}
+                                      placeholder="Motivo (ej: no depositó, se acordó descuento)…"
+                                      className="text-xs border border-red-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-red-300"
+                                      autoFocus
+                                    />
+                                    <div className="flex gap-2 max-w-sm">
+                                      <button onClick={() => { setConvertPendienteMotId(null); setMotivoConvertPendiente('') }}
+                                        className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition">
+                                        Cancelar
+                                      </button>
+                                      <button
+                                        onClick={() => convertirPendienteEnDeuda(gm, motivoConvertPendiente)}
+                                        disabled={!motivoConvertPendiente.trim() || convertingPendienteId === gm.motorizadoId}
+                                        className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-40 disabled:cursor-not-allowed">
+                                        {convertingPendienteId === gm.motorizadoId ? 'Procesando…' : 'Confirmar — crear deuda'}
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Grupo Storkhub */}
+                                {gm.storkhub.ordenes.length > 0 && (
+                                  <DepositoGrupo
+                                    icon={<Landmark className="h-4 w-4 text-blue-600" />}
+                                    titulo="Storkhub"
+                                    subtitulo="Delivery en efectivo"
+                                    colorBorder="border-blue-200"
+                                    colorBg="bg-blue-50"
+                                    total={gm.storkhub.total}
+                                    totalBruto={gm.storkhub.totalBruto}
+                                    gastosDeducibles={gm.storkhub.gastosDeducibles}
+                                    ordenes={gm.storkhub.ordenes}
+                                    expandKey={`${gm.motorizadoId}-storkhub`}
+                                    expanded={expandedGroups.has(`${gm.motorizadoId}-storkhub`)}
+                                    onToggle={() => toggleExpand(`${gm.motorizadoId}-storkhub`)}
+                                    onConfirmar={(f) => confirmarStorkhub(gm.storkhub.ordenes, gm.motorizadoId, gm.motorizadoNombre, f)}
+                                    tipoDeposito="storkhub"
+                                    onSelectOrden={setSelectedOrdenId}
+                                    comercioNames={comercioNames}
+                                  />
+                                )}
+
+                                {/* Grupos Comercio */}
+                                {gm.comercios.map((gc) => (
+                                  <DepositoGrupo
+                                    key={gc.uid}
+                                    icon={<Store className="h-4 w-4 text-purple-600" />}
+                                    titulo={gc.nombre}
+                                    subtitulo="Cobro contra entrega"
+                                    colorBorder="border-purple-200"
+                                    colorBg="bg-purple-50"
+                                    total={gc.total}
+                                    ordenes={gc.ordenes}
+                                    expandKey={`${gm.motorizadoId}-${gc.uid}`}
+                                    expanded={expandedGroups.has(`${gm.motorizadoId}-${gc.uid}`)}
+                                    onToggle={() => toggleExpand(`${gm.motorizadoId}-${gc.uid}`)}
+                                    onConfirmar={(f) => confirmarComercio(gc.ordenes, gc.uid, gc.nombre, gm.motorizadoId, gm.motorizadoNombre, f)}
+                                    tipoDeposito="comercio"
+                                    onSelectOrden={setSelectedOrdenId}
+                                    comercioNames={comercioNames}
+                                  />
+                                ))}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}
@@ -1101,13 +1262,13 @@ export default function DepositosPage() {
           : porRevisar.filter((d) => d.motorizadoUid === filtroMotorizadoPorRevisar)
         return (
         <>
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3">
           {/* Pills filtro motorizado */}
-          {motorizadosPR.length > 1 && (
+          {motorizadosPR.length > 0 && (
             <div className="flex flex-wrap gap-2">
               <button onClick={() => setFiltroMotorizadoPorRevisar('todos')}
                 className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${filtroMotorizadoPorRevisar === 'todos' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
-                Todos
+                Todos ({porRevisar.length})
               </button>
               {motorizadosPR.map((m) => (
                 <button key={m.id} onClick={() => setFiltroMotorizadoPorRevisar(m.id)}
@@ -1124,184 +1285,228 @@ export default function DepositosPage() {
               <p className="text-xs">Los depósitos subidos por motorizados aparecerán aquí.</p>
             </div>
           ) : (
-            porRevisarFiltrado.map((dep) => {
-              const isExp = expandedPorRevisar.has(dep.id)
-              const esStorkhub = dep.destinatario === 'storkhub'
-              const bankInfo = dep.destinatarioId ? comercioBankInfo[dep.destinatarioId] : undefined
-              return (
-                <div key={dep.id} className={`bg-white rounded-xl border-2 overflow-hidden ${esStorkhub ? 'border-blue-200' : 'border-purple-200'}`}>
-                  {/* Header */}
-                  <div className={`px-4 py-3 flex items-center gap-3 ${esStorkhub ? 'bg-blue-50' : 'bg-purple-50'}`}>
-                    <span>{esStorkhub ? <Landmark className="h-4 w-4 text-blue-600" /> : <Store className="h-4 w-4 text-purple-600" />}</span>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-bold text-gray-900 truncate">{dep.destinatarioNombre}</p>
-                      <p className="text-xs text-gray-500">
-                        Motorizado: {fmtNombreMotorizado(dep.motorizadoNombre, motorizadoNames, dep.motorizadoUid)} · {fmtDate(dep.creadoAt)} · {dep.solicitudIds?.length ?? 0} órdenes
-                      </p>
-                      {/* Desglose gastos enviado por motorizado */}
-                      {esStorkhub && dep.montoBruto != null && dep.gastosDescontados != null && dep.gastosDescontados > 0 && (
-                        <p className="text-[11px] text-blue-600 mt-0.5">
-                          Bruto {fmt(dep.montoBruto)} − gastos {fmt(dep.gastosDescontados)} = <strong>neto {fmt(dep.montoTotal)}</strong>
-                        </p>
-                      )}
-                      <p className="text-[11px] text-gray-400 font-mono mt-0.5">ID: {dep.id}</p>
-                    </div>
-                    <span className="text-sm font-black text-gray-900 whitespace-nowrap">{fmt(dep.montoTotal)}</span>
-                    <button onClick={() => toggleExpandPorRevisar(dep.id)} className="text-gray-500 hover:text-gray-700 transition p-1">
-                      {isExp ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                    </button>
-                  </div>
+            /* ── TABLA RESUMEN POR REVISAR ── */
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b bg-gray-50">
+                    <th className="px-3 py-2.5 w-8"></th>
+                    <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Motorizado</th>
+                    <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Destino</th>
+                    <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Fecha</th>
+                    <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-gray-500">Monto</th>
+                    <th className="px-3 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wide text-gray-500">Órd.</th>
+                    <th className="px-3 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wide text-gray-500">Boucher</th>
+                    <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-gray-500">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {porRevisarFiltrado.map((dep) => {
+                    const esStorkhub = dep.destinatario === 'storkhub'
+                    const bankInfo = dep.destinatarioId ? comercioBankInfo[dep.destinatarioId] : undefined
+                    const isExp = expandedPorRevisar.has(dep.id)
+                    const isBusy = confirmandoId === dep.id || devolviendoId === dep.id || convirtiendo === dep.id
+                    return (
+                      <Fragment key={dep.id}>
+                        {/* ── FILA RESUMEN ── */}
+                        <tr className={`hover:bg-gray-50 transition-colors ${isExp || isBusy ? 'bg-blue-50/30' : ''}`}>
+                          <td className="px-3 py-3 text-center cursor-pointer" onClick={() => toggleExpandPorRevisar(dep.id)}>
+                            {isExp ? <ChevronUp className="h-3.5 w-3.5 text-gray-400" /> : <ChevronDown className="h-3.5 w-3.5 text-gray-400" />}
+                          </td>
+                          <td className="px-3 py-3">
+                            <span className="text-xs font-semibold text-gray-800">{fmtNombreMotorizado(dep.motorizadoNombre, motorizadoNames, dep.motorizadoUid)}</span>
+                          </td>
+                          <td className="px-3 py-3">
+                            <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border ${esStorkhub ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-purple-50 text-purple-700 border-purple-200'}`}>
+                              {esStorkhub ? <Landmark className="h-2.5 w-2.5" /> : <Store className="h-2.5 w-2.5" />}
+                              {dep.destinatarioNombre}
+                            </span>
+                          </td>
+                          <td className="px-3 py-3 text-xs text-gray-500">{fmtDate(dep.creadoAt)}</td>
+                          <td className="px-3 py-3 text-right">
+                            <div>
+                              <span className="text-sm font-black text-gray-900">{fmt(dep.montoTotal)}</span>
+                              {esStorkhub && dep.montoBruto != null && dep.gastosDescontados != null && dep.gastosDescontados > 0 && (
+                                <p className="text-[10px] text-orange-500 mt-0.5">bruto {fmt(dep.montoBruto)} − {fmt(dep.gastosDescontados)}</p>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-3 py-3 text-center">
+                            <span className="text-xs text-gray-500">{dep.solicitudIds?.length ?? 0}</span>
+                          </td>
+                          <td className="px-3 py-3 text-center">
+                            {dep.boucher?.url ? (
+                              <button onClick={() => setBoucherModalUrl(dep.boucher!.url)}>
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img src={dep.boucher.url} alt="boucher" className="w-8 h-8 rounded object-cover border border-green-200 hover:opacity-80 transition mx-auto" />
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
+                                className="text-[10px] text-red-400 font-semibold hover:text-red-600 transition"
+                              >
+                                Sin boucher
+                              </button>
+                            )}
+                          </td>
+                          <td className="px-3 py-3 text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              {/* Devolver */}
+                              {devolviendoId !== dep.id && convirtiendo !== dep.id && (
+                                <button
+                                  onClick={() => setDevolviendoId(dep.id)}
+                                  disabled={isBusy}
+                                  className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-orange-200 text-orange-500 hover:bg-orange-50 transition disabled:opacity-40"
+                                  title="Devolver al motorizado"
+                                >↩</button>
+                              )}
+                              {/* Confirmar */}
+                              {devolviendoId !== dep.id && convirtiendo !== dep.id && (
+                                <button
+                                  onClick={() => confirmarDepositoExistente(dep)}
+                                  disabled={isBusy}
+                                  className={`text-[11px] font-semibold px-2 py-1 rounded-lg transition disabled:opacity-40 ${esStorkhub ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-purple-600 text-white hover:bg-purple-700'}`}
+                                >
+                                  {confirmandoId === dep.id ? '…' : '✓'}
+                                </button>
+                              )}
+                              {/* Deuda (solo Storkhub) */}
+                              {esStorkhub && devolviendoId !== dep.id && convirtiendo !== dep.id && (
+                                <button
+                                  onClick={() => setConvirtiendo(dep.id)}
+                                  disabled={isBusy}
+                                  className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-red-200 text-red-500 hover:bg-red-50 transition disabled:opacity-40"
+                                  title="Convertir en deuda"
+                                >→ Deuda</button>
+                              )}
+                              {/* Ver detalle */}
+                              <button
+                                onClick={() => toggleExpandPorRevisar(dep.id)}
+                                className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition flex items-center gap-1"
+                              >
+                                <Eye className="h-3 w-3" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
 
-                  {/* Cuentas bancarias del comercio */}
-                  {!esStorkhub && bankInfo?.accounts && bankInfo.accounts.length > 0 && (
-                    <div className="px-4 py-2.5 border-t border-purple-100 bg-purple-50/60 flex flex-wrap gap-3">
-                      {bankInfo.accounts.map((acc, i) => (
-                        <div key={i} className="flex items-center gap-2 text-xs">
-                          <span className="font-semibold text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded">{acc.bank}</span>
-                          <span className="font-mono text-gray-800 select-all">{acc.number}</span>
-                          <span className="text-gray-500">{acc.holder}</span>
-                          <span className="text-gray-400">{acc.currency}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                        {/* ── DETALLE / FORMULARIOS EXPANDIDOS ── */}
+                        {(isExp || devolviendoId === dep.id || convirtiendo === dep.id) && (
+                          <tr>
+                            <td colSpan={8} className="bg-gray-50/60 px-4 py-4 border-t border-gray-100">
+                              <div className="flex flex-col gap-3">
 
-                  {/* Expanded order IDs */}
-                  {isExp && (dep.solicitudIds?.length ?? 0) > 0 && (
-                    <div className="border-t border-gray-100 px-4 py-3 bg-gray-50">
-                      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-400">Órdenes incluidas</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {dep.solicitudIds.map((sid) => (
-                          <button
-                            key={sid}
-                            onClick={() => setSelectedOrdenId(sid)}
-                            className="rounded bg-white border border-gray-200 px-2 py-0.5 font-mono text-xs text-blue-600 hover:bg-blue-50 transition"
-                          >
-                            {sid.slice(0, 8)}…
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                                {/* Cuentas bancarias del comercio */}
+                                {!esStorkhub && bankInfo?.accounts && bankInfo.accounts.length > 0 && (
+                                  <div className="flex flex-wrap gap-3">
+                                    {bankInfo.accounts.map((acc, i) => (
+                                      <div key={i} className="flex items-center gap-2 text-xs bg-purple-50 border border-purple-100 rounded-lg px-3 py-2">
+                                        <span className="font-semibold text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded">{acc.bank}</span>
+                                        <span className="font-mono text-gray-800 select-all">{acc.number}</span>
+                                        <span className="text-gray-500">{acc.holder}</span>
+                                        <span className="text-gray-400">{acc.currency}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
 
-                  {/* Boucher + acciones */}
-                  <div className="px-4 py-3 border-t border-gray-100 flex flex-col gap-2">
-                    {dep.boucher?.url ? (
-                      <div className="flex items-center gap-3 flex-wrap">
-                        <button
-                          onClick={() => setBoucherModalUrl(dep.boucher!.url)}
-                          className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-100 transition"
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={dep.boucher.url} alt="boucher" className="h-8 w-8 rounded object-cover border border-gray-200" />
-                          Ver comprobante del motorizado
-                        </button>
-                        <button
-                          onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
-                          disabled={replacingBoucherId === dep.id}
-                          className="text-[11px] text-blue-500 hover:text-blue-700 hover:underline transition disabled:opacity-40"
-                        >
-                          {replacingBoucherId === dep.id ? '⏳ Subiendo…' : '📷 Reemplazar boucher'}
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-3">
-                        <p className="text-xs text-gray-400 italic">Sin comprobante adjunto</p>
-                        <button
-                          onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
-                          disabled={replacingBoucherId === dep.id}
-                          className="text-[11px] text-blue-500 hover:text-blue-700 hover:underline transition disabled:opacity-40"
-                        >
-                          {replacingBoucherId === dep.id ? '⏳ Subiendo…' : '📷 Subir boucher'}
-                        </button>
-                      </div>
-                    )}
-                    {/* Botones de acción: devolver / confirmar / convertir en deuda */}
-                    {devolviendoId === dep.id ? (
-                      <div className="flex flex-col gap-2">
-                        <input
-                          value={motivoDevolucion}
-                          onChange={(e) => setMotivoDevolucion(e.target.value)}
-                          placeholder="Motivo de devolución…"
-                          className="text-xs border border-orange-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-orange-300"
-                          autoFocus
-                        />
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => { setDevolviendoId(null); setMotivoDevolucion('') }}
-                            className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition"
-                          >
-                            Cancelar
-                          </button>
-                          <button
-                            onClick={() => devolverAlMotorizado(dep, motivoDevolucion)}
-                            disabled={!motivoDevolucion.trim() || devolviendoId !== dep.id}
-                            className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-orange-500 text-white hover:bg-orange-600 transition disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            Confirmar devolución
-                          </button>
-                        </div>
-                      </div>
-                    ) : convirtiendo === dep.id ? (
-                      <div className="flex flex-col gap-2">
-                        <p className="text-[11px] font-semibold text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                          ⚠️ El depósito se marcará como <strong>saldo a cargo</strong> del motorizado. Registrá el motivo.
-                        </p>
-                        <input
-                          value={motivoConversion}
-                          onChange={(e) => setMotivoConversion(e.target.value)}
-                          placeholder="Motivo (ej: motorizado justificó uso del dinero)…"
-                          className="text-xs border border-red-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-300"
-                          autoFocus
-                        />
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => { setConvirtiendo(null); setMotivoConversion('') }}
-                            className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition"
-                          >
-                            Cancelar
-                          </button>
-                          <button
-                            onClick={() => convertirEnDeuda(dep, motivoConversion)}
-                            disabled={!motivoConversion.trim()}
-                            className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            Confirmar — crear deuda
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex gap-2 flex-wrap">
-                        <button
-                          onClick={() => setDevolviendoId(dep.id)}
-                          disabled={confirmandoId === dep.id}
-                          className="flex-1 text-xs font-semibold px-3 py-2.5 rounded-lg border border-orange-200 text-orange-600 hover:bg-orange-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          ↩ Devolver
-                        </button>
-                        <button
-                          onClick={() => confirmarDepositoExistente(dep)}
-                          disabled={confirmandoId === dep.id}
-                          className={`flex-1 text-xs font-semibold px-3 py-2.5 rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed ${esStorkhub ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-purple-600 text-white hover:bg-purple-700'}`}
-                        >
-                          {confirmandoId === dep.id ? 'Confirmando…' : '✓ Confirmar'}
-                        </button>
-                        {esStorkhub && (
-                          <button
-                            onClick={() => setConvirtiendo(dep.id)}
-                            disabled={confirmandoId === dep.id}
-                            className="text-xs font-semibold px-3 py-2.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
-                            title="El motorizado no depositó — convertir en saldo a cargo"
-                          >
-                            → Deuda
-                          </button>
+                                {/* Órdenes incluidas */}
+                                {isExp && (dep.solicitudIds?.length ?? 0) > 0 && (
+                                  <div>
+                                    <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Órdenes incluidas</p>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {dep.solicitudIds.map((sid) => (
+                                        <button key={sid} onClick={() => setSelectedOrdenId(sid)}
+                                          className="rounded bg-white border border-gray-200 px-2 py-0.5 font-mono text-xs text-blue-600 hover:bg-blue-50 transition">
+                                          {sid.slice(0, 8)}…
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Boucher detalle */}
+                                {isExp && (
+                                  <div className="flex items-center gap-3 flex-wrap">
+                                    {dep.boucher?.url ? (
+                                      <>
+                                        <button onClick={() => setBoucherModalUrl(dep.boucher!.url)}
+                                          className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 transition">
+                                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                                          <img src={dep.boucher.url} alt="boucher" className="h-8 w-8 rounded object-cover border border-gray-200" />
+                                          Ver comprobante
+                                        </button>
+                                        <button onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
+                                          disabled={replacingBoucherId === dep.id}
+                                          className="text-[11px] text-blue-500 hover:text-blue-700 hover:underline transition disabled:opacity-40">
+                                          {replacingBoucherId === dep.id ? '⏳ Subiendo…' : '📷 Reemplazar'}
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <button onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
+                                        disabled={replacingBoucherId === dep.id}
+                                        className="text-[11px] font-semibold text-blue-500 hover:text-blue-700 transition border border-blue-200 bg-blue-50 px-3 py-1.5 rounded-lg disabled:opacity-40">
+                                        {replacingBoucherId === dep.id ? '⏳ Subiendo…' : '📷 Subir boucher'}
+                                      </button>
+                                    )}
+                                    <p className="text-[10px] text-gray-400 font-mono">ID: {dep.id}</p>
+                                  </div>
+                                )}
+
+                                {/* Form devolver */}
+                                {devolviendoId === dep.id && (
+                                  <div className="flex flex-col gap-2 max-w-lg">
+                                    <input value={motivoDevolucion} onChange={(e) => setMotivoDevolucion(e.target.value)}
+                                      placeholder="Motivo de devolución…"
+                                      className="text-xs border border-orange-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-orange-300"
+                                      autoFocus />
+                                    <div className="flex gap-2">
+                                      <button onClick={() => { setDevolviendoId(null); setMotivoDevolucion('') }}
+                                        className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition">
+                                        Cancelar
+                                      </button>
+                                      <button onClick={() => devolverAlMotorizado(dep, motivoDevolucion)}
+                                        disabled={!motivoDevolucion.trim()}
+                                        className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-orange-500 text-white hover:bg-orange-600 transition disabled:opacity-40 disabled:cursor-not-allowed">
+                                        Confirmar devolución
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Form convertir en deuda */}
+                                {convirtiendo === dep.id && (
+                                  <div className="flex flex-col gap-2 max-w-lg">
+                                    <p className="text-[11px] font-semibold text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                                      ⚠️ El depósito se marcará como <strong>saldo a cargo</strong> del motorizado. Registrá el motivo.
+                                    </p>
+                                    <input value={motivoConversion} onChange={(e) => setMotivoConversion(e.target.value)}
+                                      placeholder="Motivo (ej: motorizado justificó uso del dinero)…"
+                                      className="text-xs border border-red-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-red-300"
+                                      autoFocus />
+                                    <div className="flex gap-2">
+                                      <button onClick={() => { setConvirtiendo(null); setMotivoConversion('') }}
+                                        className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition">
+                                        Cancelar
+                                      </button>
+                                      <button onClick={() => convertirEnDeuda(dep, motivoConversion)}
+                                        disabled={!motivoConversion.trim()}
+                                        className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-40 disabled:cursor-not-allowed">
+                                        Confirmar — crear deuda
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
                         )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )
-            })
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
         {/* Input oculto compartido para reemplazar boucher en Por revisar */}
