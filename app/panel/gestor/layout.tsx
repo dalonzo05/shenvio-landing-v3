@@ -26,6 +26,7 @@ import {
   Calculator,
   FileText,
   BadgeDollarSign,
+  ShieldCheck,
 } from 'lucide-react'
 import { ToastNuevaOrden, type ToastData } from './_components/ToastNuevaOrden'
 
@@ -347,6 +348,14 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               icon={<TrendingUp size={18} />}
               label="Financiero"
               active={pathname.startsWith('/panel/gestor/financiero')}
+              collapsed={collapsed}
+            />
+
+            <NavItem
+              href="/panel/gestor/auditoria-financiera"
+              icon={<ShieldCheck size={18} />}
+              label="Auditoría"
+              active={pathname.startsWith('/panel/gestor/auditoria-financiera')}
               collapsed={collapsed}
             />
           </nav>
