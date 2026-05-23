@@ -5,6 +5,7 @@ import { collection, doc, getDoc, onSnapshot, query, Timestamp, where } from 'fi
 import { auth, db } from '@/fb/config'
 import { Wallet, FileImage, ChevronDown, ChevronUp, CheckCircle2, Clock, Search, Lock } from 'lucide-react'
 import { SolicitudDrawer } from '@/app/panel/gestor/_components/SolicitudDrawer'
+import { getDepositoEstado } from '@/lib/financial-types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -15,6 +16,8 @@ type DepositoDoc = {
   solicitudIds: string[]
   montoTotal: number
   boucher?: { url: string; pathStorage?: string } | null
+  // estado es la fuente de verdad; confirmadoGestor es legacy (se mantiene en sync).
+  estado?: string
   confirmadoGestor?: boolean
 }
 
@@ -71,12 +74,13 @@ function fmtMotorizadoNombre(raw: string): string {
   return raw
 }
 
-type DepStatus = 'confirmado' | 'en_revision' | 'pendiente'
+type DepStatus = 'confirmado' | 'en_revision' | 'pendiente_boucher' | 'rechazado' | 'convertido_en_deuda'
 
 function getStatus(dep: DepositoDoc): DepStatus {
-  if (dep.confirmadoGestor === true) return 'confirmado'
-  if (dep.boucher?.url) return 'en_revision'
-  return 'pendiente'
+  // Usar getDepositoEstado como única fuente de verdad para el estado.
+  // confirmadoGestor es un campo legacy que se mantiene en sync pero no debe
+  // usarse para lógica: puede ser false en docs 'convertido_en_deuda' (legacy).
+  return getDepositoEstado(dep)
 }
 
 const STATUS_CONFIG: Record<DepStatus, { label: string; bg: string; text: string; border: string; accent: string; icon: React.ReactNode }> = {
@@ -90,10 +94,20 @@ const STATUS_CONFIG: Record<DepStatus, { label: string; bg: string; text: string
     bg: '#eff6ff', text: '#2563eb', border: '#bfdbfe', accent: '#2563eb',
     icon: <Search size={13} />,
   },
-  pendiente: {
+  pendiente_boucher: {
     label: 'Pendiente',
     bg: '#fffbeb', text: '#d97706', border: '#fde68a', accent: '#d97706',
     icon: <Clock size={13} />,
+  },
+  rechazado: {
+    label: 'Rechazado',
+    bg: '#fef2f2', text: '#dc2626', border: '#fecaca', accent: '#dc2626',
+    icon: <Clock size={13} />,
+  },
+  convertido_en_deuda: {
+    label: 'Convertido en deuda',
+    bg: '#fafafa', text: '#6b7280', border: '#e5e7eb', accent: '#6b7280',
+    icon: <Lock size={13} />,
   },
 }
 
@@ -173,9 +187,9 @@ export default function DepositosPage() {
   }, [depositos, filtroMes])
 
   // Summary stats
-  const totalConfirmado = depositos.filter((d) => d.confirmadoGestor).reduce((s, d) => s + (d.montoTotal ?? 0), 0)
-  const totalEnRevision = depositos.filter((d) => !d.confirmadoGestor && d.boucher?.url).reduce((s, d) => s + (d.montoTotal ?? 0), 0)
-  const countEnRevision = depositos.filter((d) => !d.confirmadoGestor && d.boucher?.url).length
+  const totalConfirmado = depositos.filter((d) => getDepositoEstado(d) === 'confirmado').reduce((s, d) => s + (d.montoTotal ?? 0), 0)
+  const totalEnRevision = depositos.filter((d) => getDepositoEstado(d) === 'en_revision').reduce((s, d) => s + (d.montoTotal ?? 0), 0)
+  const countEnRevision = depositos.filter((d) => getDepositoEstado(d) === 'en_revision').length
 
   return (
     <div className="flex flex-col gap-6">
@@ -194,7 +208,7 @@ export default function DepositosPage() {
             <p className="text-xs font-semibold uppercase tracking-wide text-green-600">Confirmado</p>
             <p className="mt-1 text-xl font-black text-green-700">{fmt(totalConfirmado)}</p>
             <p className="text-xs text-green-600">
-              {depositos.filter((d) => d.confirmadoGestor).length} depósito{depositos.filter((d) => d.confirmadoGestor).length !== 1 ? 's' : ''}
+              {depositos.filter((d) => getDepositoEstado(d) === 'confirmado').length} depósito{depositos.filter((d) => getDepositoEstado(d) === 'confirmado').length !== 1 ? 's' : ''}
             </p>
           </div>
           <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
@@ -206,7 +220,7 @@ export default function DepositosPage() {
       )}
 
       {/* Hint sobre "En revisión" */}
-      {!loading && depositos.some((d) => !d.confirmadoGestor && d.boucher?.url) && (
+      {!loading && depositos.some((d) => getDepositoEstado(d) === 'en_revision') && (
         <div className="flex gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
           <Search size={16} className="mt-0.5 shrink-0 text-blue-500" />
           <p className="text-sm text-blue-700">

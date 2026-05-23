@@ -468,14 +468,17 @@ export default function DepositosPage() {
       const dep = calcDeposito(o)
       const depoR = o.registro?.deposito
 
-      // Storkhub pendiente
-      if (dep.totalAStorkhub > 0 && !depoR?.confirmadoStorkhub && !depoR?.confirmadoMotorizado) {
+      // Storkhub pendiente.
+      // Excluir si ya está confirmado O si ya existe un ordenes_deposito en curso
+      // (storkhubDepositoId es la fuente de verdad; confirmadoMotorizado es legacy).
+      if (dep.totalAStorkhub > 0 && !depoR?.confirmadoStorkhub && !depoR?.storkhubDepositoId) {
         grupo.storkhub.ordenes.push(o)
         grupo.storkhub.totalBruto += dep.totalAStorkhub
       }
 
-      // Comercio pendiente
-      if (dep.totalAlComercio > 0 && !depoR?.confirmadoComercio && !depoR?.confirmadoMotorizado) {
+      // Comercio pendiente.
+      // Misma lógica: excluir si ya confirmado o si el motorizado ya creó el depósito.
+      if (dep.totalAlComercio > 0 && !depoR?.confirmadoComercio && !depoR?.comercioDepositoId) {
         const uid = o.userId || o.ownerSnapshot?.uid || '__sin'
         const nombre = getNombreComercio(o, comercioNames)
         let gc = grupo.comercios.find((c) => c.uid === uid)
@@ -573,11 +576,13 @@ export default function DepositosPage() {
       const motId = o.asignacion?.motorizadoId || o.asignacion?.motorizadoAuthUid || '__sin'
       const comercioNombre = getNombreComercio(o, comercioNames)
 
-      const storkhubConfirmado = depoR?.confirmadoStorkhub || depoR?.confirmadoMotorizado
-      const comercioConfirmado = depoR?.confirmadoComercio || depoR?.confirmadoMotorizado
+      // Fuente de verdad: confirmadoStorkhub / confirmadoComercio.
+      // confirmadoMotorizado era un campo legacy pre-ordenes_deposito, ya no se usa.
+      const storkhubConfirmado = depoR?.confirmadoStorkhub
+      const comercioConfirmado = depoR?.confirmadoComercio
 
-      const storkhubAt = depoR?.confirmadoStorkhubAt || (depoR?.confirmadoMotorizado ? depoR?.confirmadoAt : undefined)
-      const comercioAt = depoR?.confirmadoComercioAt || (depoR?.confirmadoMotorizado ? depoR?.confirmadoAt : undefined)
+      const storkhubAt = depoR?.confirmadoStorkhubAt
+      const comercioAt = depoR?.confirmadoComercioAt
 
       const ordenCompleta =
         (dep.totalAStorkhub === 0 || !!storkhubConfirmado) &&
@@ -794,19 +799,23 @@ export default function DepositosPage() {
       const b = writeBatch(db)
       // Eliminar el doc de ordenes_deposito — el motorizado creará uno nuevo al re-subir
       b.delete(doc(db, 'ordenes_deposito', dep.id))
-      // Resetear las solicitudes para que el motorizado las vea como pendientes
+      // Resetear las solicitudes para que el motorizado las vea como pendientes.
+      // storkhubDepositoId / comercioDepositoId son la fuente de verdad.
+      // confirmadoMotorizado / confirmadoAt se limpian por compatibilidad con docs legacy.
       const esStorkhub = dep.destinatario === 'storkhub'
       dep.solicitudIds.forEach((sid) => {
         b.update(doc(db, 'solicitudes_envio', sid), esStorkhub ? {
           'registro.deposito.confirmadoStorkhub': false,
           'registro.deposito.confirmadoStorkhubAt': null,
           'registro.deposito.storkhubDepositoId': null,
+          // legacy — se mantiene para retrocompatibilidad con docs antiguos
           'registro.deposito.confirmadoMotorizado': false,
           'registro.deposito.confirmadoAt': null,
         } : {
           'registro.deposito.confirmadoComercio': false,
           'registro.deposito.confirmadoComercioAt': null,
           'registro.deposito.comercioDepositoId': null,
+          // legacy — se mantiene para retrocompatibilidad con docs antiguos
           'registro.deposito.confirmadoMotorizado': false,
           'registro.deposito.confirmadoAt': null,
         })

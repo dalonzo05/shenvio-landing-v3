@@ -184,12 +184,14 @@ type Solicitud = {
     deposito?: {
       monto?: number | null
       formaPago?: string | null
-      confirmadoMotorizado?: boolean
-      confirmadoAt?: any
+      confirmadoMotorizado?: boolean  // legacy
+      confirmadoAt?: any              // legacy
       confirmadoComercio?: boolean
       confirmadoComercioAt?: any
       confirmadoStorkhub?: boolean
       confirmadoStorkhubAt?: any
+      storkhubDepositoId?: string
+      comercioDepositoId?: string
     }
   }
 }
@@ -1677,7 +1679,9 @@ export default function GestorSolicitudDetallePage() {
           {(() => {
             const dep = solicitud.registro?.deposito
             if (!dep) return null
-            const tieneInfo = dep.confirmadoComercio || dep.confirmadoStorkhub || dep.confirmadoMotorizado
+            // Fuente de verdad: storkhubDepositoId / comercioDepositoId + confirmadoStorkhub / confirmadoComercio.
+            const tieneInfo = dep.confirmadoComercio || dep.confirmadoStorkhub
+              || dep.storkhubDepositoId || dep.comercioDepositoId
             if (!tieneInfo) return null
             return (
               <div className="rounded-2xl border border-teal-200 bg-white p-5 shadow-sm">
@@ -1695,6 +1699,12 @@ export default function GestorSolicitudDetallePage() {
                       </div>
                     </>
                   )}
+                  {!dep.confirmadoStorkhub && dep.storkhubDepositoId && (
+                    <div>
+                      <div className="text-gray-500">Storkhub</div>
+                      <div className="font-medium text-blue-600">⏳ En revisión</div>
+                    </div>
+                  )}
                   {dep.confirmadoComercio && (
                     <>
                       <div>
@@ -1707,17 +1717,11 @@ export default function GestorSolicitudDetallePage() {
                       </div>
                     </>
                   )}
-                  {dep.confirmadoMotorizado && !dep.confirmadoStorkhub && !dep.confirmadoComercio && (
-                    <>
-                      <div>
-                        <div className="text-gray-500">Confirmado (legacy)</div>
-                        <div className="font-medium text-green-700">✓ Sí</div>
-                      </div>
-                      <div>
-                        <div className="text-gray-500">Fecha</div>
-                        <div className="font-medium text-gray-900">{formatDateTime(dep.confirmadoAt)}</div>
-                      </div>
-                    </>
+                  {!dep.confirmadoComercio && dep.comercioDepositoId && (
+                    <div>
+                      <div className="text-gray-500">Comercio</div>
+                      <div className="font-medium text-blue-600">⏳ En revisión</div>
+                    </div>
                   )}
                 </div>
               </div>

@@ -109,9 +109,10 @@ export type SolicitudDetalle = {
     semana?: number; zona?: string
     deposito?: {
       monto?: number | null; formaPago?: string | null
-      confirmadoMotorizado?: boolean; confirmadoAt?: Timestamp | null
+      confirmadoMotorizado?: boolean; confirmadoAt?: Timestamp | null  // legacy
       confirmadoComercio?: boolean; confirmadoComercioAt?: Timestamp | null
       confirmadoStorkhub?: boolean; confirmadoStorkhubAt?: Timestamp | null
+      storkhubDepositoId?: string; comercioDepositoId?: string
     }
   }
   evidencias?: {
@@ -1302,7 +1303,10 @@ export function SolicitudDrawer({
               {(() => {
                 const dep = solicitud.registro?.deposito
                 if (!dep) return null
-                const tieneInfo = dep.confirmadoComercio || dep.confirmadoStorkhub || dep.confirmadoMotorizado
+                // Fuente de verdad: confirmadoStorkhub / confirmadoComercio / depositoIds.
+                // confirmadoMotorizado es legacy — se muestra solo si existe en docs anteriores.
+                const tieneInfo = dep.confirmadoComercio || dep.confirmadoStorkhub
+                  || dep.storkhubDepositoId || dep.comercioDepositoId
                 if (!tieneInfo) return null
                 return (
                   <Section title="Depósito" accent="teal">
@@ -1313,17 +1317,17 @@ export function SolicitudDrawer({
                           <InfoRow label="Fecha Storkhub" value={formatDateTime(dep.confirmadoStorkhubAt)} />
                         </>
                       )}
+                      {!dep.confirmadoStorkhub && dep.storkhubDepositoId && (
+                        <InfoRow label="Storkhub" value="⏳ En revisión" />
+                      )}
                       {dep.confirmadoComercio && (
                         <>
                           <InfoRow label="Comercio" value="✓ Confirmado" />
                           <InfoRow label="Fecha Comercio" value={formatDateTime(dep.confirmadoComercioAt)} />
                         </>
                       )}
-                      {dep.confirmadoMotorizado && !dep.confirmadoStorkhub && !dep.confirmadoComercio && (
-                        <>
-                          <InfoRow label="Confirmado (legacy)" value="✓ Sí" />
-                          <InfoRow label="Fecha" value={formatDateTime(dep.confirmadoAt)} />
-                        </>
+                      {!dep.confirmadoComercio && dep.comercioDepositoId && (
+                        <InfoRow label="Comercio" value="⏳ En revisión" />
                       )}
                     </div>
                   </Section>

@@ -22,6 +22,18 @@ import type {
 } from './financial-types'
 import { cuentas } from './financial-types'
 
+// ─── Reglas de timestamps ─────────────────────────────────────────────────────
+//
+// 1. serverTimestamp()   → siempre para campos top-level en addDoc/updateDoc/setDoc
+//                          (at, createdAt, updatedAt, confirmadoAt, etc.)
+// 2. Timestamp.fromDate() → solo cuando el usuario ingresa una fecha retroactiva
+//                          (ej: fecha del gasto en un formulario con input date)
+// 3. Timestamp.now()      → SOLO dentro de objetos que van a arrayUnion().
+//                          Firebase SDK rechaza serverTimestamp() en datos anidados
+//                          de arrayUnion. No usar Timestamp.now() en ningún otro caso.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ─── Tipos auxiliares ─────────────────────────────────────────────────────────
 
 type Cuentas = {
@@ -326,9 +338,12 @@ export async function convertirDepositoEnDeuda(params: {
 
   const b = writeBatch(db)
 
-  // 1. Marcar el depósito como convertido_en_deuda (solo campo `estado`)
+  // 1. Marcar el depósito como convertido_en_deuda
+  // Nota: confirmadoGestor se escribe en true para sacarlo del query 'por revisar'
+  // (where confirmadoGestor == false). El campo estado es la fuente de verdad.
   b.update(doc(db, 'ordenes_deposito', depositoId), {
     estado: 'convertido_en_deuda',
+    confirmadoGestor: true,
     confirmadoGestorAt: serverTimestamp(),
     confirmadoGestorUid: operadorId,
     notaConversion: nota,

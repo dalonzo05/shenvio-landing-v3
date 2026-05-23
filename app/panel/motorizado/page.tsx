@@ -911,11 +911,14 @@ export default function PanelMotorizadoPage() {
 
     depositosPendientes.forEach((o) => {
       const dep = calcDeposito(o)
-      if (dep.totalAStorkhub > 0 && !o.registro?.deposito?.confirmadoStorkhub) {
+      const depoR = o.registro?.deposito
+      // Excluir si ya fue confirmado o si ya existe un depósito en revisión
+      // (storkhubDepositoId / comercioDepositoId = fuente de verdad).
+      if (dep.totalAStorkhub > 0 && !depoR?.confirmadoStorkhub && !depoR?.storkhubDepositoId) {
         storkhub.orders.push(o)
         storkhub.total += dep.totalAStorkhub
       }
-      if (dep.totalAlComercio > 0 && !o.registro?.deposito?.confirmadoComercio) {
+      if (dep.totalAlComercio > 0 && !depoR?.confirmadoComercio && !depoR?.comercioDepositoId) {
         const uid = o.userId || '__sin'
         if (!comerciosMap[uid]) {
           const nombre = o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre || comercioNames[uid] || uid.slice(0, 8)
@@ -1622,12 +1625,10 @@ export default function PanelMotorizadoPage() {
                                   confirmadoMotorizadoAt: serverTimestamp(),
                                   confirmadoGestor: false,
                                 });
-                                // Marcar en solicitudes que el motorizado ya envió el depósito
-                                // (el gestor confirmará después → escribirá confirmadoStorkhub: true)
+                                // Marcar en solicitudes el ID del depósito creado.
+                                // storkhubDepositoId es la fuente de verdad (confirmadoMotorizado es legacy).
                                 const b = writeBatch(db);
                                 g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
-                                  'registro.deposito.confirmadoMotorizado': true,
-                                  'registro.deposito.confirmadoAt': serverTimestamp(),
                                   'registro.deposito.storkhubDepositoId': depositoId,
                                 }));
                                 await b.commit();
@@ -1757,12 +1758,10 @@ export default function PanelMotorizadoPage() {
                                   confirmadoMotorizadoAt: serverTimestamp(),
                                   confirmadoGestor: false,
                                 });
-                                // Marcar en solicitudes que el motorizado ya envió el depósito
-                                // (el gestor confirmará después → escribirá confirmadoComercio: true)
+                                // Marcar en solicitudes el ID del depósito creado.
+                                // comercioDepositoId es la fuente de verdad (confirmadoMotorizado es legacy).
                                 const b = writeBatch(db);
                                 g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
-                                  'registro.deposito.confirmadoMotorizado': true,
-                                  'registro.deposito.confirmadoAt': serverTimestamp(),
                                   'registro.deposito.comercioDepositoId': depositoId,
                                 }));
                                 await b.commit();
