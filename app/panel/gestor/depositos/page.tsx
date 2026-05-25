@@ -844,10 +844,8 @@ export default function DepositosPage() {
         })
       })
       await b.commit()
-      await registrarMovimiento('deposito_rechazado', dep.montoTotal,
-        auth.currentUser?.uid ?? '',
-        `Depósito devuelto al motorizado: ${motivo} · ${dep.motorizadoNombre}`,
-        { depositoId: dep.id, motorizadoId: dep.motorizadoUid })
+      // No se registra movimiento financiero: el rechazo por boucher incorrecto
+      // no representa movimiento real de dinero — es solo un evento operativo.
     } finally {
       setDevolviendoId(null)
       setMotivoDevolucion('')
