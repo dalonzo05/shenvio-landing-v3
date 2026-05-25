@@ -1806,7 +1806,7 @@ function DepositoGrupo({
     }
   }
 
-  const tieneGastos = tipoDeposito === 'storkhub' && gastosDeducibles && gastosDeducibles > 0
+  const tieneGastos = tipoDeposito === 'storkhub' && (gastosDeducibles ?? 0) > 0
 
   return (
     <div className={`rounded-xl border-2 ${colorBorder} overflow-hidden`}>
