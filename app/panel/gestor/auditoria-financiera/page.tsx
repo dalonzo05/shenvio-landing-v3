@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, Fragment } from 'react'
 import {
   collection,
   getDocs,
@@ -662,9 +662,8 @@ export default function AuditoriaFinancieraPage() {
                         const esHuerfano = !m.solicitudId && !m.depositoId && !m.motorizadoId && !m.comercioId && !m.saldoId && !m.gastoId && !m.liquidacionId
                         const isExpanded = movsExpandidos.has(m.id)
                         return (
-                          <>
+                          <Fragment key={m.id}>
                             <tr
-                              key={m.id}
                               className={`hover:bg-gray-50 cursor-pointer ${sinCuentas ? 'bg-amber-50/40' : ''} ${esHuerfano ? 'bg-red-50/30' : ''}`}
                               onClick={() => toggleMovExpand(m.id)}
                             >
@@ -722,7 +721,7 @@ export default function AuditoriaFinancieraPage() {
                                 </td>
                               </tr>
                             )}
-                          </>
+                          </Fragment>
                         )
                       })}
                     </tbody>
