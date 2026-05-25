@@ -384,6 +384,9 @@ export async function convertirDepositoEnDeuda(params: {
     operadorId,
   })
 
+  // Referenciar saldoId en ordenes_deposito para mostrar en historial
+  await updateDoc(doc(db, 'ordenes_deposito', depositoId), { saldoId })
+
   // 4. Movimiento de auditoría enriquecido
   await registrarMovimiento(
     'deposito_convertido_en_deuda',

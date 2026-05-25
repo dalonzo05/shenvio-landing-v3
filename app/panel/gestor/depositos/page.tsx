@@ -18,7 +18,7 @@ import {
 import { auth, db } from '@/fb/config'
 import { compressImage, uploadDepositoBoucher } from '@/fb/storage'
 import { registrarMovimiento, convertirDepositoEnDeuda } from '@/lib/financial-writes'
-import { getDepositoEstado } from '@/lib/financial-types'
+import { getDepositoEstado, cuentas } from '@/lib/financial-types'
 import {
   Wallet,
   CheckCircle2,
@@ -125,6 +125,8 @@ type DepositoOrderDoc = {
   rechazadoPor?: string
   rechazadoAt?: Timestamp
   motivoRechazo?: string
+  notaConversion?: string
+  saldoId?: string
 }
 
 type BankAccount = { bank: string; number: string; holder: string; currency: string }
@@ -705,10 +707,15 @@ export default function DepositosPage() {
       })
     )
     await b.commit()
-    await registrarMovimiento('deposito_confirmado', montoTotal,
+    await registrarMovimiento('deposito_efectivo_storkhub', montoTotal,
       auth.currentUser?.uid ?? '',
       `Gestor confirmó depósito Storkhub · ${motNombre}`,
-      { depositoId, motorizadoId: motId })
+      { depositoId, motorizadoId: motId },
+      {
+        cuentas: { origen: cuentas.efectivoEnPoder(motId), destino: cuentas.banco },
+        propietario: 'storkhub',
+      }
+    )
   }
 
   async function confirmarComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File) {
@@ -745,10 +752,15 @@ export default function DepositosPage() {
       })
     )
     await b.commit()
-    await registrarMovimiento('deposito_confirmado', montoTotal,
+    await registrarMovimiento('deposito_efectivo_comercio', montoTotal,
       auth.currentUser?.uid ?? '',
       `Gestor confirmó depósito comercio ${comercioNombre} · ${motNombre}`,
-      { depositoId, motorizadoId: motId, comercioId: comercioUid })
+      { depositoId, motorizadoId: motId, comercioId: comercioUid },
+      {
+        cuentas: { origen: cuentas.efectivoEnPoder(motId), destino: cuentas.saldoComercio(comercioUid) },
+        propietario: `comercio:${comercioUid}`,
+      }
+    )
   }
 
   // ── Confirmar depósito existente (creado por motorizado) ──────────────────
@@ -782,10 +794,21 @@ export default function DepositosPage() {
         })
       })
       await b.commit()
-      await registrarMovimiento('deposito_confirmado', dep.montoTotal,
+      const _esStorkhub = dep.destinatario === 'storkhub'
+      await registrarMovimiento(
+        _esStorkhub ? 'deposito_efectivo_storkhub' : 'deposito_efectivo_comercio',
+        dep.montoTotal,
         auth.currentUser?.uid ?? '',
         `Depósito confirmado · ${dep.destinatarioNombre} · ${dep.motorizadoNombre}`,
-        { depositoId: dep.id, motorizadoId: dep.motorizadoUid })
+        { depositoId: dep.id, motorizadoId: dep.motorizadoUid },
+        {
+          cuentas: {
+            origen: cuentas.efectivoEnPoder(dep.motorizadoUid),
+            destino: _esStorkhub ? cuentas.banco : cuentas.saldoComercio(dep.destinatarioId ?? dep.destinatarioNombre),
+          },
+          propietario: _esStorkhub ? 'storkhub' : `comercio:${dep.destinatarioId ?? dep.destinatarioNombre}`,
+        }
+      )
     } finally {
       setConfirmandoId(null)
     }
@@ -942,6 +965,7 @@ export default function DepositosPage() {
       confirmadoGestor: false,
       confirmadoGestorAt: null,
       confirmadoGestorUid: null,
+      estado: 'en_revision',
     }, { merge: true })
   }
 
@@ -1613,10 +1637,10 @@ export default function DepositosPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b bg-gray-50">
-                      <th className={thCls}>Fecha confirmación</th>
+                      <th className={thCls}>Fecha gestión</th>
                       <th className={thCls}>Motorizado</th>
                       <th className={thCls}>Comercio</th>
-                      <th className={thCls}>Tipo</th>
+                      <th className={thCls}>Estado</th>
                       <th className={`${thCls} text-right`}>Monto</th>
                       <th className={thCls}>Órdenes</th>
                       <th className={thCls}>Comprobante</th>
@@ -1637,10 +1661,17 @@ export default function DepositosPage() {
                           </span>
                         </td>
                         <td className={tdCls}>
-                          {dep.destinatario === 'storkhub' ? (
-                            <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">Delivery</span>
+                          {dep.estado === 'convertido_en_deuda' ? (
+                            <div className="flex flex-col gap-0.5">
+                              <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200">Convertido en deuda</span>
+                              {dep.notaConversion && (
+                                <p className="text-[10px] text-gray-400 max-w-[160px] truncate" title={dep.notaConversion}>{dep.notaConversion}</p>
+                              )}
+                            </div>
+                          ) : dep.destinatario === 'storkhub' ? (
+                            <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">Delivery confirmado</span>
                           ) : (
-                            <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200">Producto</span>
+                            <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200">Producto confirmado</span>
                           )}
                         </td>
                         <td className={`${tdCls} text-right font-semibold text-gray-900`}>{fmt(dep.montoTotal)}</td>
@@ -1663,8 +1694,16 @@ export default function DepositosPage() {
                           ) : <span className="text-[11px] text-gray-400">—</span>}
                         </td>
                         <td className={tdCls}>
-                          {userRol === 'admin' && (
-                            <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2">
+                            {dep.saldoId && (
+                              <span
+                                className="font-mono text-[10px] font-semibold text-red-600 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded cursor-default select-all"
+                                title={`Saldo ID: ${dep.saldoId}`}
+                              >
+                                Saldo {dep.saldoId.slice(0, 6)}…
+                              </span>
+                            )}
+                            {userRol === 'admin' && dep.estado !== 'convertido_en_deuda' && (
                               <button
                                 onClick={() => rehacerDeposito(dep)}
                                 title="Rehacer depósito — vuelve a Por revisar"
@@ -1672,6 +1711,8 @@ export default function DepositosPage() {
                               >
                                 Rehacer
                               </button>
+                            )}
+                            {userRol === 'admin' && (
                               <button
                                 onClick={() => eliminarDeposito(dep)}
                                 title="Eliminar depósito (solo admin)"
@@ -1679,8 +1720,8 @@ export default function DepositosPage() {
                               >
                                 Eliminar
                               </button>
-                            </div>
-                          )}
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}
