@@ -61,6 +61,7 @@ export const cuentas = {
   // StorkHub (cuentas estáticas)
   ingresos:      'ingresos_storkhub'  as const,
   banco:         'banco_storkhub'     as const,
+  caja:          'caja_storkhub'      as const, // efectivo en mano (adelantos, pagos en cash)
   gastosOp:      'gastos_operativos'  as const,
   // Origen/destino para dinero que entra o sale del sistema (ej: comercio paga en efectivo)
   externo:       'externo'            as const,

@@ -29,7 +29,7 @@ import {
   FileDown,
 } from 'lucide-react'
 import type { SaldoCargoMotorizado } from '@/lib/financial-types'
-import { LABELS_TIPO_SALDO } from '@/lib/financial-types'
+import { LABELS_TIPO_SALDO, cuentas } from '@/lib/financial-types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -778,13 +778,22 @@ export default function LiquidacionesPage() {
     setSavingAdelanto(true)
     try {
       const uid = auth.currentUser?.uid ?? ''
-      // Movimiento financiero (para compatibilidad con el cálculo existente)
+      // Movimiento financiero con doble entrada
+      // caja_storkhub → deuda_motorizado (gestor entrega efectivo, motorizado queda debiendo)
       await registrarMovimiento(
         'adelanto_motorizado',
         monto,
         uid,
         `Adelanto C$${monto} · ${moto.nombre || moto.authUid} · Sem ${selectedSemana}`,
-        { motorizadoId: selectedMotoId }
+        { motorizadoId: selectedMotoId },
+        {
+          semanaKey: selectedSemana,
+          cuentas: {
+            origen: cuentas.caja,
+            destino: cuentas.deudaMotorizado(selectedMotoId),
+          },
+          propietario: `motorizado:${selectedMotoId}`,
+        }
       )
       setMontoAdelanto('')
       setNotaAdelanto('')

@@ -403,10 +403,26 @@ export default function GastosPage() {
       `¿Anular este gasto?\n\nTipo: ${LABELS_TIPO_GASTO[gasto.tipo]}\nMonto: ${fmt(gasto.monto)}\nMotorizado: ${gasto.motorizadoNombre}`
     )
     if (!ok) return
+    // 1. Anular el gasto operativo
     await updateDoc(doc(db, 'gastos_motorizado', gasto.id), {
       estado: 'anulado',
       updatedAt: serverTimestamp(),
     })
+    // 2. Anular movimientos financieros vinculados (por gastoId)
+    // Sin esto el ledger sigue contando el gasto como activo en auditoría.
+    const snap = await getDocs(
+      query(collection(db, 'movimientos_financieros'), where('gastoId', '==', gasto.id))
+    )
+    await Promise.all(
+      snap.docs
+        .filter((d) => (d.data() as any).estado !== 'anulado')
+        .map((d) => updateDoc(d.ref, {
+          estado: 'anulado',
+          anuladoAt: serverTimestamp(),
+          anuladoPorUid: auth.currentUser?.uid ?? '',
+          motivoAnulacion: 'Gasto operativo anulado por gestor',
+        }))
+    )
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
