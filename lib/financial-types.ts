@@ -147,6 +147,9 @@ export interface MovimientoFinanciero {
   descripcion: string
   estado: 'activo' | 'anulado'
   anuladoPorMovimientoId?: string // si fue revertido por otro movimiento
+  anuladoAt?: unknown              // timestamp de anulación
+  anuladoPorUid?: string           // UID de quien anuló
+  motivoAnulacion?: string         // motivo de la anulación
 
   // ── Doble entrada (opcional en Fase 1, requerido en Fase 4+) ────────────────
   cuentaOrigen?: string  // ej: "efectivo_en_poder:moto123"

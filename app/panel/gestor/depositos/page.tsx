@@ -951,13 +951,39 @@ export default function DepositosPage() {
     }
   }
 
+  // ── Anular movimientos financieros activos de un depósito ────────────────
+  // Usado antes de rehacer o eliminar un depósito confirmado para evitar
+  // que el ledger cuente el mismo depósito dos veces.
+  // No borra nada — solo marca estado: 'anulado' con trazabilidad.
+
+  async function anularMovimientosDeDeposito(depositoId: string, motivo: string) {
+    const snap = await getDocs(
+      query(collection(db, 'movimientos_financieros'), where('depositoId', '==', depositoId))
+    )
+    const activos = snap.docs.filter((d) => (d.data() as any).estado !== 'anulado')
+    if (activos.length === 0) return
+    const b = writeBatch(db)
+    activos.forEach((d) => {
+      b.update(d.ref, {
+        estado: 'anulado',
+        anuladoAt: serverTimestamp(),
+        anuladoPorUid: auth.currentUser?.uid ?? '',
+        motivoAnulacion: motivo,
+      })
+    })
+    await b.commit()
+  }
+
   // ── Rehacer depósito: vuelve a "Por revisar" para que el motorizado reenvíe ──
 
   async function rehacerDeposito(dep: DepositoOrderDoc) {
     const ok = window.confirm(
-      `¿Rehacer este depósito?\n\nMonto: ${fmt(dep.montoTotal)}\nMotorizado: ${dep.motorizadoNombre}\n\nEl depósito volverá a "Por revisar" para que se corrija.`
+      `¿Rehacer este depósito?\n\nMonto: ${fmt(dep.montoTotal)}\nMotorizado: ${dep.motorizadoNombre}\n\nEl depósito volverá a "Por revisar" para que se corrija.\nSe anularán los movimientos financieros asociados.`
     )
     if (!ok) return
+    // 1. Anular movimientos del ledger — el depósito no está más confirmado
+    await anularMovimientosDeDeposito(dep.id, 'Depósito revertido a revisión por gestor')
+    // 2. Resetear estado operativo
     const ref = doc(db, 'ordenes_deposito', dep.id)
     await setDoc(ref, {
       confirmadoGestor: false,
@@ -974,6 +1000,8 @@ export default function DepositosPage() {
       `¿Eliminar este depósito?\n\nMonto: ${fmt(dep.montoTotal)}\nMotorizado: ${dep.motorizadoNombre}\nÓrdenes: ${dep.solicitudIds.join(', ')}\n\nEsta acción no se puede deshacer.`
     )
     if (!ok) return
+    // Anular movimientos del ledger antes de eliminar el doc
+    await anularMovimientosDeDeposito(dep.id, 'Depósito eliminado por gestor')
     await deleteDoc(doc(db, 'ordenes_deposito', dep.id))
   }
 
