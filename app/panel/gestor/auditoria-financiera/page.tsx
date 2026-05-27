@@ -19,6 +19,7 @@ import {
   CheckCircle2,
   XCircle,
   Minus,
+  Info,
 } from 'lucide-react'
 import type { MovimientoFinanciero } from '@/lib/financial-types'
 import {
@@ -47,6 +48,9 @@ type SaldoCargo = {
   motorizadoNombre: string
   saldoPendiente: number
   estado: string
+  montoOriginal?: number
+  nota?: string
+  tipo?: string
 }
 
 type DepositoPendiente = {
@@ -85,11 +89,6 @@ function fmtFechaCorta(v: unknown): string {
 }
 
 const UMBRAL_DIFERENCIA = 0.01 // diferencia mínima para marcar como discrepancia
-
-function diffColor(diff: number) {
-  if (Math.abs(diff) < UMBRAL_DIFERENCIA) return { bg: '#f0fdf4', text: '#16a34a', icon: <CheckCircle2 size={13} /> }
-  return { bg: '#fef2f2', text: '#dc2626', icon: <AlertTriangle size={13} /> }
-}
 
 // ─── Componentes menores ──────────────────────────────────────────────────────
 
@@ -141,6 +140,7 @@ export default function AuditoriaFinancieraPage() {
   const [movsExpandidos, setMovsExpandidos] = useState<Set<string>>(new Set())
   const toggleMovExpand = (id: string) =>
     setMovsExpandidos((prev) => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s })
+  const [expandedMotId, setExpandedMotId] = useState<string | null>(null)
 
   // ── Filtro de fecha para la tabla de movimientos ──────────────────────────
   const [desde, setDesde] = useState<string>(() => {
@@ -185,6 +185,9 @@ export default function AuditoriaFinancieraPage() {
             motorizadoNombre: data.motorizadoNombre ?? '',
             saldoPendiente: data.saldoPendiente ?? 0,
             estado: data.estado,
+            montoOriginal: data.montoOriginal,
+            nota: data.nota,
+            tipo: data.tipo,
           }
         }),
       )
@@ -219,37 +222,74 @@ export default function AuditoriaFinancieraPage() {
   // ─── Auditoría por motorizado ─────────────────────────────────────────────
 
   const auditMotorizados = useMemo(() => {
-    // Saldos agrupados por motorizadoId
+    // Saldos formales agrupados por motorizadoId
     const saldosPorMot: Record<string, number> = {}
     saldos.forEach((s) => {
       saldosPorMot[s.motorizadoId] = (saldosPorMot[s.motorizadoId] ?? 0) + s.saldoPendiente
     })
 
-    // Depósitos pendientes agrupados por motorizadoUid
+    // Depósitos pendientes (no confirmados) agrupados por motorizadoUid
     const depsPorUid: Record<string, number> = {}
     depositosPendientes.forEach((d) => {
       depsPorUid[d.motorizadoUid] = (depsPorUid[d.motorizadoUid] ?? 0) + d.montoTotal
     })
 
     return motorizados.map((mot) => {
-      const deudaLedger = calcularDeudaOperativaMotorizado(movimientos, mot.id)
-      const efectivoLedger = calcularEfectivoEnPoderMotorizado(movimientos, mot.id)
-      const comisionLedger = calcularComisionPendienteMotorizado(movimientos, mot.id)
-      const deudaOperativa = saldosPorMot[mot.id] ?? 0
+      // ── Saldos a cargo operativos (fuente: saldos_cargo_motorizado) ────────
+      const saldosACargoOp = saldosPorMot[mot.id] ?? 0
+
+      // ── Adelantos activos (fuente: ledger, excluye anulados) ───────────────
+      const adelantosActivos = movimientos
+        .filter((m) => m.motorizadoId === mot.id && m.tipo === 'adelanto_motorizado' && m.estado !== 'anulado')
+        .reduce((s, m) => s + m.monto, 0)
+
+      // ── Saldos del ledger por cuenta ───────────────────────────────────────
+      const efectivoLedger  = calcularEfectivoEnPoderMotorizado(movimientos, mot.id)
+      const comisionLedger  = calcularComisionPendienteMotorizado(movimientos, mot.id)
+      // deudaLedger excluye adelantos — solo para comparación en alertas
+      const deudaLedger     = calcularDeudaOperativaMotorizado(movimientos, mot.id)
+
+      // ── Balance neto de exposición ─────────────────────────────────────────
+      // Positivo = motorizado nos debe dinero; negativo = le debemos
+      const balanceNeto = saldosACargoOp + adelantosActivos + efectivoLedger - comisionLedger
+
+      // ── Depósitos sin confirmar ────────────────────────────────────────────
       const deposPendientes = depsPorUid[mot.authUid] ?? 0
-      const deudaDiff = deudaLedger - deudaOperativa
+
+      // ── Alertas (solo condiciones concretas, no diferencias de cobertura) ──
+      const alertas: string[] = []
+
+      const movsMot = movimientos.filter(
+        (m) => m.estado !== 'anulado' && m.motorizadoId === mot.id,
+      )
+      if (movsMot.some((m) => !m.cuentaOrigen && !m.cuentaDestino)) {
+        alertas.push('Movimientos sin cuentas')
+      }
+      if (deposPendientes > 0) {
+        alertas.push('Depósitos sin confirmar')
+      }
+      // Diferencia real: solo cuando ambos son non-zero y el gap es significativo
+      if (
+        (deudaLedger > 0 || saldosACargoOp > 0) &&
+        Math.abs(deudaLedger - saldosACargoOp) >= UMBRAL_DIFERENCIA
+      ) {
+        alertas.push('Deuda ledger/saldos no coinciden')
+      }
 
       return {
         mot,
-        deudaLedger,
+        saldosACargoOp,
+        adelantosActivos,
         efectivoLedger,
         comisionLedger,
-        deudaOperativa,
         deposPendientes,
-        deudaDiff,
-        tieneDiferencia: Math.abs(deudaDiff) >= UMBRAL_DIFERENCIA,
+        balanceNeto,
+        alertas,
       }
-    }).sort((a, b) => Math.abs(b.deudaDiff) - Math.abs(a.deudaDiff))
+    }).sort((a, b) =>
+      b.alertas.length - a.alertas.length ||
+      Math.abs(b.balanceNeto) - Math.abs(a.balanceNeto),
+    )
   }, [motorizados, movimientos, saldos, depositosPendientes])
 
   const auditFiltrado = useMemo(() => {
@@ -257,7 +297,7 @@ export default function AuditoriaFinancieraPage() {
     if (filtroMotorizado !== 'todos')
       list = list.filter((r) => r.mot.id === filtroMotorizado)
     if (soloDiferencias)
-      list = list.filter((r) => r.tieneDiferencia)
+      list = list.filter((r) => r.alertas.length > 0)
     return list
   }, [auditMotorizados, filtroMotorizado, soloDiferencias])
 
@@ -385,7 +425,7 @@ export default function AuditoriaFinancieraPage() {
                 onChange={(e) => setSoloDiferencias(e.target.checked)}
                 className="rounded"
               />
-              Solo diferencias
+              Solo con alertas
             </label>
 
             <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
@@ -448,8 +488,8 @@ export default function AuditoriaFinancieraPage() {
               {/* KPIs auditoría */}
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                 <KpiCard
-                  label="Motorizados con diferencia"
-                  value={auditMotorizados.filter((r) => r.tieneDiferencia).length}
+                  label="Motorizados con alertas"
+                  value={auditMotorizados.filter((r) => r.alertas.length > 0).length}
                   sub={`de ${motorizados.length} totales`}
                   warn
                 />
@@ -502,17 +542,17 @@ export default function AuditoriaFinancieraPage() {
             <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
               <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
                 <div>
-                  <h2 className="text-sm font-bold text-gray-900">Comparación por motorizado</h2>
+                  <h2 className="text-sm font-bold text-gray-900">Balance por motorizado</h2>
                   <p className="text-xs text-gray-400 mt-0.5">
-                    Ledger = derivado de movimientos_financieros · Operativo = datos almacenados
+                    Saldos operativos · adelantos · efectivo y comisión según ledger · haz clic para ver desglose
                   </p>
                 </div>
                 <span className={`text-xs font-semibold rounded-full px-2.5 py-1 ${
-                  auditFiltrado.filter((r) => r.tieneDiferencia).length === 0
+                  auditFiltrado.filter((r) => r.alertas.length > 0).length === 0
                     ? 'bg-green-100 text-green-700'
-                    : 'bg-red-100 text-red-700'
+                    : 'bg-amber-100 text-amber-700'
                 }`}>
-                  {auditFiltrado.filter((r) => r.tieneDiferencia).length} diferencias
+                  {auditFiltrado.filter((r) => r.alertas.length > 0).length} alertas
                 </span>
               </div>
               <div className="overflow-x-auto">
@@ -520,67 +560,245 @@ export default function AuditoriaFinancieraPage() {
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
                       <th className={thCls}>Motorizado</th>
-                      <th className={`${thCls} text-right`}>Deuda (ledger)</th>
-                      <th className={`${thCls} text-right`}>Deuda (operativo)</th>
-                      <th className={`${thCls} text-right`}>Diferencia</th>
-                      <th className={`${thCls} text-right`}>Efectivo (ledger)</th>
-                      <th className={`${thCls} text-right`}>Deps. pendientes</th>
-                      <th className={`${thCls} text-right`}>Comisión (ledger)</th>
+                      <th className={`${thCls} text-right`}>Saldos a cargo</th>
+                      <th className={`${thCls} text-right`}>Adelantos activos</th>
+                      <th className={`${thCls} text-right`}>Efectivo pendiente</th>
+                      <th className={`${thCls} text-right`}>Comisión pendiente</th>
+                      <th className={`${thCls} text-right`}>
+                        <span className="inline-flex items-center gap-1">
+                          Balance neto
+                          <span
+                            className="text-gray-400 cursor-help"
+                            title="Balance neto = saldos a cargo + adelantos activos + efectivo pendiente − comisión pendiente. Si es positivo, el motorizado debe. Si es negativo, StorkHub le debe pagar."
+                          >
+                            <Info size={11} />
+                          </span>
+                        </span>
+                      </th>
+                      <th className={thCls}>Alertas</th>
+                      <th className={thCls}></th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {auditFiltrado.length === 0 && (
                       <tr>
-                        <td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-400">
-                          {soloDiferencias ? 'No se detectaron diferencias ✓' : 'Sin datos'}
+                        <td colSpan={8} className="px-4 py-8 text-center text-sm text-gray-400">
+                          {soloDiferencias ? 'Sin alertas — todo en orden ✓' : 'Sin datos'}
                         </td>
                       </tr>
                     )}
-                    {auditFiltrado.map(({ mot, deudaLedger, efectivoLedger, comisionLedger, deudaOperativa, deposPendientes, deudaDiff, tieneDiferencia }) => {
-                      const dc = diffColor(deudaDiff)
+                    {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, efectivoLedger, comisionLedger, balanceNeto, alertas }) => {
+                      const isExpanded = expandedMotId === mot.id
+                      const saldosMot = saldos.filter((s) => s.motorizadoId === mot.id)
+                      const adelantosMot = movimientos.filter(
+                        (m) => m.motorizadoId === mot.id && m.tipo === 'adelanto_motorizado' && m.estado !== 'anulado',
+                      )
                       return (
-                        <tr key={mot.id} className={`hover:bg-gray-50 ${tieneDiferencia ? 'bg-red-50/30' : ''}`}>
-                          <td className={tdCls}>
-                            <div className="flex flex-col">
-                              <span className="font-semibold text-gray-900">{mot.nombre}</span>
-                              <span className="font-mono text-[10px] text-gray-400">{mot.id}</span>
-                            </div>
-                          </td>
-                          <td className={`${tdCls} text-right font-mono`}>
-                            {deudaLedger === 0
-                              ? <span className="text-gray-300">—</span>
-                              : <span className={deudaLedger > 0 ? 'text-red-700' : 'text-green-700'}>{fmt(deudaLedger)}</span>}
-                          </td>
-                          <td className={`${tdCls} text-right font-mono`}>
-                            {deudaOperativa === 0
-                              ? <span className="text-gray-300">—</span>
-                              : <span className="text-red-700">{fmt(deudaOperativa)}</span>}
-                          </td>
-                          <td className={`${tdCls} text-right`}>
-                            <span
-                              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold"
-                              style={{ background: dc.bg, color: dc.text }}
-                            >
-                              {dc.icon}
-                              {Math.abs(deudaDiff) < UMBRAL_DIFERENCIA ? '✓' : fmt(deudaDiff)}
-                            </span>
-                          </td>
-                          <td className={`${tdCls} text-right font-mono`}>
-                            {efectivoLedger === 0
-                              ? <span className="text-gray-300">—</span>
-                              : <span className="text-blue-700">{fmt(efectivoLedger)}</span>}
-                          </td>
-                          <td className={`${tdCls} text-right font-mono`}>
-                            {deposPendientes === 0
-                              ? <span className="text-gray-300">—</span>
-                              : <span className="text-purple-700">{fmt(deposPendientes)}</span>}
-                          </td>
-                          <td className={`${tdCls} text-right font-mono`}>
-                            {comisionLedger === 0
-                              ? <span className="text-gray-300">—</span>
-                              : <span className={comisionLedger > 0 ? 'text-green-700' : 'text-red-700'}>{fmt(comisionLedger)}</span>}
-                          </td>
-                        </tr>
+                        <Fragment key={mot.id}>
+                          {/* Fila principal */}
+                          <tr
+                            className={`cursor-pointer hover:bg-gray-50 transition-colors ${alertas.length > 0 ? 'bg-amber-50/20' : ''}`}
+                            onClick={() => setExpandedMotId(isExpanded ? null : mot.id)}
+                          >
+                            <td className={tdCls}>
+                              <div className="flex flex-col">
+                                <span className="font-semibold text-gray-900">{mot.nombre}</span>
+                                <span className="font-mono text-[10px] text-gray-400">{mot.id}</span>
+                              </div>
+                            </td>
+                            <td className={`${tdCls} text-right font-mono`}>
+                              {saldosACargoOp === 0
+                                ? <span className="text-gray-300">—</span>
+                                : <span className="font-semibold text-red-700">{fmt(saldosACargoOp)}</span>}
+                            </td>
+                            <td className={`${tdCls} text-right font-mono`}>
+                              {adelantosActivos === 0
+                                ? <span className="text-gray-300">—</span>
+                                : <span className="font-semibold text-amber-700">{fmt(adelantosActivos)}</span>}
+                            </td>
+                            <td className={`${tdCls} text-right font-mono`}>
+                              {efectivoLedger === 0
+                                ? <span className="text-gray-300">—</span>
+                                : <span className="font-semibold text-blue-700">{fmt(efectivoLedger)}</span>}
+                            </td>
+                            <td className={`${tdCls} text-right font-mono`}>
+                              {comisionLedger === 0
+                                ? <span className="text-gray-300">—</span>
+                                : <span className="font-semibold text-green-700">{fmt(comisionLedger)}</span>}
+                            </td>
+                            <td className={`${tdCls} text-right`}>
+                              {balanceNeto === 0
+                                ? <span className="text-gray-300">—</span>
+                                : <span className={`font-black font-mono ${balanceNeto > 0 ? 'text-red-700' : 'text-green-700'}`}>{fmt(balanceNeto)}</span>}
+                            </td>
+                            <td className={tdCls}>
+                              {alertas.length === 0 ? (
+                                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-green-700">
+                                  <CheckCircle2 size={12} /> Sin alertas
+                                </span>
+                              ) : (
+                                <div className="flex flex-col gap-1">
+                                  {alertas.map((a, i) => (
+                                    <span
+                                      key={i}
+                                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-100 rounded-full px-2 py-0.5 whitespace-nowrap"
+                                    >
+                                      <AlertTriangle size={10} /> {a}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </td>
+                            <td className={`${tdCls} text-right`}>
+                              {isExpanded
+                                ? <ChevronUp size={14} className="text-gray-400" />
+                                : <ChevronDown size={14} className="text-gray-400" />}
+                            </td>
+                          </tr>
+
+                          {/* Fila de desglose expandible */}
+                          {isExpanded && (
+                            <tr className="bg-gray-50/60">
+                              <td colSpan={8} className="px-4 py-4">
+                                <div className="flex flex-col gap-4">
+
+                                  {/* Grid 2×2: saldos, adelantos, efectivo, comisión */}
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+
+                                    {/* Saldos a cargo */}
+                                    <div className="bg-white rounded-xl border border-red-100 overflow-hidden">
+                                      <div className="px-3 py-2 bg-red-50 border-b border-red-100 flex items-center justify-between">
+                                        <span className="text-xs font-bold text-red-800">Saldos a cargo operativos</span>
+                                        <span className="text-xs font-black text-red-700">{fmt(saldosACargoOp)}</span>
+                                      </div>
+                                      {saldosMot.length === 0 ? (
+                                        <p className="px-3 py-2 text-[11px] text-gray-400">Sin saldos formales registrados</p>
+                                      ) : (
+                                        <div className="divide-y divide-red-50">
+                                          {saldosMot.map((s) => (
+                                            <div key={s.id} className="px-3 py-2 flex items-start justify-between gap-2">
+                                              <div className="flex flex-col gap-0.5 min-w-0">
+                                                {s.tipo && <span className="text-[11px] font-semibold text-gray-700">{s.tipo}</span>}
+                                                {s.nota && <span className="text-[11px] text-gray-400 italic truncate">{s.nota}</span>}
+                                                <span className={`text-[11px] font-semibold ${s.estado === 'abonado_parcial' ? 'text-amber-600' : 'text-gray-400'}`}>
+                                                  {s.estado === 'abonado_parcial' ? 'Abonado parcial' : 'Pendiente'}
+                                                </span>
+                                              </div>
+                                              <div className="text-right shrink-0">
+                                                <p className="text-xs font-black text-red-700">{fmt(s.saldoPendiente)}</p>
+                                                {s.montoOriginal != null && s.montoOriginal !== s.saldoPendiente && (
+                                                  <p className="text-[11px] text-gray-400">orig. {fmt(s.montoOriginal)}</p>
+                                                )}
+                                              </div>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {/* Adelantos activos */}
+                                    <div className="bg-white rounded-xl border border-amber-100 overflow-hidden">
+                                      <div className="px-3 py-2 bg-amber-50 border-b border-amber-100 flex items-center justify-between">
+                                        <span className="text-xs font-bold text-amber-800">Adelantos activos</span>
+                                        <span className="text-xs font-black text-amber-700">{fmt(adelantosActivos)}</span>
+                                      </div>
+                                      {adelantosMot.length === 0 ? (
+                                        <p className="px-3 py-2 text-[11px] text-gray-400">Sin adelantos activos</p>
+                                      ) : (
+                                        <div className="divide-y divide-amber-50">
+                                          {adelantosMot.map((a: any) => (
+                                            <div key={a.id} className="px-3 py-2 flex items-center justify-between gap-2">
+                                              <div className="flex flex-col gap-0.5 min-w-0">
+                                                <span className="text-[11px] text-gray-500">{fmtFechaCorta(a.at)}</span>
+                                                {a.descripcion && (
+                                                  <span className="text-[11px] text-gray-400 truncate">{a.descripcion}</span>
+                                                )}
+                                              </div>
+                                              <span className="text-xs font-black text-amber-700 shrink-0">{fmt(a.monto)}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {/* Efectivo pendiente */}
+                                    <div className="bg-white rounded-xl border border-blue-100 overflow-hidden">
+                                      <div className="px-3 py-2 bg-blue-50 border-b border-blue-100 flex items-center justify-between">
+                                        <span className="text-xs font-bold text-blue-800">Efectivo pendiente</span>
+                                        <span className="text-xs font-black text-blue-700">{fmt(efectivoLedger)}</span>
+                                      </div>
+                                      <div className="px-3 py-2">
+                                        <p className="text-[11px] text-gray-500">
+                                          Cuenta ledger: <code className="font-mono text-gray-700">efectivo_en_poder:{mot.id}</code>
+                                        </p>
+                                        {efectivoLedger === 0 && (
+                                          <p className="text-[11px] text-gray-400 mt-0.5">Sin efectivo registrado en el ledger</p>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {/* Comisión pendiente */}
+                                    <div className="bg-white rounded-xl border border-green-100 overflow-hidden">
+                                      <div className="px-3 py-2 bg-green-50 border-b border-green-100 flex items-center justify-between">
+                                        <span className="text-xs font-bold text-green-800">Comisión pendiente</span>
+                                        <span className="text-xs font-black text-green-700">{fmt(comisionLedger)}</span>
+                                      </div>
+                                      <div className="px-3 py-2">
+                                        <p className="text-[11px] text-gray-500">
+                                          Cuenta ledger: <code className="font-mono text-gray-700">comision_pendiente:{mot.id}</code>
+                                        </p>
+                                        {comisionLedger === 0 && (
+                                          <p className="text-[11px] text-gray-400 mt-0.5">Sin comisión pendiente en el ledger</p>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  {/* Cálculo del balance neto */}
+                                  <div className="bg-white rounded-xl border border-gray-200 px-4 py-3">
+                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">
+                                      Cálculo balance neto
+                                    </p>
+                                    <div className="flex flex-col gap-1 font-mono text-xs">
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-gray-500">Saldos a cargo</span>
+                                        <span className="font-semibold text-red-700">{fmt(saldosACargoOp)}</span>
+                                      </div>
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-gray-500">+ Adelantos activos</span>
+                                        <span className="font-semibold text-amber-700">{fmt(adelantosActivos)}</span>
+                                      </div>
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-gray-500">+ Efectivo pendiente</span>
+                                        <span className="font-semibold text-blue-700">{fmt(efectivoLedger)}</span>
+                                      </div>
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-gray-500">− Comisión pendiente</span>
+                                        <span className="font-semibold text-green-700">{fmt(comisionLedger)}</span>
+                                      </div>
+                                      <div className="mt-1.5 pt-1.5 border-t border-gray-200 flex items-center justify-between font-black text-sm">
+                                        <span className={balanceNeto > 0 ? 'text-red-700' : balanceNeto < 0 ? 'text-green-700' : 'text-gray-400'}>
+                                          = Balance neto
+                                        </span>
+                                        <span className={balanceNeto > 0 ? 'text-red-700' : balanceNeto < 0 ? 'text-green-700' : 'text-gray-400'}>
+                                          {fmt(balanceNeto)}
+                                        </span>
+                                      </div>
+                                      {balanceNeto !== 0 && (
+                                        <p className={`text-[11px] mt-1 font-sans ${balanceNeto > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                          {balanceNeto > 0
+                                            ? `El motorizado debe C$ ${Math.abs(balanceNeto).toLocaleString('es-NI')} a StorkHub`
+                                            : `StorkHub le debe pagar C$ ${Math.abs(balanceNeto).toLocaleString('es-NI')} al motorizado`}
+                                        </p>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
                       )
                     })}
                   </tbody>
@@ -588,10 +806,12 @@ export default function AuditoriaFinancieraPage() {
               </div>
               {/* Leyenda */}
               <div className="px-4 py-3 border-t border-gray-100 bg-gray-50">
-                <p className="text-xs text-gray-400">
-                  <strong>Diferencia</strong> = Deuda (ledger) − Deuda (operativo). &nbsp;
-                  <strong>Deps. pendientes</strong> = montoTotal en ordenes_deposito no confirmadas. &nbsp;
-                  <span className="text-amber-600">⚠ En Fase 1 el ledger tiene cobertura parcial — diferencias ≠ errores necesariamente.</span>
+                <p className="text-xs text-gray-400 leading-relaxed">
+                  <strong>Saldos a cargo</strong>: deudas formales en <code>saldos_cargo_motorizado</code>. &nbsp;
+                  <strong>Adelantos activos</strong>: adelantos del ledger no anulados. &nbsp;
+                  <strong>Efectivo pendiente</strong>: cuenta <code>efectivo_en_poder:id</code>. &nbsp;
+                  <strong>Comisión pendiente</strong>: cuenta <code>comision_pendiente:id</code>. &nbsp;
+                  Haz clic en una fila para ver el desglose completo.
                 </p>
               </div>
             </div>

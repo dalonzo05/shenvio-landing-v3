@@ -27,6 +27,7 @@ import {
   PlusCircle,
   CreditCard,
   FileDown,
+  XCircle,
 } from 'lucide-react'
 import type { SaldoCargoMotorizado } from '@/lib/financial-types'
 import { LABELS_TIPO_SALDO, cuentas } from '@/lib/financial-types'
@@ -74,6 +75,15 @@ type DepositoOrderDoc = {
 }
 
 type GastoSemana = { id: string; monto: number; tipo: string; fecha: any; estado: string }
+
+type AdelantoMovimiento = {
+  id: string
+  monto: number
+  descripcion?: string
+  at: any
+  estado: 'activo' | 'anulado'
+  anuladoAt?: any
+}
 
 type Liquidacion = {
   id: string
@@ -411,7 +421,7 @@ export default function LiquidacionesPage() {
 
   const [ordenes, setOrdenes] = useState<Solicitud[]>([])
   const [depositos, setDepositos] = useState<DepositoOrderDoc[]>([])
-  const [adelantos, setAdelantos] = useState<number>(0)
+  const [adelantosList, setAdelantosList] = useState<AdelantoMovimiento[]>([])
   const [loading, setLoading] = useState(false)
   const [expanded, setExpanded] = useState(false)
 
@@ -428,6 +438,7 @@ export default function LiquidacionesPage() {
   const [montoAdelanto, setMontoAdelanto] = useState('')
   const [notaAdelanto, setNotaAdelanto] = useState('')
   const [savingAdelanto, setSavingAdelanto] = useState(false)
+  const [anulandoAdelantoId, setAnulandoAdelantoId] = useState<string | null>(null)
 
   // Liquidaciones existentes
   const [liquidaciones, setLiquidaciones] = useState<Liquidacion[]>([])
@@ -537,7 +548,7 @@ export default function LiquidacionesPage() {
   // ── Load adelantos del motorizado en la semana ────────────────────────────
 
   useEffect(() => {
-    if (!selectedMotoId) { setAdelantos(0); return }
+    if (!selectedMotoId) { setAdelantosList([]); return }
 
     const q = query(
       collection(db, 'movimientos_financieros'),
@@ -546,13 +557,18 @@ export default function LiquidacionesPage() {
     )
     const { inicio, fin } = getSemanaRange(selectedSemana)
     return onSnapshot(q, (snap) => {
-      const total = snap.docs.reduce((sum, d) => {
-        const data = d.data() as any
-        const at = tsToDate(data.at)
-        if (at && at >= inicio && at <= fin) return sum + (data.monto || 0)
-        return sum
-      }, 0)
-      setAdelantos(total)
+      const lista: AdelantoMovimiento[] = snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() as any) } as AdelantoMovimiento))
+        .filter((a) => {
+          const at = tsToDate(a.at)
+          return at !== null && at >= inicio && at <= fin
+        })
+        .sort((a, b) => {
+          const da = tsToDate(a.at)?.getTime() ?? 0
+          const db_ = tsToDate(b.at)?.getTime() ?? 0
+          return da - db_
+        })
+      setAdelantosList(lista)
     })
   }, [selectedMotoId, selectedSemana])
 
@@ -574,6 +590,15 @@ export default function LiquidacionesPage() {
       }))
     })
   }, [selectedMotoId, selectedSemana])
+
+  // ── Adelantos activos (excluye anulados) ──────────────────────────────────
+
+  const adelantos = useMemo(
+    () => adelantosList
+      .filter((a) => a.estado !== 'anulado')
+      .reduce((s, a) => s + a.monto, 0),
+    [adelantosList],
+  )
 
   // ── Cálculo de deudas a aplicar ────────────────────────────────────────────
 
@@ -805,6 +830,25 @@ export default function LiquidacionesPage() {
     }
   }
 
+  // ── Anular adelanto ───────────────────────────────────────────────────────
+
+  async function anularAdelanto(movimientoId: string) {
+    setAnulandoAdelantoId(movimientoId)
+    try {
+      const uid = auth.currentUser?.uid ?? ''
+      await updateDoc(doc(db, 'movimientos_financieros', movimientoId), {
+        estado: 'anulado',
+        anuladoAt: serverTimestamp(),
+        anuladoPorUid: uid,
+        motivoAnulacion: 'Adelanto anulado por gestor',
+      })
+    } catch (e: any) {
+      console.error('[liquidaciones] Error anulando adelanto:', e)
+    } finally {
+      setAnulandoAdelantoId(null)
+    }
+  }
+
   const selectedMoto = motorizados.find((m) => m.id === selectedMotoId)
   const totalSaldosPendientes = saldosPendientes.reduce((s, x) => s + x.saldoPendiente, 0)
 
@@ -942,6 +986,53 @@ export default function LiquidacionesPage() {
                   <KpiCard label="Asume Storkhub" value={fmt(calculo.gastosAsumidosStorkhub)} color="green" />
                 )}
               </div>
+
+              {/* Adelantos de la semana */}
+              {adelantosList.length > 0 && (
+                <div className="rounded-xl border border-amber-200 overflow-hidden">
+                  <div className="px-3 py-2 bg-amber-50 border-b border-amber-100 flex items-center justify-between">
+                    <p className="text-xs font-bold text-amber-800">Adelantos esta semana</p>
+                    <span className="text-xs font-black text-amber-700">{fmt(adelantos)}</span>
+                  </div>
+                  <div className="divide-y divide-amber-50">
+                    {adelantosList.map((a) => (
+                      <div
+                        key={a.id}
+                        className={`px-3 py-2.5 flex items-center gap-3 transition ${a.estado === 'anulado' ? 'opacity-50 bg-gray-50' : ''}`}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs font-black text-gray-900">{fmt(a.monto)}</span>
+                            <span className="text-[11px] text-gray-400">{fmtDate(a.at)}</span>
+                            {a.estado === 'anulado' ? (
+                              <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-full bg-red-100 text-red-600">
+                                Anulado
+                              </span>
+                            ) : (
+                              <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-full bg-green-100 text-green-700">
+                                Activo
+                              </span>
+                            )}
+                          </div>
+                          {a.descripcion && (
+                            <p className="text-[11px] text-gray-400 mt-0.5 truncate">{a.descripcion}</p>
+                          )}
+                        </div>
+                        {a.estado !== 'anulado' && (
+                          <button
+                            onClick={() => anularAdelanto(a.id)}
+                            disabled={anulandoAdelantoId === a.id}
+                            className="shrink-0 flex items-center gap-1 text-[11px] font-semibold text-red-600 border border-red-200 rounded-lg px-2 py-1 hover:bg-red-50 transition disabled:opacity-40"
+                          >
+                            <XCircle className="h-3 w-3" />
+                            {anulandoAdelantoId === a.id ? '…' : 'Anular'}
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Saldos pendientes del motorizado */}
               {saldosPendientes.length > 0 && !liquidacionExistente && (
