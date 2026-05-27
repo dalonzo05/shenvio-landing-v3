@@ -45,12 +45,32 @@ export function calcularEfectivoEnPoderMotorizado(
   return calcularSaldoCuenta(movimientos, cuentas.efectivoEnPoder(motorizadoId))
 }
 
-/** Deuda total del motorizado según el ledger */
+/** Deuda total del motorizado según el ledger (incluye adelantos) */
 export function calcularDeudaMotorizado(
   movimientos: MovimientoFinanciero[],
   motorizadoId: string,
 ): number {
   return calcularSaldoCuenta(movimientos, cuentas.deudaMotorizado(motorizadoId))
+}
+
+/**
+ * Deuda del motorizado para comparación con saldos_cargo_motorizado.
+ * Excluye adelanto_motorizado porque los adelantos son flujo de liquidación
+ * semanal, no deuda formal operativa — no generan saldo_cargo.
+ * Usar esta función en auditoría comparativa (tab Motorizados).
+ */
+export function calcularDeudaOperativaMotorizado(
+  movimientos: MovimientoFinanciero[],
+  motorizadoId: string,
+): number {
+  const cuenta = cuentas.deudaMotorizado(motorizadoId)
+  return movimientos
+    .filter((m) => m.estado !== 'anulado' && m.tipo !== 'adelanto_motorizado')
+    .reduce((sum, m) => {
+      if (m.cuentaDestino === cuenta) return sum + m.monto
+      if (m.cuentaOrigen === cuenta) return sum - m.monto
+      return sum
+    }, 0)
 }
 
 /** Comisión pendiente de pago al motorizado según el ledger */

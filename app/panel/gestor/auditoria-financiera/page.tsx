@@ -22,7 +22,7 @@ import {
 } from 'lucide-react'
 import type { MovimientoFinanciero } from '@/lib/financial-types'
 import {
-  calcularDeudaMotorizado,
+  calcularDeudaOperativaMotorizado,
   calcularEfectivoEnPoderMotorizado,
   calcularComisionPendienteMotorizado,
   calcularResumenCobertura,
@@ -232,7 +232,7 @@ export default function AuditoriaFinancieraPage() {
     })
 
     return motorizados.map((mot) => {
-      const deudaLedger = calcularDeudaMotorizado(movimientos, mot.id)
+      const deudaLedger = calcularDeudaOperativaMotorizado(movimientos, mot.id)
       const efectivoLedger = calcularEfectivoEnPoderMotorizado(movimientos, mot.id)
       const comisionLedger = calcularComisionPendienteMotorizado(movimientos, mot.id)
       const deudaOperativa = saldosPorMot[mot.id] ?? 0
