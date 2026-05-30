@@ -11,6 +11,7 @@ import {
   updateDoc,
   serverTimestamp,
   getDocs,
+  writeBatch,
   Timestamp,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
@@ -297,6 +298,10 @@ export default function GastosPage() {
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
+  // Estado de anulación individual
+  const [anulandoId, setAnulandoId] = useState<string | null>(null)
+  const [anulError, setAnulError] = useState<string | null>(null)
+
   // Filtros
   const [filtroMoto, setFiltroMoto] = useState('todos')
   const [filtroTipo, setFiltroTipo] = useState<TipoGasto | 'todos'>('todos')
@@ -403,26 +408,49 @@ export default function GastosPage() {
       `¿Anular este gasto?\n\nTipo: ${LABELS_TIPO_GASTO[gasto.tipo]}\nMonto: ${fmt(gasto.monto)}\nMotorizado: ${gasto.motorizadoNombre}`
     )
     if (!ok) return
-    // 1. Anular el gasto operativo
-    await updateDoc(doc(db, 'gastos_motorizado', gasto.id), {
-      estado: 'anulado',
-      updatedAt: serverTimestamp(),
-    })
-    // 2. Anular movimientos financieros vinculados (por gastoId)
-    // Sin esto el ledger sigue contando el gasto como activo en auditoría.
-    const snap = await getDocs(
-      query(collection(db, 'movimientos_financieros'), where('gastoId', '==', gasto.id))
-    )
-    await Promise.all(
-      snap.docs
-        .filter((d) => (d.data() as any).estado !== 'anulado')
-        .map((d) => updateDoc(d.ref, {
-          estado: 'anulado',
-          anuladoAt: serverTimestamp(),
-          anuladoPorUid: auth.currentUser?.uid ?? '',
-          motivoAnulacion: 'Gasto operativo anulado por gestor',
-        }))
-    )
+
+    setAnulandoId(gasto.id)
+    setAnulError(null)
+
+    try {
+      const uid = auth.currentUser?.uid ?? ''
+
+      // 1. Anular el gasto operativo en gastos_motorizado
+      await updateDoc(doc(db, 'gastos_motorizado', gasto.id), {
+        estado: 'anulado',
+        updatedAt: serverTimestamp(),
+      })
+
+      // 2. Buscar movimientos financieros vinculados por gastoId y anularlos
+      // El campo gastoId se guarda en registrarMovimiento via crearGastoMotorizado.
+      const snap = await getDocs(
+        query(collection(db, 'movimientos_financieros'), where('gastoId', '==', gasto.id))
+      )
+
+      console.log(`[gastos] anular ${gasto.id}: ${snap.size} movimientos encontrados`)
+
+      const activos = snap.docs.filter((d) => (d.data() as any).estado !== 'anulado')
+      if (activos.length > 0) {
+        const batch = writeBatch(db)
+        activos.forEach((d) => {
+          batch.update(d.ref, {
+            estado: 'anulado',
+            anuladoAt: serverTimestamp(),
+            anuladoPorUid: uid,
+            motivoAnulacion: 'Gasto operativo anulado por gestor',
+          })
+        })
+        await batch.commit()
+        console.log(`[gastos] anulados ${activos.length} movimiento(s) del ledger`)
+      } else {
+        console.warn(`[gastos] No se encontraron movimientos activos para gastoId=${gasto.id}`)
+      }
+    } catch (e: any) {
+      console.error('[gastos] Error anulando gasto:', e)
+      setAnulError(e?.message || 'Error al anular el gasto. Revisá la consola.')
+    } finally {
+      setAnulandoId(null)
+    }
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -622,6 +650,14 @@ export default function GastosPage() {
         )}
       </div>
 
+      {/* Error de anulación */}
+      {anulError && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 flex items-start justify-between gap-3">
+          <p className="text-xs text-red-700 font-semibold">{anulError}</p>
+          <button onClick={() => setAnulError(null)} className="text-red-400 hover:text-red-600 shrink-0 text-xs">✕</button>
+        </div>
+      )}
+
       {/* Tabla */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         {loading ? (
@@ -683,10 +719,13 @@ export default function GastosPage() {
                   </td>
                   <td className="px-4 py-2.5">
                     {g.estado === 'aprobado' && (
-                      <button onClick={() => handleAnular(g)}
-                        className="text-[11px] font-semibold text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-0.5 rounded transition flex items-center gap-1"
+                      <button
+                        onClick={() => handleAnular(g)}
+                        disabled={anulandoId === g.id}
+                        className="text-[11px] font-semibold text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-0.5 rounded transition flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
                       >
-                        <XCircle className="h-3 w-3" /> Anular
+                        <XCircle className="h-3 w-3" />
+                        {anulandoId === g.id ? 'Anulando…' : 'Anular'}
                       </button>
                     )}
                   </td>
