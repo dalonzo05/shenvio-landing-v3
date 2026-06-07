@@ -222,68 +222,96 @@ export default function AuditoriaFinancieraPage() {
   // ─── Auditoría por motorizado ─────────────────────────────────────────────
 
   const auditMotorizados = useMemo(() => {
-    // Saldos formales agrupados por motorizadoId
+    // ── Saldos formales agrupados por motorizadoId ──────────────────────────
     const saldosPorMot: Record<string, number> = {}
     saldos.forEach((s) => {
       saldosPorMot[s.motorizadoId] = (saldosPorMot[s.motorizadoId] ?? 0) + s.saldoPendiente
     })
 
-    // Depósitos pendientes (no confirmados) agrupados por motorizadoUid
-    const depsPorUid: Record<string, number> = {}
+    // ── Depósitos pendientes por destino (motorizadoUid) ───────────────────
+    const depsPorUidStorkhub: Record<string, number> = {}
+    const depsPorUidComercio: Record<string, number> = {}
     depositosPendientes.forEach((d) => {
-      depsPorUid[d.motorizadoUid] = (depsPorUid[d.motorizadoUid] ?? 0) + d.montoTotal
+      if (d.destinatario === 'storkhub') {
+        depsPorUidStorkhub[d.motorizadoUid] = (depsPorUidStorkhub[d.motorizadoUid] ?? 0) + d.montoTotal
+      } else {
+        depsPorUidComercio[d.motorizadoUid] = (depsPorUidComercio[d.motorizadoUid] ?? 0) + d.montoTotal
+      }
     })
 
+    // ── Referencia: generación reciente (últimos 14 días) ──────────────────
+    const hace14dias = Date.now() - 14 * 24 * 60 * 60 * 1000
+    const TIPOS_COBRO = new Set([
+      'cobro_generado', 'delivery_efectivo_cobrado',
+      'delivery_transferencia_cobrado', 'delivery_credito_generado',
+    ])
+
     return motorizados.map((mot) => {
-      // ── Saldos a cargo operativos (fuente: saldos_cargo_motorizado) ────────
+      // ── Obligaciones operativas ────────────────────────────────────────────
       const saldosACargoOp = saldosPorMot[mot.id] ?? 0
 
-      // ── Adelantos activos (fuente: ledger, excluye anulados) ───────────────
       const adelantosActivos = movimientos
         .filter((m) => m.motorizadoId === mot.id && m.tipo === 'adelanto_motorizado' && m.estado !== 'anulado')
         .reduce((s, m) => s + m.monto, 0)
 
-      // ── Gastos operativos activos (informativo, no entra al neto) ──────────
       const gastosActivos = movimientos
         .filter((m) => m.motorizadoId === mot.id && (m.tipo === 'gasto_aprobado' || m.tipo === 'gasto_operativo_aprobado') && m.estado !== 'anulado')
         .reduce((s, m) => s + m.monto, 0)
 
-      // ── Saldos del ledger por cuenta ───────────────────────────────────────
-      const efectivoLedger  = calcularEfectivoEnPoderMotorizado(movimientos, mot.id)
-      const comisionLedger  = calcularComisionPendienteMotorizado(movimientos, mot.id)
-      // comision_pendiente se almacena como pasivo (valor negativo en el ledger).
-      // Para visualización y cálculo operativo se usa el valor absoluto.
-      const gananciaPendiente = Math.abs(comisionLedger)
-      // deudaLedger excluye adelantos — solo para comparación en alertas
-      const deudaLedger     = calcularDeudaOperativaMotorizado(movimientos, mot.id)
+      // ── Dinero pendiente de depositar ──────────────────────────────────────
+      const pendienteStorkhub = depsPorUidStorkhub[mot.authUid] ?? 0
+      const pendienteComercio = depsPorUidComercio[mot.authUid] ?? 0
 
-      // ── Neto estimado de liquidación ───────────────────────────────────────
-      // ganancia pendiente − saldos a cargo − adelantos activos
-      // Positivo = StorkHub le debe pagar al motorizado
-      // Negativo = el motorizado aún le debe a StorkHub
-      const netoEstimado = gananciaPendiente - saldosACargoOp - adelantosActivos
+      // ── Referencias técnicas del ledger ────────────────────────────────────
+      const efectivoLedger = calcularEfectivoEnPoderMotorizado(movimientos, mot.id)
+      const comisionLedger = calcularComisionPendienteMotorizado(movimientos, mot.id)
+      const deudaLedger    = calcularDeudaOperativaMotorizado(movimientos, mot.id)
 
-      // ── Depósitos sin confirmar ────────────────────────────────────────────
-      const deposPendientes = depsPorUid[mot.authUid] ?? 0
+      // ── Generación reciente (para comparar con efectivo acumulado) ─────────
+      const generacionReciente = movimientos
+        .filter((m) => {
+          if (m.motorizadoId !== mot.id || m.estado === 'anulado') return false
+          if (!TIPOS_COBRO.has(m.tipo)) return false
+          const ms = (m.at as any)?.toMillis?.()
+          return ms != null && ms >= hace14dias
+        })
+        .reduce((s, m) => s + m.monto, 0)
 
-      // ── Alertas (solo condiciones concretas, no diferencias de cobertura) ──
-      const alertas: string[] = []
+      // ── Alertas con severidad ──────────────────────────────────────────────
+      type Alerta = { msg: string; nivel: 'alto' | 'medio' | 'bajo' }
+      const alertas: Alerta[] = []
 
-      const movsMot = movimientos.filter(
-        (m) => m.estado !== 'anulado' && m.motorizadoId === mot.id,
-      )
+      // Alto: efectivo acumulado excesivo respecto a generación reciente
+      if (efectivoLedger > 0) {
+        const umbral = generacionReciente > 0 ? generacionReciente * 1.5 : 300
+        if (efectivoLedger > umbral) {
+          alertas.push({ msg: 'Posible acumulación excesiva de efectivo', nivel: 'alto' })
+        }
+      }
+      // Alto: fondos de comercio sin depositar
+      if (pendienteComercio > 0) {
+        alertas.push({ msg: 'Fondos de comercio pendientes de depositar', nivel: 'alto' })
+      }
+      // Medio: depósitos StorkHub sin confirmar
+      if (pendienteStorkhub > 0) {
+        alertas.push({ msg: 'Depósitos StorkHub sin confirmar', nivel: 'medio' })
+      }
+      // Medio: saldo a cargo activo
+      if (saldosACargoOp > 0) {
+        alertas.push({ msg: 'Motorizado mantiene deuda activa con StorkHub', nivel: 'medio' })
+      }
+      // Medio: adelantos sin regularizar
+      if (adelantosActivos > 0) {
+        alertas.push({ msg: 'Adelantos pendientes de regularización', nivel: 'medio' })
+      }
+      // Bajo: gastos pendientes de compensar
+      if (gastosActivos > 0) {
+        alertas.push({ msg: 'Gastos operativos pendientes de compensación', nivel: 'bajo' })
+      }
+      // Bajo: movimientos sin cuentas contables
+      const movsMot = movimientos.filter((m) => m.estado !== 'anulado' && m.motorizadoId === mot.id)
       if (movsMot.some((m) => !m.cuentaOrigen && !m.cuentaDestino)) {
-        alertas.push('Movimientos sin cuentas')
-      }
-      if (deposPendientes > 0) {
-        alertas.push('Depósitos sin confirmar')
-      }
-      // Diferencia real: solo cuando ambos son non-zero y el gap es significativo
-      if (
-        (deudaLedger > 0 || saldosACargoOp > 0) &&
-        Math.abs(deudaLedger - saldosACargoOp) >= UMBRAL_DIFERENCIA
-      ) {
-        alertas.push('Deuda ledger/saldos no coinciden')
+        alertas.push({ msg: 'Movimientos sin cuentas contables', nivel: 'bajo' })
       }
 
       return {
@@ -291,17 +319,21 @@ export default function AuditoriaFinancieraPage() {
         saldosACargoOp,
         adelantosActivos,
         gastosActivos,
+        pendienteStorkhub,
+        pendienteComercio,
         efectivoLedger,
         comisionLedger,
-        gananciaPendiente,
-        deposPendientes,
-        netoEstimado,
+        deudaLedger,
+        generacionReciente,
         alertas,
       }
-    }).sort((a, b) =>
-      b.alertas.length - a.alertas.length ||
-      Math.abs(b.netoEstimado) - Math.abs(a.netoEstimado),
-    )
+    }).sort((a, b) => {
+      const peso = (al: { nivel: 'alto' | 'medio' | 'bajo' }) =>
+        al.nivel === 'alto' ? 3 : al.nivel === 'medio' ? 2 : 1
+      const pA = a.alertas.reduce((s, al) => s + peso(al), 0)
+      const pB = b.alertas.reduce((s, al) => s + peso(al), 0)
+      return pB - pA || b.pendienteStorkhub - a.pendienteStorkhub
+    })
   }, [motorizados, movimientos, saldos, depositosPendientes])
 
   const auditFiltrado = useMemo(() => {
@@ -498,22 +530,36 @@ export default function AuditoriaFinancieraPage() {
               </div>
 
               {/* KPIs auditoría */}
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                <KpiCard
+                  label="Fondos StorkHub pendientes"
+                  value={auditMotorizados.filter((r) => r.pendienteStorkhub > 0).length}
+                  sub="motorizados con depósitos sin confirmar"
+                  warn
+                />
+                <KpiCard
+                  label="Fondos comercio pendientes"
+                  value={auditMotorizados.filter((r) => r.pendienteComercio > 0).length}
+                  sub="dinero de comercios sin depositar"
+                  warn
+                />
+                <KpiCard
+                  label="Con saldos a cargo"
+                  value={auditMotorizados.filter((r) => r.saldosACargoOp > 0).length}
+                  sub="deuda activa con StorkHub"
+                  warn
+                />
+                <KpiCard
+                  label="Con adelantos activos"
+                  value={auditMotorizados.filter((r) => r.adelantosActivos > 0).length}
+                  sub="adelantos sin regularizar"
+                  warn
+                />
                 <KpiCard
                   label="Motorizados con alertas"
                   value={auditMotorizados.filter((r) => r.alertas.length > 0).length}
                   sub={`de ${motorizados.length} totales`}
                   warn
-                />
-                <KpiCard
-                  label="Depósitos pendientes"
-                  value={depositosPendientes.length}
-                  sub="no confirmados por gestor"
-                />
-                <KpiCard
-                  label="Saldos a cargo activos"
-                  value={saldos.length}
-                  sub="pendiente + abonado_parcial"
                 />
               </div>
 
@@ -551,309 +597,390 @@ export default function AuditoriaFinancieraPage() {
 
           {/* ── Tab: Motorizados ────────────────────────────────────────────── */}
           {tab === 'motorizados' && (
-            <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-              <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-                <div>
-                  <h2 className="text-sm font-bold text-gray-900">Balance por motorizado</h2>
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    Saldos operativos · adelantos · efectivo y comisión según ledger · haz clic para ver desglose
-                  </p>
-                </div>
-                <span className={`text-xs font-semibold rounded-full px-2.5 py-1 ${
-                  auditFiltrado.filter((r) => r.alertas.length > 0).length === 0
-                    ? 'bg-green-100 text-green-700'
-                    : 'bg-amber-100 text-amber-700'
-                }`}>
-                  {auditFiltrado.filter((r) => r.alertas.length > 0).length} alertas
-                </span>
+            <div className="flex flex-col gap-4">
+
+              {/* KPIs de control rápido */}
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <KpiCard
+                  label="Fondos StorkHub pendientes"
+                  value={auditMotorizados.filter((r) => r.pendienteStorkhub > 0).length}
+                  sub="motorizados con depósitos sin confirmar"
+                  warn
+                />
+                <KpiCard
+                  label="Fondos comercio pendientes"
+                  value={auditMotorizados.filter((r) => r.pendienteComercio > 0).length}
+                  sub="dinero de comercios sin depositar"
+                  warn
+                />
+                <KpiCard
+                  label="Con saldos a cargo"
+                  value={auditMotorizados.filter((r) => r.saldosACargoOp > 0).length}
+                  sub="deuda activa con StorkHub"
+                  warn
+                />
+                <KpiCard
+                  label="Con alertas"
+                  value={auditMotorizados.filter((r) => r.alertas.length > 0).length}
+                  sub={`de ${motorizados.length} motorizados`}
+                  warn
+                />
               </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="bg-gray-50 border-b border-gray-200">
-                    <tr>
-                      <th className={thCls}>Motorizado</th>
-                      <th className={`${thCls} text-right`}>Saldos a cargo</th>
-                      <th className={`${thCls} text-right`}>Adelantos activos</th>
-                      <th className={`${thCls} text-right`}>Gastos op. activos</th>
-                      <th className={`${thCls} text-right`}>Comisión pendiente</th>
-                      <th className={`${thCls} text-right`}>
-                        <span className="inline-flex items-center gap-1">
-                          Neto estimado
-                          <span
-                            className="text-gray-400 cursor-help"
-                            title="Neto estimado = comisión pendiente − saldos a cargo − adelantos activos. Positivo: StorkHub le debe pagar al motorizado. Negativo: el motorizado aún le debe a StorkHub."
-                          >
-                            <Info size={11} />
-                          </span>
-                        </span>
-                      </th>
-                      <th className={thCls}>Alertas</th>
-                      <th className={thCls}></th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {auditFiltrado.length === 0 && (
+
+              {/* Tabla */}
+              <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+                <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <h2 className="text-sm font-bold text-gray-900">Control financiero por motorizado</h2>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      Ubicación del dinero · obligaciones · alertas de riesgo · haz clic para ver desglose
+                    </p>
+                  </div>
+                  <span className={`text-xs font-semibold rounded-full px-2.5 py-1 ${
+                    auditFiltrado.filter((r) => r.alertas.some((a) => a.nivel === 'alto')).length === 0
+                      ? 'bg-green-100 text-green-700'
+                      : 'bg-red-100 text-red-700'
+                  }`}>
+                    {auditFiltrado.filter((r) => r.alertas.some((a) => a.nivel === 'alto')).length} riesgo alto
+                  </span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 border-b border-gray-200">
                       <tr>
-                        <td colSpan={8} className="px-4 py-8 text-center text-sm text-gray-400">
-                          {soloDiferencias ? 'Sin alertas — todo en orden ✓' : 'Sin datos'}
-                        </td>
+                        <th className={thCls}>Motorizado</th>
+                        <th className={`${thCls} text-right`}>
+                          <span className="inline-flex items-center gap-1">
+                            Pendiente StorkHub
+                            <span title="Depósitos para StorkHub generados pero aún sin confirmar" className="cursor-help text-gray-400"><Info size={11} /></span>
+                          </span>
+                        </th>
+                        <th className={`${thCls} text-right`}>
+                          <span className="inline-flex items-center gap-1">
+                            Pendiente Comercio
+                            <span title="Dinero de cobros a comercios que el motorizado aún no ha depositado" className="cursor-help text-gray-400"><Info size={11} /></span>
+                          </span>
+                        </th>
+                        <th className={`${thCls} text-right`}>Saldos a cargo</th>
+                        <th className={`${thCls} text-right`}>Adelantos activos</th>
+                        <th className={`${thCls} text-right`}>Gastos op.</th>
+                        <th className={thCls}>Alertas de riesgo</th>
+                        <th className={thCls}></th>
                       </tr>
-                    )}
-                    {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, gastosActivos, efectivoLedger, comisionLedger, gananciaPendiente, netoEstimado, alertas }) => {
-                      const isExpanded = expandedMotId === mot.id
-                      const saldosMot = saldos.filter((s) => s.motorizadoId === mot.id)
-                      const adelantosMot = movimientos.filter(
-                        (m) => m.motorizadoId === mot.id && m.tipo === 'adelanto_motorizado' && m.estado !== 'anulado',
-                      )
-                      const gastosMot = movimientos.filter(
-                        (m) => m.motorizadoId === mot.id && (m.tipo === 'gasto_aprobado' || m.tipo === 'gasto_operativo_aprobado') && m.estado !== 'anulado',
-                      )
-                      return (
-                        <Fragment key={mot.id}>
-                          {/* Fila principal */}
-                          <tr
-                            className={`cursor-pointer hover:bg-gray-50 transition-colors ${alertas.length > 0 ? 'bg-amber-50/20' : ''}`}
-                            onClick={() => setExpandedMotId(isExpanded ? null : mot.id)}
-                          >
-                            <td className={tdCls}>
-                              <div className="flex flex-col">
-                                <span className="font-semibold text-gray-900">{mot.nombre}</span>
-                                <span className="font-mono text-[10px] text-gray-400">{mot.id}</span>
-                              </div>
-                            </td>
-                            <td className={`${tdCls} text-right font-mono`}>
-                              {saldosACargoOp === 0
-                                ? <span className="text-gray-300">—</span>
-                                : <span className="font-semibold text-red-700">{fmt(saldosACargoOp)}</span>}
-                            </td>
-                            <td className={`${tdCls} text-right font-mono`}>
-                              {adelantosActivos === 0
-                                ? <span className="text-gray-300">—</span>
-                                : <span className="font-semibold text-amber-700">{fmt(adelantosActivos)}</span>}
-                            </td>
-                            <td className={`${tdCls} text-right font-mono`}>
-                              {gastosActivos === 0
-                                ? <span className="text-gray-300">—</span>
-                                : <span className="font-semibold text-purple-700">{fmt(gastosActivos)}</span>}
-                            </td>
-                            <td className={`${tdCls} text-right font-mono`}>
-                              {gananciaPendiente === 0
-                                ? <span className="text-gray-300">—</span>
-                                : <span className="font-semibold text-green-700">{fmt(gananciaPendiente)}</span>}
-                            </td>
-                            <td className={`${tdCls} text-right`}>
-                              {netoEstimado === 0
-                                ? <span className="text-gray-300">—</span>
-                                : <span className={`font-black font-mono ${netoEstimado < 0 ? 'text-red-700' : 'text-green-700'}`}>{fmt(netoEstimado)}</span>}
-                            </td>
-                            <td className={tdCls}>
-                              {alertas.length === 0 ? (
-                                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-green-700">
-                                  <CheckCircle2 size={12} /> Sin alertas
-                                </span>
-                              ) : (
-                                <div className="flex flex-col gap-1">
-                                  {alertas.map((a, i) => (
-                                    <span
-                                      key={i}
-                                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-100 rounded-full px-2 py-0.5 whitespace-nowrap"
-                                    >
-                                      <AlertTriangle size={10} /> {a}
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
-                            </td>
-                            <td className={`${tdCls} text-right`}>
-                              {isExpanded
-                                ? <ChevronUp size={14} className="text-gray-400" />
-                                : <ChevronDown size={14} className="text-gray-400" />}
-                            </td>
-                          </tr>
-
-                          {/* Fila de desglose expandible */}
-                          {isExpanded && (
-                            <tr className="bg-gray-50/60">
-                              <td colSpan={8} className="px-4 py-4">
-                                <div className="flex flex-col gap-4">
-
-                                  {/* Grid 2×2: comisión, saldos, adelantos, gastos */}
-                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-
-                                    {/* Comisión / ganancia pendiente */}
-                                    <div className="bg-white rounded-xl border border-green-100 overflow-hidden">
-                                      <div className="px-3 py-2 bg-green-50 border-b border-green-100 flex items-center justify-between">
-                                        <span className="text-xs font-bold text-green-800">Comisión / ganancia pendiente</span>
-                                        <span className="text-xs font-black text-green-700">{fmt(gananciaPendiente)}</span>
-                                      </div>
-                                      <div className="px-3 py-2">
-                                        <p className="text-[11px] text-gray-500">
-                                          Cuenta ledger: <code className="font-mono text-gray-700">comision_pendiente:{mot.id}</code>
-                                          {comisionLedger !== 0 && (
-                                            <span className="ml-2 text-gray-400">(raw: {fmt(comisionLedger)})</span>
-                                          )}
-                                        </p>
-                                        {gananciaPendiente === 0 && (
-                                          <p className="text-[11px] text-gray-400 mt-0.5">Sin comisión pendiente en el ledger</p>
-                                        )}
-                                      </div>
-                                    </div>
-
-                                    {/* Saldos a cargo */}
-                                    <div className="bg-white rounded-xl border border-red-100 overflow-hidden">
-                                      <div className="px-3 py-2 bg-red-50 border-b border-red-100 flex items-center justify-between">
-                                        <span className="text-xs font-bold text-red-800">Saldos a cargo operativos</span>
-                                        <span className="text-xs font-black text-red-700">{fmt(saldosACargoOp)}</span>
-                                      </div>
-                                      {saldosMot.length === 0 ? (
-                                        <p className="px-3 py-2 text-[11px] text-gray-400">Sin saldos formales registrados</p>
-                                      ) : (
-                                        <div className="divide-y divide-red-50">
-                                          {saldosMot.map((s) => (
-                                            <div key={s.id} className="px-3 py-2 flex items-start justify-between gap-2">
-                                              <div className="flex flex-col gap-0.5 min-w-0">
-                                                {s.tipo && <span className="text-[11px] font-semibold text-gray-700">{s.tipo}</span>}
-                                                {s.nota && <span className="text-[11px] text-gray-400 italic truncate">{s.nota}</span>}
-                                                <span className={`text-[11px] font-semibold ${s.estado === 'abonado_parcial' ? 'text-amber-600' : 'text-gray-400'}`}>
-                                                  {s.estado === 'abonado_parcial' ? 'Abonado parcial' : 'Pendiente'}
-                                                </span>
-                                              </div>
-                                              <div className="text-right shrink-0">
-                                                <p className="text-xs font-black text-red-700">{fmt(s.saldoPendiente)}</p>
-                                                {s.montoOriginal != null && s.montoOriginal !== s.saldoPendiente && (
-                                                  <p className="text-[11px] text-gray-400">orig. {fmt(s.montoOriginal)}</p>
-                                                )}
-                                              </div>
-                                            </div>
-                                          ))}
-                                        </div>
-                                      )}
-                                    </div>
-
-                                    {/* Adelantos activos */}
-                                    <div className="bg-white rounded-xl border border-amber-100 overflow-hidden">
-                                      <div className="px-3 py-2 bg-amber-50 border-b border-amber-100 flex items-center justify-between">
-                                        <span className="text-xs font-bold text-amber-800">Adelantos activos</span>
-                                        <span className="text-xs font-black text-amber-700">{fmt(adelantosActivos)}</span>
-                                      </div>
-                                      {adelantosMot.length === 0 ? (
-                                        <p className="px-3 py-2 text-[11px] text-gray-400">Sin adelantos activos</p>
-                                      ) : (
-                                        <div className="divide-y divide-amber-50">
-                                          {adelantosMot.map((a: any) => (
-                                            <div key={a.id} className="px-3 py-2 flex items-center justify-between gap-2">
-                                              <div className="flex flex-col gap-0.5 min-w-0">
-                                                <span className="text-[11px] text-gray-500">{fmtFechaCorta(a.at)}</span>
-                                                {a.descripcion && (
-                                                  <span className="text-[11px] text-gray-400 truncate">{a.descripcion}</span>
-                                                )}
-                                              </div>
-                                              <span className="text-xs font-black text-amber-700 shrink-0">{fmt(a.monto)}</span>
-                                            </div>
-                                          ))}
-                                        </div>
-                                      )}
-                                    </div>
-
-                                    {/* Gastos operativos activos (informativo) */}
-                                    <div className="bg-white rounded-xl border border-purple-100 overflow-hidden">
-                                      <div className="px-3 py-2 bg-purple-50 border-b border-purple-100 flex items-center justify-between">
-                                        <div className="flex flex-col gap-0.5">
-                                          <span className="text-xs font-bold text-purple-800">Gastos op. activos</span>
-                                          <span className="text-[10px] text-purple-400">Solo informativo · no entra al neto</span>
-                                        </div>
-                                        <span className="text-xs font-black text-purple-700">{fmt(gastosActivos)}</span>
-                                      </div>
-                                      {gastosMot.length === 0 ? (
-                                        <p className="px-3 py-2 text-[11px] text-gray-400">Sin gastos operativos activos</p>
-                                      ) : (
-                                        <div className="divide-y divide-purple-50">
-                                          {gastosMot.map((g: any) => (
-                                            <div key={g.id} className="px-3 py-2 flex items-center justify-between gap-2">
-                                              <div className="flex flex-col gap-0.5 min-w-0">
-                                                <span className="text-[11px] text-gray-500">{fmtFechaCorta(g.at)}</span>
-                                                {g.descripcion && (
-                                                  <span className="text-[11px] text-gray-400 truncate">{g.descripcion}</span>
-                                                )}
-                                              </div>
-                                              <span className="text-xs font-black text-purple-700 shrink-0">{fmt(g.monto)}</span>
-                                            </div>
-                                          ))}
-                                        </div>
-                                      )}
-                                    </div>
-                                  </div>
-
-                                  {/* Cálculo del neto estimado */}
-                                  <div className="bg-white rounded-xl border border-gray-200 px-4 py-3">
-                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">
-                                      Cálculo neto estimado de liquidación
-                                    </p>
-                                    <div className="flex flex-col gap-1 font-mono text-xs">
-                                      <div className="flex items-center justify-between">
-                                        <span className="text-gray-500">Comisión pendiente</span>
-                                        <span className="font-semibold text-green-700">{fmt(gananciaPendiente)}</span>
-                                      </div>
-                                      <div className="flex items-center justify-between">
-                                        <span className="text-gray-500">− Saldos a cargo</span>
-                                        <span className="font-semibold text-red-700">{fmt(saldosACargoOp)}</span>
-                                      </div>
-                                      <div className="flex items-center justify-between">
-                                        <span className="text-gray-500">− Adelantos activos</span>
-                                        <span className="font-semibold text-amber-700">{fmt(adelantosActivos)}</span>
-                                      </div>
-                                      <div className="mt-1.5 pt-1.5 border-t border-gray-200 flex items-center justify-between font-black text-sm">
-                                        <span className={netoEstimado > 0 ? 'text-green-700' : netoEstimado < 0 ? 'text-red-700' : 'text-gray-400'}>
-                                          = Neto estimado
-                                        </span>
-                                        <span className={netoEstimado > 0 ? 'text-green-700' : netoEstimado < 0 ? 'text-red-700' : 'text-gray-400'}>
-                                          {fmt(netoEstimado)}
-                                        </span>
-                                      </div>
-                                      {netoEstimado !== 0 && (
-                                        <p className={`text-[11px] mt-1 font-sans ${netoEstimado > 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                          {netoEstimado > 0
-                                            ? `StorkHub debe pagar C$ ${Math.abs(netoEstimado).toLocaleString('es-NI')} al motorizado`
-                                            : `El motorizado aún debe C$ ${Math.abs(netoEstimado).toLocaleString('es-NI')} a StorkHub después de aplicar su ganancia`}
-                                        </p>
-                                      )}
-                                    </div>
-                                  </div>
-
-                                  {/* Referencia técnica: efectivo_en_poder */}
-                                  <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3">
-                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-1">
-                                      Referencia técnica
-                                    </p>
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-[11px] text-gray-500 font-mono">efectivo_en_poder:{mot.id}</span>
-                                      <span className="text-[11px] font-black text-gray-600 font-mono">{fmt(efectivoLedger)}</span>
-                                    </div>
-                                    <p className="text-[11px] text-gray-400 mt-1">
-                                      Saldo bruto de la cuenta ledger. Incluye efectos históricos acumulados (gastos, depósitos convertidos en deuda, movimientos compensados). No se usa para calcular el neto operativo.
-                                    </p>
-                                  </div>
-
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {auditFiltrado.length === 0 && (
+                        <tr>
+                          <td colSpan={8} className="px-4 py-8 text-center text-sm text-gray-400">
+                            {soloDiferencias ? 'Sin alertas — todo en orden ✓' : 'Sin datos'}
+                          </td>
+                        </tr>
+                      )}
+                      {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, gastosActivos, pendienteStorkhub, pendienteComercio, efectivoLedger, comisionLedger, deudaLedger, generacionReciente, alertas }) => {
+                        const isExpanded = expandedMotId === mot.id
+                        const saldosMot = saldos.filter((s) => s.motorizadoId === mot.id)
+                        const adelantosMot = movimientos.filter(
+                          (m) => m.motorizadoId === mot.id && m.tipo === 'adelanto_motorizado' && m.estado !== 'anulado',
+                        )
+                        const gastosMot = movimientos.filter(
+                          (m) => m.motorizadoId === mot.id && (m.tipo === 'gasto_aprobado' || m.tipo === 'gasto_operativo_aprobado') && m.estado !== 'anulado',
+                        )
+                        const depsMot = depositosPendientes.filter((d) => d.motorizadoUid === mot.authUid)
+                        const tieneAltoRiesgo = alertas.some((a) => a.nivel === 'alto')
+                        return (
+                          <Fragment key={mot.id}>
+                            {/* Fila principal */}
+                            <tr
+                              className={`cursor-pointer hover:bg-gray-50 transition-colors ${tieneAltoRiesgo ? 'bg-red-50/20' : alertas.length > 0 ? 'bg-amber-50/20' : ''}`}
+                              onClick={() => setExpandedMotId(isExpanded ? null : mot.id)}
+                            >
+                              <td className={tdCls}>
+                                <div className="flex flex-col">
+                                  <span className="font-semibold text-gray-900">{mot.nombre}</span>
+                                  <span className="font-mono text-[10px] text-gray-400">{mot.id}</span>
                                 </div>
                               </td>
+                              <td className={`${tdCls} text-right font-mono`}>
+                                {pendienteStorkhub === 0
+                                  ? <span className="text-gray-300">—</span>
+                                  : <span className="font-semibold text-red-700">{fmt(pendienteStorkhub)}</span>}
+                              </td>
+                              <td className={`${tdCls} text-right font-mono`}>
+                                {pendienteComercio === 0
+                                  ? <span className="text-gray-300">—</span>
+                                  : <span className="font-semibold text-orange-700">{fmt(pendienteComercio)}</span>}
+                              </td>
+                              <td className={`${tdCls} text-right font-mono`}>
+                                {saldosACargoOp === 0
+                                  ? <span className="text-gray-300">—</span>
+                                  : <span className="font-semibold text-red-700">{fmt(saldosACargoOp)}</span>}
+                              </td>
+                              <td className={`${tdCls} text-right font-mono`}>
+                                {adelantosActivos === 0
+                                  ? <span className="text-gray-300">—</span>
+                                  : <span className="font-semibold text-amber-700">{fmt(adelantosActivos)}</span>}
+                              </td>
+                              <td className={`${tdCls} text-right font-mono`}>
+                                {gastosActivos === 0
+                                  ? <span className="text-gray-300">—</span>
+                                  : <span className="font-semibold text-purple-700">{fmt(gastosActivos)}</span>}
+                              </td>
+                              <td className={tdCls}>
+                                {alertas.length === 0 ? (
+                                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-green-700">
+                                    <CheckCircle2 size={12} /> Sin alertas
+                                  </span>
+                                ) : (
+                                  <div className="flex flex-col gap-1">
+                                    {alertas.map((a, i) => (
+                                      <span
+                                        key={i}
+                                        className={`inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2 py-0.5 whitespace-nowrap ${
+                                          a.nivel === 'alto'
+                                            ? 'bg-red-100 text-red-700'
+                                            : a.nivel === 'medio'
+                                            ? 'bg-amber-100 text-amber-700'
+                                            : 'bg-gray-100 text-gray-600'
+                                        }`}
+                                      >
+                                        <AlertTriangle size={10} /> {a.msg}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </td>
+                              <td className={`${tdCls} text-right`}>
+                                {isExpanded
+                                  ? <ChevronUp size={14} className="text-gray-400" />
+                                  : <ChevronDown size={14} className="text-gray-400" />}
+                              </td>
                             </tr>
-                          )}
-                        </Fragment>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              {/* Leyenda */}
-              <div className="px-4 py-3 border-t border-gray-100 bg-gray-50">
-                <p className="text-xs text-gray-400 leading-relaxed">
-                  <strong>Saldos a cargo</strong>: deudas formales en <code>saldos_cargo_motorizado</code>. &nbsp;
-                  <strong>Adelantos activos</strong>: adelantos del ledger no anulados. &nbsp;
-                  <strong>Gastos op. activos</strong>: gastos aprobados sin anular (informativo, no entra al neto). &nbsp;
-                  <strong>Comisión pendiente</strong>: ganancia acumulada en <code>comision_pendiente:id</code>. &nbsp;
-                  <strong>Neto estimado</strong>: comisión − saldos a cargo − adelantos. Positivo = StorkHub paga; negativo = motorizado debe. &nbsp;
-                  Haz clic en una fila para ver el desglose completo.
-                </p>
+
+                            {/* Fila de desglose expandible */}
+                            {isExpanded && (
+                              <tr className="bg-gray-50/60">
+                                <td colSpan={8} className="px-4 py-4">
+                                  <div className="flex flex-col gap-5">
+
+                                    {/* Sección 1: Ubicación del dinero */}
+                                    <div>
+                                      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Ubicación del dinero</p>
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+
+                                        {/* Pendiente StorkHub */}
+                                        <div className="bg-white rounded-xl border border-red-100 overflow-hidden">
+                                          <div className="px-3 py-2 bg-red-50 border-b border-red-100 flex items-center justify-between">
+                                            <span className="text-xs font-bold text-red-800">Pendiente de depositar a StorkHub</span>
+                                            <span className="text-xs font-black text-red-700">{fmt(pendienteStorkhub)}</span>
+                                          </div>
+                                          {depsMot.filter((d) => d.destinatario === 'storkhub').length === 0 ? (
+                                            <p className="px-3 py-2 text-[11px] text-gray-400">Sin depósitos StorkHub pendientes</p>
+                                          ) : (
+                                            <div className="divide-y divide-red-50">
+                                              {depsMot.filter((d) => d.destinatario === 'storkhub').map((d) => (
+                                                <div key={d.id} className="px-3 py-2 flex items-center justify-between gap-2">
+                                                  <div className="flex flex-col gap-0.5">
+                                                    <span className="text-[11px] text-gray-500">{fmtFechaCorta(d.creadoAt)}</span>
+                                                    <span className="text-[11px] text-gray-400 capitalize">{d.estado}</span>
+                                                  </div>
+                                                  <span className="text-xs font-black text-red-700">{fmt(d.montoTotal)}</span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+
+                                        {/* Pendiente Comercio */}
+                                        <div className="bg-white rounded-xl border border-orange-100 overflow-hidden">
+                                          <div className="px-3 py-2 bg-orange-50 border-b border-orange-100 flex items-center justify-between">
+                                            <span className="text-xs font-bold text-orange-800">Pendiente de depositar a comercios</span>
+                                            <span className="text-xs font-black text-orange-700">{fmt(pendienteComercio)}</span>
+                                          </div>
+                                          {depsMot.filter((d) => d.destinatario !== 'storkhub').length === 0 ? (
+                                            <p className="px-3 py-2 text-[11px] text-gray-400">Sin fondos de comercio pendientes</p>
+                                          ) : (
+                                            <div className="divide-y divide-orange-50">
+                                              {depsMot.filter((d) => d.destinatario !== 'storkhub').map((d) => (
+                                                <div key={d.id} className="px-3 py-2 flex items-center justify-between gap-2">
+                                                  <div className="flex flex-col gap-0.5">
+                                                    <span className="text-[11px] text-gray-500">{fmtFechaCorta(d.creadoAt)}</span>
+                                                    <span className="text-[11px] text-gray-400 capitalize">{d.destinatario} · {d.estado}</span>
+                                                  </div>
+                                                  <span className="text-xs font-black text-orange-700">{fmt(d.montoTotal)}</span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    {/* Sección 2: Obligaciones */}
+                                    <div>
+                                      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Obligaciones con StorkHub</p>
+                                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+
+                                        {/* Saldos a cargo */}
+                                        <div className="bg-white rounded-xl border border-red-100 overflow-hidden">
+                                          <div className="px-3 py-2 bg-red-50 border-b border-red-100 flex items-center justify-between">
+                                            <span className="text-xs font-bold text-red-800">Saldos a cargo</span>
+                                            <span className="text-xs font-black text-red-700">{fmt(saldosACargoOp)}</span>
+                                          </div>
+                                          {saldosMot.length === 0 ? (
+                                            <p className="px-3 py-2 text-[11px] text-gray-400">Sin saldos formales registrados</p>
+                                          ) : (
+                                            <div className="divide-y divide-red-50">
+                                              {saldosMot.map((s) => (
+                                                <div key={s.id} className="px-3 py-2 flex items-start justify-between gap-2">
+                                                  <div className="flex flex-col gap-0.5 min-w-0">
+                                                    {s.tipo && <span className="text-[11px] font-semibold text-gray-700">{s.tipo}</span>}
+                                                    {s.nota && <span className="text-[11px] text-gray-400 italic truncate">{s.nota}</span>}
+                                                    <span className={`text-[11px] font-semibold ${s.estado === 'abonado_parcial' ? 'text-amber-600' : 'text-gray-400'}`}>
+                                                      {s.estado === 'abonado_parcial' ? 'Abonado parcial' : 'Pendiente'}
+                                                    </span>
+                                                  </div>
+                                                  <div className="text-right shrink-0">
+                                                    <p className="text-xs font-black text-red-700">{fmt(s.saldoPendiente)}</p>
+                                                    {s.montoOriginal != null && s.montoOriginal !== s.saldoPendiente && (
+                                                      <p className="text-[11px] text-gray-400">orig. {fmt(s.montoOriginal)}</p>
+                                                    )}
+                                                  </div>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+
+                                        {/* Adelantos activos */}
+                                        <div className="bg-white rounded-xl border border-amber-100 overflow-hidden">
+                                          <div className="px-3 py-2 bg-amber-50 border-b border-amber-100 flex items-center justify-between">
+                                            <span className="text-xs font-bold text-amber-800">Adelantos activos</span>
+                                            <span className="text-xs font-black text-amber-700">{fmt(adelantosActivos)}</span>
+                                          </div>
+                                          {adelantosMot.length === 0 ? (
+                                            <p className="px-3 py-2 text-[11px] text-gray-400">Sin adelantos activos</p>
+                                          ) : (
+                                            <div className="divide-y divide-amber-50">
+                                              {adelantosMot.map((a: any) => (
+                                                <div key={a.id} className="px-3 py-2 flex items-center justify-between gap-2">
+                                                  <div className="flex flex-col gap-0.5 min-w-0">
+                                                    <span className="text-[11px] text-gray-500">{fmtFechaCorta(a.at)}</span>
+                                                    {a.descripcion && <span className="text-[11px] text-gray-400 truncate">{a.descripcion}</span>}
+                                                  </div>
+                                                  <span className="text-xs font-black text-amber-700 shrink-0">{fmt(a.monto)}</span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+
+                                        {/* Gastos operativos */}
+                                        <div className="bg-white rounded-xl border border-purple-100 overflow-hidden">
+                                          <div className="px-3 py-2 bg-purple-50 border-b border-purple-100 flex items-center justify-between">
+                                            <div>
+                                              <p className="text-xs font-bold text-purple-800">Gastos op. activos</p>
+                                              <p className="text-[10px] text-purple-400">Solo informativo</p>
+                                            </div>
+                                            <span className="text-xs font-black text-purple-700">{fmt(gastosActivos)}</span>
+                                          </div>
+                                          {gastosMot.length === 0 ? (
+                                            <p className="px-3 py-2 text-[11px] text-gray-400">Sin gastos activos</p>
+                                          ) : (
+                                            <div className="divide-y divide-purple-50">
+                                              {gastosMot.map((g: any) => (
+                                                <div key={g.id} className="px-3 py-2 flex items-center justify-between gap-2">
+                                                  <div className="flex flex-col gap-0.5 min-w-0">
+                                                    <span className="text-[11px] text-gray-500">{fmtFechaCorta(g.at)}</span>
+                                                    {g.descripcion && <span className="text-[11px] text-gray-400 truncate">{g.descripcion}</span>}
+                                                  </div>
+                                                  <span className="text-xs font-black text-purple-700 shrink-0">{fmt(g.monto)}</span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    {/* Sección 3: Alertas de riesgo */}
+                                    {alertas.length > 0 && (
+                                      <div>
+                                        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Alertas de riesgo</p>
+                                        <div className="flex flex-col gap-2">
+                                          {alertas.map((a, i) => (
+                                            <div
+                                              key={i}
+                                              className={`flex items-center gap-3 rounded-lg px-3 py-2 border ${
+                                                a.nivel === 'alto'
+                                                  ? 'bg-red-50 border-red-200'
+                                                  : a.nivel === 'medio'
+                                                  ? 'bg-amber-50 border-amber-200'
+                                                  : 'bg-gray-50 border-gray-200'
+                                              }`}
+                                            >
+                                              <AlertTriangle size={14} className={
+                                                a.nivel === 'alto' ? 'text-red-600 shrink-0' : a.nivel === 'medio' ? 'text-amber-600 shrink-0' : 'text-gray-400 shrink-0'
+                                              } />
+                                              <div className="flex flex-col min-w-0">
+                                                <span className={`text-xs font-bold ${
+                                                  a.nivel === 'alto' ? 'text-red-800' : a.nivel === 'medio' ? 'text-amber-800' : 'text-gray-700'
+                                                }`}>{a.msg}</span>
+                                                <span className="text-[11px] text-gray-400 uppercase tracking-wide">Riesgo {a.nivel}</span>
+                                              </div>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Sección 4: Referencias técnicas del ledger */}
+                                    <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3">
+                                      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Referencias técnicas del ledger</p>
+                                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono text-xs">
+                                        <div className="flex flex-col gap-0.5">
+                                          <span className="text-gray-400">efectivo_en_poder</span>
+                                          <span className={`font-black ${efectivoLedger > 0 ? 'text-blue-700' : 'text-gray-400'}`}>{fmt(efectivoLedger)}</span>
+                                        </div>
+                                        <div className="flex flex-col gap-0.5">
+                                          <span className="text-gray-400">comision_pendiente</span>
+                                          <span className={`font-black ${comisionLedger !== 0 ? 'text-green-700' : 'text-gray-400'}`}>{fmt(comisionLedger)}</span>
+                                        </div>
+                                        <div className="flex flex-col gap-0.5">
+                                          <span className="text-gray-400">deuda_motorizado</span>
+                                          <span className={`font-black ${deudaLedger !== 0 ? 'text-red-700' : 'text-gray-400'}`}>{fmt(deudaLedger)}</span>
+                                        </div>
+                                      </div>
+                                      {generacionReciente > 0 && (
+                                        <p className="text-[11px] text-gray-400 mt-2 font-sans">
+                                          Generación reciente (14 días): <span className="font-semibold text-gray-600">{fmt(generacionReciente)}</span>
+                                        </p>
+                                      )}
+                                      <p className="text-[11px] text-gray-400 mt-1 font-sans">
+                                        Valores brutos del ledger. Pueden incluir efectos históricos acumulados.
+                                      </p>
+                                    </div>
+
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {/* Leyenda */}
+                <div className="px-4 py-3 border-t border-gray-100 bg-gray-50">
+                  <p className="text-xs text-gray-400 leading-relaxed">
+                    <strong>Pendiente StorkHub</strong>: depósitos para StorkHub sin confirmar por el gestor. &nbsp;
+                    <strong>Pendiente Comercio</strong>: fondos de cobros a comercios aún no depositados. &nbsp;
+                    <strong>Saldos a cargo</strong>: deudas formales en <code>saldos_cargo_motorizado</code>. &nbsp;
+                    <strong>Adelantos activos</strong>: adelantos del ledger no anulados. &nbsp;
+                    <strong>Gastos op.</strong>: gastos aprobados sin anular (informativo). &nbsp;
+                    Haz clic en una fila para ver desglose y alertas de riesgo.
+                  </p>
+                </div>
               </div>
             </div>
           )}
