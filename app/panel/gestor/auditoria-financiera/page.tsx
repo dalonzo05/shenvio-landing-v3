@@ -243,15 +243,22 @@ export default function AuditoriaFinancieraPage() {
         .filter((m) => m.motorizadoId === mot.id && m.tipo === 'adelanto_motorizado' && m.estado !== 'anulado')
         .reduce((s, m) => s + m.monto, 0)
 
+      // ── Gastos operativos activos (informativo, no entra al neto) ──────────
+      const gastosActivos = movimientos
+        .filter((m) => m.motorizadoId === mot.id && (m.tipo === 'gasto_aprobado' || m.tipo === 'gasto_operativo_aprobado') && m.estado !== 'anulado')
+        .reduce((s, m) => s + m.monto, 0)
+
       // ── Saldos del ledger por cuenta ───────────────────────────────────────
       const efectivoLedger  = calcularEfectivoEnPoderMotorizado(movimientos, mot.id)
       const comisionLedger  = calcularComisionPendienteMotorizado(movimientos, mot.id)
       // deudaLedger excluye adelantos — solo para comparación en alertas
       const deudaLedger     = calcularDeudaOperativaMotorizado(movimientos, mot.id)
 
-      // ── Balance neto de exposición ─────────────────────────────────────────
-      // Positivo = motorizado nos debe dinero; negativo = le debemos
-      const balanceNeto = saldosACargoOp + adelantosActivos + efectivoLedger - comisionLedger
+      // ── Neto estimado de liquidación ───────────────────────────────────────
+      // comisión pendiente − saldos a cargo − adelantos activos
+      // Positivo = StorkHub le debe pagar al motorizado
+      // Negativo = el motorizado aún le debe a StorkHub
+      const netoEstimado = comisionLedger - saldosACargoOp - adelantosActivos
 
       // ── Depósitos sin confirmar ────────────────────────────────────────────
       const deposPendientes = depsPorUid[mot.authUid] ?? 0
@@ -280,15 +287,16 @@ export default function AuditoriaFinancieraPage() {
         mot,
         saldosACargoOp,
         adelantosActivos,
+        gastosActivos,
         efectivoLedger,
         comisionLedger,
         deposPendientes,
-        balanceNeto,
+        netoEstimado,
         alertas,
       }
     }).sort((a, b) =>
       b.alertas.length - a.alertas.length ||
-      Math.abs(b.balanceNeto) - Math.abs(a.balanceNeto),
+      Math.abs(b.netoEstimado) - Math.abs(a.netoEstimado),
     )
   }, [motorizados, movimientos, saldos, depositosPendientes])
 
@@ -562,14 +570,14 @@ export default function AuditoriaFinancieraPage() {
                       <th className={thCls}>Motorizado</th>
                       <th className={`${thCls} text-right`}>Saldos a cargo</th>
                       <th className={`${thCls} text-right`}>Adelantos activos</th>
-                      <th className={`${thCls} text-right`}>Efectivo pendiente</th>
+                      <th className={`${thCls} text-right`}>Gastos op. activos</th>
                       <th className={`${thCls} text-right`}>Comisión pendiente</th>
                       <th className={`${thCls} text-right`}>
                         <span className="inline-flex items-center gap-1">
-                          Balance neto
+                          Neto estimado
                           <span
                             className="text-gray-400 cursor-help"
-                            title="Balance neto = saldos a cargo + adelantos activos + efectivo pendiente − comisión pendiente. Si es positivo, el motorizado debe. Si es negativo, StorkHub le debe pagar."
+                            title="Neto estimado = comisión pendiente − saldos a cargo − adelantos activos. Positivo: StorkHub le debe pagar al motorizado. Negativo: el motorizado aún le debe a StorkHub."
                           >
                             <Info size={11} />
                           </span>
@@ -587,11 +595,14 @@ export default function AuditoriaFinancieraPage() {
                         </td>
                       </tr>
                     )}
-                    {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, efectivoLedger, comisionLedger, balanceNeto, alertas }) => {
+                    {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, gastosActivos, efectivoLedger, comisionLedger, netoEstimado, alertas }) => {
                       const isExpanded = expandedMotId === mot.id
                       const saldosMot = saldos.filter((s) => s.motorizadoId === mot.id)
                       const adelantosMot = movimientos.filter(
                         (m) => m.motorizadoId === mot.id && m.tipo === 'adelanto_motorizado' && m.estado !== 'anulado',
+                      )
+                      const gastosMot = movimientos.filter(
+                        (m) => m.motorizadoId === mot.id && (m.tipo === 'gasto_aprobado' || m.tipo === 'gasto_operativo_aprobado') && m.estado !== 'anulado',
                       )
                       return (
                         <Fragment key={mot.id}>
@@ -617,9 +628,9 @@ export default function AuditoriaFinancieraPage() {
                                 : <span className="font-semibold text-amber-700">{fmt(adelantosActivos)}</span>}
                             </td>
                             <td className={`${tdCls} text-right font-mono`}>
-                              {efectivoLedger === 0
+                              {gastosActivos === 0
                                 ? <span className="text-gray-300">—</span>
-                                : <span className="font-semibold text-blue-700">{fmt(efectivoLedger)}</span>}
+                                : <span className="font-semibold text-purple-700">{fmt(gastosActivos)}</span>}
                             </td>
                             <td className={`${tdCls} text-right font-mono`}>
                               {comisionLedger === 0
@@ -627,9 +638,9 @@ export default function AuditoriaFinancieraPage() {
                                 : <span className="font-semibold text-green-700">{fmt(comisionLedger)}</span>}
                             </td>
                             <td className={`${tdCls} text-right`}>
-                              {balanceNeto === 0
+                              {netoEstimado === 0
                                 ? <span className="text-gray-300">—</span>
-                                : <span className={`font-black font-mono ${balanceNeto > 0 ? 'text-red-700' : 'text-green-700'}`}>{fmt(balanceNeto)}</span>}
+                                : <span className={`font-black font-mono ${netoEstimado < 0 ? 'text-red-700' : 'text-green-700'}`}>{fmt(netoEstimado)}</span>}
                             </td>
                             <td className={tdCls}>
                               {alertas.length === 0 ? (
@@ -662,8 +673,24 @@ export default function AuditoriaFinancieraPage() {
                               <td colSpan={8} className="px-4 py-4">
                                 <div className="flex flex-col gap-4">
 
-                                  {/* Grid 2×2: saldos, adelantos, efectivo, comisión */}
+                                  {/* Grid 2×2: comisión, saldos, adelantos, gastos */}
                                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+
+                                    {/* Comisión / ganancia pendiente */}
+                                    <div className="bg-white rounded-xl border border-green-100 overflow-hidden">
+                                      <div className="px-3 py-2 bg-green-50 border-b border-green-100 flex items-center justify-between">
+                                        <span className="text-xs font-bold text-green-800">Comisión / ganancia pendiente</span>
+                                        <span className="text-xs font-black text-green-700">{fmt(comisionLedger)}</span>
+                                      </div>
+                                      <div className="px-3 py-2">
+                                        <p className="text-[11px] text-gray-500">
+                                          Cuenta ledger: <code className="font-mono text-gray-700">comision_pendiente:{mot.id}</code>
+                                        </p>
+                                        {comisionLedger === 0 && (
+                                          <p className="text-[11px] text-gray-400 mt-0.5">Sin comisión pendiente en el ledger</p>
+                                        )}
+                                      </div>
+                                    </div>
 
                                     {/* Saldos a cargo */}
                                     <div className="bg-white rounded-xl border border-red-100 overflow-hidden">
@@ -721,77 +748,83 @@ export default function AuditoriaFinancieraPage() {
                                       )}
                                     </div>
 
-                                    {/* Efectivo pendiente */}
-                                    <div className="bg-white rounded-xl border border-blue-100 overflow-hidden">
-                                      <div className="px-3 py-2 bg-blue-50 border-b border-blue-100 flex items-center justify-between">
-                                        <span className="text-xs font-bold text-blue-800">Efectivo pendiente</span>
-                                        <span className="text-xs font-black text-blue-700">{fmt(efectivoLedger)}</span>
+                                    {/* Gastos operativos activos (informativo) */}
+                                    <div className="bg-white rounded-xl border border-purple-100 overflow-hidden">
+                                      <div className="px-3 py-2 bg-purple-50 border-b border-purple-100 flex items-center justify-between">
+                                        <div className="flex flex-col gap-0.5">
+                                          <span className="text-xs font-bold text-purple-800">Gastos op. activos</span>
+                                          <span className="text-[10px] text-purple-400">Solo informativo · no entra al neto</span>
+                                        </div>
+                                        <span className="text-xs font-black text-purple-700">{fmt(gastosActivos)}</span>
                                       </div>
-                                      <div className="px-3 py-2">
-                                        <p className="text-[11px] text-gray-500">
-                                          Cuenta ledger: <code className="font-mono text-gray-700">efectivo_en_poder:{mot.id}</code>
-                                        </p>
-                                        {efectivoLedger === 0 && (
-                                          <p className="text-[11px] text-gray-400 mt-0.5">Sin efectivo registrado en el ledger</p>
-                                        )}
-                                      </div>
-                                    </div>
-
-                                    {/* Comisión pendiente */}
-                                    <div className="bg-white rounded-xl border border-green-100 overflow-hidden">
-                                      <div className="px-3 py-2 bg-green-50 border-b border-green-100 flex items-center justify-between">
-                                        <span className="text-xs font-bold text-green-800">Comisión pendiente</span>
-                                        <span className="text-xs font-black text-green-700">{fmt(comisionLedger)}</span>
-                                      </div>
-                                      <div className="px-3 py-2">
-                                        <p className="text-[11px] text-gray-500">
-                                          Cuenta ledger: <code className="font-mono text-gray-700">comision_pendiente:{mot.id}</code>
-                                        </p>
-                                        {comisionLedger === 0 && (
-                                          <p className="text-[11px] text-gray-400 mt-0.5">Sin comisión pendiente en el ledger</p>
-                                        )}
-                                      </div>
+                                      {gastosMot.length === 0 ? (
+                                        <p className="px-3 py-2 text-[11px] text-gray-400">Sin gastos operativos activos</p>
+                                      ) : (
+                                        <div className="divide-y divide-purple-50">
+                                          {gastosMot.map((g: any) => (
+                                            <div key={g.id} className="px-3 py-2 flex items-center justify-between gap-2">
+                                              <div className="flex flex-col gap-0.5 min-w-0">
+                                                <span className="text-[11px] text-gray-500">{fmtFechaCorta(g.at)}</span>
+                                                {g.descripcion && (
+                                                  <span className="text-[11px] text-gray-400 truncate">{g.descripcion}</span>
+                                                )}
+                                              </div>
+                                              <span className="text-xs font-black text-purple-700 shrink-0">{fmt(g.monto)}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
                                     </div>
                                   </div>
 
-                                  {/* Cálculo del balance neto */}
+                                  {/* Cálculo del neto estimado */}
                                   <div className="bg-white rounded-xl border border-gray-200 px-4 py-3">
                                     <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">
-                                      Cálculo balance neto
+                                      Cálculo neto estimado de liquidación
                                     </p>
                                     <div className="flex flex-col gap-1 font-mono text-xs">
                                       <div className="flex items-center justify-between">
-                                        <span className="text-gray-500">Saldos a cargo</span>
+                                        <span className="text-gray-500">Comisión pendiente</span>
+                                        <span className="font-semibold text-green-700">{fmt(comisionLedger)}</span>
+                                      </div>
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-gray-500">− Saldos a cargo</span>
                                         <span className="font-semibold text-red-700">{fmt(saldosACargoOp)}</span>
                                       </div>
                                       <div className="flex items-center justify-between">
-                                        <span className="text-gray-500">+ Adelantos activos</span>
+                                        <span className="text-gray-500">− Adelantos activos</span>
                                         <span className="font-semibold text-amber-700">{fmt(adelantosActivos)}</span>
                                       </div>
-                                      <div className="flex items-center justify-between">
-                                        <span className="text-gray-500">+ Efectivo pendiente</span>
-                                        <span className="font-semibold text-blue-700">{fmt(efectivoLedger)}</span>
-                                      </div>
-                                      <div className="flex items-center justify-between">
-                                        <span className="text-gray-500">− Comisión pendiente</span>
-                                        <span className="font-semibold text-green-700">{fmt(comisionLedger)}</span>
-                                      </div>
                                       <div className="mt-1.5 pt-1.5 border-t border-gray-200 flex items-center justify-between font-black text-sm">
-                                        <span className={balanceNeto > 0 ? 'text-red-700' : balanceNeto < 0 ? 'text-green-700' : 'text-gray-400'}>
-                                          = Balance neto
+                                        <span className={netoEstimado > 0 ? 'text-green-700' : netoEstimado < 0 ? 'text-red-700' : 'text-gray-400'}>
+                                          = Neto estimado
                                         </span>
-                                        <span className={balanceNeto > 0 ? 'text-red-700' : balanceNeto < 0 ? 'text-green-700' : 'text-gray-400'}>
-                                          {fmt(balanceNeto)}
+                                        <span className={netoEstimado > 0 ? 'text-green-700' : netoEstimado < 0 ? 'text-red-700' : 'text-gray-400'}>
+                                          {fmt(netoEstimado)}
                                         </span>
                                       </div>
-                                      {balanceNeto !== 0 && (
-                                        <p className={`text-[11px] mt-1 font-sans ${balanceNeto > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                                          {balanceNeto > 0
-                                            ? `El motorizado debe C$ ${Math.abs(balanceNeto).toLocaleString('es-NI')} a StorkHub`
-                                            : `StorkHub le debe pagar C$ ${Math.abs(balanceNeto).toLocaleString('es-NI')} al motorizado`}
+                                      {netoEstimado !== 0 && (
+                                        <p className={`text-[11px] mt-1 font-sans ${netoEstimado > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                          {netoEstimado > 0
+                                            ? `StorkHub debe pagar C$ ${Math.abs(netoEstimado).toLocaleString('es-NI')} al motorizado`
+                                            : `El motorizado aún debe C$ ${Math.abs(netoEstimado).toLocaleString('es-NI')} a StorkHub después de aplicar su ganancia`}
                                         </p>
                                       )}
                                     </div>
+                                  </div>
+
+                                  {/* Referencia técnica: efectivo_en_poder */}
+                                  <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3">
+                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-1">
+                                      Referencia técnica
+                                    </p>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[11px] text-gray-500 font-mono">efectivo_en_poder:{mot.id}</span>
+                                      <span className="text-[11px] font-black text-gray-600 font-mono">{fmt(efectivoLedger)}</span>
+                                    </div>
+                                    <p className="text-[11px] text-gray-400 mt-1">
+                                      Saldo bruto de la cuenta ledger. Incluye efectos históricos acumulados (gastos, depósitos convertidos en deuda, movimientos compensados). No se usa para calcular el neto operativo.
+                                    </p>
                                   </div>
 
                                 </div>
@@ -809,8 +842,9 @@ export default function AuditoriaFinancieraPage() {
                 <p className="text-xs text-gray-400 leading-relaxed">
                   <strong>Saldos a cargo</strong>: deudas formales en <code>saldos_cargo_motorizado</code>. &nbsp;
                   <strong>Adelantos activos</strong>: adelantos del ledger no anulados. &nbsp;
-                  <strong>Efectivo pendiente</strong>: cuenta <code>efectivo_en_poder:id</code>. &nbsp;
-                  <strong>Comisión pendiente</strong>: cuenta <code>comision_pendiente:id</code>. &nbsp;
+                  <strong>Gastos op. activos</strong>: gastos aprobados sin anular (informativo, no entra al neto). &nbsp;
+                  <strong>Comisión pendiente</strong>: ganancia acumulada en <code>comision_pendiente:id</code>. &nbsp;
+                  <strong>Neto estimado</strong>: comisión − saldos a cargo − adelantos. Positivo = StorkHub paga; negativo = motorizado debe. &nbsp;
                   Haz clic en una fila para ver el desglose completo.
                 </p>
               </div>
