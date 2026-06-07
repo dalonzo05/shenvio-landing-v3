@@ -944,16 +944,24 @@ export default function AuditoriaFinancieraPage() {
                                     {/* Sección 4: Referencias técnicas del ledger */}
                                     <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3">
                                       <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Referencias técnicas del ledger</p>
-                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 font-mono text-xs">
-                                        <div className="flex flex-col gap-0.5">
-                                          <span className="text-gray-400">comision_pendiente</span>
-                                          <span className={`font-black ${comisionLedger !== 0 ? 'text-green-700' : 'text-gray-400'}`}>{fmt(comisionLedger)}</span>
-                                          <span className="text-[10px] text-gray-400 font-sans">Lo que StorkHub le debe al motorizado</span>
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                                        <div className="flex flex-col gap-1">
+                                          <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 font-sans">Ganancia pendiente del motorizado</span>
+                                          <span className={`font-black text-sm ${Math.abs(comisionLedger) > 0 ? 'text-green-700' : 'text-gray-400'}`}>
+                                            {fmt(Math.abs(comisionLedger))}
+                                          </span>
+                                          <span className="font-mono text-[10px] text-gray-400">
+                                            Ref. ledger: comision_pendiente = {fmt(comisionLedger)}
+                                          </span>
                                         </div>
-                                        <div className="flex flex-col gap-0.5">
-                                          <span className="text-gray-400">deuda_motorizado</span>
-                                          <span className={`font-black ${deudaLedger !== 0 ? 'text-red-700' : 'text-gray-400'}`}>{fmt(deudaLedger)}</span>
-                                          <span className="text-[10px] text-gray-400 font-sans">Lo que el motorizado le debe a StorkHub</span>
+                                        <div className="flex flex-col gap-1">
+                                          <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 font-sans">Deuda formal del motorizado</span>
+                                          <span className={`font-black text-sm ${Math.abs(deudaLedger) > 0 ? 'text-red-700' : 'text-gray-400'}`}>
+                                            {fmt(Math.abs(deudaLedger))}
+                                          </span>
+                                          <span className="font-mono text-[10px] text-gray-400">
+                                            Ref. ledger: deuda_motorizado = {fmt(deudaLedger)}
+                                          </span>
                                         </div>
                                       </div>
                                       <p className="text-[11px] text-gray-400 mt-2 font-sans">
