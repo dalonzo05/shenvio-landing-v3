@@ -140,6 +140,9 @@ export default function AuditoriaFinancieraPage() {
   const toggleMovExpand = (id: string) =>
     setMovsExpandidos((prev) => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s })
   const [expandedMotId, setExpandedMotId] = useState<string | null>(null)
+  const [detalleTecnicoMots, setDetalleTecnicoMots] = useState<Set<string>>(new Set())
+  const toggleDetalleTecnico = (id: string) =>
+    setDetalleTecnicoMots((prev) => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s })
 
   // ── Filtro de fecha para la tabla de movimientos ──────────────────────────
   const [desde, setDesde] = useState<string>(() => {
@@ -941,32 +944,46 @@ export default function AuditoriaFinancieraPage() {
                                       </div>
                                     )}
 
-                                    {/* Sección 4: Referencias técnicas del ledger */}
+                                    {/* Sección 4: Estado financiero registrado */}
                                     <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3">
-                                      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Referencias técnicas del ledger</p>
-                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-                                        <div className="flex flex-col gap-1">
-                                          <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 font-sans">Ganancia pendiente del motorizado</span>
+                                      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-3">Estado financiero registrado</p>
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                                        {/* A favor del motorizado */}
+                                        <div className="rounded-lg bg-green-50 border border-green-100 px-3 py-2 flex flex-col gap-0.5">
+                                          <span className="text-[10px] font-semibold uppercase tracking-wide text-green-600">A favor del motorizado</span>
                                           <span className={`font-black text-sm ${Math.abs(comisionLedger) > 0 ? 'text-green-700' : 'text-gray-400'}`}>
                                             {fmt(Math.abs(comisionLedger))}
                                           </span>
-                                          <span className="font-mono text-[10px] text-gray-400">
-                                            Ref. ledger: comision_pendiente = {fmt(comisionLedger)}
-                                          </span>
+                                          <span className="text-[10px] text-green-600/70">Ganancia pendiente</span>
                                         </div>
-                                        <div className="flex flex-col gap-1">
-                                          <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 font-sans">Deuda formal del motorizado</span>
+                                        {/* A favor de StorkHub */}
+                                        <div className="rounded-lg bg-red-50 border border-red-100 px-3 py-2 flex flex-col gap-0.5">
+                                          <span className="text-[10px] font-semibold uppercase tracking-wide text-red-500">A favor de StorkHub</span>
                                           <span className={`font-black text-sm ${Math.abs(deudaLedger) > 0 ? 'text-red-700' : 'text-gray-400'}`}>
                                             {fmt(Math.abs(deudaLedger))}
                                           </span>
-                                          <span className="font-mono text-[10px] text-gray-400">
-                                            Ref. ledger: deuda_motorizado = {fmt(deudaLedger)}
-                                          </span>
+                                          <span className="text-[10px] text-red-500/70">Deuda formal del motorizado</span>
                                         </div>
                                       </div>
-                                      <p className="text-[11px] text-gray-400 mt-2 font-sans">
-                                        Valores del ledger contable. Solo incluir en análisis de consistencia.
-                                      </p>
+                                      {/* Nota + toggle técnico */}
+                                      <div className="mt-2 flex items-center justify-between gap-2 flex-wrap">
+                                        <p className="text-[10px] text-gray-400 font-sans">
+                                          Datos tomados del ledger financiero. La liquidación oficial se calcula en el módulo Liquidaciones.
+                                        </p>
+                                        <button
+                                          onClick={() => toggleDetalleTecnico(mot.id)}
+                                          className="text-[10px] text-gray-400 hover:text-gray-600 underline underline-offset-2 shrink-0"
+                                        >
+                                          {detalleTecnicoMots.has(mot.id) ? 'Ocultar detalle técnico' : 'Ver detalle técnico'}
+                                        </button>
+                                      </div>
+                                      {/* Detalle técnico colapsable */}
+                                      {detalleTecnicoMots.has(mot.id) && (
+                                        <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono text-[10px] text-gray-400 border-t border-gray-200 pt-2">
+                                          <span>comision_pendiente = {fmt(comisionLedger)}</span>
+                                          <span>deuda_motorizado = {fmt(deudaLedger)}</span>
+                                        </div>
+                                      )}
                                     </div>
 
                                   </div>
