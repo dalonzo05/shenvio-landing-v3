@@ -239,12 +239,8 @@ export default function AuditoriaFinancieraPage() {
       }
     })
 
-    // ── Referencia: generación reciente (últimos 14 días) ──────────────────
-    const hace14dias = Date.now() - 14 * 24 * 60 * 60 * 1000
-    const TIPOS_COBRO = new Set([
-      'cobro_generado', 'delivery_efectivo_cobrado',
-      'delivery_transferencia_cobrado', 'delivery_credito_generado',
-    ])
+    // ── Umbral de antigüedad: depósitos con más de 7 días son riesgo medio ──
+    const hace7dias = Date.now() - 7 * 24 * 60 * 60 * 1000
 
     return motorizados.map((mot) => {
       // ── Obligaciones operativas ────────────────────────────────────────────
@@ -262,39 +258,29 @@ export default function AuditoriaFinancieraPage() {
       const pendienteStorkhub = depsPorUidStorkhub[mot.authUid] ?? 0
       const pendienteComercio = depsPorUidComercio[mot.authUid] ?? 0
 
+      // ── Antigüedad de depósitos (cualquier destino) ────────────────────────
+      const depsMot = depositosPendientes.filter((d) => d.motorizadoUid === mot.authUid)
+      const hayDepositosAncianos = depsMot.some((d) => {
+        const ms = (d.creadoAt as any)?.toMillis?.()
+        return ms != null && ms < hace7dias
+      })
+
       // ── Referencias técnicas del ledger ────────────────────────────────────
       const efectivoLedger = calcularEfectivoEnPoderMotorizado(movimientos, mot.id)
       const comisionLedger = calcularComisionPendienteMotorizado(movimientos, mot.id)
       const deudaLedger    = calcularDeudaOperativaMotorizado(movimientos, mot.id)
 
-      // ── Generación reciente (para comparar con efectivo acumulado) ─────────
-      const generacionReciente = movimientos
-        .filter((m) => {
-          if (m.motorizadoId !== mot.id || m.estado === 'anulado') return false
-          if (!TIPOS_COBRO.has(m.tipo)) return false
-          const ms = (m.at as any)?.toMillis?.()
-          return ms != null && ms >= hace14dias
-        })
-        .reduce((s, m) => s + m.monto, 0)
-
       // ── Alertas con severidad ──────────────────────────────────────────────
-      type Alerta = { msg: string; nivel: 'alto' | 'medio' | 'bajo' }
+      type Alerta = { msg: string; nivel: 'alto' | 'medio' | 'bajo'; detalle?: string }
       const alertas: Alerta[] = []
 
-      // Alto: efectivo acumulado excesivo respecto a generación reciente
-      if (efectivoLedger > 0) {
-        const umbral = generacionReciente > 0 ? generacionReciente * 1.5 : 300
-        if (efectivoLedger > umbral) {
-          alertas.push({ msg: 'Posible acumulación excesiva de efectivo', nivel: 'alto' })
-        }
+      // Alto: fondos StorkHub pendientes > C$500
+      if (pendienteStorkhub > 500) {
+        alertas.push({ msg: 'Fondos StorkHub pendientes superiores a C$500', nivel: 'alto' })
       }
-      // Alto: fondos de comercio sin depositar
-      if (pendienteComercio > 0) {
-        alertas.push({ msg: 'Fondos de comercio pendientes de depositar', nivel: 'alto' })
-      }
-      // Medio: depósitos StorkHub sin confirmar
-      if (pendienteStorkhub > 0) {
-        alertas.push({ msg: 'Depósitos StorkHub sin confirmar', nivel: 'medio' })
+      // Alto: fondos comercio pendientes > C$500
+      if (pendienteComercio > 500) {
+        alertas.push({ msg: 'Fondos de comercio pendientes superiores a C$500', nivel: 'alto' })
       }
       // Medio: saldo a cargo activo
       if (saldosACargoOp > 0) {
@@ -304,7 +290,19 @@ export default function AuditoriaFinancieraPage() {
       if (adelantosActivos > 0) {
         alertas.push({ msg: 'Adelantos pendientes de regularización', nivel: 'medio' })
       }
-      // Bajo: gastos pendientes de compensar
+      // Medio: fondos con más de 7 días sin confirmar
+      if (hayDepositosAncianos) {
+        alertas.push({ msg: 'Fondos pendientes con más de 7 días sin confirmar', nivel: 'medio' })
+      }
+      // Medio: StorkHub pendiente entre C$1–C$500 (no alto pero sigue activo)
+      if (pendienteStorkhub > 0 && pendienteStorkhub <= 500) {
+        alertas.push({ msg: 'Depósitos StorkHub sin confirmar', nivel: 'medio' })
+      }
+      // Medio: comercio pendiente entre C$1–C$500
+      if (pendienteComercio > 0 && pendienteComercio <= 500) {
+        alertas.push({ msg: 'Fondos de comercio pendientes de depositar', nivel: 'medio' })
+      }
+      // Bajo: gastos operativos pendientes de compensar
       if (gastosActivos > 0) {
         alertas.push({ msg: 'Gastos operativos pendientes de compensación', nivel: 'bajo' })
       }
@@ -312,6 +310,15 @@ export default function AuditoriaFinancieraPage() {
       const movsMot = movimientos.filter((m) => m.estado !== 'anulado' && m.motorizadoId === mot.id)
       if (movsMot.some((m) => !m.cuentaOrigen && !m.cuentaDestino)) {
         alertas.push({ msg: 'Movimientos sin cuentas contables', nivel: 'bajo' })
+      }
+      // Medio: inconsistencia entre saldos operativos y ledger
+      const deudaAbs = Math.abs(deudaLedger)
+      if ((saldosACargoOp > 0 || deudaAbs > 0) && Math.abs(saldosACargoOp - deudaAbs) > 1) {
+        alertas.push({
+          msg: 'Inconsistencia financiera detectada',
+          nivel: 'medio',
+          detalle: `Saldos cargo: ${fmt(saldosACargoOp)} · Deuda ledger: ${fmt(deudaAbs)} · Diferencia: ${fmt(Math.abs(saldosACargoOp - deudaAbs))}`,
+        })
       }
 
       return {
@@ -324,7 +331,6 @@ export default function AuditoriaFinancieraPage() {
         efectivoLedger,
         comisionLedger,
         deudaLedger,
-        generacionReciente,
         alertas,
       }
     }).sort((a, b) => {
@@ -676,7 +682,7 @@ export default function AuditoriaFinancieraPage() {
                           </td>
                         </tr>
                       )}
-                      {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, gastosActivos, pendienteStorkhub, pendienteComercio, efectivoLedger, comisionLedger, deudaLedger, generacionReciente, alertas }) => {
+                      {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, gastosActivos, pendienteStorkhub, pendienteComercio, efectivoLedger, comisionLedger, deudaLedger, alertas }) => {
                         const isExpanded = expandedMotId === mot.id
                         const saldosMot = saldos.filter((s) => s.motorizadoId === mot.id)
                         const adelantosMot = movimientos.filter(
@@ -773,10 +779,22 @@ export default function AuditoriaFinancieraPage() {
                                             <span className="text-xs font-bold text-red-800">Pendiente de depositar a StorkHub</span>
                                             <span className="text-xs font-black text-red-700">{fmt(pendienteStorkhub)}</span>
                                           </div>
+                                          {/* Efectivo en poder como referencia de delivery pendiente */}
+                                          {efectivoLedger > 0 && (
+                                            <div className="px-3 py-2 border-b border-red-50 flex items-center justify-between gap-2 bg-red-50/30">
+                                              <div className="flex flex-col gap-0.5">
+                                                <span className="text-[11px] font-semibold text-gray-600">Efectivo en poder (ref. ledger)</span>
+                                                <span className="text-[10px] text-gray-400">Delivery cobrado aún no depositado</span>
+                                              </div>
+                                              <span className="text-[11px] font-black text-blue-700 font-mono">{fmt(efectivoLedger)}</span>
+                                            </div>
+                                          )}
+                                          {/* Depósitos enviados sin confirmar */}
                                           {depsMot.filter((d) => d.destinatario === 'storkhub').length === 0 ? (
-                                            <p className="px-3 py-2 text-[11px] text-gray-400">Sin depósitos StorkHub pendientes</p>
+                                            <p className="px-3 py-2 text-[11px] text-gray-400">Sin depósitos StorkHub enviados pendientes</p>
                                           ) : (
                                             <div className="divide-y divide-red-50">
+                                              <p className="px-3 pt-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Depósitos enviados sin confirmar</p>
                                               {depsMot.filter((d) => d.destinatario === 'storkhub').map((d) => (
                                                 <div key={d.id} className="px-3 py-2 flex items-center justify-between gap-2">
                                                   <div className="flex flex-col gap-0.5">
@@ -910,7 +928,7 @@ export default function AuditoriaFinancieraPage() {
                                           {alertas.map((a, i) => (
                                             <div
                                               key={i}
-                                              className={`flex items-center gap-3 rounded-lg px-3 py-2 border ${
+                                              className={`flex items-start gap-3 rounded-lg px-3 py-2 border ${
                                                 a.nivel === 'alto'
                                                   ? 'bg-red-50 border-red-200'
                                                   : a.nivel === 'medio'
@@ -919,13 +937,16 @@ export default function AuditoriaFinancieraPage() {
                                               }`}
                                             >
                                               <AlertTriangle size={14} className={
-                                                a.nivel === 'alto' ? 'text-red-600 shrink-0' : a.nivel === 'medio' ? 'text-amber-600 shrink-0' : 'text-gray-400 shrink-0'
+                                                a.nivel === 'alto' ? 'text-red-600 shrink-0 mt-0.5' : a.nivel === 'medio' ? 'text-amber-600 shrink-0 mt-0.5' : 'text-gray-400 shrink-0 mt-0.5'
                                               } />
                                               <div className="flex flex-col min-w-0">
                                                 <span className={`text-xs font-bold ${
                                                   a.nivel === 'alto' ? 'text-red-800' : a.nivel === 'medio' ? 'text-amber-800' : 'text-gray-700'
                                                 }`}>{a.msg}</span>
-                                                <span className="text-[11px] text-gray-400 uppercase tracking-wide">Riesgo {a.nivel}</span>
+                                                {a.detalle && (
+                                                  <span className="text-[11px] text-gray-500 mt-0.5 font-mono">{a.detalle}</span>
+                                                )}
+                                                <span className="text-[11px] text-gray-400 uppercase tracking-wide mt-0.5">Riesgo {a.nivel}</span>
                                               </div>
                                             </div>
                                           ))}
@@ -950,12 +971,7 @@ export default function AuditoriaFinancieraPage() {
                                           <span className={`font-black ${deudaLedger !== 0 ? 'text-red-700' : 'text-gray-400'}`}>{fmt(deudaLedger)}</span>
                                         </div>
                                       </div>
-                                      {generacionReciente > 0 && (
-                                        <p className="text-[11px] text-gray-400 mt-2 font-sans">
-                                          Generación reciente (14 días): <span className="font-semibold text-gray-600">{fmt(generacionReciente)}</span>
-                                        </p>
-                                      )}
-                                      <p className="text-[11px] text-gray-400 mt-1 font-sans">
+                                      <p className="text-[11px] text-gray-400 mt-2 font-sans">
                                         Valores brutos del ledger. Pueden incluir efectos históricos acumulados.
                                       </p>
                                     </div>
