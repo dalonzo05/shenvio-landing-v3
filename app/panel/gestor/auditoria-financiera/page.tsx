@@ -24,7 +24,6 @@ import {
 import type { MovimientoFinanciero } from '@/lib/financial-types'
 import {
   calcularDeudaOperativaMotorizado,
-  calcularEfectivoEnPoderMotorizado,
   calcularComisionPendienteMotorizado,
   calcularResumenCobertura,
   movimientosSinCuentas,
@@ -266,7 +265,6 @@ export default function AuditoriaFinancieraPage() {
       })
 
       // ── Referencias técnicas del ledger ────────────────────────────────────
-      const efectivoLedger = calcularEfectivoEnPoderMotorizado(movimientos, mot.id)
       const comisionLedger = calcularComisionPendienteMotorizado(movimientos, mot.id)
       const deudaLedger    = calcularDeudaOperativaMotorizado(movimientos, mot.id)
 
@@ -328,7 +326,6 @@ export default function AuditoriaFinancieraPage() {
         gastosActivos,
         pendienteStorkhub,
         pendienteComercio,
-        efectivoLedger,
         comisionLedger,
         deudaLedger,
         alertas,
@@ -682,7 +679,7 @@ export default function AuditoriaFinancieraPage() {
                           </td>
                         </tr>
                       )}
-                      {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, gastosActivos, pendienteStorkhub, pendienteComercio, efectivoLedger, comisionLedger, deudaLedger, alertas }) => {
+                      {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, gastosActivos, pendienteStorkhub, pendienteComercio, comisionLedger, deudaLedger, alertas }) => {
                         const isExpanded = expandedMotId === mot.id
                         const saldosMot = saldos.filter((s) => s.motorizadoId === mot.id)
                         const adelantosMot = movimientos.filter(
@@ -779,16 +776,6 @@ export default function AuditoriaFinancieraPage() {
                                             <span className="text-xs font-bold text-red-800">Pendiente de depositar a StorkHub</span>
                                             <span className="text-xs font-black text-red-700">{fmt(pendienteStorkhub)}</span>
                                           </div>
-                                          {/* Efectivo en poder como referencia de delivery pendiente */}
-                                          {efectivoLedger > 0 && (
-                                            <div className="px-3 py-2 border-b border-red-50 flex items-center justify-between gap-2 bg-red-50/30">
-                                              <div className="flex flex-col gap-0.5">
-                                                <span className="text-[11px] font-semibold text-gray-600">Efectivo en poder (ref. ledger)</span>
-                                                <span className="text-[10px] text-gray-400">Delivery cobrado aún no depositado</span>
-                                              </div>
-                                              <span className="text-[11px] font-black text-blue-700 font-mono">{fmt(efectivoLedger)}</span>
-                                            </div>
-                                          )}
                                           {/* Depósitos enviados sin confirmar */}
                                           {depsMot.filter((d) => d.destinatario === 'storkhub').length === 0 ? (
                                             <p className="px-3 py-2 text-[11px] text-gray-400">Sin depósitos StorkHub enviados pendientes</p>
@@ -957,22 +944,20 @@ export default function AuditoriaFinancieraPage() {
                                     {/* Sección 4: Referencias técnicas del ledger */}
                                     <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3">
                                       <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Referencias técnicas del ledger</p>
-                                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono text-xs">
-                                        <div className="flex flex-col gap-0.5">
-                                          <span className="text-gray-400">efectivo_en_poder</span>
-                                          <span className={`font-black ${efectivoLedger > 0 ? 'text-blue-700' : 'text-gray-400'}`}>{fmt(efectivoLedger)}</span>
-                                        </div>
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 font-mono text-xs">
                                         <div className="flex flex-col gap-0.5">
                                           <span className="text-gray-400">comision_pendiente</span>
                                           <span className={`font-black ${comisionLedger !== 0 ? 'text-green-700' : 'text-gray-400'}`}>{fmt(comisionLedger)}</span>
+                                          <span className="text-[10px] text-gray-400 font-sans">Lo que StorkHub le debe al motorizado</span>
                                         </div>
                                         <div className="flex flex-col gap-0.5">
                                           <span className="text-gray-400">deuda_motorizado</span>
                                           <span className={`font-black ${deudaLedger !== 0 ? 'text-red-700' : 'text-gray-400'}`}>{fmt(deudaLedger)}</span>
+                                          <span className="text-[10px] text-gray-400 font-sans">Lo que el motorizado le debe a StorkHub</span>
                                         </div>
                                       </div>
                                       <p className="text-[11px] text-gray-400 mt-2 font-sans">
-                                        Valores brutos del ledger. Pueden incluir efectos históricos acumulados.
+                                        Valores del ledger contable. Solo incluir en análisis de consistencia.
                                       </p>
                                     </div>
 
