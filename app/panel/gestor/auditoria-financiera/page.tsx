@@ -251,14 +251,17 @@ export default function AuditoriaFinancieraPage() {
       // ── Saldos del ledger por cuenta ───────────────────────────────────────
       const efectivoLedger  = calcularEfectivoEnPoderMotorizado(movimientos, mot.id)
       const comisionLedger  = calcularComisionPendienteMotorizado(movimientos, mot.id)
+      // comision_pendiente se almacena como pasivo (valor negativo en el ledger).
+      // Para visualización y cálculo operativo se usa el valor absoluto.
+      const gananciaPendiente = Math.abs(comisionLedger)
       // deudaLedger excluye adelantos — solo para comparación en alertas
       const deudaLedger     = calcularDeudaOperativaMotorizado(movimientos, mot.id)
 
       // ── Neto estimado de liquidación ───────────────────────────────────────
-      // comisión pendiente − saldos a cargo − adelantos activos
+      // ganancia pendiente − saldos a cargo − adelantos activos
       // Positivo = StorkHub le debe pagar al motorizado
       // Negativo = el motorizado aún le debe a StorkHub
-      const netoEstimado = comisionLedger - saldosACargoOp - adelantosActivos
+      const netoEstimado = gananciaPendiente - saldosACargoOp - adelantosActivos
 
       // ── Depósitos sin confirmar ────────────────────────────────────────────
       const deposPendientes = depsPorUid[mot.authUid] ?? 0
@@ -290,6 +293,7 @@ export default function AuditoriaFinancieraPage() {
         gastosActivos,
         efectivoLedger,
         comisionLedger,
+        gananciaPendiente,
         deposPendientes,
         netoEstimado,
         alertas,
@@ -595,7 +599,7 @@ export default function AuditoriaFinancieraPage() {
                         </td>
                       </tr>
                     )}
-                    {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, gastosActivos, efectivoLedger, comisionLedger, netoEstimado, alertas }) => {
+                    {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, gastosActivos, efectivoLedger, comisionLedger, gananciaPendiente, netoEstimado, alertas }) => {
                       const isExpanded = expandedMotId === mot.id
                       const saldosMot = saldos.filter((s) => s.motorizadoId === mot.id)
                       const adelantosMot = movimientos.filter(
@@ -633,9 +637,9 @@ export default function AuditoriaFinancieraPage() {
                                 : <span className="font-semibold text-purple-700">{fmt(gastosActivos)}</span>}
                             </td>
                             <td className={`${tdCls} text-right font-mono`}>
-                              {comisionLedger === 0
+                              {gananciaPendiente === 0
                                 ? <span className="text-gray-300">—</span>
-                                : <span className="font-semibold text-green-700">{fmt(comisionLedger)}</span>}
+                                : <span className="font-semibold text-green-700">{fmt(gananciaPendiente)}</span>}
                             </td>
                             <td className={`${tdCls} text-right`}>
                               {netoEstimado === 0
@@ -680,13 +684,16 @@ export default function AuditoriaFinancieraPage() {
                                     <div className="bg-white rounded-xl border border-green-100 overflow-hidden">
                                       <div className="px-3 py-2 bg-green-50 border-b border-green-100 flex items-center justify-between">
                                         <span className="text-xs font-bold text-green-800">Comisión / ganancia pendiente</span>
-                                        <span className="text-xs font-black text-green-700">{fmt(comisionLedger)}</span>
+                                        <span className="text-xs font-black text-green-700">{fmt(gananciaPendiente)}</span>
                                       </div>
                                       <div className="px-3 py-2">
                                         <p className="text-[11px] text-gray-500">
                                           Cuenta ledger: <code className="font-mono text-gray-700">comision_pendiente:{mot.id}</code>
+                                          {comisionLedger !== 0 && (
+                                            <span className="ml-2 text-gray-400">(raw: {fmt(comisionLedger)})</span>
+                                          )}
                                         </p>
-                                        {comisionLedger === 0 && (
+                                        {gananciaPendiente === 0 && (
                                           <p className="text-[11px] text-gray-400 mt-0.5">Sin comisión pendiente en el ledger</p>
                                         )}
                                       </div>
@@ -785,7 +792,7 @@ export default function AuditoriaFinancieraPage() {
                                     <div className="flex flex-col gap-1 font-mono text-xs">
                                       <div className="flex items-center justify-between">
                                         <span className="text-gray-500">Comisión pendiente</span>
-                                        <span className="font-semibold text-green-700">{fmt(comisionLedger)}</span>
+                                        <span className="font-semibold text-green-700">{fmt(gananciaPendiente)}</span>
                                       </div>
                                       <div className="flex items-center justify-between">
                                         <span className="text-gray-500">− Saldos a cargo</span>
