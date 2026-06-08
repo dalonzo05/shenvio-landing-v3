@@ -948,21 +948,28 @@ export default function AuditoriaFinancieraPage() {
                                     <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3">
                                       <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-3">Estado financiero registrado</p>
                                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                                        {/* A favor del motorizado */}
+                                        {/* Comisión disponible */}
                                         <div className="rounded-lg bg-green-50 border border-green-100 px-3 py-2 flex flex-col gap-0.5">
-                                          <span className="text-[10px] font-semibold uppercase tracking-wide text-green-600">A favor del motorizado</span>
-                                          <span className={`font-black text-sm ${Math.abs(comisionLedger) > 0 ? 'text-green-700' : 'text-gray-400'}`}>
-                                            {fmt(Math.abs(comisionLedger))}
+                                          <span className="text-[10px] font-semibold uppercase tracking-wide text-green-600">Comisión disponible</span>
+                                          <span className={`font-black text-sm ${comisionLedger > 0 ? 'text-green-700' : 'text-gray-400'}`}>
+                                            {fmt(comisionLedger > 0 ? comisionLedger : 0)}
                                           </span>
-                                          <span className="text-[10px] text-green-600/70">Ganancia pendiente</span>
+                                          {comisionLedger < 0 && (
+                                            <span className="text-[10px] text-amber-600 mt-0.5">
+                                              Comisión ya usada en abonos/deudas: {fmt(Math.abs(comisionLedger))}
+                                            </span>
+                                          )}
+                                          {comisionLedger >= 0 && (
+                                            <span className="text-[10px] text-green-600/70">Pendiente de liquidar</span>
+                                          )}
                                         </div>
-                                        {/* A favor de StorkHub */}
+                                        {/* Deuda formal pendiente */}
                                         <div className="rounded-lg bg-red-50 border border-red-100 px-3 py-2 flex flex-col gap-0.5">
-                                          <span className="text-[10px] font-semibold uppercase tracking-wide text-red-500">A favor de StorkHub</span>
+                                          <span className="text-[10px] font-semibold uppercase tracking-wide text-red-500">Deuda formal pendiente</span>
                                           <span className={`font-black text-sm ${Math.abs(deudaLedger) > 0 ? 'text-red-700' : 'text-gray-400'}`}>
                                             {fmt(Math.abs(deudaLedger))}
                                           </span>
-                                          <span className="text-[10px] text-red-500/70">Deuda formal del motorizado</span>
+                                          <span className="text-[10px] text-red-500/70">Registrada en ledger a favor de StorkHub</span>
                                         </div>
                                       </div>
                                       {/* Nota + toggle técnico */}
