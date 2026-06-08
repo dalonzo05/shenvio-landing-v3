@@ -2,8 +2,11 @@ import {
   addDoc,
   collection,
   doc,
+  getDocs,
+  query,
   serverTimestamp,
   updateDoc,
+  where,
   writeBatch,
   arrayUnion,
   Timestamp,
@@ -160,17 +163,42 @@ export async function crearGastoMotorizado(params: {
 }
 
 /**
- * Anula un gasto operativo existente.
- * No genera movimiento inverso en Fase 1 — se hace en Fase 4+.
+ * Anula un gasto operativo existente y sus movimientos del ledger.
+ *
+ * 1. Marca el documento en `gastos_motorizado` como anulado.
+ * 2. Busca todos los movimientos en `movimientos_financieros` que referencian
+ *    este gastoId y los marca como anulados (batch).
+ *
+ * Ambas operaciones deben ocurrir juntas para mantener consistencia entre
+ * la colección operativa y el ledger financiero.
  */
 export async function anularGastoMotorizado(
   gastoId: string,
   operadorId: string
 ): Promise<void> {
+  // 1. Anular el gasto en la colección operativa
   await updateDoc(doc(db, 'gastos_motorizado', gastoId), {
     estado: 'anulado',
     updatedAt: serverTimestamp(),
   })
+
+  // 2. Anular los movimientos del ledger vinculados por gastoId
+  const snap = await getDocs(
+    query(collection(db, 'movimientos_financieros'), where('gastoId', '==', gastoId))
+  )
+  const activos = snap.docs.filter((d) => (d.data() as any).estado !== 'anulado')
+  if (activos.length > 0) {
+    const batch = writeBatch(db)
+    activos.forEach((d) => {
+      batch.update(d.ref, {
+        estado: 'anulado',
+        anuladoAt: serverTimestamp(),
+        anuladoPorUid: operadorId,
+        motivoAnulacion: 'Gasto operativo anulado',
+      })
+    })
+    await batch.commit()
+  }
 }
 
 // ─── Saldos a cargo del motorizado ────────────────────────────────────────────

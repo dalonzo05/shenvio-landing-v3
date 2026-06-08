@@ -7,15 +7,11 @@ import {
   query,
   where,
   orderBy,
-  doc,
-  updateDoc,
-  serverTimestamp,
   getDocs,
-  writeBatch,
   Timestamp,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
-import { crearGastoMotorizado } from '@/lib/financial-writes'
+import { crearGastoMotorizado, anularGastoMotorizado } from '@/lib/financial-writes'
 import {
   LABELS_TIPO_GASTO,
   type TipoGasto,
@@ -414,37 +410,7 @@ export default function GastosPage() {
 
     try {
       const uid = auth.currentUser?.uid ?? ''
-
-      // 1. Anular el gasto operativo en gastos_motorizado
-      await updateDoc(doc(db, 'gastos_motorizado', gasto.id), {
-        estado: 'anulado',
-        updatedAt: serverTimestamp(),
-      })
-
-      // 2. Buscar movimientos financieros vinculados por gastoId y anularlos
-      // El campo gastoId se guarda en registrarMovimiento via crearGastoMotorizado.
-      const snap = await getDocs(
-        query(collection(db, 'movimientos_financieros'), where('gastoId', '==', gasto.id))
-      )
-
-      console.log(`[gastos] anular ${gasto.id}: ${snap.size} movimientos encontrados`)
-
-      const activos = snap.docs.filter((d) => (d.data() as any).estado !== 'anulado')
-      if (activos.length > 0) {
-        const batch = writeBatch(db)
-        activos.forEach((d) => {
-          batch.update(d.ref, {
-            estado: 'anulado',
-            anuladoAt: serverTimestamp(),
-            anuladoPorUid: uid,
-            motivoAnulacion: 'Gasto operativo anulado por gestor',
-          })
-        })
-        await batch.commit()
-        console.log(`[gastos] anulados ${activos.length} movimiento(s) del ledger`)
-      } else {
-        console.warn(`[gastos] No se encontraron movimientos activos para gastoId=${gasto.id}`)
-      }
+      await anularGastoMotorizado(gasto.id, uid)
     } catch (e: any) {
       console.error('[gastos] Error anulando gasto:', e)
       setAnulError(e?.message || 'Error al anular el gasto. Revisá la consola.')
