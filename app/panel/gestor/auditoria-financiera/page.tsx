@@ -325,8 +325,8 @@ export default function AuditoriaFinancieraPage() {
       type Alerta = { msg: string; nivel: 'alto' | 'medio' | 'bajo'; detalle?: string; diasDesde?: number }
       const alertas: Alerta[] = []
 
-      // Alto: acumulación de fondos elevados en ambos destinos
-      if (pendienteStorkhub > 500 && pendienteComercio > 500) {
+      // Alto: acumulación de fondos elevados en cualquiera de los destinos
+      if (pendienteStorkhub > 500 || pendienteComercio > 500) {
         alertas.push({
           msg: 'Motorizado mantiene fondos elevados bajo custodia',
           nivel: 'alto',
