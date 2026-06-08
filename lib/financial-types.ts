@@ -333,16 +333,8 @@ export const LABELS_TIPO_CARTERA: Record<TipoCartera, string> = {
   libre:      'Convenio especial',
 }
 
-// ─── Helper de retrocompatibilidad para depósitos legacy ──────────────────────
-// Docs antiguos no tienen campo `estado`, solo `confirmadoMotorizado` y `confirmadoGestor`.
-// Solo usar para LEER docs; escrituras nuevas siempre usan el campo `estado`.
 export function getDepositoEstado(dep: {
   estado?: string
-  confirmadoGestor?: boolean
-  boucher?: { url?: string } | null
 }): EstadoDeposito {
-  if (dep.estado) return dep.estado as EstadoDeposito
-  if (dep.confirmadoGestor === true) return 'confirmado'
-  if (dep.boucher?.url) return 'en_revision'
-  return 'pendiente_boucher'
+  return (dep.estado as EstadoDeposito) ?? 'pendiente_boucher'
 }

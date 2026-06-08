@@ -67,7 +67,6 @@ type Solicitud = {
 type DepositoOrderDoc = {
   id: string
   estado?: string
-  confirmadoGestor?: boolean
   motorizadoUid: string
   montoTotal: number
   creadoAt?: Timestamp
@@ -531,7 +530,7 @@ export default function LiquidacionesPage() {
     const q = query(
       collection(db, 'ordenes_deposito'),
       where('motorizadoUid', '==', moto.authUid),
-      where('confirmadoGestor', '==', true)
+      where('estado', 'in', ['confirmado', 'convertido_en_deuda'])
     )
     return onSnapshot(q, (snap) => {
       const all = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as DepositoOrderDoc))

@@ -109,7 +109,6 @@ export type SolicitudDetalle = {
     semana?: number; zona?: string
     deposito?: {
       monto?: number | null; formaPago?: string | null
-      confirmadoMotorizado?: boolean; confirmadoAt?: Timestamp | null  // legacy
       confirmadoComercio?: boolean; confirmadoComercioAt?: Timestamp | null
       confirmadoStorkhub?: boolean; confirmadoStorkhubAt?: Timestamp | null
       storkhubDepositoId?: string; comercioDepositoId?: string
@@ -1303,8 +1302,6 @@ export function SolicitudDrawer({
               {(() => {
                 const dep = solicitud.registro?.deposito
                 if (!dep) return null
-                // Fuente de verdad: confirmadoStorkhub / confirmadoComercio / depositoIds.
-                // confirmadoMotorizado es legacy — se muestra solo si existe en docs anteriores.
                 const tieneInfo = dep.confirmadoComercio || dep.confirmadoStorkhub
                   || dep.storkhubDepositoId || dep.comercioDepositoId
                 if (!tieneInfo) return null

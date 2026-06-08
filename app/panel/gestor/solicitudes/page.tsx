@@ -170,8 +170,6 @@ type Solicitud = {
   }
   registro?: {
     deposito?: {
-      confirmadoMotorizado?: boolean
-      confirmadoAt?: any
       confirmadoComercio?: boolean
       confirmadoStorkhub?: boolean
       confirmadoStorkhubAt?: any

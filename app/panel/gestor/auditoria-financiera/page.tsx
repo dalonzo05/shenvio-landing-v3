@@ -178,7 +178,7 @@ export default function AuditoriaFinancieraPage() {
         )),
         getDocs(query(
           collection(db, 'ordenes_deposito'),
-          where('confirmadoGestor', '==', false),
+          where('estado', 'in', ['pendiente_boucher', 'en_revision']),
         )),
       ])
 

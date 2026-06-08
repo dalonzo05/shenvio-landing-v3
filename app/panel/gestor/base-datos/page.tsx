@@ -46,7 +46,7 @@ type Registro = {
   semana?: number
   zona?: string
   pago?: { realizo?: boolean; esCash?: boolean }
-  deposito?: { fecha?: Timestamp | null; monto?: number | null; formaPago?: string | null; confirmadoMotorizado?: boolean; confirmadoAt?: Timestamp | null; confirmadoComercio?: boolean; confirmadoComercioAt?: Timestamp | null; confirmadoStorkhub?: boolean; confirmadoStorkhubAt?: Timestamp | null }
+  deposito?: { fecha?: Timestamp | null; monto?: number | null; formaPago?: string | null; confirmadoComercio?: boolean; confirmadoComercioAt?: Timestamp | null; confirmadoStorkhub?: boolean; confirmadoStorkhubAt?: Timestamp | null }
   csRecaudado?: number
   usdRecaudado?: number
   numEntregas?: number

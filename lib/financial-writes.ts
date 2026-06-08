@@ -345,8 +345,6 @@ export async function anularSaldoCargo(
  * - Crea un SaldoCargoMotorizado de tipo 'deposito_no_realizado'
  * - Registra movimiento en el ledger
  *
- * NOTA: ya no escribe campos booleanos `confirmadoGestor` (legacy).
- * Los docs nuevos solo usan el campo `estado`.
  */
 export async function convertirDepositoEnDeuda(params: {
   depositoId: string
@@ -367,13 +365,8 @@ export async function convertirDepositoEnDeuda(params: {
   const b = writeBatch(db)
 
   // 1. Marcar el depósito como convertido_en_deuda
-  // Nota: confirmadoGestor se escribe en true para sacarlo del query 'por revisar'
-  // (where confirmadoGestor == false). El campo estado es la fuente de verdad.
   b.update(doc(db, 'ordenes_deposito', depositoId), {
     estado: 'convertido_en_deuda',
-    confirmadoGestor: true,
-    confirmadoGestorAt: serverTimestamp(),
-    confirmadoGestorUid: operadorId,
     notaConversion: nota,
     updatedAt: serverTimestamp(),
   })

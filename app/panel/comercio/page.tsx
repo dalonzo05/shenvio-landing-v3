@@ -27,7 +27,6 @@ type Solicitud = {
   registro?: {
     deposito?: {
       confirmadoComercio?: boolean
-      confirmadoMotorizado?: boolean  // legacy
       comercioDepositoId?: string
     }
   }
@@ -101,8 +100,6 @@ export default function ComercioDashboard() {
         const d = tsToDate(o.entregadoAt) || tsToDate(o.createdAt)
         return o.estado === 'entregado' && d && d >= inicioMes
       }).length,
-      // Depósito pendiente para el comercio = entregado + aplica CE + no confirmadoComercio.
-      // No se excluye por confirmadoMotorizado (legacy): la fuente de verdad es confirmadoComercio.
       depositosPendientes: ordenes.filter((o) =>
         o.cobroContraEntrega?.aplica &&
         o.estado === 'entregado' &&

@@ -73,11 +73,11 @@ export default function FinancieroDashboard() {
   useEffect(() => {
     const q = query(
       collection(db, 'ordenes_deposito'),
-      where('confirmadoGestor', '==', false)
+      where('estado', 'in', ['pendiente_boucher', 'en_revision'])
     )
     return onSnapshot(q, (snap) => {
       const docs = snap.docs.map((d) => d.data() as any)
-      const enRevision = docs.filter((d) => d.estado === 'en_revision' || (!d.estado && d.boucher?.url))
+      const enRevision = docs.filter((d) => d.estado === 'en_revision')
       const total = enRevision.reduce((s, d) => s + (d.montoTotal || 0), 0)
       setKpis((prev) => ({ ...prev, pagosEnRevision: total, pagosEnRevisionCount: enRevision.length }))
     })

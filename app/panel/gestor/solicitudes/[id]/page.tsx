@@ -184,8 +184,6 @@ type Solicitud = {
     deposito?: {
       monto?: number | null
       formaPago?: string | null
-      confirmadoMotorizado?: boolean  // legacy
-      confirmadoAt?: any              // legacy
       confirmadoComercio?: boolean
       confirmadoComercioAt?: any
       confirmadoStorkhub?: boolean

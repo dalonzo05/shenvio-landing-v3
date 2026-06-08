@@ -103,8 +103,6 @@ async function fetchStats(motorizadoId: string): Promise<Stats> {
   depositosSnap.docs.forEach((d) => {
     const data = d.data() as any
     const dep = data?.registro?.deposito
-    // Excluir si el motorizado ya creó el depósito en revisión (storkhubDepositoId/comercioDepositoId).
-    // confirmadoMotorizado era el campo legacy equivalente.
     if (dep?.storkhubDepositoId || dep?.comercioDepositoId) return
     const ceAplica = !!data?.cobroContraEntrega?.aplica
     const quienPaga = data?.pagoDelivery?.quienPaga || ''

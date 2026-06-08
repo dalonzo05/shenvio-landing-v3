@@ -498,10 +498,6 @@ function BoucherModal({
         motorizadoNombre: orden.asignacion?.motorizadoNombre ?? '',
         solicitudIds: [orden.id],
         montoTotal: montoFinal,
-        confirmadoMotorizado: false,
-        confirmadoGestor: true,
-        confirmadoGestorAt: serverTimestamp(),
-        confirmadoGestorUid: uid,
         boucherUrl: orden.cobroDelivery?.boucherUrl ?? null,
         metadata: { clienteNombre: nombre },
       })
@@ -658,10 +654,6 @@ function PagoContadoModal({
           motorizadoNombre: orden.asignacion?.motorizadoNombre ?? '',
           solicitudIds: [orden.id],
           montoTotal: montoFinal,
-          confirmadoMotorizado: false,
-          confirmadoGestor: true,
-          confirmadoGestorAt: serverTimestamp(),
-          confirmadoGestorUid: uid,
           metadata: { referencia: nota.trim() || null, clienteNombre: nombre },
         })
         b.update(doc(db, 'solicitudes_envio', orden.id), {

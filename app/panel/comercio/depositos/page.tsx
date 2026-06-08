@@ -16,9 +16,7 @@ type DepositoDoc = {
   solicitudIds: string[]
   montoTotal: number
   boucher?: { url: string; pathStorage?: string } | null
-  // estado es la fuente de verdad; confirmadoGestor es legacy (se mantiene en sync).
   estado?: string
-  confirmadoGestor?: boolean
 }
 
 type SolicitudDetalle = {
@@ -77,9 +75,6 @@ function fmtMotorizadoNombre(raw: string): string {
 type DepStatus = 'confirmado' | 'en_revision' | 'pendiente_boucher' | 'rechazado' | 'convertido_en_deuda'
 
 function getStatus(dep: DepositoDoc): DepStatus {
-  // Usar getDepositoEstado como única fuente de verdad para el estado.
-  // confirmadoGestor es un campo legacy que se mantiene en sync pero no debe
-  // usarse para lógica: puede ser false en docs 'convertido_en_deuda' (legacy).
   return getDepositoEstado(dep)
 }
 

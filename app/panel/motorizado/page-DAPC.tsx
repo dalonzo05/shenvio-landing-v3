@@ -69,8 +69,6 @@ type Solicitud = {
   };
   registro?: {
     deposito?: {
-      confirmadoMotorizado?: boolean;
-      confirmadoAt?: Timestamp;
       confirmadoComercio?: boolean;
       confirmadoComercioAt?: Timestamp;
       confirmadoStorkhub?: boolean;
@@ -1621,12 +1619,8 @@ export default function PanelMotorizadoPage() {
                                   gastosDescontados: totalGastosDeducibles,
                                   gastosIds: gastosNoLiquidados.map((g) => g.id),
                                   boucher: boucherData,
-                                  confirmadoMotorizado: true,
-                                  confirmadoMotorizadoAt: serverTimestamp(),
-                                  confirmadoGestor: false,
                                 });
                                 // Marcar en solicitudes el ID del depósito creado.
-                                // storkhubDepositoId es la fuente de verdad (confirmadoMotorizado es legacy).
                                 const b = writeBatch(db);
                                 g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
                                   'registro.deposito.storkhubDepositoId': depositoId,
@@ -1754,12 +1748,8 @@ export default function PanelMotorizadoPage() {
                                   solicitudIds: g.orders.map((o) => o.id),
                                   montoTotal: g.total,
                                   boucher: boucherData,
-                                  confirmadoMotorizado: true,
-                                  confirmadoMotorizadoAt: serverTimestamp(),
-                                  confirmadoGestor: false,
                                 });
                                 // Marcar en solicitudes el ID del depósito creado.
-                                // comercioDepositoId es la fuente de verdad (confirmadoMotorizado es legacy).
                                 const b = writeBatch(db);
                                 g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
                                   'registro.deposito.comercioDepositoId': depositoId,

@@ -60,8 +60,6 @@ type Solicitud = {
   }
   registro?: {
     deposito?: {
-      confirmadoMotorizado?: boolean
-      confirmadoAt?: Timestamp
       confirmadoComercio?: boolean
       confirmadoComercioAt?: Timestamp
       confirmadoStorkhub?: boolean
@@ -117,11 +115,6 @@ type DepositoOrderDoc = {
   gastosDescontados?: number  // gastos deducidos del bruto
   gastosIds?: string[]   // IDs de gastos_motorizado descontados
   boucher?: { url: string; pathStorage: string } | null
-  confirmadoMotorizado: boolean
-  confirmadoMotorizadoAt?: Timestamp
-  confirmadoGestor?: boolean
-  confirmadoGestorAt?: Timestamp
-  // Nuevos campos de estado
   rechazadoPor?: string
   rechazadoAt?: Timestamp
   motivoRechazo?: string
@@ -346,7 +339,7 @@ export default function DepositosPage() {
 
   // Query: ordenes_deposito pendientes de revisión gestora (motorizado las creó, gestor aún no confirmó)
   useEffect(() => {
-    const q = query(collection(db, 'ordenes_deposito'), where('confirmadoGestor', '==', false))
+    const q = query(collection(db, 'ordenes_deposito'), where('estado', 'in', ['pendiente_boucher', 'en_revision']))
     return onSnapshot(q, (snap) => {
       const list = snap.docs
         .map((d) => ({ id: d.id, ...(d.data() as any) } as DepositoOrderDoc))
@@ -397,13 +390,13 @@ export default function DepositosPage() {
     })
   }, [porRevisar])
 
-  // Query: ordenes_deposito confirmados por gestor (para historial limpio 1-fila-por-depósito)
+  // Query: ordenes_deposito procesados por gestor (historial: confirmados y convertidos en deuda)
   useEffect(() => {
-    const q = query(collection(db, 'ordenes_deposito'), where('confirmadoGestor', '==', true))
+    const q = query(collection(db, 'ordenes_deposito'), where('estado', 'in', ['confirmado', 'convertido_en_deuda']))
     return onSnapshot(q, (snap) => {
       const list = snap.docs
         .map((d) => ({ id: d.id, ...(d.data() as any) } as DepositoOrderDoc))
-        .sort((a, b) => (tsToDate(b.confirmadoGestorAt)?.getTime() ?? 0) - (tsToDate(a.confirmadoGestorAt)?.getTime() ?? 0))
+        .sort((a, b) => (tsToDate(b.creadoAt)?.getTime() ?? 0) - (tsToDate(a.creadoAt)?.getTime() ?? 0))
       setHistorialDepositos(list)
     })
   }, [])
@@ -470,9 +463,7 @@ export default function DepositosPage() {
       const dep = calcDeposito(o)
       const depoR = o.registro?.deposito
 
-      // Storkhub pendiente.
-      // Excluir si ya está confirmado O si ya existe un ordenes_deposito en curso
-      // (storkhubDepositoId es la fuente de verdad; confirmadoMotorizado es legacy).
+      // Storkhub pendiente: excluir si ya confirmado o si hay ordenes_deposito en curso.
       if (dep.totalAStorkhub > 0 && !depoR?.confirmadoStorkhub && !depoR?.storkhubDepositoId) {
         grupo.storkhub.ordenes.push(o)
         grupo.storkhub.totalBruto += dep.totalAStorkhub
@@ -578,8 +569,6 @@ export default function DepositosPage() {
       const motId = o.asignacion?.motorizadoId || o.asignacion?.motorizadoAuthUid || '__sin'
       const comercioNombre = getNombreComercio(o, comercioNames)
 
-      // Fuente de verdad: confirmadoStorkhub / confirmadoComercio.
-      // confirmadoMotorizado era un campo legacy pre-ordenes_deposito, ya no se usa.
       const storkhubConfirmado = depoR?.confirmadoStorkhub
       const comercioConfirmado = depoR?.confirmadoComercio
 
@@ -693,10 +682,6 @@ export default function DepositosPage() {
       gastosDescontados,
       gastosIds: gastosDeMotorizado.map((g) => g.id),
       boucher: boucherData,
-      confirmadoMotorizado: false,
-      confirmadoGestor: true,
-      confirmadoGestorAt: serverTimestamp(),
-      confirmadoGestorUid: auth.currentUser?.uid ?? '',
     })
     const b = writeBatch(db)
     ordenes.forEach((o) =>
@@ -738,10 +723,6 @@ export default function DepositosPage() {
       solicitudIds: ordenes.map((o) => o.id),
       montoTotal,
       boucher: boucherData,
-      confirmadoMotorizado: false,
-      confirmadoGestor: true,
-      confirmadoGestorAt: serverTimestamp(),
-      confirmadoGestorUid: auth.currentUser?.uid ?? '',
     })
     const b = writeBatch(db)
     ordenes.forEach((o) =>
@@ -773,9 +754,6 @@ export default function DepositosPage() {
       const b = writeBatch(db)
       b.update(ref, {
         estado: 'confirmado',
-        confirmadoGestor: true,
-        confirmadoGestorAt: serverTimestamp(),
-        confirmadoGestorUid: auth.currentUser?.uid ?? '',
       })
       const fieldKey = dep.destinatario === 'storkhub'
         ? 'registro.deposito.confirmadoStorkhub'
@@ -823,24 +801,16 @@ export default function DepositosPage() {
       // Eliminar el doc de ordenes_deposito — el motorizado creará uno nuevo al re-subir
       b.delete(doc(db, 'ordenes_deposito', dep.id))
       // Resetear las solicitudes para que el motorizado las vea como pendientes.
-      // storkhubDepositoId / comercioDepositoId son la fuente de verdad.
-      // confirmadoMotorizado / confirmadoAt se limpian por compatibilidad con docs legacy.
       const esStorkhub = dep.destinatario === 'storkhub'
       dep.solicitudIds.forEach((sid) => {
         b.update(doc(db, 'solicitudes_envio', sid), esStorkhub ? {
           'registro.deposito.confirmadoStorkhub': false,
           'registro.deposito.confirmadoStorkhubAt': null,
           'registro.deposito.storkhubDepositoId': null,
-          // legacy — se mantiene para retrocompatibilidad con docs antiguos
-          'registro.deposito.confirmadoMotorizado': false,
-          'registro.deposito.confirmadoAt': null,
         } : {
           'registro.deposito.confirmadoComercio': false,
           'registro.deposito.confirmadoComercioAt': null,
           'registro.deposito.comercioDepositoId': null,
-          // legacy — se mantiene para retrocompatibilidad con docs antiguos
-          'registro.deposito.confirmadoMotorizado': false,
-          'registro.deposito.confirmadoAt': null,
         })
       })
       await b.commit()
@@ -910,8 +880,6 @@ export default function DepositosPage() {
         montoBruto: gm.storkhub.totalBruto,
         gastosDescontados: gm.storkhub.gastosDeducibles,
         gastosIds: gastosAprobados.filter((g) => g.motorizadoId === gm.motorizadoId).map((g) => g.id),
-        confirmadoMotorizado: false,
-        confirmadoGestor: false,
       })
 
       // 2. Convertir en deuda
@@ -986,9 +954,6 @@ export default function DepositosPage() {
     // 2. Resetear estado operativo
     const ref = doc(db, 'ordenes_deposito', dep.id)
     await setDoc(ref, {
-      confirmadoGestor: false,
-      confirmadoGestorAt: null,
-      confirmadoGestorUid: null,
       estado: 'en_revision',
     }, { merge: true })
   }
@@ -1613,7 +1578,7 @@ export default function DepositosPage() {
         const hastaMs = new Date(hasta + 'T23:59:59').getTime()
 
         const filtered = historialDepositos.filter((d) => {
-          const ts = tsToDate(d.confirmadoGestorAt)?.getTime() ?? tsToDate(d.creadoAt)?.getTime() ?? 0
+          const ts = tsToDate(d.creadoAt)?.getTime() ?? 0
           if (ts < desdeMs || ts > hastaMs) return false
           if (filtroMotorizado !== 'todos' && d.motorizadoUid !== filtroMotorizado) return false
           return true
@@ -1676,7 +1641,7 @@ export default function DepositosPage() {
                   <tbody className="divide-y divide-gray-100">
                     {filtered.map((dep) => (
                       <tr key={dep.id} className="hover:bg-gray-50 transition-colors">
-                        <td className={tdCls}>{fmtDateTime(dep.confirmadoGestorAt ?? dep.creadoAt)}</td>
+                        <td className={tdCls}>{fmtDateTime(dep.creadoAt)}</td>
                         <td className={`${tdCls} font-semibold text-gray-800`}>{fmtNombreMotorizado(dep.motorizadoNombre, motorizadoNames, dep.motorizadoUid)}</td>
                         <td className={tdCls}>
                           <span className="flex items-center gap-1.5">

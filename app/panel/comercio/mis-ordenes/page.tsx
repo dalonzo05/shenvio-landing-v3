@@ -42,7 +42,6 @@ type Solicitud = {
   }
   registro?: {
     deposito?: {
-      confirmadoMotorizado?: boolean  // legacy
       confirmadoComercio?: boolean
       confirmadoStorkhub?: boolean
       comercioDepositoId?: string
@@ -107,8 +106,6 @@ function estadoDeposito(s: Solicitud): DepositoEstado {
   if (!s.cobroContraEntrega?.aplica) return 'na'
   const dep = s.registro?.deposito
   if (dep?.confirmadoComercio) return 'depositado'
-  // 'en revisión' = motorizado ya creó el depósito (comercioDepositoId es la fuente de verdad).
-  // confirmadoMotorizado era el campo legacy equivalente.
   if (dep?.comercioDepositoId) return 'en_revision'
   return 'pendiente'
 }
