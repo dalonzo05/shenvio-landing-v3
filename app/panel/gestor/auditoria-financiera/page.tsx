@@ -50,6 +50,7 @@ type SaldoCargo = {
   montoOriginal?: number
   nota?: string
   tipo?: string
+  creadoAt?: unknown
 }
 
 type DepositoPendiente = {
@@ -85,6 +86,18 @@ function fmtFechaCorta(v: unknown): string {
   const d = typeof (v as any)?.toDate === 'function' ? (v as any).toDate() : null
   if (!d) return '—'
   return d.toLocaleDateString('es-NI', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
+/** Extrae milisegundos de un Timestamp de Firestore (o 0 si no aplica) */
+function toMs(val: unknown): number {
+  return (val as any)?.toMillis?.() ?? 0
+}
+
+/** Días transcurridos desde un Timestamp de Firestore. Undefined si no tiene fecha. */
+function diasTranscurridos(val: unknown): number | undefined {
+  const ms = (val as any)?.toMillis?.()
+  if (ms == null) return undefined
+  return Math.floor((Date.now() - ms) / (1000 * 60 * 60 * 24))
 }
 
 const UMBRAL_DIFERENCIA = 0.01 // diferencia mínima para marcar como discrepancia
@@ -190,6 +203,7 @@ export default function AuditoriaFinancieraPage() {
             montoOriginal: data.montoOriginal,
             nota: data.nota,
             tipo: data.tipo,
+            creadoAt: data.creadoAt,
           }
         }),
       )
@@ -248,13 +262,32 @@ export default function AuditoriaFinancieraPage() {
       // ── Obligaciones operativas ────────────────────────────────────────────
       const saldosACargoOp = saldosPorMot[mot.id] ?? 0
 
-      const adelantosActivos = movimientos
-        .filter((m) => m.motorizadoId === mot.id && m.tipo === 'adelanto_motorizado' && m.estado !== 'anulado')
-        .reduce((s, m) => s + m.monto, 0)
+      // Saldos individuales + antigüedad del más antiguo
+      const saldosMot = saldos.filter((s) => s.motorizadoId === mot.id)
+      const diasSaldo = saldosMot.reduce<number | undefined>((max, s) => {
+        const d = diasTranscurridos(s.creadoAt)
+        return d != null && (max == null || d > max) ? d : max
+      }, undefined)
 
-      const gastosActivos = movimientos
-        .filter((m) => m.motorizadoId === mot.id && (m.tipo === 'gasto_aprobado' || m.tipo === 'gasto_operativo_aprobado') && m.estado !== 'anulado')
-        .reduce((s, m) => s + m.monto, 0)
+      // Adelantos activos + antigüedad del más antiguo
+      const adelantosFiltrados = movimientos.filter(
+        (m) => m.motorizadoId === mot.id && m.tipo === 'adelanto_motorizado' && m.estado !== 'anulado',
+      )
+      const adelantosActivos = adelantosFiltrados.reduce((s, m) => s + m.monto, 0)
+      const diasAdelanto = adelantosFiltrados.reduce<number | undefined>((max, m) => {
+        const d = diasTranscurridos(m.at)
+        return d != null && (max == null || d > max) ? d : max
+      }, undefined)
+
+      // Gastos activos + antigüedad del más antiguo
+      const gastosFiltrados = movimientos.filter(
+        (m) => m.motorizadoId === mot.id && (m.tipo === 'gasto_aprobado' || m.tipo === 'gasto_operativo_aprobado') && m.estado !== 'anulado',
+      )
+      const gastosActivos = gastosFiltrados.reduce((s, m) => s + m.monto, 0)
+      const diasGasto = gastosFiltrados.reduce<number | undefined>((max, m) => {
+        const d = diasTranscurridos(m.at)
+        return d != null && (max == null || d > max) ? d : max
+      }, undefined)
 
       // ── Dinero pendiente de depositar ──────────────────────────────────────
       const pendienteStorkhub = depsPorUidStorkhub[mot.authUid] ?? 0
@@ -267,14 +300,39 @@ export default function AuditoriaFinancieraPage() {
         return ms != null && ms < hace7dias
       })
 
+      // ── Actividad reciente ─────────────────────────────────────────────────
+      const actividadReciente = {
+        ultimoDepStorkhub: depositosPendientes
+          .filter((d) => d.motorizadoUid === mot.authUid && d.destinatario === 'storkhub')
+          .sort((a, b) => toMs(b.creadoAt) - toMs(a.creadoAt))[0]?.creadoAt ?? null,
+        ultimoDepComercio: depositosPendientes
+          .filter((d) => d.motorizadoUid === mot.authUid && d.destinatario !== 'storkhub')
+          .sort((a, b) => toMs(b.creadoAt) - toMs(a.creadoAt))[0]?.creadoAt ?? null,
+        ultimoAdelanto: movimientos
+          .filter((m) => m.motorizadoId === mot.id && m.tipo === 'adelanto_motorizado')
+          .sort((a, b) => toMs(b.at) - toMs(a.at))[0]?.at ?? null,
+        ultimoGasto: movimientos
+          .filter((m) => m.motorizadoId === mot.id && (m.tipo === 'gasto_aprobado' || m.tipo === 'gasto_operativo_aprobado'))
+          .sort((a, b) => toMs(b.at) - toMs(a.at))[0]?.at ?? null,
+        ultimoSaldo: saldosMot.sort((a, b) => toMs(b.creadoAt) - toMs(a.creadoAt))[0]?.creadoAt ?? null,
+      }
+
       // ── Referencias técnicas del ledger ────────────────────────────────────
       const comisionLedger = calcularComisionPendienteMotorizado(movimientos, mot.id)
       const deudaLedger    = calcularDeudaOperativaMotorizado(movimientos, mot.id)
 
       // ── Alertas con severidad ──────────────────────────────────────────────
-      type Alerta = { msg: string; nivel: 'alto' | 'medio' | 'bajo'; detalle?: string }
+      type Alerta = { msg: string; nivel: 'alto' | 'medio' | 'bajo'; detalle?: string; diasDesde?: number }
       const alertas: Alerta[] = []
 
+      // Alto: acumulación de fondos elevados en ambos destinos
+      if (pendienteStorkhub > 500 && pendienteComercio > 500) {
+        alertas.push({
+          msg: 'Motorizado mantiene fondos elevados bajo custodia',
+          nivel: 'alto',
+          detalle: `Pendiente StorkHub: ${fmt(pendienteStorkhub)} · Pendiente Comercio: ${fmt(pendienteComercio)} · Total bajo custodia: ${fmt(pendienteStorkhub + pendienteComercio)}`,
+        })
+      }
       // Alto: fondos StorkHub pendientes > C$500
       if (pendienteStorkhub > 500) {
         alertas.push({ msg: 'Fondos StorkHub pendientes superiores a C$500', nivel: 'alto' })
@@ -285,11 +343,11 @@ export default function AuditoriaFinancieraPage() {
       }
       // Medio: saldo a cargo activo
       if (saldosACargoOp > 0) {
-        alertas.push({ msg: 'Motorizado mantiene deuda activa con StorkHub', nivel: 'medio' })
+        alertas.push({ msg: 'Motorizado mantiene deuda activa con StorkHub', nivel: 'medio', diasDesde: diasSaldo })
       }
       // Medio: adelantos sin regularizar
       if (adelantosActivos > 0) {
-        alertas.push({ msg: 'Adelantos pendientes de regularización', nivel: 'medio' })
+        alertas.push({ msg: 'Adelantos pendientes de regularización', nivel: 'medio', diasDesde: diasAdelanto })
       }
       // Medio: fondos con más de 7 días sin confirmar
       if (hayDepositosAncianos) {
@@ -305,7 +363,7 @@ export default function AuditoriaFinancieraPage() {
       }
       // Bajo: gastos operativos pendientes de compensar
       if (gastosActivos > 0) {
-        alertas.push({ msg: 'Gastos operativos pendientes de compensación', nivel: 'bajo' })
+        alertas.push({ msg: 'Gastos operativos pendientes de compensación', nivel: 'bajo', diasDesde: diasGasto })
       }
       // Bajo: movimientos sin cuentas contables
       const movsMot = movimientos.filter((m) => m.estado !== 'anulado' && m.motorizadoId === mot.id)
@@ -332,6 +390,7 @@ export default function AuditoriaFinancieraPage() {
         comisionLedger,
         deudaLedger,
         alertas,
+        actividadReciente,
       }
     }).sort((a, b) => {
       const peso = (al: { nivel: 'alto' | 'medio' | 'bajo' }) =>
@@ -682,7 +741,7 @@ export default function AuditoriaFinancieraPage() {
                           </td>
                         </tr>
                       )}
-                      {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, gastosActivos, pendienteStorkhub, pendienteComercio, comisionLedger, deudaLedger, alertas }) => {
+                      {auditFiltrado.map(({ mot, saldosACargoOp, adelantosActivos, gastosActivos, pendienteStorkhub, pendienteComercio, comisionLedger, deudaLedger, alertas, actividadReciente }) => {
                         const isExpanded = expandedMotId === mot.id
                         const saldosMot = saldos.filter((s) => s.motorizadoId === mot.id)
                         const adelantosMot = movimientos.filter(
@@ -937,12 +996,38 @@ export default function AuditoriaFinancieraPage() {
                                                   <span className="text-[11px] text-gray-500 mt-0.5 font-mono">{a.detalle}</span>
                                                 )}
                                                 <span className="text-[11px] text-gray-400 uppercase tracking-wide mt-0.5">Riesgo {a.nivel}</span>
+                                                {a.diasDesde != null && (
+                                                  <span className="text-[11px] text-gray-400 mt-0.5">
+                                                    Hace {a.diasDesde} {a.diasDesde === 1 ? 'día' : 'días'}
+                                                  </span>
+                                                )}
                                               </div>
                                             </div>
                                           ))}
                                         </div>
                                       </div>
                                     )}
+
+                                    {/* Sección 3b: Actividad reciente */}
+                                    <div className="rounded-xl border border-gray-100 bg-white px-4 py-3">
+                                      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Actividad reciente</p>
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs">
+                                        {[
+                                          { label: 'Último depósito StorkHub', val: actividadReciente.ultimoDepStorkhub },
+                                          { label: 'Último depósito comercio', val: actividadReciente.ultimoDepComercio },
+                                          { label: 'Último adelanto',          val: actividadReciente.ultimoAdelanto },
+                                          { label: 'Último gasto operativo',   val: actividadReciente.ultimoGasto },
+                                          { label: 'Último saldo a cargo',     val: actividadReciente.ultimoSaldo },
+                                        ].map(({ label, val }) => (
+                                          <div key={label} className="flex items-center justify-between gap-2 py-0.5 border-b border-gray-50">
+                                            <span className="text-gray-400">{label}</span>
+                                            <span className={`font-semibold ${val ? 'text-gray-700' : 'text-gray-300'}`}>
+                                              {fmtFechaCorta(val)}
+                                            </span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
 
                                     {/* Sección 4: Estado financiero registrado */}
                                     <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3">
