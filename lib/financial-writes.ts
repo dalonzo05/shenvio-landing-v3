@@ -245,22 +245,26 @@ export async function crearSaldoCargo(params: {
 
   const ref = await addDoc(collection(db, 'saldos_cargo_motorizado'), saldoData)
 
-  // Las cuentas varían según el tipo de saldo
-  const cuentasMovimiento: Cuentas | undefined =
-    tipo === 'adelanto'
-      ? { origen: cuentas.efectivoEnPoder(motorizadoId), destino: cuentas.deudaMotorizado(motorizadoId) }
-      : tipo === 'deposito_no_realizado'
-      ? { origen: cuentas.deudaMotorizado(motorizadoId), destino: cuentas.banco }
-      : undefined // ajuste_manual y otro no tienen cuentas predefinidas
+  // 'deposito_no_realizado' NO emite movimiento de ledger aquí.
+  // El movimiento ya fue registrado por el llamador (convertirDepositoEnDeuda)
+  // como 'deposito_convertido_en_deuda': efectivo_en_poder → deuda_motorizado.
+  // Emitir un segundo movimiento (deuda_motorizado → banco) sería incorrecto:
+  // cancelaría la deuda y registraría un ingreso bancario que nunca ocurrió.
+  if (tipo !== 'deposito_no_realizado') {
+    const cuentasMovimiento: Cuentas | undefined =
+      tipo === 'adelanto'
+        ? { origen: cuentas.efectivoEnPoder(motorizadoId), destino: cuentas.deudaMotorizado(motorizadoId) }
+        : undefined // ajuste_manual y otro no tienen cuentas predefinidas
 
-  await registrarMovimiento(
-    'saldo_creado',
-    monto,
-    operadorId,
-    `Saldo a cargo (${tipo}) · ${motorizadoNombre}`,
-    { motorizadoId, saldoId: ref.id, ...(depositoId ? { depositoId } : {}) },
-    { cuentas: cuentasMovimiento }
-  )
+    await registrarMovimiento(
+      'saldo_creado',
+      monto,
+      operadorId,
+      `Saldo a cargo (${tipo}) · ${motorizadoNombre}`,
+      { motorizadoId, saldoId: ref.id, ...(depositoId ? { depositoId } : {}) },
+      { cuentas: cuentasMovimiento }
+    )
+  }
 
   return ref.id
 }
