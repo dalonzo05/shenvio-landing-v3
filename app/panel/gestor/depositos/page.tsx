@@ -654,16 +654,30 @@ export default function DepositosPage() {
     return [...map.entries()].map(([id, nombre]) => ({ id, nombre }))
   }, [ordenesConDeposito])
 
+  // ── Helper: obtener el doc ID canónico del motorizado ────────────────────
+  // Las cuentas del ledger (efectivo_en_poder, deuda_motorizado, etc.) siempre
+  // deben usar el Firestore doc ID de la colección `motorizado`, nunca el authUid.
+  // `asignacion.motorizadoId` en solicitudes_envio puede contener el authUid en
+  // docs antiguos, por lo que siempre resolvemos desde el authUid hacia el doc ID.
+  async function resolverMotorizadoDocId(authUid: string): Promise<string> {
+    const snap = await getDocs(query(collection(db, 'motorizado'), where('authUid', '==', authUid)))
+    return snap.docs[0]?.id ?? authUid
+  }
+
   // ── Confirmar depósito ─────────────────────────────────────────────────────
 
   async function confirmarStorkhub(ordenes: Solicitud[], motId: string, motNombre: string, boucherFile: File) {
+    // Resolver el doc ID canónico del motorizado (motId puede ser authUid en docs antiguos)
+    const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
+    const motDocId = await resolverMotorizadoDocId(motAuthUid)
+
     const depositoRef = doc(collection(db, 'ordenes_deposito'))
     const depositoId = depositoRef.id
     const blob = await compressImage(boucherFile)
     const { url, pathStorage } = await uploadDepositoBoucher(depositoId, blob)
-    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motId }
+    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
     const montoBruto = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
-    const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motId)
+    const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motDocId)
     const gastosDescontados = gastosDeMotorizado.reduce((s, g) => s + g.monto, 0)
     const montoTotal = Math.max(0, montoBruto - gastosDescontados)
     await setDoc(depositoRef, {
@@ -674,7 +688,7 @@ export default function DepositosPage() {
       destinatarioId: 'storkhub',
       destinatarioNombre: 'Storkhub',
       cuentasDestino: [],
-      motorizadoUid: motId,
+      motorizadoUid: motAuthUid,
       motorizadoNombre: motNombre,
       solicitudIds: ordenes.map((o) => o.id),
       montoTotal,
@@ -695,20 +709,24 @@ export default function DepositosPage() {
     await registrarMovimiento('deposito_efectivo_storkhub', montoTotal,
       auth.currentUser?.uid ?? '',
       `Gestor confirmó depósito Storkhub · ${motNombre}`,
-      { depositoId, motorizadoId: motId },
+      { depositoId, motorizadoId: motDocId },
       {
-        cuentas: { origen: cuentas.efectivoEnPoder(motId), destino: cuentas.banco },
+        cuentas: { origen: cuentas.efectivoEnPoder(motDocId), destino: cuentas.banco },
         propietario: 'storkhub',
       }
     )
   }
 
   async function confirmarComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File) {
+    // Resolver el doc ID canónico del motorizado
+    const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
+    const motDocId = await resolverMotorizadoDocId(motAuthUid)
+
     const depositoRef = doc(collection(db, 'ordenes_deposito'))
     const depositoId = depositoRef.id
     const blob = await compressImage(boucherFile)
     const { url, pathStorage } = await uploadDepositoBoucher(depositoId, blob)
-    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motId }
+    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
     const montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAlComercio, 0)
     await setDoc(depositoRef, {
       creadoAt: serverTimestamp(),
@@ -718,7 +736,7 @@ export default function DepositosPage() {
       destinatarioId: comercioUid,
       destinatarioNombre: comercioNombre,
       cuentasDestino: [],
-      motorizadoUid: motId,
+      motorizadoUid: motAuthUid,
       motorizadoNombre: motNombre,
       solicitudIds: ordenes.map((o) => o.id),
       montoTotal,
@@ -736,9 +754,9 @@ export default function DepositosPage() {
     await registrarMovimiento('deposito_efectivo_comercio', montoTotal,
       auth.currentUser?.uid ?? '',
       `Gestor confirmó depósito comercio ${comercioNombre} · ${motNombre}`,
-      { depositoId, motorizadoId: motId, comercioId: comercioUid },
+      { depositoId, motorizadoId: motDocId, comercioId: comercioUid },
       {
-        cuentas: { origen: cuentas.efectivoEnPoder(motId), destino: cuentas.saldoComercio(comercioUid) },
+        cuentas: { origen: cuentas.efectivoEnPoder(motDocId), destino: cuentas.saldoComercio(comercioUid) },
         propietario: `comercio:${comercioUid}`,
       }
     )
@@ -749,6 +767,9 @@ export default function DepositosPage() {
   async function confirmarDepositoExistente(dep: DepositoOrderDoc) {
     setConfirmandoId(dep.id)
     try {
+      // dep.motorizadoUid es el authUid; resolvemos el doc ID para las cuentas del ledger
+      const motDocId = await resolverMotorizadoDocId(dep.motorizadoUid)
+
       const { doc: docRef } = await import('firebase/firestore')
       const ref = docRef(db, 'ordenes_deposito', dep.id)
       const b = writeBatch(db)
@@ -778,10 +799,10 @@ export default function DepositosPage() {
         dep.montoTotal,
         auth.currentUser?.uid ?? '',
         `Depósito confirmado · ${dep.destinatarioNombre} · ${dep.motorizadoNombre}`,
-        { depositoId: dep.id, motorizadoId: dep.motorizadoUid },
+        { depositoId: dep.id, motorizadoId: motDocId },
         {
           cuentas: {
-            origen: cuentas.efectivoEnPoder(dep.motorizadoUid),
+            origen: cuentas.efectivoEnPoder(motDocId),
             destino: _esStorkhub ? cuentas.banco : cuentas.saldoComercio(dep.destinatarioId ?? dep.destinatarioNombre),
           },
           propietario: _esStorkhub ? 'storkhub' : `comercio:${dep.destinatarioId ?? dep.destinatarioNombre}`,
@@ -861,6 +882,8 @@ export default function DepositosPage() {
     try {
       const ordenes = gm.storkhub.ordenes
       const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid || gm.motorizadoId
+      // Resolver el doc ID canónico para cuentas del ledger
+      const motDocId = await resolverMotorizadoDocId(motAuthUid)
       const monto = gm.storkhub.total  // neto
 
       // 1. Crear ordenes_deposito (convertirDepositoEnDeuda lo requiere existente)
@@ -879,7 +902,7 @@ export default function DepositosPage() {
         montoTotal: monto,
         montoBruto: gm.storkhub.totalBruto,
         gastosDescontados: gm.storkhub.gastosDeducibles,
-        gastosIds: gastosAprobados.filter((g) => g.motorizadoId === gm.motorizadoId).map((g) => g.id),
+        gastosIds: gastosAprobados.filter((g) => g.motorizadoId === motDocId).map((g) => g.id),
       })
 
       // 2. Convertir en deuda
@@ -888,7 +911,7 @@ export default function DepositosPage() {
         solicitudIds: ordenes.map((o) => o.id),
         destinatario: 'storkhub',
         monto,
-        motorizadoId: gm.motorizadoId,
+        motorizadoId: motDocId,
         motorizadoUid: motAuthUid,
         motorizadoNombre: gm.motorizadoNombre,
         nota: motivo,
