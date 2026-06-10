@@ -65,6 +65,24 @@ type DepositoPendiente = {
 
 type Movimiento = MovimientoFinanciero & { id: string }
 
+// Campos mínimos de solicitudes_envio necesarios para calcular depósitos pendientes
+type OrdenEntregada = {
+  id: string
+  asignacion?: { motorizadoId?: string; motorizadoAuthUid?: string }
+  registro?: {
+    deposito?: {
+      confirmadoComercio?: boolean
+      comercioDepositoId?: string
+      confirmadoStorkhub?: boolean
+      storkhubDepositoId?: string
+    }
+  }
+  cobroContraEntrega?: { aplica?: boolean; monto?: number }
+  confirmacion?: { precioFinalCordobas?: number }
+  pagoDelivery?: { quienPaga?: string; deducirDelCobroContraEntrega?: boolean }
+  tipoCliente?: string
+}
+
 type Tab = 'resumen' | 'motorizados' | 'movimientos' | 'issues'
 
 // ─── Formato ──────────────────────────────────────────────────────────────────
@@ -101,6 +119,23 @@ function diasTranscurridos(val: unknown): number | undefined {
 }
 
 const UMBRAL_DIFERENCIA = 0.01 // diferencia mínima para marcar como discrepancia
+
+/** Calcula montos pendientes de depósito de una solicitud entregada (misma lógica que panel de depósitos) */
+function calcDeposito(s: OrdenEntregada): { totalAlComercio: number; totalAStorkhub: number } {
+  const ceAplica = !!s.cobroContraEntrega?.aplica
+  const montoProducto = ceAplica ? (s.cobroContraEntrega?.monto || 0) : 0
+  const precioDelivery = s.confirmacion?.precioFinalCordobas || 0
+  const quienPaga = s.pagoDelivery?.quienPaga || ''
+  const deducir = !!s.pagoDelivery?.deducirDelCobroContraEntrega
+  const esPorTransferencia = quienPaga === 'transferencia'
+  const esCredito = s.tipoCliente === 'credito' || quienPaga === 'credito_semanal'
+  const motorizadoRecaudeDelivery = !esPorTransferencia && !esCredito && precioDelivery > 0
+  const productoNeto = deducir ? Math.max(0, montoProducto - precioDelivery) : montoProducto
+  return {
+    totalAlComercio: productoNeto,
+    totalAStorkhub: esPorTransferencia || esCredito ? 0 : (motorizadoRecaudeDelivery ? precioDelivery : 0),
+  }
+}
 
 // ─── Componentes menores ──────────────────────────────────────────────────────
 
@@ -142,6 +177,8 @@ export default function AuditoriaFinancieraPage() {
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [saldos, setSaldos] = useState<SaldoCargo[]>([])
   const [depositosPendientes, setDepositosPendientes] = useState<DepositoPendiente[]>([])
+  // solicitudes_envio entregadas: fuente de verdad para pendienteComercio / pendienteStorkhub
+  const [ordenesEntregadas, setOrdenesEntregadas] = useState<OrdenEntregada[]>([])
 
   // ── Filtros ───────────────────────────────────────────────────────────────
   const [filtroMotorizado, setFiltroMotorizado] = useState<string>('todos')
@@ -169,7 +206,7 @@ export default function AuditoriaFinancieraPage() {
   const cargarDatos = useCallback(async () => {
     setLoading(true)
     try {
-      const [movsSnap, motSnap, saldosSnap, depSnap] = await Promise.all([
+      const [movsSnap, motSnap, saldosSnap, depSnap, ordenesSnap] = await Promise.all([
         getDocs(collection(db, 'movimientos_financieros')),
         getDocs(collection(db, 'motorizado')),
         getDocs(query(
@@ -179,6 +216,11 @@ export default function AuditoriaFinancieraPage() {
         getDocs(query(
           collection(db, 'ordenes_deposito'),
           where('estado', 'in', ['pendiente_boucher', 'en_revision']),
+        )),
+        // Fuente de verdad para montos pendientes: solicitudes entregadas aún no depositadas
+        getDocs(query(
+          collection(db, 'solicitudes_envio'),
+          where('estado', '==', 'entregado'),
         )),
       ])
 
@@ -221,6 +263,9 @@ export default function AuditoriaFinancieraPage() {
           }
         }),
       )
+      setOrdenesEntregadas(
+        ordenesSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<OrdenEntregada, 'id'>) })),
+      )
       setLoadedAt(new Date())
     } catch (err) {
       console.error('[auditoria] Error cargando datos:', err)
@@ -244,14 +289,28 @@ export default function AuditoriaFinancieraPage() {
       saldosPorMot[s.motorizadoId] = (saldosPorMot[s.motorizadoId] ?? 0) + s.saldoPendiente
     })
 
-    // ── Depósitos pendientes por destino (motorizadoUid) ───────────────────
-    const depsPorUidStorkhub: Record<string, number> = {}
-    const depsPorUidComercio: Record<string, number> = {}
-    depositosPendientes.forEach((d) => {
-      if (d.destinatario === 'storkhub') {
-        depsPorUidStorkhub[d.motorizadoUid] = (depsPorUidStorkhub[d.motorizadoUid] ?? 0) + d.montoTotal
-      } else {
-        depsPorUidComercio[d.motorizadoUid] = (depsPorUidComercio[d.motorizadoUid] ?? 0) + d.montoTotal
+    // ── Montos pendientes calculados desde solicitudes_envio (fuente de verdad) ─
+    // Esto captura TANTO órdenes sin ordenes_deposito aún (puro pendiente) COMO
+    // las que tienen ordenes_deposito en revisión — evitando la ceguera del panel
+    // cuando el motorizado no ha subido boucher todavía.
+    const pendienteStorkhubMap: Record<string, number> = {}
+    const pendienteComercioMap: Record<string, number> = {}
+
+    // Mapa inverso doc ID → authUid para órdenes antiguas sin motorizadoAuthUid
+    const docIdToAuthUid: Record<string, string> = {}
+    motorizados.forEach((m) => { if (m.authUid) docIdToAuthUid[m.id] = m.authUid })
+
+    ordenesEntregadas.forEach((o) => {
+      const authUid = o.asignacion?.motorizadoAuthUid
+        || docIdToAuthUid[o.asignacion?.motorizadoId ?? '']
+      if (!authUid) return
+      const dep = calcDeposito(o)
+      const depoR = o.registro?.deposito
+      if (dep.totalAStorkhub > 0 && !depoR?.confirmadoStorkhub && !depoR?.storkhubDepositoId) {
+        pendienteStorkhubMap[authUid] = (pendienteStorkhubMap[authUid] ?? 0) + dep.totalAStorkhub
+      }
+      if (dep.totalAlComercio > 0 && !depoR?.confirmadoComercio && !depoR?.comercioDepositoId) {
+        pendienteComercioMap[authUid] = (pendienteComercioMap[authUid] ?? 0) + dep.totalAlComercio
       }
     })
 
@@ -289,9 +348,9 @@ export default function AuditoriaFinancieraPage() {
         return d != null && (max == null || d > max) ? d : max
       }, undefined)
 
-      // ── Dinero pendiente de depositar ──────────────────────────────────────
-      const pendienteStorkhub = depsPorUidStorkhub[mot.authUid] ?? 0
-      const pendienteComercio = depsPorUidComercio[mot.authUid] ?? 0
+      // ── Dinero pendiente de depositar (calculado desde solicitudes_envio) ────
+      const pendienteStorkhub = pendienteStorkhubMap[mot.authUid] ?? 0
+      const pendienteComercio = pendienteComercioMap[mot.authUid] ?? 0
 
       // ── Antigüedad de depósitos (cualquier destino) ────────────────────────
       const depsMot = depositosPendientes.filter((d) => d.motorizadoUid === mot.authUid)
@@ -399,7 +458,7 @@ export default function AuditoriaFinancieraPage() {
       const pB = b.alertas.reduce((s, al) => s + peso(al), 0)
       return pB - pA || b.pendienteStorkhub - a.pendienteStorkhub
     })
-  }, [motorizados, movimientos, saldos, depositosPendientes])
+  }, [motorizados, movimientos, saldos, depositosPendientes, ordenesEntregadas])
 
   const auditFiltrado = useMemo(() => {
     let list = auditMotorizados
