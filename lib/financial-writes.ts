@@ -505,14 +505,18 @@ export async function revertirConversionEnDeuda(params: {
 }): Promise<void> {
   const { saldoId, depositoId, operadorId } = params
 
-  // Leer el depósito para obtener solicitudIds y destinatario
+  // Leer el depósito para obtener solicitudIds, destinatario y si tenía boucher real
   const depSnap = await getDoc(doc(db, 'ordenes_deposito', depositoId))
   if (!depSnap.exists()) throw new Error(`ordenes_deposito/${depositoId} no encontrado`)
   const depData = depSnap.data() as any
   const solicitudIds: string[] = depData.solicitudIds ?? []
   const destinatario: 'storkhub' | 'comercio' = depData.destinatario ?? 'storkhub'
 
-  // Batch: anular saldo + restaurar depósito + limpiar solicitudes
+  // Si el depósito tiene boucher (url o pathStorage) vino de "Por revisar" (Caso B).
+  // Si no tiene boucher, fue creado directamente desde "Pendientes" para la conversión (Caso A).
+  // Esta distinción determina qué fuente de datos debe quedar activa tras el revert.
+  const tieneBoucher = !!(depData.boucher?.url || depData.boucher?.pathStorage)
+
   const b = writeBatch(db)
 
   b.update(doc(db, 'saldos_cargo_motorizado', saldoId), {
@@ -521,31 +525,44 @@ export async function revertirConversionEnDeuda(params: {
     updatedAt: serverTimestamp(),
   })
 
-  b.update(doc(db, 'ordenes_deposito', depositoId), {
-    estado: 'en_revision',
-    saldoId: deleteField(),
-    notaConversion: deleteField(),
-    updatedAt: serverTimestamp(),
-  })
-
-  // Campos a limpiar según destinatario
-  const fieldKey = destinatario === 'storkhub'
-    ? 'registro.deposito.confirmadoStorkhub'
-    : 'registro.deposito.confirmadoComercio'
-  const atKey = destinatario === 'storkhub'
-    ? 'registro.deposito.confirmadoStorkhubAt'
-    : 'registro.deposito.confirmadoComercioAt'
-  const idKey = destinatario === 'storkhub'
-    ? 'registro.deposito.storkhubDepositoId'
-    : 'registro.deposito.comercioDepositoId'
-
-  solicitudIds.forEach((sid) => {
-    b.update(doc(db, 'solicitudes_envio', sid), {
-      [fieldKey]: deleteField(),
-      [atKey]: deleteField(),
-      [idKey]: deleteField(),
+  if (tieneBoucher) {
+    // Caso B: tenía boucher → el depósito vuelve a "Por revisar".
+    // Las solicitudes NO se liberan: si se limpiaran, el monto aparecería
+    // simultáneamente en "Pendientes" y en "Por revisar".
+    b.update(doc(db, 'ordenes_deposito', depositoId), {
+      estado: 'en_revision',
+      saldoId: deleteField(),
+      notaConversion: deleteField(),
+      updatedAt: serverTimestamp(),
     })
-  })
+  } else {
+    // Caso A: sin boucher → el ordenes_deposito se anula (desaparece de "Por revisar")
+    // y se liberan las solicitudes para que vuelvan a aparecer en "Pendientes".
+    b.update(doc(db, 'ordenes_deposito', depositoId), {
+      estado: 'anulado',
+      saldoId: deleteField(),
+      notaConversion: deleteField(),
+      updatedAt: serverTimestamp(),
+    })
+
+    const fieldKey = destinatario === 'storkhub'
+      ? 'registro.deposito.confirmadoStorkhub'
+      : 'registro.deposito.confirmadoComercio'
+    const atKey = destinatario === 'storkhub'
+      ? 'registro.deposito.confirmadoStorkhubAt'
+      : 'registro.deposito.confirmadoComercioAt'
+    const idKey = destinatario === 'storkhub'
+      ? 'registro.deposito.storkhubDepositoId'
+      : 'registro.deposito.comercioDepositoId'
+
+    solicitudIds.forEach((sid) => {
+      b.update(doc(db, 'solicitudes_envio', sid), {
+        [fieldKey]: deleteField(),
+        [atKey]: deleteField(),
+        [idKey]: deleteField(),
+      })
+    })
+  }
 
   await b.commit()
 

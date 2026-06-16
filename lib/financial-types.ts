@@ -14,11 +14,12 @@ export type TipoDeposito =
 
 // ─── Estados del depósito ──────────────────────────────────────────────────────
 export type EstadoDeposito =
-  | 'pendiente_boucher' // creado, esperando que motorizado suba boucher
-  | 'en_revision'       // boucher subido, esperando al gestor
-  | 'confirmado'        // gestor confirmó
-  | 'rechazado'         // gestor rechazó
+  | 'pendiente_boucher'   // creado, esperando que motorizado suba boucher
+  | 'en_revision'         // boucher subido, esperando al gestor
+  | 'confirmado'          // gestor confirmó
+  | 'rechazado'           // gestor rechazó
   | 'convertido_en_deuda' // gestor convirtió el pendiente en saldo a cargo del motorizado
+  | 'anulado'             // revertido por error (creado desde Pendientes, sin boucher real)
 
 // ─── Tipos de cartera comercial ───────────────────────────────────────────────
 // Más flexible que solo 'contado' | 'crédito', permite convenios futuros.
