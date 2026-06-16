@@ -61,6 +61,7 @@ const BADGE_ESTADO: Record<EstadoSaldo, string> = {
   abonado_parcial: 'bg-orange-100 text-orange-700',
   pagado: 'bg-green-100 text-green-700',
   anulado: 'bg-gray-100 text-gray-500',
+  condonado: 'bg-purple-100 text-purple-700',
 }
 
 const LABEL_ESTADO: Record<EstadoSaldo, string> = {
@@ -68,6 +69,7 @@ const LABEL_ESTADO: Record<EstadoSaldo, string> = {
   abonado_parcial: 'Abonado parcial',
   pagado: 'Pagado',
   anulado: 'Anulado',
+  condonado: 'Condonado',
 }
 
 const LABEL_ORIGEN_SALDO: Record<string, string> = {
@@ -263,6 +265,9 @@ export default function SaldosPage() {
       await condonarDeudaMotorizado({
         saldoId: saldo.id,
         depositoId: saldo.depositoId,
+        monto: saldo.saldoPendiente,
+        motorizadoId: saldo.motorizadoId,
+        motorizadoNombre: saldo.motorizadoNombre,
         operadorId: auth.currentUser?.uid ?? '',
         nota: motivo.trim(),
       })
@@ -326,7 +331,7 @@ export default function SaldosPage() {
           ))}
         </select>
 
-        {(['todos', 'pendiente', 'abonado_parcial', 'pagado', 'anulado'] as const).map((e) => (
+        {(['todos', 'pendiente', 'abonado_parcial', 'pagado', 'anulado', 'condonado'] as const).map((e) => (
           <button
             key={e}
             onClick={() => setFiltroEstado(e)}

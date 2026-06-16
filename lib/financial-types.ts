@@ -60,12 +60,13 @@ export const cuentas = {
   transitorioProducto:(comercioId: string)   => `transitorio_producto:${comercioId}`,
 
   // StorkHub (cuentas estáticas)
-  ingresos:      'ingresos_storkhub'  as const,
-  banco:         'banco_storkhub'     as const,
-  caja:          'caja_storkhub'      as const, // efectivo en mano (adelantos, pagos en cash)
-  gastosOp:      'gastos_operativos'  as const,
+  ingresos:              'ingresos_storkhub'      as const,
+  banco:                 'banco_storkhub'         as const,
+  caja:                  'caja_storkhub'          as const, // efectivo en mano (adelantos, pagos en cash)
+  gastosOp:              'gastos_operativos'      as const,
+  perdidaCondonaciones:  'perdida_condonaciones'  as const, // pérdidas asumidas por condonar deudas
   // Origen/destino para dinero que entra o sale del sistema (ej: comercio paga en efectivo)
-  externo:       'externo'            as const,
+  externo:               'externo'                as const,
 } as const
 
 // ─── Tipos de movimiento financiero ───────────────────────────────────────────
@@ -135,6 +136,7 @@ export type TipoMovimiento =
   // ── Ajustes ─────────────────────────────────────────────────────────────────
   | 'ajuste_manual'                    // corrección contable libre (requiere nota)
   | 'anulacion'                        // contra-movimiento para revertir otro movimiento
+  | 'deuda_condonada'                  // StorkHub absorbe pérdida: deuda_motorizado → perdida_condonaciones
 
 // ─── Movimiento financiero (colección movimientos_financieros) ─────────────────
 // Fase 1: ledger como auditoría enriquecida. Los campos cuentaOrigen/cuentaDestino
@@ -263,7 +265,7 @@ export type TipoSaldo =
   | 'ajuste_manual'
   | 'otro'
 
-export type EstadoSaldo = 'pendiente' | 'abonado_parcial' | 'pagado' | 'anulado'
+export type EstadoSaldo = 'pendiente' | 'abonado_parcial' | 'pagado' | 'anulado' | 'condonado'
 
 export type OrigenSaldo = 'deposito' | 'liquidacion' | 'manual'
 

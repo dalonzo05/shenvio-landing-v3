@@ -172,6 +172,7 @@ const TIPOS_QUE_REQUIEREN_CUENTAS = new Set<string>([
   'liquidacion_pago_efectivo',
   'liquidacion_pago_transferencia',
   'abono_deuda_motorizado',
+  'deuda_condonada',
 ])
 
 /** Movimientos que deberían tener cuentas pero no las tienen */

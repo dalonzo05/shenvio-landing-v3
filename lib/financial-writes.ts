@@ -594,43 +594,46 @@ export async function revertirConversionEnDeuda(params: {
  * Condona (perdona) una deuda del motorizado originada en depósito no realizado.
  * Usar cuando StorkHub decide absorber la pérdida.
  *
- * - Anula saldo_cargo_motorizado
- * - Anula el movimiento deposito_convertido_en_deuda del ledger → deuda = C$0
- * - NO toca solicitudes_envio (el depósito fue gestionado, no vuelve a pendiente)
- * - ordenes_deposito queda como registro histórico (convertido_en_deuda)
+ * - El saldo queda con estado 'condonado' (no 'anulado' — la deuda sí existió)
+ * - deposito_convertido_en_deuda se mantiene activo como huella histórica
+ * - Crea movimiento 'deuda_condonada': deuda_motorizado → perdida_condonaciones
+ * - ordenes_deposito recibe señal condonado:true para display histórico
  */
 export async function condonarDeudaMotorizado(params: {
   saldoId: string
   depositoId: string
+  monto: number
+  motorizadoId: string
+  motorizadoNombre: string
   operadorId: string
   nota?: string
 }): Promise<void> {
-  const { saldoId, depositoId, operadorId, nota } = params
+  const { saldoId, depositoId, monto, motorizadoId, motorizadoNombre, operadorId, nota } = params
 
   await updateDoc(doc(db, 'saldos_cargo_motorizado', saldoId), {
-    estado: 'anulado',
-    motivoAnulacion: 'condonado',
-    ...(nota ? { nota } : {}),
+    estado: 'condonado',
+    motivoCondonacion: nota ?? '',
     updatedAt: serverTimestamp(),
   })
 
-  const movsSnap = await getDocs(
-    query(collection(db, 'movimientos_financieros'), where('depositoId', '==', depositoId))
-  )
-  const activos = movsSnap.docs.filter((d) => {
-    const data = d.data() as any
-    return data.estado !== 'anulado' && data.tipo === 'deposito_convertido_en_deuda'
+  await updateDoc(doc(db, 'ordenes_deposito', depositoId), {
+    condonado: true,
+    notaCondonacion: nota ?? '',
+    updatedAt: serverTimestamp(),
   })
-  if (activos.length > 0) {
-    const b = writeBatch(db)
-    activos.forEach((d) => {
-      b.update(d.ref, {
-        estado: 'anulado',
-        anuladoAt: serverTimestamp(),
-        anuladoPorUid: operadorId,
-        motivoAnulacion: 'Deuda condonada',
-      })
-    })
-    await b.commit()
-  }
+
+  await registrarMovimiento(
+    'deuda_condonada',
+    monto,
+    operadorId,
+    `Deuda condonada · ${motorizadoNombre}${nota ? ` · ${nota}` : ''}`,
+    { motorizadoId, depositoId, saldoId },
+    {
+      cuentas: {
+        origen: cuentas.deudaMotorizado(motorizadoId),
+        destino: cuentas.perdidaCondonaciones,
+      },
+      propietario: 'storkhub',
+    }
+  )
 }
