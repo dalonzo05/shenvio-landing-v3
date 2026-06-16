@@ -1,7 +1,9 @@
 import {
   addDoc,
   collection,
+  deleteField,
   doc,
+  getDoc,
   getDocs,
   query,
   serverTimestamp,
@@ -483,4 +485,135 @@ export async function registrarAdelanto(params: {
   })
 
   return { movimientoId, saldoId }
+}
+
+// ─── Revertir conversión en deuda (depósito convertido por error) ─────────────
+
+/**
+ * Revierte completamente una conversión de depósito en deuda.
+ * Usar cuando el gestor convirtió por error.
+ *
+ * - Anula saldo_cargo_motorizado
+ * - Restaura ordenes_deposito a 'en_revision'
+ * - Limpia confirmación en solicitudes_envio → vuelven a aparecer como pendientes
+ * - Anula el movimiento deposito_convertido_en_deuda del ledger → deuda = C$0
+ */
+export async function revertirConversionEnDeuda(params: {
+  saldoId: string
+  depositoId: string
+  operadorId: string
+}): Promise<void> {
+  const { saldoId, depositoId, operadorId } = params
+
+  // Leer el depósito para obtener solicitudIds y destinatario
+  const depSnap = await getDoc(doc(db, 'ordenes_deposito', depositoId))
+  if (!depSnap.exists()) throw new Error(`ordenes_deposito/${depositoId} no encontrado`)
+  const depData = depSnap.data() as any
+  const solicitudIds: string[] = depData.solicitudIds ?? []
+  const destinatario: 'storkhub' | 'comercio' = depData.destinatario ?? 'storkhub'
+
+  // Batch: anular saldo + restaurar depósito + limpiar solicitudes
+  const b = writeBatch(db)
+
+  b.update(doc(db, 'saldos_cargo_motorizado', saldoId), {
+    estado: 'anulado',
+    motivoAnulacion: 'revertido_por_error',
+    updatedAt: serverTimestamp(),
+  })
+
+  b.update(doc(db, 'ordenes_deposito', depositoId), {
+    estado: 'en_revision',
+    saldoId: deleteField(),
+    notaConversion: deleteField(),
+    updatedAt: serverTimestamp(),
+  })
+
+  // Campos a limpiar según destinatario
+  const fieldKey = destinatario === 'storkhub'
+    ? 'registro.deposito.confirmadoStorkhub'
+    : 'registro.deposito.confirmadoComercio'
+  const atKey = destinatario === 'storkhub'
+    ? 'registro.deposito.confirmadoStorkhubAt'
+    : 'registro.deposito.confirmadoComercioAt'
+  const idKey = destinatario === 'storkhub'
+    ? 'registro.deposito.storkhubDepositoId'
+    : 'registro.deposito.comercioDepositoId'
+
+  solicitudIds.forEach((sid) => {
+    b.update(doc(db, 'solicitudes_envio', sid), {
+      [fieldKey]: deleteField(),
+      [atKey]: deleteField(),
+      [idKey]: deleteField(),
+    })
+  })
+
+  await b.commit()
+
+  // Anular movimientos del ledger vinculados al depósito
+  const movsSnap = await getDocs(
+    query(collection(db, 'movimientos_financieros'), where('depositoId', '==', depositoId))
+  )
+  const activos = movsSnap.docs.filter((d) => {
+    const data = d.data() as any
+    return data.estado !== 'anulado' && data.tipo === 'deposito_convertido_en_deuda'
+  })
+  if (activos.length > 0) {
+    const batch2 = writeBatch(db)
+    activos.forEach((d) => {
+      batch2.update(d.ref, {
+        estado: 'anulado',
+        anuladoAt: serverTimestamp(),
+        anuladoPorUid: operadorId,
+        motivoAnulacion: 'Conversión en deuda revertida por error',
+      })
+    })
+    await batch2.commit()
+  }
+}
+
+// ─── Condonar deuda del motorizado ────────────────────────────────────────────
+
+/**
+ * Condona (perdona) una deuda del motorizado originada en depósito no realizado.
+ * Usar cuando StorkHub decide absorber la pérdida.
+ *
+ * - Anula saldo_cargo_motorizado
+ * - Anula el movimiento deposito_convertido_en_deuda del ledger → deuda = C$0
+ * - NO toca solicitudes_envio (el depósito fue gestionado, no vuelve a pendiente)
+ * - ordenes_deposito queda como registro histórico (convertido_en_deuda)
+ */
+export async function condonarDeudaMotorizado(params: {
+  saldoId: string
+  depositoId: string
+  operadorId: string
+  nota?: string
+}): Promise<void> {
+  const { saldoId, depositoId, operadorId, nota } = params
+
+  await updateDoc(doc(db, 'saldos_cargo_motorizado', saldoId), {
+    estado: 'anulado',
+    motivoAnulacion: 'condonado',
+    ...(nota ? { nota } : {}),
+    updatedAt: serverTimestamp(),
+  })
+
+  const movsSnap = await getDocs(
+    query(collection(db, 'movimientos_financieros'), where('depositoId', '==', depositoId))
+  )
+  const activos = movsSnap.docs.filter((d) => {
+    const data = d.data() as any
+    return data.estado !== 'anulado' && data.tipo === 'deposito_convertido_en_deuda'
+  })
+  if (activos.length > 0) {
+    const b = writeBatch(db)
+    activos.forEach((d) => {
+      b.update(d.ref, {
+        estado: 'anulado',
+        anuladoAt: serverTimestamp(),
+        anuladoPorUid: operadorId,
+        motivoAnulacion: 'Deuda condonada',
+      })
+    })
+    await b.commit()
+  }
 }

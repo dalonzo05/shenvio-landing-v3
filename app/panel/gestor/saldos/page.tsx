@@ -8,7 +8,7 @@ import {
   orderBy,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
-import { registrarAbonoSaldo, anularSaldoCargo } from '@/lib/financial-writes'
+import { registrarAbonoSaldo, anularSaldoCargo, revertirConversionEnDeuda, condonarDeudaMotorizado } from '@/lib/financial-writes'
 import {
   LABELS_TIPO_SALDO,
   type SaldoCargoMotorizado,
@@ -90,6 +90,9 @@ export default function SaldosPage() {
   const [filtroMoto, setFiltroMoto] = useState('todos')
   const [filtroEstado, setFiltroEstado] = useState<EstadoSaldo | 'todos'>('pendiente')
   const [expandedId, setExpandedId] = useState<string | null>(null)
+
+  // Acción en curso (revertir / condonar)
+  const [procesandoId, setProcesandoId] = useState<string | null>(null)
 
   // Abono
   const [abonoId, setAbonoId] = useState<string | null>(null)
@@ -215,6 +218,59 @@ export default function SaldosPage() {
       setErrAbono(e?.message || 'Error al registrar abono')
     } finally {
       setSavingAbono(false)
+    }
+  }
+
+  async function handleRevertir(saldo: Saldo) {
+    if (!saldo.depositoId) return
+    const ok = window.confirm(
+      `¿Revertir conversión en deuda?\n\nMotorizado: ${saldo.motorizadoNombre}\nMonto: ${fmt(saldo.saldoPendiente)}\n\n` +
+      `Esto hará lo siguiente:\n` +
+      `• El saldo a cargo quedará anulado.\n` +
+      `• El depósito volverá a estado "En revisión".\n` +
+      `• Las solicitudes asociadas volverán a aparecer como pendientes de depósito.\n` +
+      `• Auditoría mostrará nuevamente el monto como pendiente.\n\n` +
+      `Usar solo si la conversión fue un error. Esta acción no se puede deshacer.`
+    )
+    if (!ok) return
+    setProcesandoId(saldo.id)
+    try {
+      await revertirConversionEnDeuda({
+        saldoId: saldo.id,
+        depositoId: saldo.depositoId,
+        operadorId: auth.currentUser?.uid ?? '',
+      })
+    } catch (e: any) {
+      console.error('Error revirtiendo conversión:', e)
+      alert('Error al revertir: ' + (e?.message ?? 'Error desconocido'))
+    } finally {
+      setProcesandoId(null)
+    }
+  }
+
+  async function handleCondonar(saldo: Saldo) {
+    if (!saldo.depositoId) return
+    const motivo = window.prompt(
+      `Condonar deuda — ${saldo.motorizadoNombre} (${fmt(saldo.saldoPendiente)})\n\n` +
+      `El monto NO se recuperará. Las solicitudes quedan cerradas.\n` +
+      `El depósito queda como registro histórico.\n\n` +
+      `Ingresa el motivo de la condonación (obligatorio):`
+    )
+    if (motivo === null) return // canceló
+    if (!motivo.trim()) { alert('Debes ingresar un motivo para condonar.'); return }
+    setProcesandoId(saldo.id)
+    try {
+      await condonarDeudaMotorizado({
+        saldoId: saldo.id,
+        depositoId: saldo.depositoId,
+        operadorId: auth.currentUser?.uid ?? '',
+        nota: motivo.trim(),
+      })
+    } catch (e: any) {
+      console.error('Error condonando deuda:', e)
+      alert('Error al condonar: ' + (e?.message ?? 'Error desconocido'))
+    } finally {
+      setProcesandoId(null)
     }
   }
 
@@ -559,12 +615,33 @@ export default function SaldosPage() {
                         >
                           + Registrar abono
                         </button>
-                        <button
-                          onClick={() => handleAnular(s)}
-                          className="text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition"
-                        >
-                          Anular
-                        </button>
+                        {s.tipo === 'deposito_no_realizado' && s.depositoId ? (
+                          <>
+                            <button
+                              onClick={() => handleRevertir(s)}
+                              disabled={procesandoId === s.id}
+                              title="El depósito vuelve a revisión y las solicitudes quedan pendientes"
+                              className="text-xs font-semibold px-3 py-2 rounded-lg border border-amber-300 text-amber-700 hover:bg-amber-50 transition disabled:opacity-40"
+                            >
+                              Revertir
+                            </button>
+                            <button
+                              onClick={() => handleCondonar(s)}
+                              disabled={procesandoId === s.id}
+                              title="StorkHub absorbe la pérdida. Las solicitudes no vuelven a pendiente."
+                              className="text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition disabled:opacity-40"
+                            >
+                              Condonar
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => handleAnular(s)}
+                            className="text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition"
+                          >
+                            Anular
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
