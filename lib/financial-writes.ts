@@ -6,6 +6,7 @@ import {
   getDoc,
   getDocs,
   query,
+  runTransaction,
   serverTimestamp,
   updateDoc,
   where,
@@ -22,6 +23,7 @@ import type {
   TipoSaldo,
   SaldoCargoMotorizado,
   AbonoSaldo,
+  MetodoAbono,
   OrigenSaldo,
   PropietarioEfectivo,
 } from './financial-types'
@@ -273,12 +275,13 @@ export async function crearSaldoCargo(params: {
 
 /**
  * Registra un abono (pago parcial o total) a un saldo a cargo.
+ * Usa runTransaction para que la actualización del saldo y la creación del
+ * movimiento sean atómicas: si una falla, ninguna se aplica.
  */
 export async function registrarAbonoSaldo(params: {
   saldoId: string
   montoAbono: number
-  saldoPendienteActual: number
-  metodo?: string
+  metodoAbono: MetodoAbono
   nota?: string
   operadorId: string
   motorizadoId: string
@@ -287,43 +290,57 @@ export async function registrarAbonoSaldo(params: {
   comprobantePath?: string
 }): Promise<void> {
   const {
-    saldoId, montoAbono, saldoPendienteActual, metodo, nota, operadorId,
+    saldoId, montoAbono, metodoAbono, nota, operadorId,
     motorizadoId, motorizadoNombre, comprobanteUrl, comprobantePath,
   } = params
 
-  const nuevoSaldo = Math.max(0, saldoPendienteActual - montoAbono)
-  const nuevoEstado = nuevoSaldo <= 0 ? 'pagado' : 'abonado_parcial'
+  const cuentaDestino: string =
+    metodoAbono === 'transferencia'          ? cuentas.banco :
+    /* descuento_liquidacion | ajuste_manual */ cuentas.recuperacionDeuda
 
-  const abono: AbonoSaldo = {
-    monto: montoAbono,
-    fecha: Timestamp.now(), // serverTimestamp() no puede usarse dentro de arrayUnion()
-    metodo: metodo ?? 'efectivo',
-    nota: nota ?? '',
-    creadoPorUid: operadorId,
-    ...(comprobanteUrl ? { comprobanteUrl } : {}),
-    ...(comprobantePath ? { comprobantePath } : {}),
-  }
+  const saldoRef = doc(db, 'saldos_cargo_motorizado', saldoId)
+  const movRef   = doc(collection(db, 'movimientos_financieros'))
 
-  await updateDoc(doc(db, 'saldos_cargo_motorizado', saldoId), {
-    saldoPendiente: nuevoSaldo,
-    estado: nuevoEstado,
-    abonos: arrayUnion(abono),
-    updatedAt: serverTimestamp(),
-  })
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(saldoRef)
+    if (!snap.exists()) throw new Error(`Saldo ${saldoId} no encontrado`)
 
-  await registrarMovimiento(
-    'abono_saldo',
-    montoAbono,
-    operadorId,
-    `Abono saldo · ${motorizadoNombre}`,
-    { motorizadoId, saldoId },
-    {
-      cuentas: {
-        origen: cuentas.comisionPendiente(motorizadoId),
-        destino: cuentas.deudaMotorizado(motorizadoId),
-      },
+    const pendienteActual = snap.data().saldoPendiente as number
+    const nuevoSaldo  = Math.max(0, pendienteActual - montoAbono)
+    const nuevoEstado = nuevoSaldo <= 0 ? 'pagado' : 'abonado_parcial'
+
+    const abono: AbonoSaldo = {
+      monto: montoAbono,
+      fecha: Timestamp.now(), // serverTimestamp() no puede usarse dentro de arrayUnion()
+      metodoAbono,
+      nota: nota ?? '',
+      creadoPorUid: operadorId,
+      ...(comprobanteUrl ? { comprobanteUrl } : {}),
+      ...(comprobantePath ? { comprobantePath } : {}),
     }
-  )
+
+    tx.update(saldoRef, {
+      saldoPendiente: nuevoSaldo,
+      estado: nuevoEstado,
+      abonos: arrayUnion(abono),
+      updatedAt: serverTimestamp(),
+    })
+
+    const movimiento: Omit<MovimientoFinanciero, 'id'> = {
+      tipo: 'abono_deuda_motorizado',
+      monto: montoAbono,
+      at: serverTimestamp(),
+      creadoPorUid: operadorId,
+      creadoPorRol: 'gestor',
+      descripcion: `Abono deuda (${metodoAbono}) · ${motorizadoNombre}`,
+      estado: 'activo',
+      cuentaOrigen:  cuentas.deudaMotorizado(motorizadoId),
+      cuentaDestino,
+      motorizadoId,
+      saldoId,
+    }
+    tx.set(movRef, movimiento)
+  })
 }
 
 /**

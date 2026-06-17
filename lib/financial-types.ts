@@ -65,6 +65,7 @@ export const cuentas = {
   caja:                  'caja_storkhub'          as const, // efectivo en mano (adelantos, pagos en cash)
   gastosOp:              'gastos_operativos'      as const,
   perdidaCondonaciones:  'perdida_condonaciones'  as const, // pérdidas asumidas por condonar deudas
+  recuperacionDeuda:     'recuperacion_deuda_liquidacion' as const, // deuda recuperada por descuento en liquidación
   // Origen/destino para dinero que entra o sale del sistema (ej: comercio paga en efectivo)
   externo:               'externo'                as const,
 } as const
@@ -126,7 +127,7 @@ export type TipoMovimiento =
   | 'liquidacion_pago_transferencia'   // comision_pendiente → externo
 
   // ── Saldos y deudas ─────────────────────────────────────────────────────────
-  | 'abono_deuda_motorizado'           // comision_pendiente → deuda_motorizado
+  | 'abono_deuda_motorizado'           // deuda_motorizado:{id} → banco_storkhub | recuperacion_deuda_liquidacion
   | 'aporte_empresa_gasto'             // gastos_operativos → comision_pendiente (empresa asume gasto)
 
   // ── Cobros comercios ────────────────────────────────────────────────────────
@@ -269,10 +270,12 @@ export type EstadoSaldo = 'pendiente' | 'abonado_parcial' | 'pagado' | 'anulado'
 
 export type OrigenSaldo = 'deposito' | 'liquidacion' | 'manual'
 
+export type MetodoAbono = 'descuento_liquidacion' | 'transferencia' | 'ajuste_manual'
+
 export interface AbonoSaldo {
   monto: number
   fecha: unknown
-  metodo?: string
+  metodoAbono: MetodoAbono
   nota?: string
   creadoPorUid: string
   comprobanteUrl?: string   // URL pública del comprobante/boucher subido a Storage

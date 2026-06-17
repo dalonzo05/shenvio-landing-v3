@@ -685,8 +685,7 @@ export default function LiquidacionesPage() {
         await registrarAbonoSaldo({
           saldoId: sid,
           montoAbono,
-          saldoPendienteActual: saldo.saldoPendiente,
-          metodo: 'descuento_liquidacion',
+          metodoAbono: 'descuento_liquidacion',
           nota: `Descontado en liquidación ${selectedSemana}`,
           operadorId: uid,
           motorizadoId: selectedMotoId,

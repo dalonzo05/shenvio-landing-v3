@@ -365,6 +365,12 @@ export default function AuditoriaFinancieraPage() {
       ).sort((a, b) => toMs(b.at) - toMs(a.at))
       const totalCondonado = condonacionesMot.reduce((s, m) => s + m.monto, 0)
 
+      // ── Recuperaciones históricas (abonos cerrados, no generan alerta) ────
+      const recuperacionesMot = movimientos.filter(
+        (m) => m.motorizadoId === mot.id && m.tipo === 'abono_deuda_motorizado' && m.estado !== 'anulado',
+      ).sort((a, b) => toMs(b.at) - toMs(a.at))
+      const totalRecuperado = recuperacionesMot.reduce((s, m) => s + m.monto, 0)
+
       // ── Actividad reciente ─────────────────────────────────────────────────
       const actividadReciente = {
         ultimoDepStorkhub: depositosPendientes
@@ -458,6 +464,8 @@ export default function AuditoriaFinancieraPage() {
         actividadReciente,
         condonacionesMot,
         totalCondonado,
+        recuperacionesMot,
+        totalRecuperado,
       }
     }).sort((a, b) => {
       const peso = (al: { nivel: 'alto' | 'medio' | 'bajo' }) =>
@@ -844,7 +852,7 @@ export default function AuditoriaFinancieraPage() {
                           (m) => m.motorizadoId === mot.id && (m.tipo === 'gasto_aprobado' || m.tipo === 'gasto_operativo_aprobado') && m.estado !== 'anulado',
                         )
                         const depsMot = depositosPendientes.filter((d) => d.motorizadoUid === mot.authUid)
-                        const { condonacionesMot, totalCondonado } = auditFiltrado.find((r) => r.mot.id === mot.id)!
+                        const { condonacionesMot, totalCondonado, recuperacionesMot, totalRecuperado } = auditFiltrado.find((r) => r.mot.id === mot.id)!
                         const tieneAltoRiesgo = alertas.some((a) => a.nivel === 'alto')
                         return (
                           <Fragment key={mot.id}>
@@ -1063,7 +1071,47 @@ export default function AuditoriaFinancieraPage() {
                                       </div>
                                     </div>
 
-                                    {/* Sección 3: Historial de condonaciones */}
+                                    {/* Sección 3: Historial de recuperación de deudas */}
+                                    {recuperacionesMot.length > 0 && (
+                                      <div>
+                                        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">
+                                          Historial de recuperación
+                                          <span className="ml-2 text-green-700 normal-case font-bold">
+                                            Total recuperado: {fmt(totalRecuperado)}
+                                          </span>
+                                        </p>
+                                        <div className="bg-white rounded-xl border border-green-100 overflow-hidden">
+                                          <div className="px-3 py-2 bg-green-50 border-b border-green-100 flex items-center justify-between">
+                                            <span className="text-xs font-bold text-green-800">Deudas recuperadas (cerradas)</span>
+                                            <span className="text-[11px] text-green-600 font-semibold">{recuperacionesMot.length} abono{recuperacionesMot.length !== 1 ? 's' : ''}</span>
+                                          </div>
+                                          <div className="divide-y divide-green-50">
+                                            {recuperacionesMot.map((r: any) => (
+                                              <div key={r.id} className="px-3 py-2.5 flex items-start justify-between gap-3">
+                                                <div className="flex flex-col gap-0.5 min-w-0">
+                                                  <span className="text-[11px] font-semibold text-gray-700">{fmtFechaCorta(r.at)}</span>
+                                                  {r.descripcion && (
+                                                    <span className="text-[11px] text-gray-500 italic truncate">{r.descripcion}</span>
+                                                  )}
+                                                  {r.saldoId && (
+                                                    <span className="text-[10px] font-mono text-gray-400">saldo: {r.saldoId}</span>
+                                                  )}
+                                                  {r.depositoId && (
+                                                    <span className="text-[10px] font-mono text-gray-400">depósito: {r.depositoId}</span>
+                                                  )}
+                                                  <span className="text-[10px] text-green-600 uppercase tracking-wide font-semibold">
+                                                    {r.cuentaOrigen} → {r.cuentaDestino}
+                                                  </span>
+                                                </div>
+                                                <span className="text-xs font-black text-green-700 shrink-0">{fmt(r.monto)}</span>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Sección 5: Historial de condonaciones */}
                                     {condonacionesMot.length > 0 && (
                                       <div>
                                         <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">
@@ -1103,7 +1151,7 @@ export default function AuditoriaFinancieraPage() {
                                       </div>
                                     )}
 
-                                    {/* Sección 4: Alertas de riesgo */}
+                                    {/* Sección 6: Alertas de riesgo */}
                                     {alertas.length > 0 && (
                                       <div>
                                         <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Alertas de riesgo</p>
@@ -1142,7 +1190,7 @@ export default function AuditoriaFinancieraPage() {
                                       </div>
                                     )}
 
-                                    {/* Sección 5: Actividad reciente */}
+                                    {/* Sección 7: Actividad reciente */}
                                     <div className="rounded-xl border border-gray-100 bg-white px-4 py-3">
                                       <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Actividad reciente</p>
                                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs">
@@ -1163,7 +1211,7 @@ export default function AuditoriaFinancieraPage() {
                                       </div>
                                     </div>
 
-                                    {/* Sección 6: Estado financiero registrado */}
+                                    {/* Sección 8: Estado financiero registrado */}
                                     <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3">
                                       <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-3">Estado financiero registrado</p>
                                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">

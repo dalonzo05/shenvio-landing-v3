@@ -156,7 +156,6 @@ export function movimientosHuerfanos(
 const TIPOS_QUE_REQUIEREN_CUENTAS = new Set<string>([
   'gasto_aprobado',
   'saldo_creado',
-  'abono_saldo',
   'adelanto_motorizado',
   'deposito_confirmado',
   'deposito_convertido_en_deuda',

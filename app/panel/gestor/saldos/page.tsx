@@ -14,6 +14,7 @@ import {
   type SaldoCargoMotorizado,
   type AbonoSaldo,
   type EstadoSaldo,
+  type MetodoAbono,
 } from '@/lib/financial-types'
 import { compressImage, uploadComprobante } from '@/fb/storage'
 import {
@@ -78,8 +79,9 @@ const LABEL_ORIGEN_SALDO: Record<string, string> = {
   manual: 'Ajuste manual',
 }
 
-// Métodos que exigen comprobante
-const METODOS_REQUIEREN_COMPROBANTE = ['transferencia', 'deposito_bancario']
+// solo transferencia exige comprobante
+const METODOS_REQUIEREN_COMPROBANTE: string[] = ['transferencia']
+const METODOS_MUESTRAN_COMPROBANTE:  string[] = ['transferencia']
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
@@ -99,7 +101,7 @@ export default function SaldosPage() {
   // Abono
   const [abonoId, setAbonoId] = useState<string | null>(null)
   const [montoAbono, setMontoAbono] = useState('')
-  const [metodoAbono, setMetodoAbono] = useState('efectivo')
+  const [metodoAbono, setMetodoAbono] = useState<MetodoAbono>('transferencia')
   const [notaAbono, setNotaAbono] = useState('')
   const [comprobanteFile, setComprobanteFile] = useState<File | null>(null)
   const [comprobantePreview, setComprobantePreview] = useState<string | null>(null)
@@ -164,7 +166,7 @@ export default function SaldosPage() {
     setAbonoId(null)
     setMontoAbono('')
     setNotaAbono('')
-    setMetodoAbono('efectivo')
+    setMetodoAbono('transferencia')
     setComprobanteFile(null)
     setComprobantePreview(null)
     setErrAbono(null)
@@ -205,8 +207,7 @@ export default function SaldosPage() {
       await registrarAbonoSaldo({
         saldoId: saldo.id,
         montoAbono: monto,
-        saldoPendienteActual: saldo.saldoPendiente,
-        metodo: metodoAbono,
+        metodoAbono,
         nota: notaAbono,
         operadorId: auth.currentUser?.uid ?? '',
         motorizadoId: saldo.motorizadoId,
@@ -471,7 +472,7 @@ export default function SaldosPage() {
                           fecha={fmtDateShort(a.fecha)}
                           titulo={`Abono ${fmt(a.monto)}`}
                           detalle={[
-                            a.metodo ?? 'efectivo',
+                            a.metodoAbono ?? 'transferencia',
                             a.nota || null,
                           ].filter(Boolean).join(' · ')}
                           comprobante={a.comprobanteUrl}
@@ -531,13 +532,12 @@ export default function SaldosPage() {
                           />
                           <select
                             value={metodoAbono}
-                            onChange={(e) => { setMetodoAbono(e.target.value); setComprobanteFile(null); setComprobantePreview(null) }}
+                            onChange={(e) => { setMetodoAbono(e.target.value as MetodoAbono); setComprobanteFile(null); setComprobantePreview(null) }}
                             className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none"
                           >
-                            <option value="efectivo">Efectivo</option>
                             <option value="transferencia">Transferencia</option>
-                            <option value="deposito_bancario">Depósito bancario</option>
                             <option value="descuento_liquidacion">Desc. liquidación</option>
+                            <option value="ajuste_manual">Ajuste manual</option>
                           </select>
                         </div>
 
@@ -550,7 +550,8 @@ export default function SaldosPage() {
                           className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-300"
                         />
 
-                        {/* Comprobante */}
+                        {/* Comprobante: solo visible para transferencia */}
+                        {METODOS_MUESTRAN_COMPROBANTE.includes(metodoAbono) && (
                         <div className="flex flex-col gap-1.5">
                           <label className="flex items-center gap-2 cursor-pointer">
                             <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition ${
@@ -591,6 +592,7 @@ export default function SaldosPage() {
                             </div>
                           )}
                         </div>
+                        )}
 
                         {errAbono && (
                           <p className="text-xs text-red-600 font-semibold">{errAbono}</p>
