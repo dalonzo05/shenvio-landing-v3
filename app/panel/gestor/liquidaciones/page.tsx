@@ -720,9 +720,6 @@ export default function LiquidacionesPage() {
         ordenesIds: ordenes.map((o) => o.id),
         depositosIds: depositos.map((d) => d.id),
       })
-      await registrarMovimiento('liquidacion_pagada', calculo.netoAPagar, uid,
-        `Liquidación creada sem ${selectedSemana} · ${moto.nombre || moto.authUid}`,
-        { motorizadoId: selectedMotoId, depositoId: docRef.id })
     } catch (e: any) {
       setErr(e?.message || 'Error al crear liquidación')
     } finally {
@@ -762,9 +759,9 @@ export default function LiquidacionesPage() {
         ...(saldoGeneradoId ? { saldoGeneradoId } : {}),
       })
 
-      await registrarMovimiento('liquidacion_pagada', liq.netoAPagar, uid,
+      await registrarMovimiento('liquidacion_pago_efectivo', liq.netoAPagar, uid,
         `Liquidación pagada sem ${liq.semanaKey} · ${liq.motorizadoNombre}`,
-        { motorizadoId: liq.motorizadoId })
+        { motorizadoId: liq.motorizadoId, liquidacionId: liq.id })
 
       // ── Generar y subir PDF ────────────────────────────────────────────────
       try {

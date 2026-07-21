@@ -159,7 +159,6 @@ const TIPOS_QUE_REQUIEREN_CUENTAS = new Set<string>([
   'adelanto_motorizado',
   'deposito_confirmado',
   'deposito_convertido_en_deuda',
-  'liquidacion_pagada',
   // Tipos nuevos (Fase 1+)
   'delivery_efectivo_cobrado',
   'delivery_credito_generado',
