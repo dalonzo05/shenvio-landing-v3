@@ -167,7 +167,6 @@ const TIPOS_QUE_REQUIEREN_CUENTAS = new Set<string>([
   'deposito_efectivo_comercio',
   'gasto_operativo_aprobado',
   'liquidacion_comision_calculada',
-  'liquidacion_pago_efectivo',
   'liquidacion_pago_transferencia',
   'abono_deuda_motorizado',
   'deuda_condonada',

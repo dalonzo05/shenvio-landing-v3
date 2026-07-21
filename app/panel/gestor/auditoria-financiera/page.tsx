@@ -438,7 +438,7 @@ export default function AuditoriaFinancieraPage() {
       }
       // Bajo: movimientos sin cuentas contables
       const movsMot = movimientos.filter((m) => m.estado !== 'anulado' && m.motorizadoId === mot.id)
-      if (movsMot.some((m) => !m.cuentaOrigen && !m.cuentaDestino)) {
+      if (movimientosConCoberturaPendiente(movsMot).length > 0) {
         alertas.push({ msg: 'Movimientos sin cuentas contables', nivel: 'bajo' })
       }
       // Medio: inconsistencia entre saldos operativos y ledger
