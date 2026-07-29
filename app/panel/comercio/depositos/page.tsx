@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { collection, doc, getDoc, onSnapshot, query, Timestamp, where } from 'firebase/firestore'
-import { auth, db } from '@/fb/config'
+import { db } from '@/fb/config'
 import { Wallet, FileImage, ChevronDown, ChevronUp, CheckCircle2, Clock, Search, Lock } from 'lucide-react'
 import { SolicitudDrawer } from '@/app/panel/gestor/_components/SolicitudDrawer'
 import { getDepositoEstado } from '@/lib/financial-types'
+import { useUser } from '@/app/Components/UserProvider'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -109,6 +110,7 @@ const STATUS_CONFIG: Record<DepStatus, { label: string; bg: string; text: string
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function DepositosPage() {
+  const { profile } = useUser()
   const [depositos, setDepositos] = useState<DepositoDoc[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -118,12 +120,12 @@ export default function DepositosPage() {
   const [solicitudesDetalle, setSolicitudesDetalle] = useState<Record<string, SolicitudDetalle>>({})
 
   useEffect(() => {
-    const user = auth.currentUser
-    if (!user) return
+    // Identidad estable (Bloque A): comercioId, no auth.uid.
+    if (!profile?.comercioId) return
     const q = query(
       collection(db, 'ordenes_deposito'),
       where('destinatario', '==', 'comercio'),
-      where('destinatarioId', '==', user.uid),
+      where('destinatarioId', '==', profile.comercioId),
     )
     const unsub = onSnapshot(q, (snap) => {
       const list: DepositoDoc[] = snap.docs
@@ -136,7 +138,7 @@ export default function DepositosPage() {
       setLoading(false)
     })
     return () => unsub()
-  }, [])
+  }, [profile?.comercioId])
 
   // Lazy-load solicitud details when a card is expanded
   useEffect(() => {

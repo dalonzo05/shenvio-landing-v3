@@ -3,6 +3,8 @@ import * as admin from 'firebase-admin';
 
 admin.initializeApp();
 
+export { crearAccesoComercio } from './comercio-acceso';
+
 /**
  * Daily cleanup: deletes photo evidence from Storage and Firestore
  * for orders delivered more than 45 days ago.

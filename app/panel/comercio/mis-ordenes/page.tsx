@@ -13,8 +13,9 @@ import {
   where,
   Timestamp,
 } from 'firebase/firestore'
-import { auth, db } from '@/fb/config'
+import { db } from '@/fb/config'
 import { compressImage, uploadEvidenciaPath } from '@/fb/storage'
+import { useUser } from '@/app/Components/UserProvider'
 import { Package, Upload, X } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -125,6 +126,7 @@ function debeDelivery(s: Solicitud): boolean | null {
 type FiltroEstado = 'todas' | 'activas' | 'entregadas'
 
 export default function MisOrdenesPage() {
+  const { profile } = useUser()
   const [ordenes, setOrdenes] = useState<Solicitud[]>([])
   const [loading, setLoading] = useState(true)
   const [filtro, setFiltro] = useState<FiltroEstado>('todas')
@@ -139,11 +141,11 @@ export default function MisOrdenesPage() {
   const [viendoBoucherUrl, setViendoBoucherUrl] = useState<string | null>(null)
 
   useEffect(() => {
-    const user = auth.currentUser
-    if (!user) return
+    // Identidad estable (Bloque A): comercioId, no auth.uid.
+    if (!profile?.comercioId) return
     const q = query(
       collection(db, 'solicitudes_envio'),
-      where('userId', '==', user.uid)
+      where('userId', '==', profile.comercioId)
     )
     const unsub = onSnapshot(q, (snap) => {
       const list = snap.docs
@@ -153,7 +155,7 @@ export default function MisOrdenesPage() {
       setLoading(false)
     })
     return () => unsub()
-  }, [])
+  }, [profile?.comercioId])
 
   function triggerUpload(solicitudId: string) {
     setUploadTargetId(solicitudId)

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { collection, onSnapshot, query, where, Timestamp } from 'firebase/firestore'
-import { auth, db } from '@/fb/config'
+import { db } from '@/fb/config'
 import { useUser } from '@/app/Components/UserProvider'
 import { Plus, Package } from 'lucide-react'
 
@@ -73,9 +73,9 @@ export default function ComercioDashboard() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const user = auth.currentUser
-    if (!user) return
-    const q = query(collection(db, 'solicitudes_envio'), where('userId', '==', user.uid))
+    // Identidad estable (Bloque A): comercioId, no auth.uid.
+    if (!profile?.comercioId) return
+    const q = query(collection(db, 'solicitudes_envio'), where('userId', '==', profile.comercioId))
     const unsub = onSnapshot(q, (snap) => {
       const list: Solicitud[] = snap.docs
         .map((d) => ({ id: d.id, ...(d.data() as any) }))
@@ -84,7 +84,7 @@ export default function ComercioDashboard() {
       setLoading(false)
     })
     return () => unsub()
-  }, [])
+  }, [profile?.comercioId])
 
   const hoy = new Date()
   const inicioMes = new Date(hoy.getFullYear(), hoy.getMonth(), 1)

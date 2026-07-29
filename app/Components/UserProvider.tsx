@@ -21,7 +21,11 @@ import { auth } from '@/fb/config'
 import { readUserProfileByUid, upsertUserProfileByUid } from '@/fb/data'
 
 export type ThemePref = 'light' | 'dark'
-export type UserProfile = { email?: string; name?: string; theme?: ThemePref }
+// comercioId: puntero al ID PERMANENTE de comercios/{comercioId} (Bloque A) —
+// solo presente cuando usuarios/{uid}.rol === 'Comercio'. Nunca usar
+// authUser.uid como comercioId; siempre resolver la identidad del comercio
+// vía este campo (usuarios/{authUid}.comercioId).
+export type UserProfile = { email?: string; name?: string; theme?: ThemePref; comercioId?: string }
 
 type Ctx = {
   authUser: User | null
@@ -76,6 +80,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
           email: u.email ?? '',
           name: p?.name ?? '',
           theme: p?.theme,
+          comercioId: p?.comercioId,
         }
 
         setProfile(newProfile)
@@ -162,7 +167,10 @@ export function UserProvider({ children }: { children: ReactNode }) {
       const cred = await createUserWithEmailAndPassword(auth, email, password)
 
       try {
-        await upsertUserProfileByUid(cred.user.uid, { email, name })
+        // cred.user.email (confirmado por Firebase Auth), no el parámetro
+        // `email` de entrada — coincide siempre con request.auth.token.email
+        // que valida firestore.rules, nunca un valor de formulario suelto.
+        await upsertUserProfileByUid(cred.user.uid, { email: cred.user.email ?? '', name })
       } catch (err) {
         console.warn('No se pudo guardar el perfil al registrarse:', err)
       }
@@ -204,6 +212,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
       email: u.email ?? '',
       name: p?.name ?? '',
       theme: p?.theme,
+      comercioId: p?.comercioId,
     }
 
     setProfile(merged)

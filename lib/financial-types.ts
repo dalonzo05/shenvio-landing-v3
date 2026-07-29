@@ -53,7 +53,8 @@ export const cuentas = {
   deudaMotorizado:    (motorizadoId: string) => `deuda_motorizado:${motorizadoId}`,
   comisionPendiente:  (motorizadoId: string) => `comision_pendiente:${motorizadoId}`,
 
-  // Comercio
+  // Comercio — el comercioId embebido en estas cuentas es el ID PERMANENTE de
+  // comercios/{comercioId} (identidad estable, Bloque A), nunca el Auth UID.
   saldoComercio:      (comercioId: string)   => `saldo_comercio:${comercioId}`,
   // Dinero de producto cobrado: es retención temporal, NO deuda del comercio.
   // Solo transita por el motorizado hasta que lo deposita al comercio.
@@ -390,6 +391,29 @@ export function getDepositoEstado(dep: {
 // - Toda escritura en estas 4 colecciones pasa por Cloud Functions — el
 //   cliente nunca escribe cargos_delivery ni aplicaciones_pago directamente,
 //   y solo puede crear pagos_comercio en borrador/reportado.
+//
+// Identidad de comercio (Bloque A, identidad estable — no reabrir sin
+// discutirlo primero):
+// - comercioId es el ID PERMANENTE del documento comercios/{comercioId},
+//   asignado una sola vez al crear el comercio. NUNCA es el Auth UID y NUNCA
+//   cambia, exista o no un Auth UID vinculado (authUid es solo el acceso de
+//   login, opcional y reemplazable). CargoDelivery.comercioId,
+//   PagoComercio.comercioId, AplicacionPago.comercioId y
+//   MovimientoFinanciero.comercioId siguen esta regla.
+// - DEUDA TÉCNICA DE NAMING (no renombrar todavía, solo documentar): otras
+//   colecciones fuera de este archivo guardan el mismo comercioId estable
+//   bajo nombres que sugieren "UID de Auth" cuando NO lo son:
+//     · solicitudes_envio.userId / .comercioUid
+//     · clientes_envio.comercioUid
+//     · cobros_semanales.clienteUid  (el nombre es el más engañoso: no es un
+//       "cliente", es el comercio al que se le factura el crédito semanal —
+//       confirmado en app/panel/motorizado/page.tsx, siempre proviene de
+//       solicitud.userId)
+//     · ordenes_deposito.destinatarioId (solo cuando destinatario=='comercio')
+//   Candidato prioritario a normalizar en una limpieza futura: renombrar
+//   comercioUid/clienteUid a comercioId en todas las colecciones. Módulos
+//   nuevos (cargos_delivery, pagos_comercio, aplicaciones_pago) ya usan
+//   comercioId directamente — no repetir el error de naming en código nuevo.
 
 // ─── cargos_delivery ─────────────────────────────────────────────────────────
 

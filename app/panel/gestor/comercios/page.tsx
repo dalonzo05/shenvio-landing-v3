@@ -4,19 +4,16 @@ import React, { useEffect, useState } from 'react'
 import {
   collection,
   onSnapshot,
-  query,
-  where,
   doc,
   getDoc,
   setDoc,
   serverTimestamp,
   updateDoc,
   deleteField,
-  deleteDoc,
 } from 'firebase/firestore'
-import { db } from '@/fb/config'
+import { httpsCallable, type HttpsCallableResult } from 'firebase/functions'
+import { db, functions, auth } from '@/fb/config'
 import { upsertCompanyByUid, type BankAccount, type CompanyPayload } from '@/fb/data'
-import { createAuthUser } from '@/fb/createAuthUser'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { Search, X, ChevronDown, ChevronUp, Building2, Phone, MapPin, CreditCard, Star, Lock } from 'lucide-react'
 
@@ -121,13 +118,15 @@ type PuntoRetiro = {
 }
 
 type Comercio = {
-  uid: string
-  // from usuarios/{uid}
+  uid: string // = comercioId (Bloque A) — ID permanente del doc comercios/, nunca el Auth UID
+  // from usuarios/{authUid}, solo si accesoEstado tiene un authUid vinculado
   email: string
   userName?: string
   activo?: boolean
-  sinAuth?: boolean
-  // from comercios/{uid}
+  // identidad/acceso (Bloque A/B) — comercios/{comercioId}
+  accesoEstado?: 'sin_acceso' | 'provisionando' | 'activo' | 'error_provision' | 'desactivado'
+  authUid?: string | null
+  // from comercios/{comercioId}
   name?: string
   phone?: string
   address?: string
@@ -214,31 +213,35 @@ export default function ComerciosPage() {
   const [pTipo, setPTipo] = useState<'referencial' | 'exacto'>('referencial')
   const [pShowMap, setPShowMap] = useState(false)
 
-  // Load all comercios (usuarios with rol=cliente)
+  // Identidad estable (Bloque A): comercios/ es la única fuente — un comercio
+  // sin_acceso no tiene doc en usuarios/, así que ya no se puede depender de
+  // ese join para listarlos. usuarios/{authUid} se cruza aparte, solo para
+  // los que sí tienen acceso, únicamente para mostrar email/activo en vivo.
   useEffect(() => {
-    const q = query(collection(db, 'usuarios'), where('rol', '==', 'Comercio'))
-    const unsub = onSnapshot(q, async (snap) => {
-      const usuarios = snap.docs.map((d) => ({ uid: d.id, ...(d.data() as any) }))
-      // Fetch comercios docs in parallel
-      const snapsCom = await Promise.all(
-        usuarios.map((u) => getDoc(doc(db, 'comercios', u.uid)))
+    const unsub = onSnapshot(collection(db, 'comercios'), async (snap) => {
+      const comerciosDocs = snap.docs.map((d) => ({ uid: d.id, ...(d.data() as any) }))
+      const authUids = [...new Set(comerciosDocs.filter((c) => c.authUid).map((c) => c.authUid as string))]
+      const usuariosSnaps = await Promise.all(authUids.map((uid) => getDoc(doc(db, 'usuarios', uid))))
+      const usuarioPorAuthUid = new Map(
+        authUids.map((uid, i) => [uid, usuariosSnaps[i].exists() ? (usuariosSnaps[i].data() as any) : null])
       )
-      const list: Comercio[] = usuarios.map((u, i) => {
-        const comData = snapsCom[i].exists() ? (snapsCom[i].data() as any) : {}
+      const list: Comercio[] = comerciosDocs.map((c) => {
+        const usuario = c.authUid ? usuarioPorAuthUid.get(c.authUid) : null
         return {
-          uid: u.uid,
-          email: u.email || '',
-          userName: u.name,
-          activo: u.activo,
-          sinAuth: u.sinAuth ?? false,
-          name: comData.name || u.name || '',
-          phone: comData.phone || '',
-          address: comData.address || '',
-          accounts: Array.isArray(comData.accounts) ? comData.accounts : [],
-          puntosRetiro: comData.puntosRetiro || {},
-          notaInterna: comData.notaInterna || '',
-          requiereBolso: comData.requiereBolso ?? false,
-          tipoCliente: comData.tipoCliente || 'contado',
+          uid: c.uid,
+          email: usuario?.email || c.emailAcceso || c.emailContacto || '',
+          userName: usuario?.name,
+          activo: usuario?.activo,
+          accesoEstado: c.accesoEstado ?? 'sin_acceso',
+          authUid: c.authUid ?? null,
+          name: c.name || usuario?.name || '',
+          phone: c.phone || '',
+          address: c.address || '',
+          accounts: Array.isArray(c.accounts) ? c.accounts : [],
+          puntosRetiro: c.puntosRetiro || {},
+          notaInterna: c.notaInterna || '',
+          requiereBolso: c.requiereBolso ?? false,
+          tipoCliente: c.tipoCliente || 'contado',
         }
       })
       list.sort((a, b) => (a.name || '').localeCompare(b.name || ''))
@@ -516,23 +519,25 @@ export default function ComerciosPage() {
 
     setNcLoading(true)
     try {
-      const nuevoRef = doc(collection(db, 'usuarios'))
-      const uid = nuevoRef.id
+      // comercioId permanente (Bloque A): un solo doc en comercios/, nunca en
+      // usuarios/ — nadie puede loguearse todavía, así que no hace falta (ni
+      // corresponde) crear un perfil de usuario en este momento. Ver
+      // crearAccesoComercio (Cloud Function, Bloque B) para cuando se le dé
+      // acceso real más adelante.
+      const nuevoRef = doc(collection(db, 'comercios'))
       await setDoc(nuevoRef, {
         name: ncNombre.trim(),
-        email: ncEmail.trim() || null,
         phone: ncTelefono.trim(),
-        rol: 'Comercio',
-        activo: true,
-        creadoPorGestor: true,
-        sinAuth: true,
-        createdAt: serverTimestamp(),
+        address: ncDireccion.trim() || null,
+        // Contacto conocido al crear el comercio — distinto de emailAcceso
+        // (que representa específicamente el correo de login, asignado
+        // recién cuando se otorga acceso).
+        emailContacto: ncEmail.trim() || null,
+        accesoEstado: 'sin_acceso',
+        authUid: null,
+        creadoPorUid: auth.currentUser?.uid ?? '',
+        creadoAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-      })
-      await upsertCompanyByUid(uid, {
-        name: ncNombre.trim(),
-        phone: ncTelefono.trim(),
-        address: ncDireccion.trim() || undefined,
       })
       setShowNew(false)
       setNcNombre(''); setNcTelefono(''); setNcEmail(''); setNcDireccion(''); setNcError('')
@@ -543,38 +548,59 @@ export default function ComerciosPage() {
     }
   }
 
+  // comercioId es permanente (Bloque A) — otorgar acceso NUNCA crea un doc
+  // nuevo ni migra nada. Toda la lógica sensible (validar rol, crear/
+  // reutilizar el Auth user, escribir usuarios/comercios) vive server-side
+  // en la Cloud Function crearAccesoComercio (functions/src/comercio-acceso.ts).
+  // Este cliente solo la invoca y muestra el resultado.
+  type ResultadoCrearAcceso = {
+    ok: true
+    comercioId: string
+    authUid: string
+    authUidAnterior: string | null
+    esNuevoAuthUser: boolean
+    esReemplazo: boolean
+    esIdempotente: boolean
+    recuperacionAdministrativa: boolean
+    mensaje: string
+    // Presente SOLO en el emulador (nunca en producción) — nunca se loguea.
+    enlaceActivacionDev?: string
+    // Presente fuera del emulador cuando la función no puede garantizar el
+    // envío de correo — ver auditoría de app/api/send-welcome en el reporte.
+    advertenciaEnvioCorreo?: string
+  }
+
   async function crearAccesoComercio() {
     if (!selected) return
     if (!caEmail.trim()) { setCaMsg('❌ El correo es obligatorio'); return }
     setCaSaving(true); setCaMsg(null)
     try {
-      const tempPassword = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2).toUpperCase() + '!9'
-      const authUid = await createAuthUser(caEmail.trim(), tempPassword)
-      const [usuarioSnap, comercioSnap] = await Promise.all([
-        getDoc(doc(db, 'usuarios', selected.uid)),
-        getDoc(doc(db, 'comercios', selected.uid)),
-      ])
-      const usuarioData = usuarioSnap.exists() ? usuarioSnap.data() : {}
-      const comercioData = comercioSnap.exists() ? comercioSnap.data() : {}
-      const esMigracion = selected.sinAuth && selected.uid !== authUid
-      await Promise.all([
-        setDoc(doc(db, 'usuarios', authUid), {
-          ...usuarioData,
-          email: caEmail.trim(),
-          sinAuth: false,
-          activo: true,
-          updatedAt: serverTimestamp(),
-        }),
-        setDoc(doc(db, 'comercios', authUid), {
-          ...comercioData,
-          updatedAt: serverTimestamp(),
-        }),
-        esMigracion ? deleteDoc(doc(db, 'usuarios', selected.uid)) : Promise.resolve(),
-        esMigracion ? deleteDoc(doc(db, 'comercios', selected.uid)) : Promise.resolve(),
-      ])
-      // Sacar el entry viejo del estado local para evitar el flash de duplicado
+      // nombre NO se envía: la función toma exclusivamente comercios/{id}.name
+      // como fuente autoritativa (ver functions/src/comercio-acceso.ts).
+      const llamarCrearAcceso = httpsCallable<
+        { comercioId: string; email: string; reemplazar?: boolean },
+        ResultadoCrearAcceso
+      >(functions, 'crearAccesoComercio')
+
+      const resultado: HttpsCallableResult<ResultadoCrearAcceso> = await llamarCrearAcceso({
+        comercioId: selected.uid,
+        email: caEmail.trim(),
+      })
+
+      const { mensaje, enlaceActivacionDev, advertenciaEnvioCorreo, recuperacionAdministrativa } = resultado.data
+
+      // TODO(Bloque C): esta lista todavía se carga vía usuarios (rol=Comercio)
+      // cruzado con comercios — un comercio sin_acceso no aparece ahí, así que
+      // quitarlo aquí de forma optimista sigue siendo el único remedio hasta
+      // que Bloque C cambie la fuente de la lista a comercios directamente.
       setComerciosList((prev) => prev.filter((c) => c.uid !== selected.uid))
-      // El correo es no-crítico: si falla, el acceso ya fue creado igualmente
+
+      // NOTA (auditoría Bloque B): /api/send-welcome genera su PROPIO enlace
+      // internamente (adminAuth.generatePasswordResetLink) y no acepta uno
+      // externo — pasarle enlaceActivacionDev no tendría ningún efecto, por
+      // eso no se envía. Ese endpoint hoy no tiene autenticación propia
+      // (hallazgo reportado por separado); seguimos llamándolo sin cambios
+      // de comportamiento respecto a como ya funcionaba.
       fetch('/api/send-welcome', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -583,12 +609,25 @@ export default function ComerciosPage() {
           email: caEmail.trim(),
         }),
       }).catch(() => {})
-      closeDrawer()
+
+      const notas = [
+        recuperacionAdministrativa ? '(reanudado por otro gestor — recuperación administrativa registrada)' : '',
+        advertenciaEnvioCorreo ? `⚠️ ${advertenciaEnvioCorreo}` : '',
+      ].filter(Boolean).join(' ')
+
+      if (enlaceActivacionDev) {
+        // Solo emulador: se lo mostramos al gestor para poder probar el
+        // flujo sin correo real. No cerramos el drawer para que pueda copiarlo.
+        setCaMsg(`✅ ${mensaje} ${notas} — Enlace de prueba (solo emulador): ${enlaceActivacionDev}`)
+      } else {
+        setCaMsg(`✅ ${mensaje}${notas ? ' ' + notas : ''}`)
+        closeDrawer()
+      }
     } catch (e: any) {
-      const code = e?.code
-      if (code === 'auth/email-already-in-use') setCaMsg('❌ Ese correo ya está registrado')
-      else if (code === 'auth/invalid-email') setCaMsg('❌ Correo inválido')
-      else setCaMsg('❌ Error al crear el acceso')
+      // httpsCallable rechaza con { code, message } (ej. 'already-exists',
+      // 'permission-denied') — mostramos el mensaje que la función arma.
+      setCaMsg(`❌ ${e?.message || 'Error al crear el acceso'}`)
+    } finally {
       setCaSaving(false)
     }
   }
@@ -689,9 +728,22 @@ export default function ComerciosPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3">
-                    <span className={`inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-full ${c.activo ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-600 border border-red-200'}`}>
-                      {c.activo ? 'Activo' : 'Inactivo'}
-                    </span>
+                    {(() => {
+                      const estado = c.accesoEstado ?? 'sin_acceso'
+                      const activo = estado === 'activo'
+                      const etiqueta: Record<string, string> = {
+                        sin_acceso: 'Sin acceso',
+                        provisionando: 'Otorgando…',
+                        activo: 'Activo',
+                        error_provision: 'Error acceso',
+                        desactivado: 'Desactivado',
+                      }
+                      return (
+                        <span className={`inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-full ${activo ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-600 border border-red-200'}`}>
+                          {etiqueta[estado] ?? estado}
+                        </span>
+                      )
+                    })()}
                   </td>
                   <td className="px-4 py-3">
                     <button onClick={() => openDrawer(c)} className="text-[#004aad] text-xs font-semibold hover:underline">
@@ -736,46 +788,63 @@ export default function ComerciosPage() {
             {/* Drawer body */}
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
 
-              {/* ── Acceso al sistema ── */}
-              <section className={`rounded-xl border p-4 space-y-3 ${selected.sinAuth ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'}`}>
-                <div className="flex items-center gap-2">
-                  <Lock className={`h-4 w-4 ${selected.sinAuth ? 'text-amber-600' : 'text-green-600'}`} />
-                  <h3 className={`text-xs font-bold uppercase tracking-wide ${selected.sinAuth ? 'text-amber-700' : 'text-green-700'}`}>
-                    Acceso al sistema
-                  </h3>
-                  <span className={`ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full border ${selected.sinAuth ? 'bg-amber-100 text-amber-700 border-amber-300' : 'bg-green-100 text-green-700 border-green-300'}`}>
-                    {selected.sinAuth ? 'Sin acceso' : 'Con acceso'}
-                  </span>
-                </div>
+              {/* ── Acceso al sistema (Bloque A: accesoEstado en comercios/{comercioId}) ── */}
+              {(() => {
+                const estado = selected.accesoEstado ?? 'sin_acceso'
+                const activo = estado === 'activo'
+                const etiquetaEstado: Record<string, string> = {
+                  sin_acceso: 'Sin acceso',
+                  provisionando: 'Otorgando acceso…',
+                  activo: 'Con acceso',
+                  error_provision: 'Error al otorgar acceso',
+                  desactivado: 'Acceso desactivado',
+                }
+                return (
+                  <section className={`rounded-xl border p-4 space-y-3 ${activo ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}`}>
+                    <div className="flex items-center gap-2">
+                      <Lock className={`h-4 w-4 ${activo ? 'text-green-600' : 'text-amber-600'}`} />
+                      <h3 className={`text-xs font-bold uppercase tracking-wide ${activo ? 'text-green-700' : 'text-amber-700'}`}>
+                        Acceso al sistema
+                      </h3>
+                      <span className={`ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full border ${activo ? 'bg-green-100 text-green-700 border-green-300' : 'bg-amber-100 text-amber-700 border-amber-300'}`}>
+                        {etiquetaEstado[estado] ?? estado}
+                      </span>
+                    </div>
 
-                {selected.sinAuth ? (
-                  <>
-                    <p className="text-xs text-amber-700">Este comercio no tiene cuenta. Ingresá su correo y le enviaremos un link para que cree su contraseña.</p>
-                    <div className="space-y-2">
-                      <div>
-                        <label className={S.label}>Correo <span className="text-red-500">*</span></label>
-                        <input type="email" value={caEmail} onChange={(e) => setCaEmail(e.target.value)} placeholder="correo@ejemplo.com" className={S.input} />
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <button
-                        onClick={crearAccesoComercio}
-                        disabled={caSaving}
-                        className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition disabled:opacity-40"
-                      >
-                        {caSaving ? 'Creando acceso…' : 'Crear acceso'}
-                      </button>
-                      {caMsg && (
-                        <span className={`text-xs font-semibold ${caMsg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>{caMsg}</span>
-                      )}
-                    </div>
-                  </>
-                ) : (
-                  <p className="text-xs text-green-700">
-                    Acceso activo · <span className="font-semibold">{selected.email}</span>
-                  </p>
-                )}
-              </section>
+                    {!activo ? (
+                      <>
+                        <p className="text-xs text-amber-700">
+                          {estado === 'error_provision'
+                            ? 'El intento anterior de otorgar acceso no se completó. Podés reintentar con el mismo correo o uno distinto.'
+                            : 'Este comercio no tiene cuenta activa. Ingresá su correo y le enviaremos un link para que cree su contraseña.'}
+                        </p>
+                        <div className="space-y-2">
+                          <div>
+                            <label className={S.label}>Correo <span className="text-red-500">*</span></label>
+                            <input type="email" value={caEmail} onChange={(e) => setCaEmail(e.target.value)} placeholder="correo@ejemplo.com" className={S.input} />
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={crearAccesoComercio}
+                            disabled={caSaving}
+                            className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition disabled:opacity-40"
+                          >
+                            {caSaving ? 'Creando acceso…' : 'Crear acceso'}
+                          </button>
+                          {caMsg && (
+                            <span className={`text-xs font-semibold ${caMsg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>{caMsg}</span>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <p className="text-xs text-green-700">
+                        Acceso activo · <span className="font-semibold">{selected.email}</span>
+                      </p>
+                    )}
+                  </section>
+                )
+              })()}
 
               {/* ── Perfil empresa ── */}
               <section>

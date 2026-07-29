@@ -49,15 +49,17 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
   }, [router])
 
   useEffect(() => {
-    const user = auth.currentUser
-    if (!user) return
+    // Identidad estable (Bloque A): las solicitudes se filtran por
+    // comercioId, no por auth.uid — se resuelve vía usuarios/{uid}.comercioId
+    // (expuesto en profile por UserProvider).
+    if (!profile?.comercioId) return
     const q = query(
       collection(db, 'solicitudes_envio'),
-      where('userId', '==', user.uid),
+      where('userId', '==', profile.comercioId),
       where('estado', 'in', ESTADOS_ACTIVOS)
     )
     return onSnapshot(q, (snap) => setActiveCount(snap.size))
-  }, [])
+  }, [profile?.comercioId])
 
   if (loading) return <div className="w-full px-6 py-6 text-sm text-gray-600">Cargando...</div>
 

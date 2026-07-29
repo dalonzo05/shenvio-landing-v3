@@ -4,7 +4,8 @@ import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { doc, onSnapshot, Timestamp } from 'firebase/firestore'
-import { auth, db } from '@/fb/config'
+import { db } from '@/fb/config'
+import { useUser } from '@/app/Components/UserProvider'
 import {
   ChevronLeft, MapPin, Package, Truck, CreditCard,
   Clock, CheckCircle2, XCircle, Camera,
@@ -237,6 +238,7 @@ function InfoRow({ label, value, mono = false }: { label: string; value?: React.
 export default function OrdenDetallePage() {
   const { id } = useParams<{ id: string }>()
   const router = useRouter()
+  const { profile } = useUser()
   const [orden, setOrden] = useState<Solicitud | null>(null)
   const [loading, setLoading] = useState(true)
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
@@ -246,15 +248,15 @@ export default function OrdenDetallePage() {
     const unsub = onSnapshot(doc(db, 'solicitudes_envio', id), (snap) => {
       if (!snap.exists()) { router.replace('/panel/comercio/mis-ordenes'); return }
       const data = { id: snap.id, ...(snap.data() as any) } as Solicitud
-      const user = auth.currentUser
-      if (user && data.userId && data.userId !== user.uid) {
+      // Identidad estable (Bloque A): comparar contra comercioId, no auth.uid.
+      if (profile?.comercioId && data.userId && data.userId !== profile.comercioId) {
         router.replace('/panel/comercio/mis-ordenes'); return
       }
       setOrden(data)
       setLoading(false)
     })
     return () => unsub()
-  }, [id, router])
+  }, [id, router, profile?.comercioId])
 
   if (loading) return (
     <div className="flex items-center justify-center py-20 text-sm text-gray-400 gap-2">

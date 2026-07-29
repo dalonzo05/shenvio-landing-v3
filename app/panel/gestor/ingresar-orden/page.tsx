@@ -5,6 +5,7 @@ import {
   addDoc,
   collection,
   doc,
+  getDoc,
   getDocs,
   onSnapshot,
   query,
@@ -1148,7 +1149,12 @@ export default function GestorIngresarOrdenPage() {
   const [ncGuardando, setNcGuardando] = useState(false)
   const [ncError, setNcError] = useState('')
 
-  // Carga lista de comercios/clientes con rol adecuado
+  // Carga lista de comercios/clientes.
+  // Identidad estable (Bloque A): los comercios (rol='Comercio') se leen
+  // directamente de comercios/ — un comercio sin_acceso no tiene doc en
+  // usuarios/, así que ya no se puede depender del join usuarios→comercios
+  // para listarlos. Los clientes individuales (rol='cliente') sí siguen
+  // siendo su propio Auth UID, así que esos se leen de usuarios/ como antes.
   useEffect(() => {
     const run = async () => {
       try {
@@ -1157,26 +1163,38 @@ export default function GestorIngresarOrdenPage() {
           getDocs(collection(db, 'comercios')),
         ])
 
-        const companyByUid = new Map<string, any>()
-        comerciosSnap.docs.forEach((d) => companyByUid.set(d.id, d.data()))
-
-        const rows: ComercioOption[] = usuariosSnap.docs
+        const filasCliente: ComercioOption[] = usuariosSnap.docs
           .map((d) => ({ uid: d.id, ...(d.data() as any) }))
-          .filter((u: any) => {
-            const rol = String(u.rol || '').toLowerCase()
-            return rol === 'cliente' || rol === 'comercio'
-          })
-          .map((u: any) => {
-            const company = companyByUid.get(u.uid) || {}
-            return {
-              uid: u.uid,
-              nombre: u.name || company.name || u.email || u.uid,
-              email: u.email || '',
-              phone: company.phone || '',
-              companyName: company.name || '',
-              address: company.address || '',
-            }
-          })
+          .filter((u: any) => String(u.rol || '').toLowerCase() === 'cliente')
+          .map((u: any) => ({
+            uid: u.uid,
+            nombre: u.name || u.email || u.uid,
+            email: u.email || '',
+            phone: '',
+            companyName: '',
+            address: '',
+          }))
+
+        const comerciosDocs = comerciosSnap.docs.map((d) => ({ uid: d.id, ...(d.data() as any) }))
+        const authUids = [...new Set(comerciosDocs.filter((c) => c.authUid).map((c) => c.authUid as string))]
+        const usuariosComercioSnaps = await Promise.all(authUids.map((uid) => getDoc(doc(db, 'usuarios', uid))))
+        const usuarioPorAuthUid = new Map(
+          authUids.map((uid, i) => [uid, usuariosComercioSnaps[i].exists() ? (usuariosComercioSnaps[i].data() as any) : null])
+        )
+
+        const filasComercio: ComercioOption[] = comerciosDocs.map((c) => {
+          const usuario = c.authUid ? usuarioPorAuthUid.get(c.authUid) : null
+          return {
+            uid: c.uid, // comercioId estable — nunca el Auth UID
+            nombre: c.name || usuario?.name || c.emailAcceso || c.uid,
+            email: usuario?.email || c.emailAcceso || c.emailContacto || '',
+            phone: c.phone || '',
+            companyName: c.name || '',
+            address: c.address || '',
+          }
+        })
+
+        const rows = [...filasCliente, ...filasComercio]
           .sort((a, b) => (a.companyName || a.nombre).localeCompare(b.companyName || b.nombre))
 
         setComercios(rows)
@@ -1926,23 +1944,20 @@ export default function GestorIngresarOrdenPage() {
 
     setNcGuardando(true); setNcError('')
     try {
-      const nuevoRef = doc(collection(db, 'usuarios'))
+      // comercioId permanente (Bloque A): un solo doc en comercios/, nunca en
+      // usuarios/ — mismo criterio que crearComercio() en
+      // app/panel/gestor/comercios/page.tsx.
+      const nuevoRef = doc(collection(db, 'comercios'))
       const uid = nuevoRef.id
       await setDoc(nuevoRef, {
         name: ncNombre.trim(),
-        email: ncEmail.trim() || null,
-        phone: ncTelefono.trim(),
-        rol: 'Comercio',
-        activo: true,
-        creadoPorGestor: true,
-        sinAuth: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      })
-      await setDoc(doc(db, 'comercios', uid), {
-        name: ncNombre.trim(),
         phone: ncTelefono.trim(),
         address: ncDireccion.trim() || null,
+        emailContacto: ncEmail.trim() || null,
+        accesoEstado: 'sin_acceso',
+        authUid: null,
+        creadoPorUid: auth.currentUser?.uid ?? '',
+        creadoAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       })
 

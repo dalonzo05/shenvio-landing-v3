@@ -14,6 +14,22 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/usuarios/$(request.auth.uid));
     }
 
+    // ── Identidad estable de comercio (Bloque A) ──────────────────────────────
+    // El comercioId es el ID PERMANENTE del doc comercios/{comercioId} — nunca
+    // cambia, exista o no un Auth UID vinculado. authUid es solo el acceso de
+    // login (opcional). usuarios/{authUid}.comercioId es el puntero que
+    // resuelve "qué comercio soy" a partir de la sesión autenticada. NUNCA
+    // usar request.auth.uid directamente como comercioId — por eso
+    // isComercioRole() ya NO implica identidad, solo rol; la identidad se
+    // resuelve siempre con este helper.
+    // .get() con default null: mientras no se ejecute el backfill (Bloque A,
+    // pendiente de aprobación), los usuarios/{authUid} existentes NO tienen
+    // comercioId todavía — acceder al campo directo (userDoc().data.comercioId)
+    // lanzaría un error de evaluación en vez de simplemente denegar.
+    function comercioIdDelUsuario() {
+      return userDoc().data.get('comercioId', null);
+    }
+
     function isActiveUser() {
       return signedIn()
         && exists(/databases/$(database)/documents/usuarios/$(request.auth.uid))
@@ -51,10 +67,20 @@ service cloud.firestore {
         && resource.data.asignacion.motorizadoAuthUid == request.auth.uid;
     }
 
+    // solicitudes_envio.userId es un campo sobrecargado: para un cliente
+    // individual ES su Auth UID; para un comercio, es su comercioId estable
+    // (NUNCA su Auth UID). Hay que distinguir por rol — ver nota de deuda
+    // técnica en lib/financial-types.ts sobre nombres ambiguos.
+    function esCreadorDeSolicitud(valorUserId) {
+      return isComercioRole()
+        ? valorUserId == comercioIdDelUsuario()
+        : valorUserId == request.auth.uid;
+    }
+
     function isOwnSolicitudCliente() {
       return signedIn()
         && resource.data.userId is string
-        && resource.data.userId == request.auth.uid;
+        && esCreadorDeSolicitud(resource.data.userId);
     }
 
     function isOwnMotorizadoDoc() {
@@ -63,22 +89,111 @@ service cloud.firestore {
         && resource.data.authUid == request.auth.uid;
     }
 
+    // usuarios/{authUid} sigue siendo el doc de perfil/rol keyeado por Auth UID
+    // (eso NO cambia — sigue siendo necesario para login y para resolver el
+    // rol). Para un comercio, además guarda el puntero comercioId hacia el
+    // negocio permanente en comercios/{comercioId}.
+    //
+    // HALLAZGO DE SEGURIDAD CORREGIDO AQUÍ: el create anterior permitía
+    // isOwner(userId) SIN restricción de campos — cualquier usuario recién
+    // autoregistrado (vía la API pública de Firebase Auth, sin pasar por la
+    // UI de esta app) podía escribir directamente rol:'Comercio' +
+    // comercioId:'<id de un negocio existente>' en su propio doc y ganar
+    // acceso de lectura a los datos de ese negocio. El update ya bloqueaba
+    // el cambio POSTERIOR de esos campos, pero el create no — el daño ya
+    // estaba hecho en el primer write. Ahora ambas ramas usan listas
+    // CERRADAS de campos permitidos.
     match /usuarios/{userId} {
+
+      // Auto-registro: perfil básico, nada privilegiado. Ajustada al flujo
+      // real (UserProvider.tsx -> fb/data.ts:upsertUserProfileByUid, que hoy
+      // solo escribe email/name/updatedAt). 'rol' NO está en esta lista a
+      // propósito: hoy no existe un rol por defecto de auto-registro — un
+      // usuario recién registrado queda SIN rol hasta que gestor/admin se lo
+      // asigne (rama isAdminOrGestor() de abajo) o hasta la Cloud Function
+      // de Bloque B. Si en el futuro se quisiera un rol por defecto, debe
+      // agregarse aquí FIJO a un valor no privilegiado (ej. 'cliente'),
+      // nunca como un valor elegido por el propio request.
+      function camposPermitidosAutoRegistroUsuario() {
+        return request.resource.data.keys().hasOnly([
+          'email', 'name', 'theme', 'createdAt', 'updatedAt'
+        ]);
+      }
+
+      function autoRegistroValido() {
+        return camposPermitidosAutoRegistroUsuario()
+          && (
+            request.auth.token.get('email', null) == null
+            || !('email' in request.resource.data)
+            || request.resource.data.email == request.auth.token.get('email', null)
+          )
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.updatedAt == request.time;
+      }
+
+      // Auto-edición: misma restrictividad que el create — el propietario no
+      // puede sembrar en un update ningún campo que el create ya le negó.
+      function camposEditablesAutoUsuario() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name', 'theme', 'updatedAt'
+        ]);
+      }
+
       allow read: if isOwner(userId) || isAdminOrGestor();
 
-      allow create: if isOwner(userId) || isAdminOrGestor();
+      // COMPATIBILIDAD TEMPORAL: isAdminOrGestor() sigue sin restricción de
+      // campos porque 3 pantallas todavía escriben usuarios/ directamente
+      // desde el cliente con sesión de gestor/admin:
+      //   - app/panel/gestor/comercios/page.tsx: crearComercio(),
+      //     crearAccesoComercio()
+      //   - app/panel/gestor/motorizados/page.tsx: crearAccesoMotorizado()
+      //   - app/panel/gestor/ingresar-orden/page.tsx: alta rápida de
+      //     comercio inline (mismo patrón duplicado que crearComercio())
+      // PENDIENTE: mover estas altas a Cloud Functions. Bloque B cubre la
+      // de comercios; motorizados e ingresar-orden quedan fuera del alcance
+      // de este bloque — quedan marcadas aquí para no perderlas de vista.
+      allow create: if (isOwner(userId) && autoRegistroValido()) || isAdminOrGestor();
 
-      allow update: if (isOwner(userId)
-        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['rol', 'activo']))
+      allow update: if (
+          isOwner(userId)
+          && camposEditablesAutoUsuario()
+          && request.resource.data.updatedAt == request.time
+        )
         || isAdminOrGestor();
 
       allow delete: if isAdminOrGestor();
     }
 
-    match /comercios/{userId} {
-      allow read: if isOwner(userId) || isAdminOrGestor() || isMotorizadoRole();
+    // comercios/{comercioId}: ID PERMANENTE del negocio, asignado una sola vez
+    // en crearComercio() — NUNCA es el Auth UID y nunca cambia. Un comercio
+    // solo puede crearse desde el panel de gestor (isOwner-create eliminado:
+    // no hay flujo de autoregistro que escriba aquí). El comercio autenticado
+    // solo puede editar sus propios datos de negocio; los campos de
+    // identidad/acceso (authUid, emailAcceso, accesoEstado, accesoCreadoPorUid,
+    // accesoCreadoAt, accesoActualizadoPorUid, accesoActualizadoAt,
+    // creadoPorUid, creadoAt) quedan reservados a Admin SDK/Cloud Functions.
+    match /comercios/{comercioId} {
+      function esMiComercio() {
+        return isComercioRole() && comercioId == comercioIdDelUsuario();
+      }
 
-      allow write: if isOwner(userId) || isAdminOrGestor();
+      function camposEditablesComercio() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name',
+          'phone',
+          'address',
+          'accounts',
+          'puntosRetiro',
+          'updatedAt'
+        ]);
+      }
+
+      allow read: if esMiComercio() || isAdminOrGestor() || isMotorizadoRole();
+
+      allow create: if isAdminOrGestor();
+
+      allow update: if isAdminOrGestor()
+        || (esMiComercio() && camposEditablesComercio());
 
       allow delete: if isAdminOrGestor();
     }
@@ -175,14 +290,14 @@ service cloud.firestore {
     match /solicitudes_envio/{id} {
       allow create: if signedIn()
         && (
-          request.resource.data.userId == request.auth.uid
+          esCreadorDeSolicitud(request.resource.data.userId)
           || isAdminOrGestor()
         );
 
       allow read: if isAdminOrGestor()
         || isOwnSolicitudCliente()
         || isAssignedMotorizado()
-        || (isComercioRole() && resource.data.comercioUid == request.auth.uid);
+        || (isComercioRole() && resource.data.comercioUid == comercioIdDelUsuario());
 
       // Gestor/admin: acceso completo
       allow update: if isAdminOrGestor();
@@ -208,34 +323,37 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // clientes_envio.comercioUid: pese al nombre, siempre es el comercioId
+    // estable del comercio dueño de la libreta de clientes — nunca el Auth
+    // UID (deuda técnica de naming, ver lib/financial-types.ts).
     match /clientes_envio/{clienteId} {
       allow read: if isAdminOrGestor()
         || (
-          signedIn()
+          isComercioRole()
           && resource.data.comercioUid is string
-          && resource.data.comercioUid == request.auth.uid
+          && resource.data.comercioUid == comercioIdDelUsuario()
         );
 
       allow create: if isAdminOrGestor()
         || (
-          signedIn()
+          isComercioRole()
           && request.resource.data.comercioUid is string
-          && request.resource.data.comercioUid == request.auth.uid
+          && request.resource.data.comercioUid == comercioIdDelUsuario()
         );
 
       allow update: if isAdminOrGestor()
         || (
-          signedIn()
+          isComercioRole()
           && resource.data.comercioUid is string
-          && resource.data.comercioUid == request.auth.uid
+          && resource.data.comercioUid == comercioIdDelUsuario()
           && request.resource.data.comercioUid == resource.data.comercioUid
         );
 
       allow delete: if isAdminOrGestor()
         || (
-          signedIn()
+          isComercioRole()
           && resource.data.comercioUid is string
-          && resource.data.comercioUid == request.auth.uid
+          && resource.data.comercioUid == comercioIdDelUsuario()
         );
     }
 
@@ -257,7 +375,7 @@ service cloud.firestore {
         || (signedIn() && resource.data.motorizadoUid == request.auth.uid)
         || (isComercioRole()
             && resource.data.destinatario == 'comercio'
-            && resource.data.destinatarioId == request.auth.uid);
+            && resource.data.destinatarioId == comercioIdDelUsuario());
 
       // Gestor/admin: puede confirmar, rechazar y editar libremente
       allow update: if isAdminOrGestor();
@@ -299,7 +417,7 @@ service cloud.firestore {
     // en código de confianza y no en reglas.
     match /cargos_delivery/{cargoId} {
       allow read: if isAdminOrGestor()
-        || (isComercioRole() && resource.data.comercioId == request.auth.uid);
+        || (isComercioRole() && resource.data.comercioId == comercioIdDelUsuario());
       allow write: if false;
     }
 
@@ -310,24 +428,113 @@ service cloud.firestore {
     // confirmado, parcial, rechazado, anulado) y cualquier escritura de
     // montoAplicado/excedenteSinResolver es exclusiva de Cloud Functions.
     match /pagos_comercio/{pagoId} {
+
+      // Lista cerrada según el esquema real de PagoComercio (lib/financial-types.ts).
+      // NOTA: el campo de autoría en el esquema real se llama 'creadoPorUid'
+      // (no 'creadoPor') — se usa ese nombre aquí. Se incluye
+      // 'comercioNombreSnapshot' aunque no estaba en la lista solicitada porque
+      // es un campo NO opcional de la interfaz (snapshot denormalizado del
+      // nombre) — omitirlo rompería toda creación legítima.
+      // Deliberadamente EXCLUIDOS (solo Cloud Functions/Admin SDK): confirmadoPor,
+      // confirmadoAt, rechazadoPor, rechazadoAt, motivoRechazo, anuladoPorUid,
+      // anuladoAt, motivoAnulacion.
+      function camposPermitidosPagoComercio() {
+        return request.resource.data.keys().hasOnly([
+          'comercioId',
+          'comercioNombreSnapshot',
+          'monto',
+          'metodo',
+          'estado',
+          'montoAplicado',
+          'excedenteSinResolver',
+          'comprobanteUrl',
+          'comprobantePath',
+          'cargosSeleccionadosIds',
+          'pagoAnteriorRechazadoId',
+          'creadoPorUid',
+          'creadoAt',
+          'actualizadoAt',
+          'reportadoPor',
+          'reportadoAt'
+        ]);
+      }
+
+      function excedenteSinManipularEnCreate() {
+        return !('excedenteSinResolver' in request.resource.data.keys())
+          || request.resource.data.excedenteSinResolver == 0;
+      }
+
+      function comprobanteValido() {
+        return request.resource.data.comprobanteUrl is string
+          && request.resource.data.comprobanteUrl.size() > 0;
+      }
+
+      function creacionAutoatribuida() {
+        return request.resource.data.creadoPorUid == request.auth.uid
+          && request.resource.data.creadoAt == request.time;
+      }
+
+      function reporteAutoatribuido() {
+        return request.resource.data.reportadoPor == request.auth.uid
+          && request.resource.data.reportadoAt == request.time;
+      }
+
+      function sinCamposDeReporteEnCreate() {
+        return !('reportadoPor' in request.resource.data.keys())
+          && !('reportadoAt' in request.resource.data.keys());
+      }
+
       allow read: if isAdminOrGestor()
-        || (isComercioRole() && resource.data.comercioId == request.auth.uid);
+        || (isComercioRole() && resource.data.comercioId == comercioIdDelUsuario());
 
-      allow create: if (
-          isAdminOrGestor()
-          || (isComercioRole() && request.resource.data.comercioId == request.auth.uid)
-        )
-        && request.resource.data.estado in ['borrador', 'reportado']
-        && request.resource.data.montoAplicado == 0;
+      allow create: if camposPermitidosPagoComercio()
+        && request.resource.data.montoAplicado == 0
+        && excedenteSinManipularEnCreate()
+        && creacionAutoatribuida()
+        && (
+          // Comercio autorreportando su propio pago, en borrador.
+          (
+            isComercioRole()
+            && request.resource.data.comercioId == comercioIdDelUsuario()
+            && request.resource.data.estado == 'borrador'
+            && sinCamposDeReporteEnCreate()
+          )
+          // Comercio creando directo en reportado: exige comprobante y auto-atribución del reporte.
+          || (
+            isComercioRole()
+            && request.resource.data.comercioId == comercioIdDelUsuario()
+            && request.resource.data.estado == 'reportado'
+            && comprobanteValido()
+            && reporteAutoatribuido()
+          )
+          // Gestor/admin registrando en nombre del comercio, en borrador.
+          || (
+            isAdminOrGestor()
+            && request.resource.data.estado == 'borrador'
+            && sinCamposDeReporteEnCreate()
+          )
+          // Gestor/admin registrando un pago ya recibido (ej. efectivo en oficina)
+          // directo en reportado — no se exige comprobante (puede ser efectivo).
+          || (
+            isAdminOrGestor()
+            && request.resource.data.estado == 'reportado'
+            && reporteAutoatribuido()
+          )
+        );
 
+      // Solo se puede editar mientras el documento SIGUE en 'borrador'. Una vez
+      // 'reportado' (o cualquier estado posterior), ningún campo es editable
+      // desde el cliente — confirmar/rechazar/marcar parcial/anular son
+      // exclusivos de Cloud Functions con Admin SDK, que no pasan por estas reglas.
       allow update: if (
           isAdminOrGestor()
-          || (isComercioRole() && resource.data.comercioId == request.auth.uid)
+          || (isComercioRole() && resource.data.comercioId == comercioIdDelUsuario())
         )
-        && resource.data.estado in ['borrador', 'reportado']
+        && resource.data.estado == 'borrador'
         && request.resource.data.estado in ['borrador', 'reportado']
         && request.resource.data.comercioId == resource.data.comercioId
         && request.resource.data.montoAplicado == resource.data.montoAplicado
+        && request.resource.data.get('excedenteSinResolver', null) == resource.data.get('excedenteSinResolver', null)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'monto',
           'metodo',
@@ -338,7 +545,20 @@ service cloud.firestore {
           'reportadoAt',
           'cargosSeleccionadosIds',
           'actualizadoAt'
-        ]);
+        ])
+        && (
+          // Se mantiene en borrador: prohibido sembrar reportadoPor/reportadoAt.
+          (
+            request.resource.data.estado == 'borrador'
+            && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['reportadoPor', 'reportadoAt'])
+          )
+          // Transición borrador -> reportado: exige comprobante y auto-atribución.
+          || (
+            request.resource.data.estado == 'reportado'
+            && comprobanteValido()
+            && reporteAutoatribuido()
+          )
+        );
 
       allow delete: if false;
     }
@@ -347,7 +567,7 @@ service cloud.firestore {
     // aplicó a cada cargo — solo Cloud Functions escriben aquí.
     match /aplicaciones_pago/{id} {
       allow read: if isAdminOrGestor()
-        || (isComercioRole() && resource.data.comercioId == request.auth.uid);
+        || (isComercioRole() && resource.data.comercioId == comercioIdDelUsuario());
       allow write: if false;
     }
 

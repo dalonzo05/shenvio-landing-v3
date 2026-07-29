@@ -205,7 +205,9 @@ export default function AjustesPage() {
       setEmailVerified(authUser.emailVerified)
       const p = await readUserProfileByUid(authUser.uid)
       setName(p?.name ?? profile?.name ?? '')
-      const c = await readCompanyByUid(authUser.uid)
+      // Identidad estable (Bloque A): comercios/{comercioId}, no authUser.uid.
+      if (!profile?.comercioId) return
+      const c = await readCompanyByUid(profile.comercioId)
       if (c) {
         setCompanyName(c.name ?? '')
         setPhone(c.phone ?? '')
@@ -214,12 +216,12 @@ export default function AjustesPage() {
         if (c.tipoCliente) setTipoCliente(c.tipoCliente)
       }
     })()
-  }, [authUser, profile?.name])
+  }, [authUser, profile?.name, profile?.comercioId])
 
   // Real-time puntos favoritos
   useEffect(() => {
-    if (!authUser) return
-    const unsub = onSnapshot(doc(db, 'comercios', authUser.uid), (snap) => {
+    if (!profile?.comercioId) return
+    const unsub = onSnapshot(doc(db, 'comercios', profile.comercioId), (snap) => {
       if (!snap.exists()) { setPuntosFavoritos([]); return }
       const data = snap.data() as any
       const container = data?.puntosRetiro || {}
@@ -237,7 +239,7 @@ export default function AjustesPage() {
       setPuntosFavoritos(items)
     })
     return () => unsub()
-  }, [authUser])
+  }, [profile?.comercioId])
 
   if (loading || !authUser) return null
 
@@ -245,7 +247,11 @@ export default function AjustesPage() {
   const saveProfile = async () => {
     setSavingProfile(true); setMsgProfile(null)
     try {
-      await upsertUserProfileByUid(authUser.uid, { name: name.trim(), email: authUser.email ?? '' })
+      // No se envía email: en esta pantalla el doc ya existe (es una
+      // actualización), y firestore.rules ya no permite tocar email desde
+      // la auto-edición del propio usuario — email se sincroniza solo en el
+      // primer login (UserProvider.tsx) o vía gestor/Cloud Function.
+      await upsertUserProfileByUid(authUser.uid, { name: name.trim() })
       await refreshProfile()
       setMsgProfile('✅ Perfil guardado')
     } catch { setMsgProfile('❌ No se pudo guardar') }
@@ -257,10 +263,11 @@ export default function AjustesPage() {
   const [msgCompany, setMsgCompany] = useState<string | null>(null)
 
   const saveCompany = async () => {
+    if (!profile?.comercioId) { setMsgCompany('❌ No se pudo resolver el comercio de tu cuenta.'); return }
     setSavingCompany(true); setMsgCompany(null)
     try {
       const accountsClean = accounts.filter(a => a.bank || a.number || a.holder).map(a => ({ bank: (a.bank || '').trim(), number: (a.number || '').trim(), holder: (a.holder || '').trim(), currency: a.currency || 'NIO' }))
-      await upsertCompanyByUid(authUser.uid, { accounts: accountsClean })
+      await upsertCompanyByUid(profile.comercioId, { accounts: accountsClean })
       setMsgCompany('✅ Cuentas guardadas')
     } catch (e: any) { setMsgCompany(`❌ No se pudo guardar: ${e?.message || ''}`) }
     finally { setSavingCompany(false) }
@@ -299,6 +306,7 @@ export default function AjustesPage() {
   }
 
   const guardarFavorito = async () => {
+    if (!profile?.comercioId) { setFavError('No se pudo resolver el comercio de tu cuenta.'); return }
     if (!favLabel.trim()) { setFavError('El nombre del lugar es obligatorio.'); return }
     const duplicateLabel = puntosFavoritos.some(
       f => f.key !== editingKey && f.label.trim().toLowerCase() === favLabel.trim().toLowerCase()
@@ -319,16 +327,17 @@ export default function AjustesPage() {
       if (favCoord) payload.coord = favCoord
       if (favLink.trim()) payload.puntoGoogleLink = favLink.trim()
 
-      await setDoc(doc(db, 'comercios', authUser.uid), { puntosRetiro: { [key]: payload }, updatedAt: serverTimestamp() }, { merge: true })
+      await setDoc(doc(db, 'comercios', profile.comercioId), { puntosRetiro: { [key]: payload }, updatedAt: serverTimestamp() }, { merge: true })
       setModalOpen(false)
     } catch (e) { console.error(e); setFavError('No se pudo guardar el punto.') }
     finally { setSavingFav(false) }
   }
 
   const eliminarFavorito = async (key: string) => {
+    if (!profile?.comercioId) return
     if (!confirm('¿Eliminás este punto favorito?')) return
     try {
-      await updateDoc(doc(db, 'comercios', authUser.uid), { [`puntosRetiro.${key}`]: null, updatedAt: serverTimestamp() })
+      await updateDoc(doc(db, 'comercios', profile.comercioId), { [`puntosRetiro.${key}`]: null, updatedAt: serverTimestamp() })
     } catch (e) { console.error(e) }
   }
 

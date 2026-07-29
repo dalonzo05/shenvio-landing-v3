@@ -16,6 +16,7 @@ import {
   where,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import { useUser } from '@/app/Components/UserProvider'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
@@ -123,24 +124,27 @@ async function calcularDistancia(o: LatLng, d: LatLng): Promise<{ km: number; pr
 
 // ─── Hooks ────────────────────────────────────────────────────────────────────
 
-function useClientesEntrega(uid: string | null) {
+// Los 4 helpers de abajo reciben el comercioId ESTABLE (Bloque A) — nunca el
+// Auth UID — porque clientes_envio y comercios/{id} se identifican por el
+// negocio permanente, no por quién está logueado en ese momento.
+function useClientesEntrega(comercioId: string | null) {
   const [clientes, setClientes] = useState<ClienteGuardado[]>([])
   useEffect(() => {
-    if (!uid) return
-    const q = query(collection(db, 'clientes_envio'), where('comercioUid', '==', uid))
+    if (!comercioId) return
+    const q = query(collection(db, 'clientes_envio'), where('comercioUid', '==', comercioId))
     const unsub = onSnapshot(q, (snap) => {
       setClientes(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })))
     })
     return () => unsub()
-  }, [uid])
+  }, [comercioId])
   return clientes
 }
 
-function usePuntosFavoritos(uid: string | null) {
+function usePuntosFavoritos(comercioId: string | null) {
   const [puntos, setPuntos] = useState<PuntoFavorito[]>([])
   useEffect(() => {
-    if (!uid) return
-    const unsub = onSnapshot(doc(db, 'comercios', uid), (snap) => {
+    if (!comercioId) return
+    const unsub = onSnapshot(doc(db, 'comercios', comercioId), (snap) => {
       if (!snap.exists()) { setPuntos([]); return }
       const data = snap.data() as any
       const container = data?.puntosRetiro || {}
@@ -159,17 +163,17 @@ function usePuntosFavoritos(uid: string | null) {
       setPuntos(items)
     })
     return () => unsub()
-  }, [uid])
+  }, [comercioId])
   return puntos
 }
 
-async function guardarClienteEntrega(uid: string, data: Omit<ClienteGuardado, 'id'>) {
+async function guardarClienteEntrega(comercioId: string, data: Omit<ClienteGuardado, 'id'>) {
   if (!data.celular?.trim()) return
-  const docId = `${uid}_${data.celular.replace(/\D/g, '')}`
+  const docId = `${comercioId}_${data.celular.replace(/\D/g, '')}`
   const payload: Record<string, any> = {
     nombre: data.nombre.trim(),
     celular: data.celular.trim(),
-    comercioUid: uid,
+    comercioUid: comercioId,
     updatedAt: serverTimestamp(),
     // totalViajes se incrementa solo cuando la orden pasa a 'entregado' en SolicitudDrawer
   }
@@ -179,7 +183,7 @@ async function guardarClienteEntrega(uid: string, data: Omit<ClienteGuardado, 'i
   await setDoc(doc(db, 'clientes_envio', docId), payload, { merge: true })
 }
 
-async function guardarPuntoFavorito(uid: string, label: string, data: RetiroState, geocode: string) {
+async function guardarPuntoFavorito(comercioId: string, label: string, data: RetiroState, geocode: string) {
   const key = `punto_${Date.now()}`
   const payload: Record<string, any> = {
     label: label.trim(),
@@ -191,7 +195,7 @@ async function guardarPuntoFavorito(uid: string, label: string, data: RetiroStat
   }
   if (data.coord) payload.coord = data.coord
   if (geocode.trim()) payload.geocodeGoogle = geocode.trim()
-  await setDoc(doc(db, 'comercios', uid), { puntosRetiro: { [key]: payload }, updatedAt: serverTimestamp() }, { merge: true })
+  await setDoc(doc(db, 'comercios', comercioId), { puntosRetiro: { [key]: payload }, updatedAt: serverTimestamp() }, { merge: true })
 }
 
 // ─── Phone helpers ────────────────────────────────────────────────────────────
@@ -713,13 +717,20 @@ const blankEntrega = (): EntregaState => ({ nombre: '', celular: '', direccion: 
 export default function SolicitarEnvioPage() {
   const [uid, setUid] = useState<string | null>(null)
   useEffect(() => { const u = auth.currentUser; if (u) setUid(u.uid) }, [])
+  // Identidad estable (Bloque A): comercioId (usuarios/{uid}.comercioId),
+  // NUNCA auth.uid, para todo lo que sea del comercio como negocio
+  // (comercios/{comercioId}, clientes_envio, solicitudes_envio.userId).
+  // `uid` (Auth UID) se conserva solo para leer usuarios/{uid} y para
+  // cotizaciones (historial de sesión, no de negocio — ver Bloque A).
+  const { profile } = useUser()
+  const comercioId = profile?.comercioId ?? null
 
   const [ownerCompanyName, setOwnerCompanyName] = useState('')
   const [comercioRequiereBolso, setComercioRequiereBolso] = useState(false)
   useEffect(() => {
-    if (!uid) return
+    if (!uid || !comercioId) return
     Promise.all([
-      getDoc(doc(db, 'comercios', uid)),
+      getDoc(doc(db, 'comercios', comercioId)),
       getDoc(doc(db, 'usuarios', uid)),
     ]).then(([comercioSnap, usuarioSnap]) => {
       const c = comercioSnap.exists() ? (comercioSnap.data() as any) : null
@@ -728,10 +739,10 @@ export default function SolicitarEnvioPage() {
       setComercioRequiereBolso(c?.requiereBolso ?? false)
       if (c?.tipoCliente) setTipoCliente(c.tipoCliente)
     })
-  }, [uid])
+  }, [uid, comercioId])
 
-  const clientesEntrega = useClientesEntrega(uid)
-  const puntosFavoritos = usePuntosFavoritos(uid)
+  const clientesEntrega = useClientesEntrega(comercioId)
+  const puntosFavoritos = usePuntosFavoritos(comercioId)
 
   // Draft from calculadora
   const [draft, setDraft] = useState<any>(null)
@@ -858,7 +869,7 @@ export default function SolicitarEnvioPage() {
   // ── Trip history detection ──
   const [viajeAnterior, setViajeAnterior] = useState<{ precio: number; tipo: 'entregado' | 'cotizacion' } | null>(null)
   useEffect(() => {
-    if (!uid || !retiro.coord || !entrega.coord) { setViajeAnterior(null); return }
+    if (!uid || !comercioId || !retiro.coord || !entrega.coord) { setViajeAnterior(null); return }
     const o = retiro.coord
     const d = entrega.coord
     const TOL = 0.0005
@@ -867,8 +878,10 @@ export default function SolicitarEnvioPage() {
     let cancelled = false
     const search = async () => {
       const [cotSnap, solSnap] = await Promise.all([
+        // cotizaciones: historial de sesión por Auth UID (no cambia).
         getDocs(query(collection(db, 'cotizaciones'), where('userId', '==', uid), orderBy('createdAt', 'desc'), limit(20))),
-        getDocs(query(collection(db, 'solicitudes_envio'), where('userId', '==', uid), orderBy('createdAt', 'desc'), limit(20))),
+        // solicitudes_envio: identidad estable del comercio (Bloque A).
+        getDocs(query(collection(db, 'solicitudes_envio'), where('userId', '==', comercioId), orderBy('createdAt', 'desc'), limit(20))),
       ])
       if (cancelled) return
       // Primero buscar en solicitudes realmente entregadas (viaje similar real)
@@ -891,7 +904,7 @@ export default function SolicitarEnvioPage() {
     }
     search().catch(() => {})
     return () => { cancelled = true }
-  }, [uid, retiro.coord, entrega.coord])
+  }, [uid, comercioId, retiro.coord, entrega.coord])
 
   // ── Manual price calculation ──
   const [calcResult, setCalcResult] = useState<{ km: number; precio: number } | null>(null)
@@ -1013,10 +1026,10 @@ export default function SolicitarEnvioPage() {
   }
 
   const handleGuardarComoFavorito = async () => {
-    if (!newFavLabel.trim() || !uid) return
+    if (!newFavLabel.trim() || !comercioId) return
     setSavingNewFav(true)
     try {
-      await guardarPuntoFavorito(uid, newFavLabel, retiro, geocodeRetiro)
+      await guardarPuntoFavorito(comercioId, newFavLabel, retiro, geocodeRetiro)
       setShowGuardarFav(false)
       setNewFavLabel('')
       setMsg({ type: 'success', text: `⭐ "${newFavLabel}" guardado como favorito.` })
@@ -1163,6 +1176,7 @@ export default function SolicitarEnvioPage() {
       setSaving(true)
       const user = auth.currentUser
       if (!user) { setMsg({ type: 'error', text: 'No hay sesión iniciada.' }); return }
+      if (!comercioId) { setMsg({ type: 'error', text: 'No se pudo resolver el comercio de tu cuenta. Recargá la página.' }); return }
 
       const zonasActivas = await getZonasActivas()
       const {
@@ -1185,10 +1199,10 @@ export default function SolicitarEnvioPage() {
       const tieneCalculo = !!calcResult || !!draft
 
       await addDoc(collection(db, 'solicitudes_envio'), {
-        userId: user.uid,
-        comercioUid: user.uid,
+        userId: comercioId,
+        comercioUid: comercioId,
         ownerSnapshot: {
-          uid: user.uid,
+          uid: comercioId,
           companyName: ownerCompanyName || '',
         },
         tipoCliente,
@@ -1296,7 +1310,7 @@ export default function SolicitarEnvioPage() {
         createdAt: serverTimestamp(),
       })
 
-      await guardarClienteEntrega(user.uid, {
+      await guardarClienteEntrega(comercioId, {
         nombre: entrega.nombre.trim(),
         celular: entrega.celular.trim(),
         direccion: entrega.direccion.trim(),

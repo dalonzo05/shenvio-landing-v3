@@ -82,6 +82,10 @@ type Solicitud = {
 
 type CobroSemanal = {
   id: string
+  // clienteUid es el comercioId estable del comercio facturado por crédito
+  // semanal (NUNCA un Auth UID ni un cliente final distinto) — ver nota de
+  // identidad estable en lib/financial-types.ts. Nombre engañoso, candidato a
+  // normalizar a comercioId en una limpieza futura (no renombrar todavía).
   clienteUid: string
   clienteNombre: string
   clienteCompany: string

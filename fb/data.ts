@@ -1,5 +1,5 @@
 // fb/data.ts
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore'
+import { doc, getDoc, setDoc, serverTimestamp, runTransaction } from 'firebase/firestore'
 import { db } from '@/fb/config'
 
 /** (legacy solo si aún tienes docs por email) */
@@ -22,14 +22,44 @@ function cleanUndefined(value: any): any {
   return value
 }
 
-/* ===== USUARIOS (por UID) ===== */
+/* ===== USUARIOS (por UID) =====
+ *
+ * upsertUserProfileByUid distingue creación de actualización DENTRO de una
+ * transacción (no con dos pasos separados de leer-y-luego-escribir, que
+ * dejaría una ventana de carrera entre llamadas concurrentes):
+ *
+ * - Si usuarios/{uid} NO existe: es la primera vez que este usuario se
+ *   autentica. Se crea con createdAt Y updatedAt en serverTimestamp(). Debe
+ *   cumplir firestore.rules → camposPermitidosAutoRegistroUsuario()
+ *   (email/name/theme/createdAt/updatedAt) — nunca rol/activo/comercioId.
+ * - Si YA existe: es una actualización. Se reescribe SOLO con los campos
+ *   recibidos (nunca createdAt) + updatedAt en serverTimestamp() — el
+ *   createdAt original queda intacto porque ni siquiera se envía. Debe
+ *   cumplir camposEditablesAutoUsuario() (name/theme/updatedAt) — por eso
+ *   ningún caller debe pasar `email` en una actualización (ver
+ *   app/panel/ajustes/page.tsx).
+ *
+ * Se envuelve en runTransaction para que sea idempotente ante llamadas
+ * concurrentes (ej. dos disparos de onAuthStateChanged casi simultáneos):
+ * la transacción de Firestore reintenta automáticamente si otra escritura
+ * ganó la carrera, así que createdAt nunca se pisa ni se duplica el efecto.
+ */
 export async function upsertUserProfileByUid(
   uid: string,
   profile: { email?: string; name?: string; theme?: string }
 ) {
   if (!uid) throw new Error('uid inválido')
   const data = cleanUndefined(profile)
-  await setDoc(doc(db, 'usuarios', uid), { ...data, updatedAt: serverTimestamp() }, { merge: true })
+  const ref = doc(db, 'usuarios', uid)
+
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref)
+    if (!snap.exists()) {
+      tx.set(ref, { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() })
+    } else {
+      tx.set(ref, { ...data, updatedAt: serverTimestamp() }, { merge: true })
+    }
+  })
 }
 
 export async function readUserProfileByUid(uid: string) {
