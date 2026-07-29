@@ -170,6 +170,13 @@ const TIPOS_QUE_REQUIEREN_CUENTAS = new Set<string>([
   'liquidacion_pago_transferencia',
   'abono_deuda_motorizado',
   'deuda_condonada',
+  // Cargos de delivery (Fase 1A) — nacen ya con el patrón correcto, a
+  // diferencia de pago_recibido/cobro_generado legacy que nunca lo tuvieron.
+  'cargo_generado',
+  'cliente_efectivo_confirmado',
+  'ce_deduccion_confirmada',
+  'cliente_transferencia_confirmada',
+  'pago_comercio_aplicado',
 ])
 
 /** Movimientos que deberían tener cuentas pero no las tienen */

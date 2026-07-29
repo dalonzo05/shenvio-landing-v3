@@ -68,6 +68,21 @@ export const cuentas = {
   recuperacionDeuda:     'recuperacion_deuda_liquidacion' as const, // deuda recuperada por descuento en liquidación
   // Origen/destino para dinero que entra o sale del sistema (ej: comercio paga en efectivo)
   externo:               'externo'                as const,
+
+  // ── Cargos de delivery (Fase 1A) ──────────────────────────────────────────
+  // Cuenta de devengo puro: nunca es destino, solo origen. Su saldo (negativo
+  // por diseño) leído en valor absoluto es "ingreso generado" del período,
+  // independiente de si ya se cobró (ver ingresos vs ingresosStorkhub/banco).
+  ingresosDevengadosDelivery: 'ingresos_devengados_delivery' as const,
+  // Cuenta puente única (no parametrizada): dinero que debe el CLIENTE FINAL,
+  // no el comercio, mientras no se confirma su pago (efectivo/CE en poder del
+  // motorizado sin confirmar, o transferencia directa aún no confirmada).
+  porCobrarClienteFinal:      'por_cobrar_cliente_final'     as const,
+  // Ajuste manual de un cargo de comercio: NUNCA debe simular una entrada
+  // bancaria o de caja real — dinero que no llegó por ningún canal físico.
+  ajustesManualesCobros:      'ajustes_manuales_cobros'      as const,
+  // Pérdida de un cargo de comercio (perdido u origen cliente_final perdido).
+  perdidaCobrosComercio:      'perdida_cobros_comercio'      as const,
 } as const
 
 // ─── Tipos de movimiento financiero ───────────────────────────────────────────
@@ -139,6 +154,17 @@ export type TipoMovimiento =
   | 'anulacion'                        // contra-movimiento para revertir otro movimiento
   | 'deuda_condonada'                  // StorkHub absorbe pérdida: deuda_motorizado → perdida_condonaciones
 
+  // ── Cargos de delivery (Fase 1A) ────────────────────────────────────────────
+  // Un cargo_generado representa SOLO devengo — nunca implica que el dinero ya
+  // esté en custodia real. La confirmación de custodia/cobro es SIEMPRE un
+  // movimiento separado (ver cliente_efectivo_confirmado / ce_deduccion_confirmada
+  // / cliente_transferencia_confirmada / pago_comercio_aplicado).
+  | 'cargo_generado'                   // ingresos_devengados_delivery → saldo_comercio | por_cobrar_cliente_final
+  | 'cliente_efectivo_confirmado'      // por_cobrar_cliente_final → efectivo_en_poder (SOLO si recibio=true)
+  | 'ce_deduccion_confirmada'          // por_cobrar_cliente_final → efectivo_en_poder (SOLO si recibio=true, delivery deducido del CE)
+  | 'cliente_transferencia_confirmada' // por_cobrar_cliente_final → banco_storkhub (boucher confirmado por gestor)
+  | 'pago_comercio_aplicado'           // saldo_comercio → banco_storkhub | caja_storkhub | ajustes_manuales_cobros (según pagos_comercio.metodo)
+
 // ─── Movimiento financiero (colección movimientos_financieros) ─────────────────
 // Fase 1: ledger como auditoría enriquecida. Los campos cuentaOrigen/cuentaDestino
 // son opcionales para no romper el flujo actual mientras se migra gradualmente.
@@ -176,6 +202,9 @@ export interface MovimientoFinanciero {
   saldoId?: string
   gastoId?: string
   liquidacionId?: string
+  cargoId?: string        // ref a cargos_delivery (Fase 1A)
+  pagoComercioId?: string // ref a pagos_comercio (Fase 1A)
+  aplicacionId?: string   // ref a aplicaciones_pago (Fase 1A)
 
   // ── Datos extra sin schema fijo ─────────────────────────────────────────────
   metadata?: Record<string, unknown>
@@ -343,4 +372,145 @@ export function getDepositoEstado(dep: {
   estado?: string
 }): EstadoDeposito {
   return (dep.estado as EstadoDeposito) ?? 'pendiente_boucher'
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ─── Fase 1A — Cuentas por cobrar de delivery ───────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Reemplaza gradualmente a cobroDelivery/cobros_semanales (que se mantienen
+// intactos en paralelo mientras se valida este modelo — ver plan de migración).
+//
+// Principios (ya aprobados, no reabrir sin discutirlo primero):
+// - cargos_delivery NO persiste ubicacionActual, recepcionResumen ni
+//   depositoIdConciliacion. La conciliación vive exclusivamente en
+//   aplicaciones_pago; la ubicación del dinero se deriva del ledger.
+// - aplicaciones_pago es la única fuente de verdad de cuánto se aplicó a
+//   cada cargo.
+// - Toda escritura en estas 4 colecciones pasa por Cloud Functions — el
+//   cliente nunca escribe cargos_delivery ni aplicaciones_pago directamente,
+//   y solo puede crear pagos_comercio en borrador/reportado.
+
+// ─── cargos_delivery ─────────────────────────────────────────────────────────
+
+export type ResponsableCargo = 'comercio' | 'cliente_final' | 'tercero'
+
+export type CoberturaTipoCargo =
+  | 'cliente_efectivo'
+  | 'cliente_transferencia'
+  | 'deduccion_ce'
+  | 'comercio_contado'
+  | 'comercio_credito'
+  | 'tercero'
+
+export type EstadoCoberturaCargo = 'pendiente' | 'parcial' | 'cubierto' | 'perdido' | 'anulado'
+// NOTA: 'condonado' está reservado en el diseño pero no es alcanzable en
+// Fase 1A — condonaciones_comercio no existe todavía.
+
+export type ReceptorInicialCargo = 'motorizado' | 'storkhub_directo'
+
+export interface CargoDelivery {
+  id?: string // = solicitudId (determinístico, 1:1) — ver generarCargoDelivery
+  solicitudId: string
+  comercioId: string
+  comercioNombreSnapshot: string
+  montoOriginal: number
+  montoAjustado: number
+  // Cache mantenido TRANSACCIONALMENTE junto con aplicaciones_pago — no es un
+  // campo "libre", nunca se edita fuera de las Cloud Functions de esta fase.
+  montoPendiente: number
+  responsableOriginal: ResponsableCargo
+  coberturaTipo: CoberturaTipoCargo
+  estadoCobertura: EstadoCoberturaCargo
+  receptorInicial: ReceptorInicialCargo
+  beneficiarioEconomico: 'storkhub'
+  semanaKey?: string      // solo si coberturaTipo === 'comercio_credito'
+  motorizadoId?: string   // requerido si receptorInicial === 'motorizado'
+  anulado: boolean
+  motivoAnulacion?: string
+  anuladoPorUid?: string
+  anuladoAt?: unknown
+  creadoAt: unknown
+  actualizadoAt: unknown
+}
+
+// ─── pagos_comercio ──────────────────────────────────────────────────────────
+
+export type EstadoPagoComercio =
+  | 'borrador'
+  | 'reportado'
+  | 'en_revision'
+  | 'confirmado'
+  | 'parcial'
+  | 'rechazado' // terminal — nunca vuelve a 'reportado'
+  | 'anulado'
+
+export type MetodoPagoComercio = 'transferencia' | 'efectivo' | 'ajuste_manual'
+
+export interface PagoComercio {
+  id?: string
+  comercioId: string
+  comercioNombreSnapshot: string
+  monto: number
+  metodo: MetodoPagoComercio
+  estado: EstadoPagoComercio
+  comprobanteUrl?: string
+  comprobantePath?: string
+  reportadoPor?: string
+  reportadoAt?: unknown
+  confirmadoPor?: string
+  confirmadoAt?: unknown
+  rechazadoPor?: string
+  rechazadoAt?: unknown
+  motivoRechazo?: string
+  // Cache mantenido transaccionalmente por confirmarPagoComercio.
+  montoAplicado: number
+  // Sobrepago sin resolver — Fase 1B (saldos a favor) todavía no existe.
+  excedenteSinResolver?: number
+  cargosSeleccionadosIds?: string[]
+  // Si este pago es un reintento tras un rechazo, referencia al anterior.
+  // 'rechazado' es terminal: un comprobante nuevo SIEMPRE crea un documento
+  // pagos_comercio nuevo, nunca reabre el rechazado.
+  pagoAnteriorRechazadoId?: string
+  creadoPorUid: string
+  creadoAt: unknown
+  actualizadoAt: unknown
+  anuladoPorUid?: string
+  anuladoAt?: unknown
+  motivoAnulacion?: string
+}
+
+// ─── aplicaciones_pago ───────────────────────────────────────────────────────
+
+export type OrigenTipoAplicacion = 'pago_comercio' | 'deposito_motorizado'
+export type EstadoAplicacion = 'activa' | 'revertida'
+
+export interface AplicacionPago {
+  id?: string // = `${origenTipo}_${origenId}_${cargoId}` (determinístico)
+  cargoId: string
+  comercioId: string // denormalizado desde cargo.comercioId — para reglas/queries
+  origenTipo: OrigenTipoAplicacion
+  origenId: string
+  motorizadoId?: string // denormalizado desde cargo.motorizadoId, solo si origenTipo='deposito_motorizado'
+  montoAplicado: number
+  estado: EstadoAplicacion
+  creadoAt: unknown
+  creadoPorUid: string
+  revertidoAt?: unknown
+  revertidoPorUid?: string
+  motivoReversion?: string
+}
+
+// ─── configuracion_cobros (singleton, id='global') ──────────────────────────
+
+export interface ConfiguracionCobros {
+  id?: string // siempre 'global'
+  umbralDiasMorosidadDefault: number
+  // Reservado, NO usado en Fase 1A — comisión configurable queda fuera de
+  // alcance hasta que se apruebe explícitamente.
+  comisionPctDefault?: number
+  // Reservado, NO usado en Fase 1A.
+  canalesNotificacionHabilitados?: string[]
+  actualizadoAt: unknown
+  actualizadoPorUid: string
 }

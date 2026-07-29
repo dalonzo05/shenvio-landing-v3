@@ -97,6 +97,82 @@
         { "fieldPath": "zonaEntregaId", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "cargos_delivery",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "comercioId", "order": "ASCENDING" },
+        { "fieldPath": "estadoCobertura", "order": "ASCENDING" },
+        { "fieldPath": "creadoAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "cargos_delivery",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "estadoCobertura", "order": "ASCENDING" },
+        { "fieldPath": "creadoAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "cargos_delivery",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "motorizadoId", "order": "ASCENDING" },
+        { "fieldPath": "estadoCobertura", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "cargos_delivery",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "semanaKey", "order": "ASCENDING" },
+        { "fieldPath": "comercioId", "order": "ASCENDING" },
+        { "fieldPath": "estadoCobertura", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "pagos_comercio",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "comercioId", "order": "ASCENDING" },
+        { "fieldPath": "estado", "order": "ASCENDING" },
+        { "fieldPath": "creadoAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "pagos_comercio",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "estado", "order": "ASCENDING" },
+        { "fieldPath": "reportadoAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "aplicaciones_pago",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "cargoId", "order": "ASCENDING" },
+        { "fieldPath": "estado", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "aplicaciones_pago",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "origenId", "order": "ASCENDING" },
+        { "fieldPath": "origenTipo", "order": "ASCENDING" },
+        { "fieldPath": "estado", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "aplicaciones_pago",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "comercioId", "order": "ASCENDING" },
+        { "fieldPath": "estado", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

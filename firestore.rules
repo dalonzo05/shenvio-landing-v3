@@ -25,6 +25,10 @@ service cloud.firestore {
         && (userDoc().data.rol == 'admin' || userDoc().data.rol == 'gestor');
     }
 
+    function isAdmin() {
+      return isActiveUser() && userDoc().data.rol == 'admin';
+    }
+
     function isMotorizadoRole() {
       return isActiveUser()
         && userDoc().data.rol == 'motorizado';
@@ -280,6 +284,80 @@ service cloud.firestore {
     match /movimientos_financieros/{id} {
       allow read, write: if isAdminOrGestor();
       allow delete: if false;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Fase 1A — Cuentas por cobrar de delivery (cargos_delivery, pagos_comercio,
+    // aplicaciones_pago, configuracion_cobros). Corre en paralelo al modelo
+    // legacy (cobroDelivery/cobros_semanales), que sigue intacto.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Un cargo por viaje con delivery. Toda escritura pasa por Cloud Functions
+    // (Admin SDK, que no pasa por estas reglas) — el cliente NUNCA escribe
+    // aquí directamente, ni siquiera gestor/admin, para que las invariantes
+    // cruzadas (FIFO, montoPendiente, pertenencia de comercioId) se validen
+    // en código de confianza y no en reglas.
+    match /cargos_delivery/{cargoId} {
+      allow read: if isAdminOrGestor()
+        || (isComercioRole() && resource.data.comercioId == request.auth.uid);
+      allow write: if false;
+    }
+
+    // Eventos de pago del comercio. El comercio puede autorreportar el suyo
+    // (subir comprobante) y el gestor puede registrar uno en su nombre (ej.
+    // efectivo recibido en oficina) — ambos casos SOLO en estado inicial
+    // borrador/reportado. Cualquier transición posterior (en_revision,
+    // confirmado, parcial, rechazado, anulado) y cualquier escritura de
+    // montoAplicado/excedenteSinResolver es exclusiva de Cloud Functions.
+    match /pagos_comercio/{pagoId} {
+      allow read: if isAdminOrGestor()
+        || (isComercioRole() && resource.data.comercioId == request.auth.uid);
+
+      allow create: if (
+          isAdminOrGestor()
+          || (isComercioRole() && request.resource.data.comercioId == request.auth.uid)
+        )
+        && request.resource.data.estado in ['borrador', 'reportado']
+        && request.resource.data.montoAplicado == 0;
+
+      allow update: if (
+          isAdminOrGestor()
+          || (isComercioRole() && resource.data.comercioId == request.auth.uid)
+        )
+        && resource.data.estado in ['borrador', 'reportado']
+        && request.resource.data.estado in ['borrador', 'reportado']
+        && request.resource.data.comercioId == resource.data.comercioId
+        && request.resource.data.montoAplicado == resource.data.montoAplicado
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'monto',
+          'metodo',
+          'comprobanteUrl',
+          'comprobantePath',
+          'estado',
+          'reportadoPor',
+          'reportadoAt',
+          'cargosSeleccionadosIds',
+          'actualizadoAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    // Tabla de unión pago/depósito ↔ cargo. Fuente de verdad de cuánto se
+    // aplicó a cada cargo — solo Cloud Functions escriben aquí.
+    match /aplicaciones_pago/{id} {
+      allow read: if isAdminOrGestor()
+        || (isComercioRole() && resource.data.comercioId == request.auth.uid);
+      allow write: if false;
+    }
+
+    // Configuración global de Cobros (umbral de morosidad, etc.). Lectura
+    // abierta (el umbral no es sensible, el panel comercio también lo usa);
+    // escritura solo admin — es política global, no una acción operativa
+    // del día a día de un gestor.
+    match /configuracion_cobros/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
     }
 
     // Liquidaciones semanales de motorizado: gestor/admin escribe, motorizado puede leer la suya
