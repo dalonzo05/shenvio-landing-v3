@@ -283,19 +283,37 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
   }
 
   // ¿Hay un acceso activo con OTRO email? Ahí sí se exige reemplazar:true.
-  const authUidAnterior: string | null =
+  // OJO: estos dos valores son el cálculo INICIAL, válido solo para decidir
+  // qué escribir la PRIMERA vez que se reserva esta operación (más abajo, en
+  // TX1). Después de TX1, todo el resto de la función usa exclusivamente
+  // reserva.authUidAnterior / reserva.esReemplazo (la reserva es la fuente
+  // de verdad) — nunca estas dos constantes — para que una reanudación no
+  // pierda esta información aunque accesoEstado ya haya cambiado a
+  // 'provisionando' (ver comentario de TX1 más abajo).
+  const authUidAnteriorCalculado: string | null =
     comercioInicial.accesoEstado === 'activo' && comercioInicial.authUid && comercioInicial.emailAcceso !== emailNormalizado
       ? comercioInicial.authUid
       : null;
-  if (authUidAnterior && !reemplazar) {
+  if (authUidAnteriorCalculado && !reemplazar) {
     throw new HttpsError(
       'already-exists',
       'Este comercio ya tiene un acceso activo con otro correo. Pasá reemplazar:true para reemplazarlo explícitamente.',
     );
   }
-  const esReemplazo = authUidAnterior !== null;
+  const esReemplazoCalculado = authUidAnteriorCalculado !== null;
 
   // ── TX1: lock de concurrencia (reserva), con autoría (punto 7) ──────────
+  //
+  // accesoProvisionAuthUidAnterior / accesoProvisionEsReemplazo: capturan la
+  // decisión "esto es un reemplazo del uid X" UNA sola vez, en el momento en
+  // que se crea la reserva — y se preservan sin cambios mientras la reserva
+  // siga vigente, sin importar que accesoEstado pase a 'provisionando' (o
+  // que este resultado se re-derive erróneamente a partir de accesoEstado,
+  // como hacía la versión anterior de esta función). Al unirse a una
+  // reserva ya existente del MISMO operacionId, se leen estos dos campos
+  // en vez de volver a inferirlos de comercioInicial — así una reanudación
+  // después de un crash nunca "olvida" que había que deshabilitar un
+  // usuario anterior.
   const reserva = await db.runTransaction(async (tx) => {
     const snap = await tx.get(comercioRef);
     if (!snap.exists) throw new HttpsError('not-found', `comercios/${comercioId} desapareció.`);
@@ -307,7 +325,21 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
         // Mismo intento lógico — nos unimos. Si el operador es distinto del
         // que la inició, queda registrado como recuperación administrativa.
         recuperacionAdministrativa = c.accesoProvisionIniciadoPorUid !== operadorUid;
-        return { reanudando: true, recuperacionAdministrativa, accesoProvisionAuthUid: c.accesoProvisionAuthUid ?? null };
+        return {
+          reanudando: true,
+          recuperacionAdministrativa,
+          accesoProvisionAuthUid: c.accesoProvisionAuthUid ?? null,
+          // Compatibilidad con una reserva creada por una versión anterior
+          // de esta función (sin estos 2 campos): por defecto seguro,
+          // "no es reemplazo, sin anterior" — nunca se inventa un
+          // reemplazo que no quedó registrado explícitamente. En el peor
+          // caso (una reserva vieja que SÍ era un reemplazo real, cruzando
+          // justo un despliegue de este fix), el comportamiento es el
+          // mismo bug de antes — no uno nuevo ni uno que dañe datos de
+          // otro comercio.
+          authUidAnterior: (c.accesoProvisionAuthUidAnterior as string | undefined) ?? null,
+          esReemplazo: c.accesoProvisionEsReemplazo === true,
+        };
       }
       const iniciadoAtMs = (c.accesoProvisionIniciadoAt as admin.firestore.Timestamp | undefined)?.toMillis?.() ?? 0;
       if (Date.now() - iniciadoAtMs <= RESERVA_TIMEOUT_MS) {
@@ -322,10 +354,18 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
       accesoProvisionEmail: emailNormalizado,
       accesoProvisionIniciadoAt: FieldValue.serverTimestamp(),
       accesoProvisionIniciadoPorUid: operadorUid,
+      accesoProvisionAuthUidAnterior: authUidAnteriorCalculado,
+      accesoProvisionEsReemplazo: esReemplazoCalculado,
       accesoEstado: 'provisionando',
     }, { merge: true });
 
-    return { reanudando: false, recuperacionAdministrativa: false, accesoProvisionAuthUid: null as string | null };
+    return {
+      reanudando: false,
+      recuperacionAdministrativa: false,
+      accesoProvisionAuthUid: null as string | null,
+      authUidAnterior: authUidAnteriorCalculado,
+      esReemplazo: esReemplazoCalculado,
+    };
   });
 
   try {
@@ -334,7 +374,7 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
     let authUid: string;
     let esNuevoAuthUser = false;
 
-    if (authUidAnterior === null && comercioInicial.authUid && comercioInicial.emailAcceso === emailNormalizado) {
+    if (reserva.authUidAnterior === null && comercioInicial.authUid && comercioInicial.emailAcceso === emailNormalizado) {
       // No debería llegar aquí (ya habría vuelto por el atajo idempotente o
       // por reparación) salvo el caso "mismo email, pero authUid ya no
       // existe en Auth" — cubierto por el bloque de abajo igual.
@@ -402,15 +442,18 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
     await db.collection('usuarios').doc(authUid).set(usuarioPayload, { merge: true });
 
     // ── Paso 4-5: deshabilitar el anterior POR COMPLETO antes de habilitar
-    //    el nuevo — nunca al revés. ─────────────────────────────────────────
-    if (esReemplazo && authUidAnterior && authUidAnterior !== authUid) {
-      const anterior = await obtenerAuthUser(authUidAnterior);
+    //    el nuevo — nunca al revés. Usa reserva.esReemplazo/authUidAnterior
+    //    (la reserva), NUNCA las constantes calculadas antes de TX1 — esas
+    //    son estables en la primera invocación, pero en una reanudación ya
+    //    no reflejan la realidad (accesoEstado cambió a 'provisionando'). ──
+    if (reserva.esReemplazo && reserva.authUidAnterior && reserva.authUidAnterior !== authUid) {
+      const anterior = await obtenerAuthUser(reserva.authUidAnterior);
       if (anterior && !anterior.disabled) {
-        await authAdmin.updateUser(authUidAnterior, { disabled: true });
+        await authAdmin.updateUser(reserva.authUidAnterior, { disabled: true });
       }
-      const usuarioAnteriorSnap = await db.collection('usuarios').doc(authUidAnterior).get();
+      const usuarioAnteriorSnap = await db.collection('usuarios').doc(reserva.authUidAnterior).get();
       if (!usuarioAnteriorSnap.exists || usuarioAnteriorSnap.data()?.activo !== false) {
-        await db.collection('usuarios').doc(authUidAnterior).set(
+        await db.collection('usuarios').doc(reserva.authUidAnterior).set(
           { activo: false, updatedAt: FieldValue.serverTimestamp() },
           { merge: true },
         );
@@ -466,12 +509,14 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
         accesoProvisionIniciadoAt: FieldValue.delete(),
         accesoProvisionIniciadoPorUid: FieldValue.delete(),
         accesoProvisionAuthUid: FieldValue.delete(),
+        accesoProvisionAuthUidAnterior: FieldValue.delete(),
+        accesoProvisionEsReemplazo: FieldValue.delete(),
       };
       if (esPrimeraVez) {
         payload.accesoCreadoPorUid = operadorUid;
         payload.accesoCreadoAt = FieldValue.serverTimestamp();
       }
-      if (esReemplazo) payload.accesoAnteriorUid = authUidAnterior;
+      if (reserva.esReemplazo) payload.accesoAnteriorUid = reserva.authUidAnterior;
       if (reserva.recuperacionAdministrativa) {
         payload.accesoRecuperadoPorUid = operadorUid;
         payload.accesoRecuperadoAt = FieldValue.serverTimestamp();
@@ -485,12 +530,12 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
       ok: true,
       comercioId,
       authUid,
-      authUidAnterior: esReemplazo ? authUidAnterior : null,
+      authUidAnterior: reserva.esReemplazo ? reserva.authUidAnterior : null,
       esNuevoAuthUser,
-      esReemplazo,
+      esReemplazo: reserva.esReemplazo,
       esIdempotente: false,
       recuperacionAdministrativa: reserva.recuperacionAdministrativa,
-      mensaje: esReemplazo
+      mensaje: reserva.esReemplazo
         ? 'Acceso reemplazado correctamente.'
         : esNuevoAuthUser
           ? 'Acceso creado correctamente.'
@@ -514,6 +559,8 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
           accesoProvisionIniciadoAt: FieldValue.delete(),
           accesoProvisionIniciadoPorUid: FieldValue.delete(),
           accesoProvisionAuthUid: FieldValue.delete(),
+          accesoProvisionAuthUidAnterior: FieldValue.delete(),
+          accesoProvisionEsReemplazo: FieldValue.delete(),
         },
         { merge: true },
       ).catch(() => {});
