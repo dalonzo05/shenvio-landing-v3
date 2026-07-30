@@ -104,6 +104,7 @@
 
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
+import { FieldValue } from 'firebase-admin/firestore';
 import * as crypto from 'crypto';
 
 interface CrearAccesoComercioData {
@@ -319,7 +320,7 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
       accesoProvisionEstado: 'reservado',
       accesoProvisionOperacionId: operacionId,
       accesoProvisionEmail: emailNormalizado,
-      accesoProvisionIniciadoAt: admin.firestore.FieldValue.serverTimestamp(),
+      accesoProvisionIniciadoAt: FieldValue.serverTimestamp(),
       accesoProvisionIniciadoPorUid: operadorUid,
       accesoEstado: 'provisionando',
     }, { merge: true });
@@ -395,9 +396,9 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
       comercioId,
       email: emailNormalizado,
       name: nombreAutoritativo,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     };
-    if (!usuarioNuevoSnap.exists) usuarioPayload.createdAt = admin.firestore.FieldValue.serverTimestamp();
+    if (!usuarioNuevoSnap.exists) usuarioPayload.createdAt = FieldValue.serverTimestamp();
     await db.collection('usuarios').doc(authUid).set(usuarioPayload, { merge: true });
 
     // ── Paso 4-5: deshabilitar el anterior POR COMPLETO antes de habilitar
@@ -410,7 +411,7 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
       const usuarioAnteriorSnap = await db.collection('usuarios').doc(authUidAnterior).get();
       if (!usuarioAnteriorSnap.exists || usuarioAnteriorSnap.data()?.activo !== false) {
         await db.collection('usuarios').doc(authUidAnterior).set(
-          { activo: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+          { activo: false, updatedAt: FieldValue.serverTimestamp() },
           { merge: true },
         );
       }
@@ -424,7 +425,7 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
 
     // ── Paso 7: activar el perfil nuevo ─────────────────────────────────────
     await db.collection('usuarios').doc(authUid).set(
-      { activo: true, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+      { activo: true, updatedAt: FieldValue.serverTimestamp() },
       { merge: true },
     );
 
@@ -455,23 +456,25 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
 
       const payload: Record<string, unknown> = {
         accesoEstado: 'activo',
+        authUid,
+        emailAcceso: emailNormalizado,
         accesoActualizadoPorUid: operadorUid,
-        accesoActualizadoAt: admin.firestore.FieldValue.serverTimestamp(),
-        accesoProvisionEstado: admin.firestore.FieldValue.delete(),
-        accesoProvisionOperacionId: admin.firestore.FieldValue.delete(),
-        accesoProvisionEmail: admin.firestore.FieldValue.delete(),
-        accesoProvisionIniciadoAt: admin.firestore.FieldValue.delete(),
-        accesoProvisionIniciadoPorUid: admin.firestore.FieldValue.delete(),
-        accesoProvisionAuthUid: admin.firestore.FieldValue.delete(),
+        accesoActualizadoAt: FieldValue.serverTimestamp(),
+        accesoProvisionEstado: FieldValue.delete(),
+        accesoProvisionOperacionId: FieldValue.delete(),
+        accesoProvisionEmail: FieldValue.delete(),
+        accesoProvisionIniciadoAt: FieldValue.delete(),
+        accesoProvisionIniciadoPorUid: FieldValue.delete(),
+        accesoProvisionAuthUid: FieldValue.delete(),
       };
       if (esPrimeraVez) {
         payload.accesoCreadoPorUid = operadorUid;
-        payload.accesoCreadoAt = admin.firestore.FieldValue.serverTimestamp();
+        payload.accesoCreadoAt = FieldValue.serverTimestamp();
       }
       if (esReemplazo) payload.accesoAnteriorUid = authUidAnterior;
       if (reserva.recuperacionAdministrativa) {
         payload.accesoRecuperadoPorUid = operadorUid;
-        payload.accesoRecuperadoAt = admin.firestore.FieldValue.serverTimestamp();
+        payload.accesoRecuperadoAt = FieldValue.serverTimestamp();
       }
 
       tx.set(comercioRef, payload, { merge: true });
@@ -505,12 +508,12 @@ export const crearAccesoComercio = onCall<CrearAccesoComercioData>(async (reques
       await comercioRef.set(
         {
           accesoEstado: 'error_provision',
-          accesoProvisionEstado: admin.firestore.FieldValue.delete(),
-          accesoProvisionOperacionId: admin.firestore.FieldValue.delete(),
-          accesoProvisionEmail: admin.firestore.FieldValue.delete(),
-          accesoProvisionIniciadoAt: admin.firestore.FieldValue.delete(),
-          accesoProvisionIniciadoPorUid: admin.firestore.FieldValue.delete(),
-          accesoProvisionAuthUid: admin.firestore.FieldValue.delete(),
+          accesoProvisionEstado: FieldValue.delete(),
+          accesoProvisionOperacionId: FieldValue.delete(),
+          accesoProvisionEmail: FieldValue.delete(),
+          accesoProvisionIniciadoAt: FieldValue.delete(),
+          accesoProvisionIniciadoPorUid: FieldValue.delete(),
+          accesoProvisionAuthUid: FieldValue.delete(),
         },
         { merge: true },
       ).catch(() => {});

@@ -1,20 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { Resend } from 'resend'
-import { adminAuth } from '@/fb/admin'
-import { getFirestore, FieldValue } from 'firebase-admin/firestore'
-import { getApps, initializeApp, cert } from 'firebase-admin/app'
+import { adminAuth, adminDb, emulatorActivo } from '@/fb/admin'
+import { FieldValue } from 'firebase-admin/firestore'
 
 const resend = new Resend(process.env.RESEND_API_KEY)
-
-function getAdminDb() {
-  const adminApp =
-    getApps().find((a) => a.name === 'admin') ??
-    initializeApp(
-      { credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON!)) },
-      'admin'
-    )
-  return getFirestore(adminApp)
-}
 
 const MAX_ATTEMPTS = 3
 const WINDOW_MS = 24 * 60 * 60 * 1000 // 24 horas
@@ -37,7 +26,7 @@ export async function POST(req: NextRequest) {
   }
 
   // Leer doc de Firestore para obtener nombre y rate limit
-  const db = getAdminDb()
+  const db = adminDb
   const ref = db.collection('usuarios').doc(uid)
   const snap = await ref.get()
   const data = snap.data() ?? {}
@@ -55,11 +44,21 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  // Generar link personalizado
+  // Generar link personalizado — adminAuth ya está redirigido al Auth
+  // Emulator local cuando emulatorActivo (ver fb/admin.ts), nunca genera un
+  // link real fuera de ese modo.
   const firebaseLink = await adminAuth.generatePasswordResetLink(email.trim())
   const oobCode = new URL(firebaseLink).searchParams.get('oobCode')
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'https://shenvios.com'
   const resetLink = `${appUrl}/crear-password?oobCode=${oobCode}`
+
+  // Resend real NUNCA se llama en modo emulador — mismo criterio que
+  // send-welcome. Solo se deja una señal de prueba en el log del servidor.
+  if (emulatorActivo) {
+    console.log(`[emulator] send-reset-password: envío real omitido. Link (solo emulador) para ${email.trim()}: ${resetLink}`)
+    await ref.set({ resetAttempts: FieldValue.arrayUnion(ahora) }, { merge: true })
+    return NextResponse.json({ ok: true, emulator: true })
+  }
 
   // Enviar correo
   const { error: mailError } = await resend.emails.send({

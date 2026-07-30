@@ -1,5 +1,6 @@
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import * as admin from 'firebase-admin';
+import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 
 admin.initializeApp();
 
@@ -17,7 +18,7 @@ export const limpiarEvidencias = onSchedule(
     const bucket = admin.storage().bucket();
 
     const cutoffDate = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
-    const cutoff = admin.firestore.Timestamp.fromDate(cutoffDate);
+    const cutoff = Timestamp.fromDate(cutoffDate);
 
     // Query orders older than 45 days that still have evidencias
     const snap = await db
@@ -54,7 +55,7 @@ export const limpiarEvidencias = onSchedule(
       }
 
       batch.update(docSnap.ref, {
-        evidencias: admin.firestore.FieldValue.delete(),
+        evidencias: FieldValue.delete(),
       });
     }
 

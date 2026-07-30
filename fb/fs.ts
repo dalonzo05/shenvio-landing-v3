@@ -4,6 +4,7 @@
 
 export {
   getFirestore,
+  connectFirestoreEmulator,
   collection,
   getDocs,
   doc,

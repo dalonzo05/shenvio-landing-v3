@@ -319,14 +319,20 @@ export default function ComerciosPage() {
         address: eAddress.trim(),
         accounts: accountsClean,
       }
-      await Promise.all([
-        upsertCompanyByUid(selected.uid, payload),
-        updateDoc(doc(db, 'usuarios', selected.uid), {
-          name: eName.trim(),
-          phone: ePhone.trim(),
-          updatedAt: serverTimestamp(),
-        }),
-      ])
+      // comercios/{comercioId} (selected.uid) es la única identidad estable y
+      // siempre se actualiza. usuarios/{authUid} es un doc aparte, keyed por
+      // Auth UID, que solo existe cuando el comercio tiene acceso vinculado
+      // (Bloque A/B) — un comercio sin_acceso no debe intentar escribirlo.
+      const writes: Promise<unknown>[] = [upsertCompanyByUid(selected.uid, payload)]
+      if (selected.accesoEstado === 'activo' && selected.authUid) {
+        writes.push(
+          updateDoc(doc(db, 'usuarios', selected.authUid), {
+            name: eName.trim(),
+            updatedAt: serverTimestamp(),
+          })
+        )
+      }
+      await Promise.all(writes)
       setMsg('✅ Perfil guardado')
       // Update local list
       setComerciosList((prev) =>
@@ -595,19 +601,20 @@ export default function ComerciosPage() {
       // que Bloque C cambie la fuente de la lista a comercios directamente.
       setComerciosList((prev) => prev.filter((c) => c.uid !== selected.uid))
 
-      // NOTA (auditoría Bloque B): /api/send-welcome genera su PROPIO enlace
-      // internamente (adminAuth.generatePasswordResetLink) y no acepta uno
-      // externo — pasarle enlaceActivacionDev no tendría ningún efecto, por
-      // eso no se envía. Ese endpoint hoy no tiene autenticación propia
-      // (hallazgo reportado por separado); seguimos llamándolo sin cambios
-      // de comportamiento respecto a como ya funcionaba.
-      fetch('/api/send-welcome', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nombre: selected.name || selected.email,
-          email: caEmail.trim(),
-        }),
+      // /api/send-welcome ahora exige un ID token de Firebase del operador
+      // (verificado server-side contra usuarios/{uid}.rol) y lee el correo
+      // y nombre de comercios/{comercioId} directamente — nunca confía en
+      // lo que este cliente le pase. Solo se le informa el comercioId; el
+      // enlace generado nunca vuelve al navegador.
+      auth.currentUser?.getIdToken().then((idToken) => {
+        fetch('/api/send-welcome', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${idToken}`,
+          },
+          body: JSON.stringify({ comercioId: selected.uid }),
+        }).catch(() => {})
       }).catch(() => {})
 
       const notas = [
