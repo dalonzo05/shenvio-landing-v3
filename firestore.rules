@@ -142,20 +142,22 @@ service cloud.firestore {
       allow read: if isOwner(userId) || isAdminOrGestor();
 
       // COMPATIBILIDAD TEMPORAL: isAdminOrGestor() sigue sin restricción de
-      // campos porque 3 pantallas todavía escriben usuarios/ directamente
+      // campos porque 2 pantallas todavía escriben usuarios/ directamente
       // desde el cliente con sesión de gestor/admin:
-      //   - app/panel/gestor/comercios/page.tsx: crearComercio(),
-      //     crearAccesoComercio()
       //   - app/panel/gestor/motorizados/page.tsx: crearAccesoMotorizado()
-      //   - app/panel/gestor/ingresar-orden/page.tsx: alta rápida de
-      //     comercio inline (mismo patrón duplicado que crearComercio())
-      // PENDIENTE: mover estas altas a Cloud Functions. Bloque B cubre la
-      // de comercios; motorizados e ingresar-orden quedan fuera del alcance
-      // de este bloque — quedan marcadas aquí para no perderlas de vista.
+      //     crea el doc completo (setDoc) al otorgar acceso a un motorizado.
+      //   - app/panel/gestor/comercios/page.tsx: saveProfile() sincroniza
+      //     solo el campo `name` (updateDoc) cuando el comercio ya tiene
+      //     acceso activo — la creación/reemplazo de ese acceso en sí ya NO
+      //     se hace aquí, pasa por la Cloud Function crearAccesoComercio
+      //     (Bloque B/C).
+      // ingresar-orden/page.tsx YA NO escribe usuarios/ en absoluto.
+      // PENDIENTE: mover también estas dos escrituras a Cloud Functions.
       allow create: if (isOwner(userId) && autoRegistroValido()) || isAdminOrGestor();
 
       allow update: if (
           isOwner(userId)
+          && isActiveUser()
           && camposEditablesAutoUsuario()
           && request.resource.data.updatedAt == request.time
         )
