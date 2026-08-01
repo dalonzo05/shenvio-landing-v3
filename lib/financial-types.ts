@@ -310,6 +310,15 @@ export interface AbonoSaldo {
   creadoPorUid: string
   comprobanteUrl?: string   // URL pública del comprobante/boucher subido a Storage
   comprobantePath?: string  // path en Firebase Storage para referencia
+
+  // ── Trazabilidad de liquidación (Fase F2) ──────────────────────────────────
+  // Presentes solo cuando el abono proviene de crearLiquidacion (ver
+  // app/panel/gestor/liquidaciones/page.tsx). aplicacionId es determinístico
+  // (`${liquidacionId}_${saldoId}`) — identifica sin ambigüedad esta aplicación
+  // específica del abono, incluso si el mismo saldo participara en más de una
+  // liquidación a lo largo del tiempo.
+  liquidacionId?: string
+  aplicacionId?: string
 }
 
 export interface SaldoCargoMotorizado {

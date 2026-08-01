@@ -7,17 +7,18 @@ import {
   query,
   where,
   doc,
-  addDoc,
   updateDoc,
   serverTimestamp,
   Timestamp,
   orderBy,
   limit,
   getDocs,
+  runTransaction,
+  arrayUnion,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { uploadLiquidacionPDF } from '@/fb/storage'
-import { registrarMovimiento, registrarAbonoSaldo, crearSaldoCargo } from '@/lib/financial-writes'
+import { registrarMovimiento, crearSaldoCargo } from '@/lib/financial-writes'
 import {
   Receipt,
   ChevronDown,
@@ -29,7 +30,7 @@ import {
   FileDown,
   XCircle,
 } from 'lucide-react'
-import type { SaldoCargoMotorizado } from '@/lib/financial-types'
+import type { SaldoCargoMotorizado, AbonoSaldo } from '@/lib/financial-types'
 import { LABELS_TIPO_SALDO, cuentas } from '@/lib/financial-types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -661,7 +662,22 @@ export default function LiquidacionesPage() {
   )
 
   // ── Crear liquidación ─────────────────────────────────────────────────────
-
+  //
+  // Identidad estable (Fase F2): el documento de liquidaciones_motorizado usa
+  // un ID determinístico `${motorizadoId}_${semanaKey}` en vez de un ID
+  // aleatorio. Su propia existencia es el marcador de idempotencia — no se
+  // necesita una colección de "locks" separada. Dos pestañas o un doble clic
+  // que compitan por crear la misma liquidación terminan operando sobre el
+  // MISMO documento: Firestore solo confirma la primera transacción que
+  // escribe, y el SDK reintenta automáticamente la perdedora, que al releer
+  // encuentra el documento ya creado y no aplica nada de nuevo (mismo
+  // mecanismo ya validado para F3 y F6).
+  //
+  // Todo (saldos, abonos, movimientos, liquidación) se confirma en una sola
+  // runTransaction: no se llama a registrarAbonoSaldo (abre su propia
+  // transacción, no se puede anidar) ni a registrarMovimiento (usa addDoc
+  // fuera de transacción y traga errores) — la lógica equivalente se
+  // reconstruye inline, igual que en las correcciones F3/F5/F6.
   async function crearLiquidacion() {
     if (!selectedMotoId || liquidacionExistente) return
     const moto = motorizados.find((m) => m.id === selectedMotoId)
@@ -671,55 +687,179 @@ export default function LiquidacionesPage() {
     try {
       const uid = auth.currentUser?.uid ?? ''
       const { inicio, fin } = getSemanaRange(selectedSemana)
+      const liquidacionId = `${selectedMotoId}_${selectedSemana}`
+      const liqRef = doc(db, 'liquidaciones_motorizado', liquidacionId)
 
-      // Calcular IDs de saldos seleccionados y sus montos reales
-      const deudasAplicadasIds: string[] = []
-      for (const sid of saldosSeleccionados) {
-        const saldo = saldosPendientes.find((x) => x.id === sid)
-        if (!saldo) continue
-        const parcialStr = abonosParciales[sid]
-        const parcial = parcialStr ? parseFloat(parcialStr) : NaN
-        const montoAbono = isNaN(parcial) ? saldo.saldoPendiente : Math.min(parcial, saldo.saldoPendiente)
-
-        // Registrar el abono en el saldo
-        await registrarAbonoSaldo({
-          saldoId: sid,
-          montoAbono,
-          metodoAbono: 'descuento_liquidacion',
-          nota: `Descontado en liquidación ${selectedSemana}`,
-          operadorId: uid,
-          motorizadoId: selectedMotoId,
-          motorizadoNombre: moto.nombre || moto.authUid,
-        })
-        deudasAplicadasIds.push(sid)
+      // Pre-chequeo FUERA de la transacción: Firestore no permite where()
+      // dentro de runTransaction. Esta consulta detecta tanto el propio
+      // documento determinístico (si ya existe) como cualquier liquidación
+      // legacy con ID aleatorio para el mismo motorizadoId + semanaKey.
+      const existentesSnap = await getDocs(
+        query(
+          collection(db, 'liquidaciones_motorizado'),
+          where('motorizadoId', '==', selectedMotoId),
+          where('semanaKey', '==', selectedSemana),
+        )
+      )
+      const legacyAjenos = existentesSnap.docs.filter((d) => d.id !== liquidacionId)
+      if (legacyAjenos.length === 1) {
+        setErr('Ya existe una liquidación para este motorizado y esta semana (registro histórico). No se creó ninguna nueva.')
+        return
+      }
+      if (legacyAjenos.length > 1) {
+        setErr(`Existen ${legacyAjenos.length} liquidaciones históricas para este motorizado y esta semana. Requiere conciliación manual — no se creó ni se modificó nada.`)
+        return
       }
 
-      const docRef = await addDoc(collection(db, 'liquidaciones_motorizado'), {
-        motorizadoId: selectedMotoId,
-        motorizadoUid: moto.authUid,
-        motorizadoNombre: moto.nombre || moto.authUid,
-        semanaKey: selectedSemana,
-        semanaInicio: Timestamp.fromDate(inicio),
-        semanaFin: Timestamp.fromDate(fin),
-        totalViajes: calculo.totalViajes,
-        totalGenerado: calculo.totalGenerado,
-        comisionPct: calculo.comisionPct,
-        comision: calculo.comision,
-        adelantos: calculo.adelantos,
-        faltantesDeposito: calculo.faltantesDeposito,
-        otrosDescuentos: 0,
-        deudasAplicadas: calculo.deudasAplicar,
-        deudasAplicadasIds,
-        gastosAprobados: calculo.totalGastos,
-        gastosAsumidosStorkhub: calculo.gastosAsumidosStorkhub,
-        gastosIds: gastos.map((g) => g.id),
-        netoAPagar: calculo.netoAPagar,
-        estado: 'pendiente',
-        creadoAt: serverTimestamp(),
-        creadoPor: uid,
-        ordenesIds: ordenes.map((o) => o.id),
-        depositosIds: depositos.map((d) => d.id),
+      // Snapshot de la selección: se revalida completo dentro de la
+      // transacción, este arreglo solo dice QUÉ saldos intentar y con qué
+      // tope manual (si el gestor escribió un abono parcial).
+      const seleccion = [...saldosSeleccionados].map((sid) => {
+        const parcialStr = abonosParciales[sid]
+        const parcial = parcialStr ? parseFloat(parcialStr) : NaN
+        return { saldoId: sid, topeManual: isNaN(parcial) ? null : parcial }
       })
+
+      const calculoSnapshot = calculo
+      const ordenesIds = ordenes.map((o) => o.id)
+      const depositosIds = depositos.map((d) => d.id)
+      const gastosIds = gastos.map((g) => g.id)
+      const motorizadoNombre = moto.nombre || moto.authUid
+
+      let yaExistia = false
+
+      await runTransaction(db, async (tx) => {
+        // 1. Releer el marcador de identidad de la liquidación.
+        const liqSnap = await tx.get(liqRef)
+        if (liqSnap.exists()) {
+          yaExistia = true
+          return
+        }
+
+        // 3. Releer TODOS los saldos seleccionados dentro de la transacción.
+        const saldoRefs = seleccion.map((s) => doc(db, 'saldos_cargo_motorizado', s.saldoId))
+        const saldoSnaps = await Promise.all(saldoRefs.map((r) => tx.get(r)))
+
+        // 4-6. Verificar cada saldo y calcular el abono desde el pendiente
+        // real. Política ante saldo inválido (ya pagado/condonado/anulado,
+        // o de otro motorizado): abortar TODA la liquidación — no dejar
+        // resultados parciales ni una liquidación con números distintos a
+        // los que el gestor revisó antes de confirmar.
+        let totalAplicado = 0
+        const aplicaciones: Array<{
+          saldoId: string
+          saldoRef: typeof saldoRefs[number]
+          montoAplicado: number
+          nuevoSaldo: number
+          nuevoEstado: 'pagado' | 'abonado_parcial'
+          movRef: ReturnType<typeof doc>
+        }> = []
+
+        saldoSnaps.forEach((snap, i) => {
+          const sid = seleccion[i].saldoId
+          if (!snap.exists()) {
+            throw new Error(`El saldo ${sid} ya no existe. No se creó ninguna liquidación.`)
+          }
+          const data = snap.data() as SaldoCargoMotorizado
+          if (data.motorizadoId !== selectedMotoId) {
+            throw new Error(`El saldo ${sid} no pertenece a este motorizado. No se creó ninguna liquidación.`)
+          }
+          if (data.estado !== 'pendiente' && data.estado !== 'abonado_parcial') {
+            throw new Error(`El saldo ${sid} ya no está pendiente (estado actual: "${data.estado}"). No se creó ninguna liquidación — actualizá la selección e intentá de nuevo.`)
+          }
+          const pendienteReal = data.saldoPendiente
+          if (!(pendienteReal > 0)) {
+            throw new Error(`El saldo ${sid} ya no tiene monto pendiente. No se creó ninguna liquidación.`)
+          }
+          const tope = seleccion[i].topeManual
+          const montoAplicado = tope == null ? pendienteReal : Math.min(tope, pendienteReal)
+          const nuevoSaldo = Math.max(0, pendienteReal - montoAplicado)
+          const nuevoEstado: 'pagado' | 'abonado_parcial' = nuevoSaldo <= 0 ? 'pagado' : 'abonado_parcial'
+          totalAplicado += montoAplicado
+          aplicaciones.push({
+            saldoId: sid,
+            saldoRef: saldoRefs[i],
+            montoAplicado,
+            nuevoSaldo,
+            nuevoEstado,
+            movRef: doc(collection(db, 'movimientos_financieros')),
+          })
+        })
+
+        // 7-10. Actualizar cada saldo y crear exactamente un movimiento por
+        // saldo aplicado, todo dentro de la misma transacción.
+        aplicaciones.forEach(({ saldoId, saldoRef, montoAplicado, nuevoSaldo, nuevoEstado, movRef }) => {
+          const aplicacionId = `${liquidacionId}_${saldoId}`
+          const abono: AbonoSaldo = {
+            monto: montoAplicado,
+            fecha: Timestamp.now(), // serverTimestamp() no puede usarse dentro de arrayUnion()
+            metodoAbono: 'descuento_liquidacion',
+            nota: `Descontado en liquidación ${selectedSemana}`,
+            creadoPorUid: uid,
+            liquidacionId,
+            aplicacionId,
+          }
+          tx.update(saldoRef, {
+            saldoPendiente: nuevoSaldo,
+            estado: nuevoEstado,
+            abonos: arrayUnion(abono),
+            updatedAt: serverTimestamp(),
+          })
+          tx.set(movRef, {
+            tipo: 'abono_deuda_motorizado',
+            monto: montoAplicado,
+            at: serverTimestamp(),
+            creadoPorUid: uid,
+            creadoPorRol: 'gestor',
+            descripcion: `Abono deuda (descuento_liquidacion) · ${motorizadoNombre}`,
+            estado: 'activo',
+            cuentaOrigen: cuentas.deudaMotorizado(selectedMotoId),
+            cuentaDestino: cuentas.recuperacionDeuda,
+            motorizadoId: selectedMotoId,
+            saldoId,
+            liquidacionId,
+          })
+        })
+
+        // 11-12. Crear el documento de liquidación (ID determinístico) en la
+        // misma transacción. netoAPagar y deudasAplicadas usan totalAplicado
+        // (el pendiente real releído ahora), nunca calculo.deudasAplicar (que
+        // puede estar obsoleto si otra pestaña abonó algo mientras tanto).
+        const netoAPagar =
+          calculoSnapshot.comision - calculoSnapshot.adelantos - calculoSnapshot.faltantesDeposito +
+          calculoSnapshot.gastosAsumidosStorkhub - totalAplicado
+
+        tx.set(liqRef, {
+          motorizadoId: selectedMotoId,
+          motorizadoUid: moto.authUid,
+          motorizadoNombre,
+          semanaKey: selectedSemana,
+          semanaInicio: Timestamp.fromDate(inicio),
+          semanaFin: Timestamp.fromDate(fin),
+          totalViajes: calculoSnapshot.totalViajes,
+          totalGenerado: calculoSnapshot.totalGenerado,
+          comisionPct: calculoSnapshot.comisionPct,
+          comision: calculoSnapshot.comision,
+          adelantos: calculoSnapshot.adelantos,
+          faltantesDeposito: calculoSnapshot.faltantesDeposito,
+          otrosDescuentos: 0,
+          deudasAplicadas: totalAplicado,
+          deudasAplicadasIds: aplicaciones.map((a) => a.saldoId),
+          gastosAprobados: calculoSnapshot.totalGastos,
+          gastosAsumidosStorkhub: calculoSnapshot.gastosAsumidosStorkhub,
+          gastosIds,
+          netoAPagar,
+          estado: 'pendiente',
+          creadoAt: serverTimestamp(),
+          creadoPor: uid,
+          ordenesIds,
+          depositosIds,
+        })
+      })
+
+      if (yaExistia) {
+        setErr('Esta liquidación ya fue creada anteriormente para este motorizado y semana. No se aplicó ningún cambio.')
+      }
     } catch (e: any) {
       setErr(e?.message || 'Error al crear liquidación')
     } finally {
