@@ -8,10 +8,12 @@ import {
   where,
   doc,
   getDoc,
+  getDocs,
   updateDoc,
   serverTimestamp,
   Timestamp,
   writeBatch,
+  runTransaction,
   increment,
   arrayUnion,
   deleteField,
@@ -60,6 +62,11 @@ type CobroDelivery = {
   boucherUrl?: string
   boucherPath?: string
   boucherAt?: Timestamp
+  // Referencia al movimiento pago_recibido creado atómicamente junto con el
+  // pago (ver marcarGrupoPagado / revertirPagada). Ausente en registros
+  // pagados antes de esta corrección — revertirPagada resuelve esos casos
+  // por búsqueda legacy (solicitudId + tipo + estado activo).
+  movimientoPagoId?: string
 }
 
 type Solicitud = {
@@ -667,14 +674,26 @@ function PagoContadoModal({
           'registro.deposito.storkhubDepositoId': depositoId,
         })
         await b.commit()
-        await registrarMovimiento('pago_recibido', montoFinal, uid,
+        const movId = await registrarMovimiento('pago_recibido', montoFinal, uid,
           `Pago delivery por transferencia confirmado · ${nombre}`,
           { solicitudId: orden.id, depositoId })
+        // Enlace mínimo y aditivo para que revertirPagada (ver F5) pueda ubicar
+        // este movimiento sin ambigüedad. No cambia la atomicidad ni la
+        // idempotencia de este flujo individual — eso queda fuera de alcance
+        // de esta corrección (solo F3/F5). Si registrarMovimiento falla
+        // silenciosamente (retorna null), la solicitud queda sin
+        // movimientoPagoId y una reversión futura usará el fallback legacy.
+        if (movId) {
+          await updateDoc(doc(db, 'solicitudes_envio', orden.id), { 'cobroDelivery.movimientoPagoId': movId })
+        }
       } else {
         await updateDoc(doc(db, 'solicitudes_envio', orden.id), updates)
-        await registrarMovimiento('pago_recibido', montoFinal, uid,
+        const movId = await registrarMovimiento('pago_recibido', montoFinal, uid,
           `Pago contado confirmado · ${nombre} · ${formaPago}`,
           { solicitudId: orden.id })
+        if (movId) {
+          await updateDoc(doc(db, 'solicitudes_envio', orden.id), { 'cobroDelivery.movimientoPagoId': movId })
+        }
       }
       onClose()
     } catch (e: any) {
@@ -788,6 +807,15 @@ export default function CobrosPage() {
   // Subida de boucher por el gestor
   const [uploadingBoucherId, setUploadingBoucherId] = useState<string | null>(null)
   const boucherInputRef = useRef<HTMLInputElement>(null)
+
+  // Pago en lote (marcarGrupoPagado) y reversión (revertirPagada): estas
+  // banderas solo evitan doble clic en la MISMA pestaña — la garantía real
+  // de no duplicar contra doble pestaña/reintento vive en la runTransaction
+  // de cada función, no en este estado de React.
+  const [procesandoGrupoKey, setProcesandoGrupoKey] = useState<string | null>(null)
+  const [errorGrupoPago, setErrorGrupoPago] = useState<string | null>(null)
+  const [revirtiendoId, setRevirtiendoId] = useState<string | null>(null)
+  const [errorReversion, setErrorReversion] = useState<string | null>(null)
 
   // ── Queries ────────────────────────────────────────────────────────────────
 
@@ -954,12 +982,79 @@ export default function CobrosPage() {
 
   // (marcarPagada es invocado desde PagoContadoModal — ver modal arriba)
 
+  // Revierte un cobro contado ya pagado. La solicitud y el movimiento
+  // pago_recibido asociado se leen y escriben dentro de una única
+  // runTransaction: o se revierten los dos juntos, o ninguno cambia.
+  //
+  // - Si la solicitud ya tiene cobroDelivery.movimientoPagoId (pagos creados
+  //   por el flujo corregido), lo usamos directo.
+  // - Si no lo tiene (registros legacy, o pagados por el modal individual —
+  //   que queda fuera de alcance de esta corrección), lo resolvemos ANTES de
+  //   abrir la transacción con una query por solicitudId: Firestore no
+  //   permite where() dentro de runTransaction, solo tx.get(docRef). Si la
+  //   query no encuentra exactamente un movimiento activo, bloqueamos sin
+  //   escribir nada y pedimos conciliación manual.
   async function revertirPagada(orden: Solicitud) {
-    await updateDoc(doc(db, 'solicitudes_envio', orden.id), {
-      'cobroDelivery.estado': 'pendiente',
-      'cobroDelivery.pagadoAt': deleteField(),
-      'cobroDelivery.formaPago': deleteField(),
-      'cobroDelivery.notaPago': deleteField(),
+    const uid = auth.currentUser?.uid || 'desconocido'
+    const solRef = doc(db, 'solicitudes_envio', orden.id)
+
+    let movimientoId = orden.cobroDelivery?.movimientoPagoId ?? null
+    if (!movimientoId) {
+      const legacySnap = await getDocs(
+        query(
+          collection(db, 'movimientos_financieros'),
+          where('solicitudId', '==', orden.id),
+          where('tipo', '==', 'pago_recibido'),
+          where('estado', '==', 'activo'),
+        )
+      )
+      if (legacySnap.size === 0) {
+        throw new Error('No se encontró ningún movimiento pago_recibido activo para esta solicitud. No se revirtió nada — requiere conciliación manual.')
+      }
+      if (legacySnap.size > 1) {
+        throw new Error(`Se encontraron ${legacySnap.size} movimientos pago_recibido activos para esta solicitud. No se revirtió nada — requiere conciliación manual.`)
+      }
+      movimientoId = legacySnap.docs[0].id
+    }
+    const movRef = doc(db, 'movimientos_financieros', movimientoId)
+
+    await runTransaction(db, async (tx) => {
+      const [solSnap, movSnap] = await Promise.all([tx.get(solRef), tx.get(movRef)])
+      if (!solSnap.exists()) {
+        throw new Error('La solicitud ya no existe.')
+      }
+      const data = solSnap.data() as any
+      const cobro = data.cobroDelivery as CobroDelivery | undefined
+      if (!cobro || cobro.estado !== 'pagado') {
+        throw new Error('Esta solicitud ya no está en estado pagado (probablemente ya fue revertida).')
+      }
+      if (!movSnap.exists()) {
+        throw new Error('El movimiento financiero asociado no existe. No se revirtió nada — requiere conciliación manual.')
+      }
+      const movData = movSnap.data() as any
+      if (movData.solicitudId !== orden.id || movData.tipo !== 'pago_recibido') {
+        throw new Error('El movimiento encontrado no corresponde a esta solicitud. No se revirtió nada — requiere conciliación manual.')
+      }
+      if (movData.estado === 'anulado') {
+        throw new Error('El movimiento ya está anulado pero la solicitud seguía marcada como pagada. No se revirtió nada — requiere conciliación manual.')
+      }
+
+      tx.update(solRef, {
+        'cobroDelivery.estado': 'pendiente',
+        'cobroDelivery.pagadoAt': deleteField(),
+        'cobroDelivery.formaPago': deleteField(),
+        'cobroDelivery.notaPago': deleteField(),
+        // movimientoPagoId se conserva a propósito: queda apuntando al
+        // movimiento (ahora anulado) como rastro de auditoría de que este
+        // cobro fue pagado y luego revertido.
+        'cobroDelivery.movimientoPagoId': movimientoId,
+      })
+      tx.update(movRef, {
+        estado: 'anulado',
+        anuladoAt: serverTimestamp(),
+        anuladoPorUid: uid,
+        motivoAnulacion: 'Reversión de cobro contado por gestor',
+      })
     })
   }
 
@@ -974,23 +1069,67 @@ export default function CobrosPage() {
     [contadoRaw]
   )
 
+  // Marca pagado un grupo de cobros contado (mismo cliente + día) en una sola
+  // runTransaction. Por cada solicitud:
+  //  - se relee dentro de la transacción (nunca se confía en el prop `o`);
+  //  - si ya está pagada se omite (protege contra doble clic, doble pestaña
+  //    y reintentos: el segundo intento no encuentra nada pendiente que hacer);
+  //  - se crea exactamente un movimiento pago_recibido con el mismo tipo,
+  //    monto y referencia (solicitudId) que usa el flujo individual aprobado
+  //    (PagoContadoModal.handleConfirmar) — ese flujo tampoco fija cuentaOrigen/
+  //    cuentaDestino para 'pago_recibido' (tipo legacy sin doble entrada), así
+  //    que aquí se replica ese mismo comportamiento, sin inventar campos nuevos;
+  //  - se guarda cobroDelivery.movimientoPagoId con el ID del movimiento recién
+  //    creado, para que revertirPagada pueda ubicarlo sin ambigüedad.
+  // Todo ocurre dentro de la misma transacción: si falla la escritura de
+  // cualquier movimiento, Firestore descarta también las actualizaciones de
+  // las solicitudes — no puede quedar un pago parcialmente aplicado al grupo.
   async function marcarGrupoPagado(ordenes: Solicitud[], formaPago: string) {
-    const b = writeBatch(db)
-    ordenes.forEach((o) => {
-      const updates: any = {
-        'cobroDelivery.estado': 'pagado',
-        'cobroDelivery.pagadoAt': serverTimestamp(),
-        'cobroDelivery.formaPago': formaPago,
-      }
-      if (!o.cobroDelivery) {
-        updates['cobroDelivery.monto'] = (o as any).confirmacion?.precioFinalCordobas ?? 0
-        updates['cobroDelivery.tipoCliente'] = o.tipoCliente || 'contado'
-        updates['cobroDelivery.quienPaga'] = o.pagoDelivery?.quienPaga || ''
-        updates['cobroDelivery.registradoAt'] = serverTimestamp()
-      }
-      b.update(doc(db, 'solicitudes_envio', o.id), updates)
+    const uid = auth.currentUser?.uid || 'desconocido'
+    const solicitudRefs = ordenes.map((o) => doc(db, 'solicitudes_envio', o.id))
+
+    await runTransaction(db, async (tx) => {
+      const snaps = await Promise.all(solicitudRefs.map((ref) => tx.get(ref)))
+
+      snaps.forEach((snap, i) => {
+        if (!snap.exists()) return
+        const data = snap.data() as any
+        const cobroActual = data.cobroDelivery as CobroDelivery | undefined
+        // Ya pagada (por este mismo intento en otra pestaña, o un reintento
+        // anterior que sí llegó a escribir): no se toca ni se duplica.
+        if (cobroActual?.estado === 'pagado') return
+
+        const o = ordenes[i]
+        const monto = cobroActual?.monto ?? (data as any).confirmacion?.precioFinalCordobas ?? 0
+        const nombre = getClienteNombre(o, comercioNames)
+        const movRef = doc(collection(db, 'movimientos_financieros'))
+
+        const updates: any = {
+          'cobroDelivery.estado': 'pagado',
+          'cobroDelivery.pagadoAt': serverTimestamp(),
+          'cobroDelivery.formaPago': formaPago,
+          'cobroDelivery.movimientoPagoId': movRef.id,
+        }
+        if (!cobroActual) {
+          updates['cobroDelivery.monto'] = monto
+          updates['cobroDelivery.tipoCliente'] = o.tipoCliente || 'contado'
+          updates['cobroDelivery.quienPaga'] = o.pagoDelivery?.quienPaga || ''
+          updates['cobroDelivery.registradoAt'] = serverTimestamp()
+        }
+
+        tx.update(solicitudRefs[i], updates)
+        tx.set(movRef, {
+          tipo: 'pago_recibido',
+          monto,
+          at: serverTimestamp(),
+          creadoPorUid: uid,
+          creadoPorRol: 'gestor',
+          descripcion: `Pago contado confirmado (lote) · ${nombre} · ${formaPago}`,
+          estado: 'activo',
+          solicitudId: o.id,
+        })
+      })
     })
-    await b.commit()
   }
 
   // ── Subida de boucher por gestor ───────────────────────────────────────────
@@ -1259,6 +1398,12 @@ export default function CobrosPage() {
           {/* Por cliente / día */}
           {contadoSub === 'por_cliente' && (
             <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
+              {errorGrupoPago && (
+                <div className="m-3 flex items-start justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  <span>{errorGrupoPago}</span>
+                  <button onClick={() => setErrorGrupoPago(null)} className="font-semibold hover:underline shrink-0">Cerrar</button>
+                </div>
+              )}
               {loadingContado ? (
                 <div className="py-16 text-center text-sm text-gray-400">Cargando…</div>
               ) : contadoPorClienteDia.length === 0 ? (
@@ -1291,16 +1436,38 @@ export default function CobrosPage() {
                         <td className="px-4 py-3">
                           <div className="flex gap-1.5">
                             <button
-                              onClick={() => marcarGrupoPagado(g.ordenes, 'efectivo')}
-                              className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 transition whitespace-nowrap"
+                              onClick={async () => {
+                                setErrorGrupoPago(null)
+                                setProcesandoGrupoKey(g.key)
+                                try {
+                                  await marcarGrupoPagado(g.ordenes, 'efectivo')
+                                } catch (e: any) {
+                                  setErrorGrupoPago(e?.message || 'Error al marcar el grupo como pagado. No se aplicó ningún cambio.')
+                                } finally {
+                                  setProcesandoGrupoKey(null)
+                                }
+                              }}
+                              disabled={procesandoGrupoKey === g.key}
+                              className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 transition whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
                             >
-                              <Banknote className="inline h-3 w-3 mr-1" />Efectivo
+                              <Banknote className="inline h-3 w-3 mr-1" />{procesandoGrupoKey === g.key ? 'Procesando…' : 'Efectivo'}
                             </button>
                             <button
-                              onClick={() => marcarGrupoPagado(g.ordenes, 'transferencia')}
-                              className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition whitespace-nowrap"
+                              onClick={async () => {
+                                setErrorGrupoPago(null)
+                                setProcesandoGrupoKey(g.key)
+                                try {
+                                  await marcarGrupoPagado(g.ordenes, 'transferencia')
+                                } catch (e: any) {
+                                  setErrorGrupoPago(e?.message || 'Error al marcar el grupo como pagado. No se aplicó ningún cambio.')
+                                } finally {
+                                  setProcesandoGrupoKey(null)
+                                }
+                              }}
+                              disabled={procesandoGrupoKey === g.key}
+                              className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
                             >
-                              <ArrowRightLeft className="inline h-3 w-3 mr-1" />Trans.
+                              <ArrowRightLeft className="inline h-3 w-3 mr-1" />{procesandoGrupoKey === g.key ? 'Procesando…' : 'Trans.'}
                             </button>
                           </div>
                         </td>
@@ -1315,6 +1482,12 @@ export default function CobrosPage() {
           {/* Historial cobrados */}
           {contadoSub === 'pagados' && (
             <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
+              {errorReversion && (
+                <div className="m-3 flex items-start justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  <span>{errorReversion}</span>
+                  <button onClick={() => setErrorReversion(null)} className="font-semibold hover:underline shrink-0">Cerrar</button>
+                </div>
+              )}
               {loadingContado ? (
                 <div className="py-16 text-center text-sm text-gray-400">Cargando…</div>
               ) : contadoPagados.length === 0 ? (
@@ -1377,10 +1550,21 @@ export default function CobrosPage() {
                                 </button>
                               )}
                               <button
-                                onClick={() => revertirPagada(s)}
-                                className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 transition"
+                                onClick={async () => {
+                                  setErrorReversion(null)
+                                  setRevirtiendoId(s.id)
+                                  try {
+                                    await revertirPagada(s)
+                                  } catch (e: any) {
+                                    setErrorReversion(e?.message || 'Error al revertir. No se aplicó ningún cambio.')
+                                  } finally {
+                                    setRevirtiendoId(null)
+                                  }
+                                }}
+                                disabled={revirtiendoId === s.id}
+                                className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 transition disabled:opacity-40 disabled:cursor-not-allowed"
                               >
-                                Revertir
+                                {revirtiendoId === s.id ? 'Revirtiendo…' : 'Revertir'}
                               </button>
                             </div>
                           </td>
