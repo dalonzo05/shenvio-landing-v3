@@ -363,9 +363,18 @@ export default function SaldosPage() {
             const isExp = expandedId === s.id
             const isAbono = abonoId === s.id
             const puedeAbono = s.estado === 'pendiente' || s.estado === 'abonado_parcial'
-            const descontado = s.montoOriginal - s.saldoPendiente
+            // totalAbonado se deriva SIEMPRE de abonos[] (dinero realmente
+            // abonado) — nunca de montoOriginal-saldoPendiente, que deja de
+            // ser fiable en cuanto el saldo se condona (ver montoCondonado).
+            const totalAbonado = (s.abonos ?? []).reduce((sum, a) => sum + (a.monto || 0), 0)
+            const montoCondonadoMostrado = s.estado === 'condonado' ? (s.montoCondonado ?? 0) : 0
+            const totalResuelto = totalAbonado + montoCondonadoMostrado
+            // Compatibilidad legacy: si el documento quedó con saldoPendiente
+            // > 0 pese a estar condonado (condonaciones anteriores a esta
+            // corrección), se muestra en 0 sin reescribir el documento.
+            const pendienteMostrado = s.estado === 'condonado' ? 0 : s.saldoPendiente
             const pctDescontado = s.montoOriginal > 0
-              ? Math.round((descontado / s.montoOriginal) * 100)
+              ? Math.min(100, Math.round((totalResuelto / s.montoOriginal) * 100))
               : 0
 
             return (
@@ -410,22 +419,31 @@ export default function SaldosPage() {
                       <p className="text-sm font-black text-gray-700 mt-0.5">{fmt(s.montoOriginal)}</p>
                     </div>
                     <div className="bg-green-50 rounded-lg px-2 py-2 border border-green-100">
-                      <p className="text-[10px] font-semibold text-green-500 uppercase tracking-wide">Descontado</p>
-                      <p className="text-sm font-black text-green-700 mt-0.5">{fmt(descontado)}</p>
+                      <p className="text-[10px] font-semibold text-green-500 uppercase tracking-wide">Abonado</p>
+                      <p className="text-sm font-black text-green-700 mt-0.5">{fmt(totalAbonado)}</p>
                     </div>
                     <div className={`rounded-lg px-2 py-2 border ${
-                      s.estado === 'pagado'
+                      s.estado === 'pagado' || s.estado === 'condonado'
                         ? 'bg-green-50 border-green-100'
                         : 'bg-red-50 border-red-100'
                     }`}>
                       <p className={`text-[10px] font-semibold uppercase tracking-wide ${
-                        s.estado === 'pagado' ? 'text-green-500' : 'text-red-400'
+                        s.estado === 'pagado' || s.estado === 'condonado' ? 'text-green-500' : 'text-red-400'
                       }`}>Pendiente</p>
                       <p className={`text-sm font-black mt-0.5 ${
-                        s.estado === 'pagado' ? 'text-green-700' : 'text-red-700'
-                      }`}>{fmt(s.saldoPendiente)}</p>
+                        s.estado === 'pagado' || s.estado === 'condonado' ? 'text-green-700' : 'text-red-700'
+                      }`}>{fmt(pendienteMostrado)}</p>
                     </div>
                   </div>
+
+                  {/* Monto condonado — solo visible si el saldo fue condonado.
+                     No se afirma que fue "abonado": queda como su propia línea. */}
+                  {montoCondonadoMostrado > 0 && (
+                    <div className="mt-2 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1.5 text-center">
+                      <p className="text-[10px] font-semibold text-amber-600 uppercase tracking-wide">Condonado</p>
+                      <p className="text-sm font-black text-amber-700 mt-0.5">{fmt(montoCondonadoMostrado)}</p>
+                    </div>
+                  )}
 
                   {/* ── Barra de progreso ── */}
                   {s.montoOriginal > 0 && (
@@ -437,7 +455,7 @@ export default function SaldosPage() {
                         />
                       </div>
                       <p className="text-[10px] text-gray-400 mt-0.5 text-right">
-                        {pctDescontado}% saldado
+                        {pctDescontado}% resuelto
                       </p>
                     </div>
                   )}
@@ -497,6 +515,15 @@ export default function SaldosPage() {
                           fecha={fmtDateShort(s.updatedAt)}
                           titulo="Saldo completamente saldado"
                           detalle=""
+                        />
+                      )}
+                      {s.estado === 'condonado' && (
+                        <TimelineEvent
+                          dot="✓"
+                          dotColor="text-amber-600"
+                          fecha={fmtDateShort(s.condonadoAt)}
+                          titulo={`Condonado ${fmt(montoCondonadoMostrado)}`}
+                          detalle={s.motivoCondonacion || 'Sin nota'}
                         />
                       )}
                       {s.estado === 'anulado' && (

@@ -719,6 +719,12 @@ export async function condonarDeudaMotorizado(params: {
 
     tx.update(saldoRef, {
       estado: 'condonado',
+      // saldoPendiente pasa a 0: lo condonado también resuelve la deuda, no
+      // solo lo abonado — antes quedaba congelado en su valor previo,
+      // provocando que un saldo condonado se mostrara como si aún debiera
+      // dinero. montoCondonado (abajo) es el registro de CUÁNTO se perdonó;
+      // totalAbonado (derivado de abonos[], nunca de este campo) no se toca.
+      saldoPendiente: 0,
       motivoCondonacion: nota ?? '',
       montoCondonado,
       movimientoCondonacionId: movRef.id,
