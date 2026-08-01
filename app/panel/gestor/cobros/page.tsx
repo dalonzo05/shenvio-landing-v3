@@ -14,8 +14,6 @@ import {
   Timestamp,
   writeBatch,
   runTransaction,
-  increment,
-  arrayUnion,
   deleteField,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
@@ -102,8 +100,23 @@ type CobroSemanal = {
   totalMonto: number
   totalPagado: number
   estado: 'pendiente' | 'parcial' | 'pagado'
-  pagos: Array<{ monto: number; at: Timestamp; nota?: string; registradoPor: string }>
+  // pagoId/movimientoPagoId ausentes en pagos registrados antes de esta
+  // corrección (F4) — se conservan intactos, nunca se les adivina un ID
+  // retroactivo. formaPago/referencia quedan presentes pero sin selector en
+  // esta UI todavía (no existe ese control hoy) — se documenta como límite,
+  // no se rediseña el modal para agregarlo.
+  pagos: Array<{
+    pagoId?: string
+    monto: number
+    at: Timestamp
+    nota?: string | null
+    registradoPor: string
+    formaPago?: string | null
+    referencia?: string | null
+    movimientoPagoId?: string
+  }>
   ordenesIds: string[]
+  pagadoAt?: Timestamp
 }
 
 type MainTab = 'contado' | 'credito' | 'incidencias'
@@ -319,6 +332,14 @@ function ResolveModal({
 
 // ─── Pago Modal (Crédito) ─────────────────────────────────────────────────────
 
+// Sobrepago detectado dentro de la transacción — nunca se reduce el monto
+// silenciosamente, se bloquea y se informa el saldo real.
+class SaldoInsuficienteError extends Error {
+  constructor(public saldoReal: number) {
+    super('SALDO_INSUFICIENTE')
+  }
+}
+
 function PagoModal({
   cobroSemanal,
   onClose,
@@ -330,38 +351,144 @@ function PagoModal({
   const [nota, setNota] = useState('')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [resultado, setResultado] = useState<'exito' | 'ya_registrado' | null>(null)
+  // Ref además del state `saving`: bloquea sincrónicamente un doble clic
+  // antes de que React re-renderice el `disabled` del botón.
+  const savingRef = useRef(false)
 
   const pendiente = cobroSemanal.totalMonto - cobroSemanal.totalPagado
   const montoNum = parseFloat(monto) || 0
 
-  async function handlePago() {
-    if (!montoNum || montoNum <= 0) { setErr('Ingresa un monto válido'); return }
-    setSaving(true); setErr(null)
+  // pagoId estable: generado UNA sola vez por intento de pago sobre este
+  // cobro semanal (no en cada clic). Persistido en sessionStorage bajo una
+  // clave por cobroSemanal.id para sobrevivir a doble clic, a un reintento
+  // tras timeout, y a una recarga real de la página. Se borra únicamente
+  // cuando la operación confirma (éxito o "ya registrado"), para que el
+  // siguiente pago legítimo sobre este mismo cobro reciba un pagoId nuevo.
+  // Límite: no sobrevive a cerrar la pestaña (alcance de sessionStorage) —
+  // aceptable porque ahí el usuario reinicia conscientemente el intento.
+  const storageKey = `storkhub:pagoId:cobroSemanal:${cobroSemanal.id}`
+  const pagoIdRef = useRef<string | null>(null)
+  if (!pagoIdRef.current) {
     try {
-      const uid = auth.currentUser?.uid || 'desconocido'
-      const nuevoPagado = cobroSemanal.totalPagado + montoNum
-      const nuevoEstado: CobroSemanal['estado'] =
-        nuevoPagado >= cobroSemanal.totalMonto ? 'pagado' : nuevoPagado > 0 ? 'parcial' : 'pendiente'
+      const existente = sessionStorage.getItem(storageKey)
+      pagoIdRef.current = existente || crypto.randomUUID()
+      if (!existente) sessionStorage.setItem(storageKey, pagoIdRef.current)
+    } catch {
+      // sessionStorage no disponible (modo privado, etc.): degrada a un
+      // pagoId solo en memoria — sigue protegiendo doble clic/reintentos
+      // dentro de esta misma sesión de modal, no sobrevive a un reload.
+      pagoIdRef.current = crypto.randomUUID()
+    }
+  }
 
-      const pagoEntry = {
-        monto: montoNum,
-        at: Timestamp.now(),
-        nota: nota.trim() || null,
-        registradoPor: uid,
-      }
-      await updateDoc(doc(db, 'cobros_semanales', cobroSemanal.id), {
-        totalPagado: increment(montoNum),
-        estado: nuevoEstado,
-        pagos: arrayUnion(pagoEntry),
-        updatedAt: serverTimestamp(),
+  async function handlePago() {
+    if (savingRef.current) return
+    if (!montoNum || montoNum <= 0) { setErr('Ingresa un monto válido'); return }
+    savingRef.current = true
+    setSaving(true); setErr(null)
+
+    const pagoId = pagoIdRef.current!
+    const uid = auth.currentUser?.uid || 'desconocido'
+    const cobroRef = doc(db, 'cobros_semanales', cobroSemanal.id)
+    const movRef = doc(db, 'movimientos_financieros', `pago_semanal_${cobroSemanal.id}_${pagoId}`)
+    const notaTrim = nota.trim() || null
+
+    try {
+      const resultadoTx = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(cobroRef)
+        if (!snap.exists()) throw new Error('Este cobro semanal ya no existe.')
+        const data = snap.data() as CobroSemanal
+
+        if (typeof data.totalMonto !== 'number' || !(data.totalMonto > 0)) {
+          throw new Error('El cobro semanal tiene un totalMonto inválido — no se puede registrar el pago.')
+        }
+
+        const totalPagadoReal = data.totalPagado || 0
+        const pagosActuales = Array.isArray(data.pagos) ? data.pagos : []
+
+        // Idempotencia — chequeo primario: ¿este pagoId ya está en pagos[]?
+        const yaEnPagos = pagosActuales.some((p) => p.pagoId === pagoId)
+        // Defensa adicional: ¿el movimiento determinístico ya existe? Cubre
+        // el caso borde de una relectura que aún no reflejara pagos[] pero sí
+        // el movimiento — no debería ocurrir dentro de la misma transacción
+        // atómica, pero es la señal más fuerte disponible de "ya se aplicó".
+        const movSnap = yaEnPagos ? null : await tx.get(movRef)
+        if (yaEnPagos || movSnap?.exists()) {
+          return { yaRegistrado: true as const }
+        }
+
+        // Consistencia histórica: se documenta, nunca se repara aquí.
+        const sumaPagosHistorica = pagosActuales.reduce((s, p) => s + (p.monto || 0), 0)
+        if (Math.abs(sumaPagosHistorica - totalPagadoReal) > 0.009) {
+          console.warn(
+            `[cobros_semanales] Inconsistencia histórica en ${cobroSemanal.id}: totalPagado=${totalPagadoReal} ` +
+            `vs suma(pagos[])=${sumaPagosHistorica}. No se repara automáticamente — requiere conciliación manual. ` +
+            'El nuevo pago se registra igual, usando totalPagado como fuente de verdad.'
+          )
+        }
+
+        const saldoPendienteReal = data.totalMonto - totalPagadoReal
+        if (montoNum > saldoPendienteReal) {
+          throw new SaldoInsuficienteError(saldoPendienteReal)
+        }
+
+        const nuevoTotalPagado = totalPagadoReal + montoNum
+        const nuevoEstado: CobroSemanal['estado'] =
+          nuevoTotalPagado === data.totalMonto ? 'pagado' : nuevoTotalPagado > 0 ? 'parcial' : 'pendiente'
+
+        const pagoEntry = {
+          pagoId,
+          monto: montoNum,
+          at: Timestamp.now(), // serverTimestamp() no puede usarse dentro de un array literal
+          nota: notaTrim,
+          registradoPor: uid,
+          formaPago: null,
+          referencia: notaTrim,
+          movimientoPagoId: movRef.id,
+        }
+
+        tx.update(cobroRef, {
+          totalPagado: nuevoTotalPagado,
+          estado: nuevoEstado,
+          pagos: [...pagosActuales, pagoEntry],
+          updatedAt: serverTimestamp(),
+          ...(nuevoEstado === 'pagado' ? { pagadoAt: serverTimestamp() } : {}),
+        })
+
+        tx.set(movRef, {
+          tipo: 'pago_recibido',
+          monto: montoNum,
+          at: serverTimestamp(),
+          creadoPorUid: uid,
+          creadoPorRol: 'gestor',
+          descripcion: `Pago crédito semanal · ${cobroSemanal.clienteCompany || cobroSemanal.clienteNombre} · sem ${cobroSemanal.semanaKey}`,
+          estado: 'activo',
+          comercioId: cobroSemanal.clienteUid,
+          semanaKey: cobroSemanal.semanaKey,
+          metadata: { cobroSemanalId: cobroSemanal.id, pagoId },
+        })
+
+        return { yaRegistrado: false as const }
       })
-      await registrarMovimiento('pago_recibido', montoNum, uid,
-        `Pago crédito semanal · ${cobroSemanal.clienteCompany || cobroSemanal.clienteNombre} · sem ${cobroSemanal.semanaKey}`,
-        { comercioId: cobroSemanal.clienteUid })
-      onClose()
+
+      try { sessionStorage.removeItem(storageKey) } catch {}
+
+      if (resultadoTx.yaRegistrado) {
+        setResultado('ya_registrado')
+      } else {
+        setResultado('exito')
+        setTimeout(onClose, 900)
+      }
     } catch (e: any) {
-      setErr(e?.message || 'Error al guardar')
+      if (e instanceof SaldoInsuficienteError) {
+        setErr(`El monto excede el saldo pendiente real (${fmt(e.saldoReal)}).`)
+      } else {
+        setErr(e?.message || 'Error al registrar el pago')
+      }
+      // monto y nota se conservan a propósito: el usuario no pierde lo ingresado.
     } finally {
+      savingRef.current = false
       setSaving(false)
     }
   }
@@ -400,22 +527,28 @@ function PagoModal({
           value={monto}
           onChange={(e) => setMonto(e.target.value)}
           placeholder={`Máx. ${pendiente}`}
-          className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#004aad]/30 focus:border-[#004aad] mb-3"
+          disabled={saving || resultado !== null}
+          className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#004aad]/30 focus:border-[#004aad] mb-3 disabled:bg-gray-50 disabled:text-gray-400"
         />
         <textarea
           value={nota}
           onChange={(e) => setNota(e.target.value)}
           placeholder="Nota opcional (referencia, banco, etc.)"
-          className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm resize-none h-16 focus:outline-none focus:ring-2 focus:ring-[#004aad]/30 focus:border-[#004aad]"
+          disabled={saving || resultado !== null}
+          className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm resize-none h-16 focus:outline-none focus:ring-2 focus:ring-[#004aad]/30 focus:border-[#004aad] disabled:bg-gray-50 disabled:text-gray-400"
         />
         {err && <p className="text-xs text-red-600 mt-1">{err}</p>}
+        {resultado === 'exito' && <p className="text-xs font-semibold text-green-600 mt-1">✅ Pago registrado</p>}
+        {resultado === 'ya_registrado' && (
+          <p className="text-xs font-semibold text-blue-600 mt-1">ℹ️ Este pago ya había sido registrado — no se creó otro.</p>
+        )}
         <div className="flex gap-2 mt-4">
           <button onClick={onClose} className="flex-1 border border-gray-200 text-gray-600 text-sm font-semibold py-2.5 rounded-xl hover:bg-gray-50 transition">
-            Cancelar
+            {resultado ? 'Cerrar' : 'Cancelar'}
           </button>
           <button
             onClick={handlePago}
-            disabled={saving || !montoNum}
+            disabled={saving || !montoNum || resultado !== null}
             className="flex-1 bg-green-600 text-white text-sm font-semibold py-2.5 rounded-xl hover:bg-green-700 transition disabled:opacity-40"
           >
             {saving ? 'Guardando…' : '✓ Registrar pago'}
