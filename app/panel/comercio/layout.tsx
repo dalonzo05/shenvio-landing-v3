@@ -1,11 +1,12 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter, usePathname } from 'next/navigation'
+import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { auth, db } from '@/fb/config'
-import { doc, getDoc, collection, onSnapshot, query, where } from 'firebase/firestore'
+import { db } from '@/fb/config'
+import { collection, onSnapshot, query, where } from 'firebase/firestore'
 import { useUser } from '@/app/Components/UserProvider'
+import { useRoleGuard, type Rol } from '../_hooks/useRoleGuard'
 import {
   Home,
   Package,
@@ -19,10 +20,13 @@ import {
   MoreHorizontal,
 } from 'lucide-react'
 
+// Constante de módulo: ver nota en useRoleGuard sobre la identidad estable.
+const ROLES_COMERCIO: readonly Rol[] = ['Comercio']
+
 export default function ComercioLayout({ children }: { children: React.ReactNode }) {
-  const router = useRouter()
   const pathname = usePathname()
-  const [loading, setLoading] = useState(true)
+  const estadoGuard = useRoleGuard(ROLES_COMERCIO, '/panel/comercio')
+  const autorizado = estadoGuard === 'autorizado'
   const [collapsed, setCollapsed] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [activeCount, setActiveCount] = useState(0)
@@ -31,37 +35,31 @@ export default function ComercioLayout({ children }: { children: React.ReactNode
   const ESTADOS_ACTIVOS = ['pendiente_confirmacion', 'confirmada', 'asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega']
 
   useEffect(() => {
-    const run = async () => {
-      const user = auth.currentUser
-      if (!user) { router.replace('/login'); return }
-      try {
-        const snap = await getDoc(doc(db, 'usuarios', user.uid))
-        const data = snap.exists() ? (snap.data() as any) : null
-        const activo = data?.activo === true
-        const rol = data?.rol ?? null
-        if (!activo || rol !== 'Comercio') { router.replace('/panel'); return }
-        setLoading(false)
-      } catch {
-        router.replace('/panel')
-      }
-    }
-    run()
-  }, [router])
-
-  useEffect(() => {
     // Identidad estable (Bloque A): las solicitudes se filtran por
     // comercioId, no por auth.uid — se resuelve vía usuarios/{uid}.comercioId
     // (expuesto en profile por UserProvider).
-    if (!profile?.comercioId) return
+    // El guard va primero: aunque comercioId ya acotaba de hecho el listener,
+    // no es una comprobación de rol — se exige autorización explícita para
+    // que ningún otro rol pueda abrirlo.
+    if (!autorizado || !profile?.comercioId) return
     const q = query(
       collection(db, 'solicitudes_envio'),
       where('userId', '==', profile.comercioId),
       where('estado', 'in', ESTADOS_ACTIVOS)
     )
-    return onSnapshot(q, (snap) => setActiveCount(snap.size))
-  }, [profile?.comercioId])
+    return onSnapshot(q, (snap) => setActiveCount(snap.size), (error) => {
+      console.warn('[comercio] listener de órdenes activas detenido:', error.code)
+      setActiveCount(0)
+    })
+  }, [autorizado, profile?.comercioId])
 
-  if (loading) return <div className="w-full px-6 py-6 text-sm text-gray-600">Cargando...</div>
+  if (estadoGuard !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuard === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Cargando...'}
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-screen w-full bg-gray-50" style={{ '--sidebar-width': collapsed ? '84px' : '250px' } as React.CSSProperties}>

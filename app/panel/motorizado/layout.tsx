@@ -1,12 +1,12 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter, usePathname } from 'next/navigation'
+import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { auth, db } from '@/fb/config'
-import { doc, getDoc } from 'firebase/firestore'
+import { auth } from '@/fb/config'
 import { useUser } from '@/app/Components/UserProvider'
 import { setPersistence, browserLocalPersistence } from 'firebase/auth'
+import { useRoleGuard, type Rol } from '../_hooks/useRoleGuard'
 import {
   Home,
   ChevronLeft,
@@ -15,37 +15,39 @@ import {
   User,
 } from 'lucide-react'
 
+// Constante de módulo: ver nota en useRoleGuard sobre la identidad estable.
+const ROLES_MOTORIZADO: readonly Rol[] = ['motorizado']
+
 export default function MotorizadoLayout({ children }: { children: React.ReactNode }) {
-  const router = useRouter()
   const pathname = usePathname()
-  const [loading, setLoading] = useState(true)
+  const estadoGuard = useRoleGuard(ROLES_MOTORIZADO, '/panel/motorizado')
+  const autorizado = estadoGuard === 'autorizado'
   const [collapsed, setCollapsed] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const { profile, signOut } = useUser()
 
+  // Sesión recordada: el motorizado trabaja desde el teléfono todo el día y no
+  // debe perder la sesión entre viajes. Solo tiene sentido una vez confirmado
+  // que quien está en el panel es efectivamente un motorizado.
   useEffect(() => {
-    const run = async () => {
-      const user = auth.currentUser
-      if (!user) { router.replace('/login'); return }
+    if (!autorizado) return
+    let vivo = true
+    ;(async () => {
       try {
-        const snap = await getDoc(doc(db, 'usuarios', user.uid))
-        const data = snap.exists() ? (snap.data() as any) : null
-        const activo = data?.activo === true
-        const rol = data?.rol ?? null
-        if (!activo || rol !== 'motorizado') { router.replace('/panel'); return }
-        try {
-          await setPersistence(auth, browserLocalPersistence)
-          localStorage.setItem('storkhub:remember', 'true')
-        } catch {}
-        setLoading(false)
-      } catch {
-        router.replace('/panel')
-      }
-    }
-    run()
-  }, [router])
+        await setPersistence(auth, browserLocalPersistence)
+        if (vivo) localStorage.setItem('storkhub:remember', 'true')
+      } catch {}
+    })()
+    return () => { vivo = false }
+  }, [autorizado])
 
-  if (loading) return <div className="w-full px-6 py-6 text-sm text-gray-600">Cargando...</div>
+  if (estadoGuard !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuard === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Cargando...'}
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-screen w-full bg-gray-50">

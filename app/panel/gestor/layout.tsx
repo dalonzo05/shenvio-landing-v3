@@ -1,10 +1,11 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { useRouter, usePathname } from 'next/navigation'
+import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { auth, db } from '@/fb/config'
-import { collection, doc, getDoc, onSnapshot, query, where, orderBy } from 'firebase/firestore'
+import { db } from '@/fb/config'
+import { collection, onSnapshot, query, where, orderBy } from 'firebase/firestore'
+import { useRoleGuard, type Rol } from '../_hooks/useRoleGuard'
 import {
   LayoutDashboard,
   ClipboardList,
@@ -32,10 +33,17 @@ import { ToastNuevaOrden, type ToastData } from './_components/ToastNuevaOrden'
 
 const MAX_TOASTS = 3
 
+// Constante de módulo a propósito: useRoleGuard la recibe como dependencia del
+// efecto, así que un literal en línea lo reejecutaría en cada render.
+const ROLES_GESTOR: readonly Rol[] = ['admin', 'gestor']
+
 export default function GestorLayout({ children }: { children: React.ReactNode }) {
-  const router = useRouter()
   const pathname = usePathname()
-  const [loading, setLoading] = useState(true)
+  // Interruptor único del panel: hasta que no diga 'autorizado' no se abre
+  // ningún listener. Sustituye al antiguo estado `loading`, que se quedaba
+  // en true para siempre cuando el rol no correspondía.
+  const estadoGuard = useRoleGuard(ROLES_GESTOR, '/panel/gestor')
+  const autorizado = estadoGuard === 'autorizado'
   const [collapsed, setCollapsed] = useState(false)
   const [cobrosPendientes, setCobrosPendientes] = useState(0)
   const [metricas, setMetricas] = useState({ activas: 0, entregadasHoy: 0, conProblema: 0, pendCobro: 0, prioritarias: 0 })
@@ -67,42 +75,12 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
 
-  // ── Validación de rol ─────────────────────────────────────────────────────
-  useEffect(() => {
-    const run = async () => {
-      const user = auth.currentUser
-
-      if (!user) {
-        router.replace('/login')
-        return
-      }
-
-      try {
-        const snap = await getDoc(doc(db, 'usuarios', user.uid))
-        const data = snap.exists() ? (snap.data() as any) : null
-
-        const rol = data?.rol ?? null
-        const activo = data?.activo === true
-
-        const permitido = activo && (rol === 'admin' || rol === 'gestor')
-
-        if (!permitido) {
-          router.replace('/panel')
-          return
-        }
-
-        setLoading(false)
-      } catch (error) {
-        console.error('Error validando acceso gestor:', error)
-        router.replace('/panel')
-      }
-    }
-
-    run()
-  }, [router])
-
   // ── Badge: cobros pendientes en tiempo real ───────────────────────────────
+  // Este era el listener que rompía la app: arrancaba sin esperar la
+  // validación de rol, así que con sesión de comercio o motorizado pegaba
+  // contra las reglas y el permission-denied sin manejar tumbaba al SDK.
   useEffect(() => {
+    if (!autorizado) return
     const q = query(
       collection(db, 'solicitudes_envio'),
       where('cobroPendiente', '==', true)
@@ -118,13 +96,18 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
         return !hayCobroRegistrado || hayNoRecibido
       })
       setCobrosPendientes(reales.length)
+    }, (error) => {
+      // Callback de error explícito: sin él, el SDK trata el fallo como no
+      // manejado. Se libera el listener dejando el badge en su último valor.
+      console.warn('[gestor] listener de cobros pendientes detenido:', error.code)
+      setCobrosPendientes(0)
     })
     return () => unsub()
-  }, [])
+  }, [autorizado])
 
   // ── Métricas globales + detección de nuevas órdenes ──────────────────────
   useEffect(() => {
-    if (loading) return
+    if (!autorizado) return
     const q = query(collection(db, 'solicitudes_envio'), orderBy('createdAt', 'desc'))
     const unsub = onSnapshot(q, (snap) => {
       const docs = snap.docs.map(d => ({ id: d.id, ...d.data() } as any))
@@ -175,9 +158,11 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
           setNuevasNoVistas((prev) => prev + 1)
         })
       }
+    }, (error) => {
+      console.warn('[gestor] listener de métricas detenido:', error.code)
     })
     return () => unsub()
-  }, [loading, addToast])
+  }, [autorizado, addToast])
 
   // ── Resetear "nuevas no vistas" al entrar a solicitudes ──────────────────
   useEffect(() => {
@@ -186,8 +171,16 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
     }
   }, [pathname])
 
-  if (loading) {
-    return <div className="w-full px-6 py-6 text-sm text-gray-600">Validando permisos...</div>
+  // Dos textos distintos a propósito: "Validando permisos..." solo se ve
+  // mientras la verificación está realmente en curso. Si el rol no
+  // corresponde, el estado pasa a 'redirigiendo' y el mensaje cambia — así
+  // una pantalla de validación detenida deja de ser un final posible.
+  if (estadoGuard !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuard === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
   }
 
   // Badge visual del sidebar según estado
