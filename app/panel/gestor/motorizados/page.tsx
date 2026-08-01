@@ -159,6 +159,9 @@ export default function MotorizadosPage() {
   const [caPassword, setCaPassword] = useState('')
   const [caSaving, setCaSaving] = useState(false)
   const [caMsg, setCaMsg] = useState<string | null>(null)
+  // Ref además del state: bloquea sincrónicamente un doble clic antes de que
+  // React re-renderice el botón con `disabled`, evitando dos createAuthUser.
+  const caSavingRef = useRef(false)
 
   // Ubicación base
   const [eUbicacionBase,        setEUbicacionBase]        = useState<{ lat: number; lng: number } | null>(null)
@@ -317,9 +320,11 @@ export default function MotorizadosPage() {
   const inactivos = motorizados.filter((m) => m.activo === false).length
 
   async function crearAccesoMotorizado() {
-    if (!selected) return
+    if (caSavingRef.current) return
+    if (!selected) { setCaMsg('❌ No hay un motorizado seleccionado. Cerrá y volvé a abrir el drawer con "Editar".'); return }
     if (!caEmail.trim()) { setCaMsg('❌ El correo es obligatorio'); return }
     if (caPassword.length < 6) { setCaMsg('❌ Mínimo 6 caracteres'); return }
+    caSavingRef.current = true
     setCaSaving(true); setCaMsg(null)
     try {
       const authUid = await createAuthUser(caEmail.trim(), caPassword)
@@ -344,6 +349,7 @@ export default function MotorizadosPage() {
       if (code === 'auth/email-already-in-use') setCaMsg('❌ Ese correo ya está registrado')
       else setCaMsg('❌ Error al crear el acceso')
     } finally {
+      caSavingRef.current = false
       setCaSaving(false)
     }
   }
@@ -450,13 +456,30 @@ export default function MotorizadosPage() {
           createdAt: serverTimestamp(),
           ...ubicacionBasePayload,
         })
+        let fotoUrlCreado: string | null = null
         if (ePhotoFile) {
           const blob = await compressImage(ePhotoFile)
           const { url } = await uploadFotoMotorizado(docRef.id, blob)
           await updateDoc(docRef, { fotoUrl: url })
           setEPhotoPreview(url)
           setEPhotoFile(null)
+          fotoUrlCreado = url
         }
+        // Deja el registro recién creado como `selected` con su ID real —
+        // sin esto, el drawer sigue mostrando el formulario de "Acceso al
+        // sistema" (que solo depende de `isNew`) pero crearAccesoMotorizado()
+        // no tiene sobre qué doc operar y no hace nada.
+        setSelected({
+          id: docRef.id,
+          nombre: eName.trim(),
+          telefono: ePhone.trim(),
+          estado: eEstado,
+          activo: eActivo,
+          authUid: eAuthUid.trim() || undefined,
+          tieneBolso: eTieneBolso,
+          fotoUrl: fotoUrlCreado,
+          ...ubicacionBasePayload,
+        })
         setMsg('✅ Motorizado creado')
         setIsNew(false)
       } else if (selected) {
