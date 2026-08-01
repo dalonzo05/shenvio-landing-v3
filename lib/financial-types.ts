@@ -330,6 +330,17 @@ export interface SaldoCargoMotorizado {
   createdAt: unknown
   updatedAt?: unknown
   abonos?: AbonoSaldo[]
+
+  // ── Condonación (ver condonarDeudaMotorizado en lib/financial-writes.ts) ──
+  // Presentes solo cuando estado === 'condonado'. movimientoCondonacionId
+  // identifica sin ambigüedad el único movimiento deuda_condonada activo
+  // asociado — ausente en saldos condonados antes de esta corrección
+  // (condonarDeudaMotorizado resuelve esos casos por búsqueda legacy).
+  motivoCondonacion?: string
+  montoCondonado?: number
+  movimientoCondonacionId?: string
+  condonadoAt?: unknown
+  condonadoPorUid?: string
 }
 
 // ─── Adelantos al motorizado (colección adelantos_motorizado) ─────────────────

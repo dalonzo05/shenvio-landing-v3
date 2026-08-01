@@ -615,6 +615,18 @@ export async function revertirConversionEnDeuda(params: {
  * - deposito_convertido_en_deuda se mantiene activo como huella histórica
  * - Crea movimiento 'deuda_condonada': deuda_motorizado → perdida_condonaciones
  * - ordenes_deposito recibe señal condonado:true para display histórico
+ *
+ * Idempotencia (Fase F6): el saldo, el depósito y el movimiento se confirman
+ * juntos dentro de una única runTransaction. Si el saldo ya está 'condonado'
+ * al releerlo, la transacción aborta sin crear ningún movimiento nuevo — a lo
+ * sumo un movimiento 'deuda_condonada' activo puede existir por saldoId.
+ *
+ * Firestore no permite where() dentro de runTransaction, así que la decisión
+ * de qué ruta tomar (crear vs. saldo ya condonado vs. reconciliar un registro
+ * legacy sin movimientoCondonacionId) se resuelve con una lectura previa
+ * fuera de la transacción. La transacción real vuelve a leer todo lo
+ * necesario antes de escribir — esa relectura es la garantía atómica, no la
+ * decisión previa.
  */
 export async function condonarDeudaMotorizado(params: {
   saldoId: string
@@ -625,32 +637,114 @@ export async function condonarDeudaMotorizado(params: {
   operadorId: string
   nota?: string
 }): Promise<void> {
-  const { saldoId, depositoId, monto, motorizadoId, motorizadoNombre, operadorId, nota } = params
+  const { saldoId, depositoId, motorizadoId, motorizadoNombre, operadorId, nota } = params
+  const saldoRef = doc(db, 'saldos_cargo_motorizado', saldoId)
 
-  await updateDoc(doc(db, 'saldos_cargo_motorizado', saldoId), {
-    estado: 'condonado',
-    motivoCondonacion: nota ?? '',
-    updatedAt: serverTimestamp(),
-  })
+  const preSnap = await getDoc(saldoRef)
+  if (!preSnap.exists()) {
+    throw new Error(`Saldo ${saldoId} no encontrado.`)
+  }
+  const preData = preSnap.data() as SaldoCargoMotorizado
 
-  await updateDoc(doc(db, 'ordenes_deposito', depositoId), {
-    condonado: true,
-    notaCondonacion: nota ?? '',
-    updatedAt: serverTimestamp(),
-  })
-
-  await registrarMovimiento(
-    'deuda_condonada',
-    monto,
-    operadorId,
-    `Deuda condonada · ${motorizadoNombre}${nota ? ` · ${nota}` : ''}`,
-    { motorizadoId, depositoId, saldoId },
-    {
-      cuentas: {
-        origen: cuentas.deudaMotorizado(motorizadoId),
-        destino: cuentas.perdidaCondonaciones,
-      },
-      propietario: 'storkhub',
+  if (preData.estado === 'condonado') {
+    if (preData.movimientoCondonacionId) {
+      throw new Error('Este saldo ya fue condonado anteriormente. No se creó ningún movimiento nuevo.')
     }
-  )
+
+    // Legacy: condonado antes de esta corrección, sin movimientoCondonacionId.
+    // Reconciliar por saldoId — nunca crear una pérdida nueva ni adivinar.
+    const legacySnap = await getDocs(
+      query(
+        collection(db, 'movimientos_financieros'),
+        where('saldoId', '==', saldoId),
+        where('tipo', '==', 'deuda_condonada'),
+        where('estado', '==', 'activo'),
+      )
+    )
+    if (legacySnap.size === 0) {
+      throw new Error('Este saldo ya está condonado pero no tiene ningún movimiento deuda_condonada activo asociado. Requiere conciliación manual — no se creó ninguna pérdida nueva.')
+    }
+    if (legacySnap.size > 1) {
+      throw new Error(`Este saldo ya está condonado y tiene ${legacySnap.size} movimientos deuda_condonada activos asociados. Requiere conciliación manual — no se modificó ni se creó nada.`)
+    }
+
+    const movimientoId = legacySnap.docs[0].id
+    const movRef = doc(db, 'movimientos_financieros', movimientoId)
+
+    // Solo vincula la referencia — no crea ni modifica montos.
+    await runTransaction(db, async (tx) => {
+      const [saldoSnap2, movSnap2] = await Promise.all([tx.get(saldoRef), tx.get(movRef)])
+      if (!saldoSnap2.exists()) throw new Error('El saldo ya no existe.')
+      const saldoData2 = saldoSnap2.data() as SaldoCargoMotorizado
+      if (saldoData2.estado !== 'condonado' || saldoData2.movimientoCondonacionId) {
+        throw new Error('El estado del saldo cambió durante la operación. Repetí la acción para volver a evaluarlo.')
+      }
+      const movData2 = movSnap2.exists() ? (movSnap2.data() as any) : null
+      if (!movData2 || movData2.estado !== 'activo' || movData2.saldoId !== saldoId || movData2.tipo !== 'deuda_condonada') {
+        throw new Error('El movimiento a vincular ya no es válido. Requiere conciliación manual.')
+      }
+      tx.update(saldoRef, { movimientoCondonacionId: movimientoId, updatedAt: serverTimestamp() })
+    })
+    return
+  }
+
+  if (preData.estado !== 'pendiente' && preData.estado !== 'abonado_parcial') {
+    throw new Error(`No se puede condonar un saldo en estado "${preData.estado}".`)
+  }
+
+  const depositoRef = doc(db, 'ordenes_deposito', depositoId)
+  const movRef = doc(collection(db, 'movimientos_financieros'))
+
+  await runTransaction(db, async (tx) => {
+    const saldoSnap = await tx.get(saldoRef)
+    if (!saldoSnap.exists()) {
+      throw new Error(`Saldo ${saldoId} no encontrado.`)
+    }
+    const saldoData = saldoSnap.data() as SaldoCargoMotorizado
+
+    if (saldoData.estado === 'condonado') {
+      throw new Error('Este saldo ya fue condonado anteriormente. No se creó ningún movimiento nuevo.')
+    }
+    if (saldoData.estado !== 'pendiente' && saldoData.estado !== 'abonado_parcial') {
+      throw new Error(`No se puede condonar un saldo en estado "${saldoData.estado}".`)
+    }
+
+    // El monto condonado es siempre el saldoPendiente real leído ahora, nunca
+    // el parámetro `monto` recibido (que puede quedar obsoleto entre el click
+    // y la ejecución si hubo un abono parcial en el medio).
+    const montoCondonado = saldoData.saldoPendiente
+    if (!(montoCondonado > 0)) {
+      throw new Error('El saldo pendiente es 0 — no hay nada que condonar.')
+    }
+
+    tx.update(saldoRef, {
+      estado: 'condonado',
+      motivoCondonacion: nota ?? '',
+      montoCondonado,
+      movimientoCondonacionId: movRef.id,
+      condonadoAt: serverTimestamp(),
+      condonadoPorUid: operadorId,
+      updatedAt: serverTimestamp(),
+    })
+    tx.update(depositoRef, {
+      condonado: true,
+      notaCondonacion: nota ?? '',
+      updatedAt: serverTimestamp(),
+    })
+    tx.set(movRef, {
+      tipo: 'deuda_condonada',
+      monto: montoCondonado,
+      at: serverTimestamp(),
+      creadoPorUid: operadorId,
+      creadoPorRol: 'gestor',
+      descripcion: `Deuda condonada · ${motorizadoNombre}${nota ? ` · ${nota}` : ''}`,
+      estado: 'activo',
+      motorizadoId,
+      depositoId,
+      saldoId,
+      cuentaOrigen: cuentas.deudaMotorizado(motorizadoId),
+      cuentaDestino: cuentas.perdidaCondonaciones,
+      propietario: 'storkhub',
+    })
+  })
 }
