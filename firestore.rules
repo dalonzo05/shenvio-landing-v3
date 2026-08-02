@@ -304,6 +304,31 @@ service cloud.firestore {
       // Gestor/admin: acceso completo
       allow update: if isAdminOrGestor();
 
+      // acumulacionCobroSemanal es el marcador de conciliación del cobro
+      // semanal (P1). El motorizado solo puede DEJARLO PEDIDO: pone
+      // estado='pendiente' al entregar, y nada más. Los estados finales
+      // ('acumulado', 'requiere_revision'), el cobroSemanalId y el motivo los
+      // escribe únicamente la callable vía Admin SDK, que no pasa por estas
+      // reglas. Si el cliente pudiera marcar 'acumulado' por su cuenta, la
+      // conciliación del gestor dejaría de ser confiable — que es justo lo
+      // que este marcador viene a garantizar.
+      function marcadorSoloPendiente() {
+        return !('acumulacionCobroSemanal' in request.resource.data.diff(resource.data).affectedKeys())
+          || (
+            request.resource.data.acumulacionCobroSemanal.keys().hasOnly(['estado', 'updatedAt'])
+            && request.resource.data.acumulacionCobroSemanal.estado == 'pendiente'
+            // El estado PREVIO también tiene que ser 'pendiente' (o no existir
+            // aún). Sin esta línea el marcador solo estaba protegido de rebote:
+            // un 'acumulado' viene acompañado de cobroSemanalId, así que el
+            // hasOnly de arriba ya lo rechazaba por conteo de campos. Pero eso
+            // es una coincidencia, no la regla — un 'acumulado' sin ese campo
+            // sí podía revertirse a 'pendiente', y con él la conciliación del
+            // gestor volvería a mostrar como pendiente algo ya cobrado.
+            // Acá la transición se prohíbe explícitamente.
+            && resource.data.get(['acumulacionCobroSemanal', 'estado'], 'pendiente') == 'pendiente'
+          );
+      }
+
       // Motorizado: solo puede modificar campos operativos, NO financieros
       allow update: if isAssignedMotorizado()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -319,8 +344,10 @@ service cloud.firestore {
           'cobroDelivery',
           'asignacion',
           'registro',
-          'pagoDelivery'
-        ]);
+          'pagoDelivery',
+          'acumulacionCobroSemanal'
+        ])
+        && marcadorSoloPendiente();
 
       allow delete: if false;
     }
@@ -359,124 +386,25 @@ service cloud.firestore {
         );
     }
 
-    // Crédito semanal del comercio. El COBRO en sí (registrar un pago, mover
-    // totalPagado/estado, cerrar la semana) es exclusivo de gestor/admin —
-    // ese es el flujo F4, atómico e idempotente, en gestor/cobros/page.tsx.
+    // Crédito semanal del comercio. Colección exclusiva de gestor/admin.
     //
-    // El motorizado NO cobra: solo ACUMULA lo que acaba de entregar. Al
-    // marcar 'entregado' una orden de crédito (motorizado/page.tsx), abre el
-    // doc de la semana si no existía y le suma el delivery de esa orden.
+    // El motorizado ya no aparece acá. Antes necesitaba `read` para que su
+    // transacción de entrega pudiera decidir entre crear y acumular el
+    // documento semanal — y como no existe ningún campo que ligue un
+    // motorizado con el crédito de un comercio, esa lectura no se podía
+    // acotar: quedaba habilitado a enumerar la cartera completa (razón
+    // social, deuda, pagos y notas con referencias bancarias). Ese era el P1.
     //
-    // La versión anterior de este bloque era `allow read, write: if
-    // isMotorizadoRole()`. Como `write` engloba create+update+delete, un
-    // motorizado podía además poner totalPagado/estado a voluntad —
-    // cancelando la deuda semanal de cualquier comercio — y hasta borrar el
-    // documento entero. Explotado y reproducido en Emulator (auditoría P0).
+    // La acumulación pasó a la callable acumularCobroSemanalPorOrden, que usa
+    // Admin SDK y no evalúa estas reglas. Con eso desaparece el motivo de la
+    // lectura, y con él las funciones ordenAcumulable / ordenCoincide /
+    // ordenesAgregadas, que existían solo para acotar aquella escritura.
+    //
+    // El comercio tampoco lee su propio cobro semanal: nunca pudo, el
+    // producto funciona así, y abrirlo ahora sería ampliar superficie sin
+    // necesidad demostrada.
     match /cobros_semanales/{docId} {
-
-      // La orden que se anexa debe cumplir TODO lo siguiente:
-      //   1. existir;
-      //   2. estar asignada a quien firma la escritura;
-      //   3. pertenecer al mismo comercio que este cobro semanal;
-      //   4. tener un precio definitivo numérico y positivo;
-      //   5. que el monto sumado sea EXACTAMENTE ese precio;
-      //   6. quedar entregada al cerrar esta misma transacción.
-      //
-      // (2) y (3) hacen falta las dos: solo con (2), un motorizado podía
-      // cargar una entrega legítima suya del comercio B contra la semana del
-      // comercio A e inflarle la deuda a un tercero.
-      //
-      // (5) es lo que impide fijar la deuda del comercio a voluntad. El ancla
-      // es confirmacion.precioFinalCordobas, que el gestor fija al confirmar
-      // la orden y que el motorizado NO puede tocar: no figura en la lista de
-      // campos de su allow update en solicitudes_envio (ver más arriba).
-      // Deliberadamente NO se usa cobroDelivery.monto como referencia: ese
-      // campo sí está en esa lista, o sea que lo escribe el propio motorizado
-      // en esta misma transacción — validar contra él sería circular.
-      function ordenAcumulable(ordenId, comercioUid, delta) {
-        return exists(/databases/$(database)/documents/solicitudes_envio/$(ordenId))
-          && ordenCoincide(
-               get(/databases/$(database)/documents/solicitudes_envio/$(ordenId)).data,
-               comercioUid, delta)
-          && getAfter(/databases/$(database)/documents/solicitudes_envio/$(ordenId))
-               .data.estado == 'entregado';
-      }
-
-      // El dueño de la orden se lee de userId, o de ownerSnapshot.uid cuando
-      // existe — el mismo par que usa motorizado/page.tsx para armar el id del
-      // doc semanal. get() ve el estado ya confirmado (no las escrituras
-      // pendientes): asignación y precio son previos a la entrega, así que ya
-      // están persistidos cuando se evalúa la regla. El estado 'entregado', en
-      // cambio, se alcanza dentro de esta transacción — por eso ese único
-      // chequeo usa getAfter().
-      function ordenCoincide(orden, comercioUid, delta) {
-        return orden.get(['asignacion', 'motorizadoAuthUid'], null) == request.auth.uid
-          && (
-            orden.get('userId', null) == comercioUid
-            || orden.get(['ownerSnapshot', 'uid'], null) == comercioUid
-          )
-          && orden.get(['confirmacion', 'precioFinalCordobas'], null) is number
-          && orden.get(['confirmacion', 'precioFinalCordobas'], null) > 0
-          && delta == orden.get(['confirmacion', 'precioFinalCordobas'], null);
-      }
-
-      // Órdenes que este write agrega respecto de lo ya guardado.
-      function ordenesAgregadas() {
-        return request.resource.data.ordenesIds.removeAll(resource.data.ordenesIds);
-      }
-
       allow read, write: if isAdminOrGestor();
-
-      // Lectura: la transacción de entrega hace tx.get(semanaRef) para
-      // decidir entre crear y acumular, así que el motorizado necesita leer.
-      allow read: if isMotorizadoRole();
-
-      // Alta de la semana: nace SIN cobrar. totalPagado en 0, estado
-      // 'pendiente' y pagos vacío no son valores por defecto sino
-      // condiciones — así el alta no puede usarse para fabricar una semana
-      // que ya figure como saldada. El id del doc lo forma el comercio y la
-      // semana, y se exige que coincida con el contenido para que no se
-      // pueda sembrar un doc a nombre de otro comercio.
-      //
-      // Al abrir la semana el total arranca en el precio de la única orden
-      // que la origina: aquí el delta es el propio totalMonto.
-      allow create: if isMotorizadoRole()
-        && request.resource.data.totalPagado == 0
-        && request.resource.data.estado == 'pendiente'
-        && request.resource.data.pagos.size() == 0
-        && docId == request.resource.data.clienteUid + '_' + request.resource.data.semanaKey
-        && request.resource.data.ordenesIds.size() == 1
-        && ordenAcumulable(
-             request.resource.data.ordenesIds[0],
-             request.resource.data.clienteUid,
-             request.resource.data.totalMonto);
-
-      // Acumulación: solo sumar monto y anexar la orden. totalPagado,
-      // estado, pagos[], pagadoAt, clienteUid y semanaKey quedan FUERA de
-      // hasOnly, así que para el motorizado son inmutables — no hay forma de
-      // marcar pagada una semana por esta vía.
-      //
-      // Se exige exactamente una orden nueva: si el id ya estaba en la lista
-      // (reintento sobre una entrega ya contabilizada), arrayUnion no agrega
-      // nada pero increment sí sumaría de nuevo. Pedir que la lista crezca
-      // ata el incremento a una orden concreta y bloquea ese doble cobro.
-      // Además la lista solo puede crecer: no se puede quitar una orden ya
-      // acumulada para sustituirla por otra.
-      //
-      // El delta tiene que ser exactamente el precio de esa orden — ni más ni
-      // menos. Es la diferencia entre "el motorizado reporta una entrega" y
-      // "el motorizado decide cuánto debe el comercio".
-      allow update: if isMotorizadoRole()
-        && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['totalMonto', 'ordenesIds', 'updatedAt'])
-        && request.resource.data.ordenesIds.hasAll(resource.data.ordenesIds)
-        && ordenesAgregadas().size() == 1
-        && ordenAcumulable(
-             ordenesAgregadas()[0],
-             resource.data.clienteUid,
-             request.resource.data.totalMonto - resource.data.totalMonto);
-
-      // Sin delete para el motorizado: no se le concede en ninguna rama.
     }
 
     // Órdenes de depósito: agrupan viajes por motorizado + destino, almacenan boucher único

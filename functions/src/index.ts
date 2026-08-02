@@ -5,6 +5,7 @@ import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 admin.initializeApp();
 
 export { crearAccesoComercio } from './comercio-acceso';
+export { acumularCobroSemanalPorOrden } from './cobro-semanal';
 
 /**
  * Daily cleanup: deletes photo evidence from Storage and Firestore

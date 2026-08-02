@@ -20,6 +20,7 @@ import { auth, db } from '@/fb/config'
 import { registrarMovimiento } from '@/lib/financial-writes'
 import {
   AlertCircle,
+  ShieldCheck,
   CheckCircle2,
   X,
   CreditCard,
@@ -119,11 +120,16 @@ type CobroSemanal = {
   pagadoAt?: Timestamp
 }
 
-type MainTab = 'contado' | 'credito' | 'incidencias'
+type MainTab = 'contado' | 'credito' | 'incidencias' | 'conciliacion'
 type ContadoSub = 'por_orden' | 'por_cliente' | 'pagados'
 type IncidenciasTab = 'pendientes' | 'resueltos'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function fmtFecha(ts?: { toDate?: () => Date }) {
+  const d = ts?.toDate?.()
+  return d ? d.toLocaleDateString('es-NI', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'
+}
 
 function fmt(n?: number) {
   if (typeof n !== 'number') return '—'
@@ -914,6 +920,7 @@ export default function CobrosPage() {
   const [mainTab, setMainTab] = useState<MainTab>('contado')
   const [contadoSub, setContadoSub] = useState<ContadoSub>('por_orden')
   const [incidenciasTab, setIncidenciasTab] = useState<IncidenciasTab>('pendientes')
+  const [acumulacionesPendientes, setAcumulacionesPendientes] = useState<Solicitud[]>([])
 
   // Contado: todas las órdenes entregadas (filtramos client-side para capturar históricas)
   const [contadoRaw, setContadoRaw] = useState<Solicitud[]>([])
@@ -979,6 +986,28 @@ export default function CobrosPage() {
         .sort((a, b) => b.semanaKey.localeCompare(a.semanaKey))
       setCobrosSemanales(rows)
       setLoadingCredito(false)
+    })
+  }, [])
+
+  // ── Conciliación de acumulaciones (P1) ────────────────────────────────────
+  // La entrega y la acumulación del cobro semanal ocurren en dos pasos: el
+  // cliente entrega, la callable acumula. Si el segundo no llega a correr, la
+  // orden queda con el marcador en 'pendiente'. Se consulta el marcador
+  // explícito y no la ausencia del id dentro de ordenesIds: buscar "lo que
+  // falta" exigiría leer todos los cobros y cruzarlos, y no distinguiría un
+  // caso pendiente de uno que nunca debió acumularse.
+  useEffect(() => {
+    const q = query(
+      collection(db, 'solicitudes_envio'),
+      where('acumulacionCobroSemanal.estado', 'in', ['pendiente', 'requiere_revision'])
+    )
+    return onSnapshot(q, (snap) => {
+      setAcumulacionesPendientes(
+        snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Solicitud))
+      )
+    }, (error) => {
+      console.warn('[cobros] listener de conciliación detenido:', error.code)
+      setAcumulacionesPendientes([])
     })
   }, [])
 
@@ -1401,7 +1430,68 @@ export default function CobrosPage() {
             </span>
           )}
         </button>
+        <button onClick={() => setMainTab('conciliacion')} className={btnTab(mainTab === 'conciliacion')}>
+          <ShieldCheck className="inline h-4 w-4 mr-1.5 opacity-70" />
+          Conciliación
+          {acumulacionesPendientes.length > 0 && (
+            <span className="ml-1.5 inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-500 text-white text-[10px] font-black">
+              {acumulacionesPendientes.length > 9 ? '9+' : acumulacionesPendientes.length}
+            </span>
+          )}
+        </button>
       </div>
+
+      {/* ── TAB: CONCILIACIÓN ────────────────────────────────────────────── */}
+      {/* Entregas de crédito cuyo cobro semanal no llegó a acumularse. Se
+          muestra lo mínimo para decidir: qué orden, de qué comercio, cuándo y
+          por cuánto. El monto real lo recalcula siempre la callable — acá solo
+          se informa el precio de la orden como referencia. */}
+      {mainTab === 'conciliacion' && (
+        <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
+          {acumulacionesPendientes.length === 0 ? (
+            <p className="px-4 py-8 text-center text-sm text-gray-400">
+              Sin acumulaciones pendientes. Todas las entregas de crédito están registradas en su cobro semanal.
+            </p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 text-left text-xs font-semibold text-gray-500">
+                <tr>
+                  <th className="px-4 py-2.5">ORDEN</th>
+                  <th className="px-4 py-2.5">COMERCIO</th>
+                  <th className="px-4 py-2.5">ENTREGADA</th>
+                  <th className="px-4 py-2.5">PRECIO</th>
+                  <th className="px-4 py-2.5">ESTADO</th>
+                  <th className="px-4 py-2.5">MOTIVO</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {acumulacionesPendientes.map((s) => {
+                  const acu = (s as any).acumulacionCobroSemanal ?? {}
+                  const requiereRevision = acu.estado === 'requiere_revision'
+                  return (
+                    <tr key={s.id} className="hover:bg-gray-50/70">
+                      <td className="px-4 py-3 font-mono text-xs">{s.id.slice(0, 10)}</td>
+                      <td className="px-4 py-3">{getClienteNombre(s, comercioNames)}</td>
+                      <td className="px-4 py-3 text-gray-500">{fmtFecha(s.entregadoAt)}</td>
+                      <td className="px-4 py-3 font-semibold">{fmt((s as any).confirmacion?.precioFinalCordobas)}</td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full border ${
+                          requiereRevision
+                            ? 'bg-red-50 text-red-700 border-red-200'
+                            : 'bg-amber-50 text-amber-700 border-amber-200'
+                        }`}>
+                          {requiereRevision ? 'Requiere revisión' : 'Pendiente'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-gray-500">{acu.motivo || '—'}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
 
       {/* ── TAB: CONTADO ─────────────────────────────────────────────────── */}
       {mainTab === 'contado' && (

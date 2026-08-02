@@ -7,7 +7,8 @@ import {
   doc, getDoc, setDoc, updateDoc, serverTimestamp, Timestamp, writeBatch,
   runTransaction, increment, arrayUnion, limit,
 } from 'firebase/firestore';
-import { auth, db } from '@/fb/config';
+import { auth, db, functions } from '@/fb/config';
+import { httpsCallable } from 'firebase/functions';
 import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBoucher, type TipoEvidencia } from '@/fb/storage'
 import { registrarMovimiento } from '@/lib/financial-writes';
 import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
@@ -244,6 +245,51 @@ function sortDesc(arr: Solicitud[], field: keyof Solicitud = 'createdAt') {
   return [...arr].sort((a, b) => (tsToDate(b[field])?.getTime() || 0) - (tsToDate(a[field])?.getTime() || 0));
 }
 
+// ─── Acumulación del cobro semanal (P1) ──────────────────────────────────────
+//
+// La acumulación vive en la callable; acá solo se la invoca y se traduce el
+// fallo a algo que el motorizado entienda. La orden ya quedó entregada antes
+// de llegar acá: un error de red no revierte nada, solo deja el marcador en
+// 'pendiente' para que el reintento al reabrir la pantalla lo resuelva.
+
+const acumularCallable = httpsCallable<{ ordenId: string }, { ok: true; yaAcumulada: boolean; cobroSemanalId: string }>(
+  functions,
+  'acumularCobroSemanalPorOrden'
+)
+
+// Dos reintentos con backoff corto (0.8s, 2.4s). Suficiente para una caída
+// momentánea de red sin dejar al motorizado esperando: si no sale, la orden
+// queda 'pendiente' y el barrido de la pantalla la recoge después. La callable
+// es idempotente, así que reintentar nunca duplica el monto.
+const REINTENTOS_ACUMULACION = 2
+const BACKOFF_MS = [800, 2400]
+
+async function acumularConReintento(
+  ordenId: string,
+  onError?: (msg: string) => void
+): Promise<boolean> {
+  for (let intento = 0; intento <= REINTENTOS_ACUMULACION; intento++) {
+    try {
+      await acumularCallable({ ordenId })
+      return true
+    } catch (e: unknown) {
+      const code = (e as { code?: string })?.code ?? ''
+      // Un rechazo por reglas de negocio no mejora reintentando: se corta.
+      const definitivo = /permission-denied|failed-precondition|invalid-argument|not-found|unauthenticated/.test(code)
+      if (definitivo || intento === REINTENTOS_ACUMULACION) {
+        onError?.(
+          definitivo
+            ? 'La entrega se registró, pero el cobro semanal quedó pendiente de revisión por el gestor.'
+            : 'La entrega se registró. El cobro semanal se sincronizará automáticamente.'
+        )
+        return false
+      }
+      await new Promise((r) => setTimeout(r, BACKOFF_MS[intento]))
+    }
+  }
+  return false
+}
+
 // ─── Semana helpers (ISO 8601) ────────────────────────────────────────────────
 
 function getSemanaKey(date: Date): string {
@@ -434,6 +480,32 @@ export default function PanelMotorizadoPage() {
     return () => { if (typeof unsub === 'function') unsub(); };
   }, [user, cargar]);
 
+  // ── Barrido de acumulaciones pendientes (P1) ──────────────────────────────
+  // Cierra la ventana de la Opción B: si la callable no llegó a correr tras
+  // una entrega (red caída, app cerrada), la orden quedó 'pendiente' y acá se
+  // reintenta al abrir la pantalla. Solo órdenes propias, entregadas y en
+  // 'pendiente' — 'requiere_revision' se deja al gestor a propósito, porque
+  // significa que un reintento automático no lo va a resolver.
+  const barridoHechoRef = useRef(false)
+  useEffect(() => {
+    if (!user || ordenes.length === 0 || barridoHechoRef.current) return
+    const pendientes = ordenes.filter(
+      (o: any) =>
+        o.estado === 'entregado' &&
+        o.acumulacionCobroSemanal?.estado === 'pendiente' &&
+        o.asignacion?.motorizadoAuthUid === user.uid
+    )
+    if (pendientes.length === 0) return
+    barridoHechoRef.current = true
+    // Secuencial a propósito: varias pendientes del mismo comercio caen en el
+    // mismo documento semanal, y en paralelo solo generarían contención.
+    void (async () => {
+      for (const o of pendientes) {
+        await acumularConReintento(o.id)
+      }
+    })()
+  }, [user?.uid, ordenes])
+
   useEffect(() => {
     if (!user) { setLiquidaciones([]); return; }
     const q = query(
@@ -573,47 +645,26 @@ export default function PanelMotorizadoPage() {
           ...(semanaKey ? { semanaKey } : {}),
         }
 
-        // Para crédito con monto > 0: upsert atómico en cobros_semanales
+        // Crédito con monto > 0: la acumulación en cobros_semanales ya NO se
+        // hace desde acá. El cliente solo deja el marcador 'pendiente' dentro
+        // de la misma transacción de entrega, y después llama a la callable,
+        // que resuelve comercio, precio y semana server-side. Así el
+        // motorizado no necesita ninguna lectura sobre cobros_semanales —
+        // que era lo que obligaba a abrirle la colección entera (P1).
         if (esCredito && precioDelivery > 0) {
-          const uid = (o.ownerSnapshot as any)?.uid || o.userId || ''
-          const clienteNombre = o.ownerSnapshot?.nombre ?? ''
-          const clienteCompany = o.ownerSnapshot?.companyName ?? ''
-          const semanaRef = doc(db, 'cobros_semanales', `${uid}_${semanaKey}`)
+          p['acumulacionCobroSemanal.estado'] = 'pendiente'
+          p['acumulacionCobroSemanal.updatedAt'] = serverTimestamp()
 
-          // La transaction solo actualiza solicitud y cobros_semanales.
-          // El doc del motorizado se actualiza separado usando motorizadoDocId
-          // para garantizar que isOwnMotorizadoDoc() pase siempre.
           await runTransaction(db, async (tx) => {
-            const semanaSnap = await tx.get(semanaRef)
             tx.update(doc(db, 'solicitudes_envio', o.id), p)
-            if (!semanaSnap.exists()) {
-              const { inicio, fin } = getSemanaRange(semanaKey!)
-              tx.set(semanaRef, {
-                clienteUid: uid,
-                clienteNombre,
-                clienteCompany,
-                semanaKey: semanaKey!,
-                semanaInicio: Timestamp.fromDate(inicio),
-                semanaFin: Timestamp.fromDate(fin),
-                totalMonto: precioDelivery,
-                totalPagado: 0,
-                estado: 'pendiente',
-                pagos: [],
-                ordenesIds: [o.id],
-                creadoAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              })
-            } else {
-              tx.update(semanaRef, {
-                totalMonto: increment(precioDelivery),
-                ordenesIds: arrayUnion(o.id),
-                updatedAt: serverTimestamp(),
-              })
-            }
           })
           if (motorizadoDocId) {
             await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: 'disponible', updatedAt: serverTimestamp() })
           }
+          // La entrega ya está confirmada: si esto falla, la orden queda
+          // entregada y 'pendiente', y se reintenta sola al reabrir la
+          // pantalla. Nunca se revierte la entrega por un fallo de red.
+          void acumularConReintento(o.id, setErr)
           const coordFinalCredito =
             o.entrega?.coord ??
             (o.tipoServicio === 'fuera_managua' ? o.fueraManagua?.coordsPuntoLogistico ?? null : null)
