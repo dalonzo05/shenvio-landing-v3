@@ -36,6 +36,17 @@ service cloud.firestore {
         && userDoc().data.activo == true;
     }
 
+    // Activo Y con un rol reconocido. isActiveUser() por sí solo NO alcanza
+    // para "es un usuario operativo del sistema": un recién autoregistrado
+    // queda con activo:true pero SIN rol hasta que gestor/admin se lo asigne,
+    // y esa ventana no debe dar acceso a nada. Se usa donde el criterio es
+    // "cualquier usuario del sistema" y no un rol concreto.
+    // La capitalización de 'Comercio' es la real del esquema — ver isComercioRole().
+    function hasKnownActiveRole() {
+      return isActiveUser()
+        && userDoc().data.get('rol', '') in ['admin', 'gestor', 'motorizado', 'Comercio', 'cliente'];
+    }
+
     function isAdminOrGestor() {
       return isActiveUser()
         && (userDoc().data.rol == 'admin' || userDoc().data.rol == 'gestor');
@@ -60,8 +71,12 @@ service cloud.firestore {
         && userDoc().data.rol == 'Comercio';
     }
 
+    // isMotorizadoRole() en vez de signedIn(): estar asignado a una orden no
+    // es identidad suficiente. Sin esta comprobación, un motorizado dado de
+    // baja seguía leyendo y actualizando todas las órdenes que tuvo
+    // asignadas — con datos de destinatario, precio y URL de evidencia.
     function isAssignedMotorizado() {
-      return signedIn()
+      return isMotorizadoRole()
         && resource.data.asignacion is map
         && resource.data.asignacion.motorizadoAuthUid is string
         && resource.data.asignacion.motorizadoAuthUid == request.auth.uid;
@@ -77,8 +92,12 @@ service cloud.firestore {
         : valorUserId == request.auth.uid;
     }
 
+    // isActiveUser() por el mismo motivo: ser el creador de una solicitud no
+    // sobrevive a la baja de la cuenta. (Para un comercio, esCreadorDeSolicitud
+    // ya pasaba por isComercioRole(), que sí valida activo; el hueco estaba en
+    // la rama de cliente individual, que comparaba contra el Auth UID a secas.)
     function isOwnSolicitudCliente() {
-      return signedIn()
+      return isActiveUser()
         && resource.data.userId is string
         && esCreadorDeSolicitud(resource.data.userId);
     }
@@ -200,8 +219,22 @@ service cloud.firestore {
       allow delete: if isAdminOrGestor();
     }
 
+    // Ficha operativa del motorizado: nombre, teléfono, dirección base, foto,
+    // zona y la última ubicación GPS. Es un directorio de personal.
+    //
+    // Antes decía `signedIn()`, que no comprueba activo, ni rol, ni
+    // pertenencia — así que la regla era uniformemente verdadera y Firestore
+    // autorizaba el `list` completo. Cualquier sesión lo enumeraba: un
+    // motorizado dado de baja, un comercio inactivo, un usuario sin rol
+    // asignado y hasta uno anónimo.
+    //
+    // El comercio NO recibe acceso: nunca leyó esta colección — muestra al
+    // motorizado desde el snapshot denormalizado de la propia orden
+    // (asignacion.motorizadoNombre / motorizadoFotoUrl), así que cerrarla no
+    // lo afecta y abrirla sería ampliar superficie sin necesidad.
     match /motorizado/{docId} {
-      allow read: if signedIn();
+      allow read: if isAdminOrGestor()
+        || (isMotorizadoRole() && isOwnMotorizadoDoc());
 
       allow create: if isAdminOrGestor();
 
@@ -229,7 +262,7 @@ service cloud.firestore {
     match /cotizaciones/{docId} {
 
       function isMeCreating() {
-        return signedIn() && request.resource.data.userId == request.auth.uid;
+        return isActiveUser() && request.resource.data.userId == request.auth.uid;
       }
 
       function onlyAllowedKeys() {
@@ -285,12 +318,18 @@ service cloud.firestore {
       }
 
       allow create: if isMeCreating() && onlyAllowedKeys() && validData();
-      allow read: if signedIn() && resource.data.userId == request.auth.uid;
+      allow read: if isActiveUser() && resource.data.userId == request.auth.uid;
       allow update, delete: if false;
     }
 
     match /solicitudes_envio/{id} {
-      allow create: if signedIn()
+      // isActiveUser() en vez de signedIn(): la rama de comercio ya validaba
+      // actividad por dentro (esCreadorDeSolicitud -> isComercioRole()), pero
+      // la de cliente individual comparaba el userId contra el Auth UID a
+      // secas — así que una cuenta de cliente dada de baja seguía creando
+      // órdenes. Las comprobaciones de propiedad y la rama de gestor/admin
+      // quedan exactamente como estaban.
+      allow create: if isActiveUser()
         && (
           esCreadorDeSolicitud(request.resource.data.userId)
           || isAdminOrGestor()
@@ -410,13 +449,19 @@ service cloud.firestore {
     // Órdenes de depósito: agrupan viajes por motorizado + destino, almacenan boucher único
     match /ordenes_deposito/{depositoId} {
       // El motorizado crea su propio depósito (motorizadoUid == auth UID).
-      // Usamos UID directo en lugar de isMotorizadoRole() para no depender del
-      // cross-read a /usuarios — si ese doc falla, el create quedaría bloqueado.
+      //
+      // Antes se usaba signedIn() a propósito, para no depender del cross-read
+      // a /usuarios: se temía que un perfil ausente rompiera el create. Ese
+      // temor resultó infundado — cuando usuarios/{uid} no existe,
+      // isActiveUser() evalúa a falso y DENIEGA limpiamente, sin error de
+      // evaluación. A cambio, el atajo dejaba a una cuenta dada de baja
+      // creando y modificando depósitos: escritura en el circuito financiero
+      // desde una cuenta que ya no debería operar.
       allow create: if isAdminOrGestor()
-        || (signedIn() && request.resource.data.motorizadoUid == request.auth.uid);
+        || (isMotorizadoRole() && request.resource.data.motorizadoUid == request.auth.uid);
 
       allow read: if isAdminOrGestor()
-        || (signedIn() && resource.data.motorizadoUid == request.auth.uid)
+        || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid)
         || (isComercioRole()
             && resource.data.destinatario == 'comercio'
             && resource.data.destinatarioId == comercioIdDelUsuario());
@@ -424,9 +469,10 @@ service cloud.firestore {
       // Gestor/admin: puede confirmar, rechazar y editar libremente
       allow update: if isAdminOrGestor();
 
-      // Motorizado: solo puede subir boucher y pasar a en_revision
-      // También usa UID directo para no depender del cross-read a /usuarios.
-      allow update: if signedIn()
+      // Motorizado: solo puede subir boucher y pasar a en_revision.
+      // Mismo cambio que create/read — se exige rol motorizado activo. Los
+      // campos y estados permitidos quedan exactamente como estaban.
+      allow update: if isMotorizadoRole()
         && resource.data.motorizadoUid == request.auth.uid
         && resource.data.estado in ['pendiente_boucher', 'rechazado']
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -620,7 +666,7 @@ service cloud.firestore {
     // escritura solo admin — es política global, no una acción operativa
     // del día a día de un gestor.
     match /configuracion_cobros/{id} {
-      allow read: if signedIn();
+      allow read: if hasKnownActiveRole();
       allow write: if isAdmin();
     }
 
