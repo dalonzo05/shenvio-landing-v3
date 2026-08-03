@@ -56,6 +56,13 @@ service cloud.firestore {
       return isActiveUser() && userDoc().data.rol == 'admin';
     }
 
+    // Bloque 0C-A: hacía falta separar gestor de admin. isAdminOrGestor() los
+    // trata igual, y eso es justo lo que permitía la escalada de privilegios
+    // sobre usuarios/ — ver el bloque de control de rol en ese match.
+    function isGestor() {
+      return isActiveUser() && userDoc().data.rol == 'gestor';
+    }
+
     function isMotorizadoRole() {
       return isActiveUser()
         && userDoc().data.rol == 'motorizado';
@@ -158,13 +165,60 @@ service cloud.firestore {
         ]);
       }
 
+      // ── Bloque 0C-A: control de escalamiento de roles ────────────────────
+      // La rama isAdminOrGestor() de create/update no tenía lista cerrada de
+      // campos, y trataba al gestor igual que al admin. Un gestor podía
+      // escribir rol:'admin' en su propio doc desde la consola del navegador,
+      // o convertir en admin a cualquier otro usuario. Estos helpers separan
+      // ambos roles: el admin conserva su capacidad actual sin cambios, y el
+      // gestor queda limitado a los perfiles operativos que la interfaz crea
+      // y edita de verdad.
+      function esRolPrivilegiado(valor) {
+        return valor == 'admin' || valor == 'gestor';
+      }
+
+      // Lista CERRADA, no lista de bloqueo: un rol desconocido no queda
+      // autorizado por omisión. El único rol que la interfaz del gestor asigna
+      // hoy es 'motorizado' (crearAccesoMotorizado en gestor/motorizados). El
+      // acceso de un Comercio lo crea la Cloud Function crearAccesoComercio
+      // con Admin SDK, que no pasa por estas reglas, y ningún flujo de gestor
+      // crea 'cliente'. Autorizar más sería ampliar superficie sin un flujo
+      // real que la respalde.
+      function esRolCreablePorGestor(valor) {
+        return valor is string && valor in ['motorizado'];
+      }
+
+      // .get() con default null: un usuario recién autoregistrado todavía no
+      // tiene el campo, y leerlo directo lanzaría error de evaluación en vez
+      // de denegar limpiamente.
+      function rolActual() {
+        return resource.data.get('rol', null);
+      }
+
+      function rolEntrante() {
+        return request.resource.data.get('rol', null);
+      }
+
+      // El rol tiene que existir antes y después, ser string y no cambiar.
+      // Exigir `is string` en ambos lados cubre de una sola vez el borrado del
+      // campo, el envío de null, y el reemplazo completo del documento con
+      // setDoc sin merge: si el rol no viene, rolEntrante() es null, no es
+      // string, y la comprobación falla. La igualdad es exacta, así que un
+      // cambio de mayúsculas ('comercio' por 'Comercio') tampoco pasa.
+      function rolSeConserva() {
+        return rolActual() is string
+          && rolEntrante() is string
+          && rolEntrante() == rolActual();
+      }
+
       allow read: if isOwner(userId) || isAdminOrGestor();
 
-      // COMPATIBILIDAD TEMPORAL: isAdminOrGestor() sigue sin restricción de
-      // campos porque 2 pantallas todavía escriben usuarios/ directamente
-      // desde el cliente con sesión de gestor/admin:
+      // COMPATIBILIDAD TEMPORAL: la rama de gestor/admin sigue sin lista
+      // cerrada de campos porque 2 pantallas todavía escriben usuarios/
+      // directamente desde el cliente:
       //   - app/panel/gestor/motorizados/page.tsx: crearAccesoMotorizado()
-      //     crea el doc completo (setDoc) al otorgar acceso a un motorizado.
+      //     crea el doc completo (setDoc) al otorgar acceso a un motorizado,
+      //     con rol:'motorizado' fijo en el código.
       //   - app/panel/gestor/comercios/page.tsx: saveProfile() sincroniza
       //     solo el campo `name` (updateDoc) cuando el comercio ya tiene
       //     acceso activo — la creación/reemplazo de ese acceso en sí ya NO
@@ -172,15 +226,33 @@ service cloud.firestore {
       //     (Bloque B/C).
       // ingresar-orden/page.tsx YA NO escribe usuarios/ en absoluto.
       // PENDIENTE: mover también estas dos escrituras a Cloud Functions.
-      allow create: if (isOwner(userId) && autoRegistroValido()) || isAdminOrGestor();
+      //
+      // Lo que sí cambia (Bloque 0C-A): el gestor deja de poder elegir el rol.
+      // El admin conserva exactamente la capacidad que tenía.
+      allow create: if (isOwner(userId) && autoRegistroValido())
+        || isAdmin()
+        || (isGestor() && esRolCreablePorGestor(rolEntrante()));
 
+      // La rama del propio usuario ya impedía tocar el rol: camposEditables
+      // AutoUsuario() usa hasOnly(['name','theme','updatedAt']), así que 'rol'
+      // ni siquiera puede aparecer entre las claves afectadas — una garantía
+      // más fuerte que comparar rol viejo contra rol nuevo, y que además no
+      // rompe a los usuarios que todavía no tienen rol asignado.
       allow update: if (
           isOwner(userId)
           && isActiveUser()
           && camposEditablesAutoUsuario()
           && request.resource.data.updatedAt == request.time
         )
-        || isAdminOrGestor();
+        || isAdmin()
+        || (
+          isGestor()
+          // No puede tocar perfiles de admin ni de gestor, ni siquiera el
+          // suyo: sin esto podía degradar a un admin a rol operativo y después
+          // editarlo, o cambiarse el rol a sí mismo.
+          && !esRolPrivilegiado(rolActual())
+          && rolSeConserva()
+        );
 
       allow delete: if isAdminOrGestor();
     }
