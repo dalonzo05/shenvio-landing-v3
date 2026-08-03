@@ -134,12 +134,22 @@ service cloud.firestore {
       // Auto-registro: perfil básico, nada privilegiado. Ajustada al flujo
       // real (UserProvider.tsx -> fb/data.ts:upsertUserProfileByUid, que hoy
       // solo escribe email/name/updatedAt). 'rol' NO está en esta lista a
-      // propósito: hoy no existe un rol por defecto de auto-registro — un
-      // usuario recién registrado queda SIN rol hasta que gestor/admin se lo
-      // asigne (rama isAdminOrGestor() de abajo) o hasta la Cloud Function
-      // de Bloque B. Si en el futuro se quisiera un rol por defecto, debe
-      // agregarse aquí FIJO a un valor no privilegiado (ej. 'cliente'),
-      // nunca como un valor elegido por el propio request.
+      // propósito: no existe un rol por defecto de auto-registro.
+      //
+      // El perfil autoregistrado queda SIN rol, y sin rol no obtiene ningún
+      // privilegio operativo — hasKnownActiveRole() y los helpers de rol lo
+      // dejan fuera de todas las ramas. Los accesos operativos se provisionan
+      // por flujos propios y acotados: crearAccesoMotorizado escribe el perfil
+      // con rol 'motorizado' fijo, y el acceso de Comercio lo crea la Cloud
+      // Function crearAccesoComercio con Admin SDK.
+      //
+      // Este bloque NO implementa un proceso de aprobación para las cuentas
+      // sin rol: quedan inertes hasta que uno de esos flujos, o un admin, las
+      // provisione. El gestor ya no puede asignarles rol (Bloque 0C-A).
+      //
+      // Si en el futuro se quisiera un rol por defecto, debe agregarse aquí
+      // FIJO a un valor no privilegiado (ej. 'cliente'), nunca como un valor
+      // elegido por el propio request.
       function camposPermitidosAutoRegistroUsuario() {
         return request.resource.data.keys().hasOnly([
           'email', 'name', 'theme', 'createdAt', 'updatedAt'
@@ -211,11 +221,49 @@ service cloud.firestore {
           && rolEntrante() == rolActual();
       }
 
+      // ── Bloque 0C-B: listas cerradas de campos para el gestor ─────────────
+      // 0C-A cerró el campo rol, pero la rama del gestor seguía aceptando
+      // cualquier otro campo: podía escribir activo, comercioId, email o
+      // claves inventadas sobre un perfil operativo. Estas allowlist son
+      // positivas — lo que no está enumerado queda denegado, así que un campo
+      // de autorización que se añada en el futuro no se cuela por omisión.
+
+      // Payload exacto de crearAccesoMotorizado()
+      // (app/panel/gestor/motorizados/page.tsx). activo se comprueba solo como
+      // booleano porque el flujo envía `selected.activo !== false`, que puede
+      // ser true o false según el estado del motorizado.
+      function payloadMotorizadoValido() {
+        return request.resource.data.keys().hasOnly([
+          'name', 'email', 'rol', 'activo', 'creadoPorGestor', 'createdAt', 'updatedAt'
+        ])
+          && request.resource.data.get('name', '') is string
+          && request.resource.data.get('name', '').size() > 0
+          && request.resource.data.get('email', '') is string
+          && request.resource.data.get('email', '').size() > 0
+          && request.resource.data.get('activo', null) is bool
+          && request.resource.data.get('creadoPorGestor', false) == true
+          && request.resource.data.get('createdAt', null) == request.time
+          && request.resource.data.get('updatedAt', null) == request.time;
+      }
+
+      // Payload exacto de saveProfile() (app/panel/gestor/comercios/page.tsx):
+      // solo sincroniza el nombre. Deja fuera rol, activo, comercioId, uid,
+      // email, createdAt, creadoPorGestor, theme y cualquier clave desconocida.
+      // No se exige name no vacío: ese flujo no valida el campo antes de
+      // enviarlo, así que exigirlo cambiaría el comportamiento de una pantalla
+      // fuera del alcance de este bloque — ver riesgos residuales.
+      function camposEditablesGestorUsuario() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name', 'updatedAt'
+        ])
+          && request.resource.data.get('name', '') is string
+          && request.resource.data.get('updatedAt', null) == request.time;
+      }
+
       allow read: if isOwner(userId) || isAdminOrGestor();
 
-      // COMPATIBILIDAD TEMPORAL: la rama de gestor/admin sigue sin lista
-      // cerrada de campos porque 2 pantallas todavía escriben usuarios/
-      // directamente desde el cliente:
+      // Las 2 pantallas que todavía escriben usuarios/ directamente desde el
+      // cliente con sesión de gestor:
       //   - app/panel/gestor/motorizados/page.tsx: crearAccesoMotorizado()
       //     crea el doc completo (setDoc) al otorgar acceso a un motorizado,
       //     con rol:'motorizado' fijo en el código.
@@ -225,13 +273,18 @@ service cloud.firestore {
       //     se hace aquí, pasa por la Cloud Function crearAccesoComercio
       //     (Bloque B/C).
       // ingresar-orden/page.tsx YA NO escribe usuarios/ en absoluto.
-      // PENDIENTE: mover también estas dos escrituras a Cloud Functions.
+      // PENDIENTE: mover también estas dos escrituras a Cloud Functions;
+      // mientras tanto, cada una tiene su allowlist exacta arriba.
       //
-      // Lo que sí cambia (Bloque 0C-A): el gestor deja de poder elegir el rol.
-      // El admin conserva exactamente la capacidad que tenía.
+      // El admin conserva exactamente la capacidad que tenía: sin lista
+      // cerrada, igual que antes de 0C-A/0C-B.
       allow create: if (isOwner(userId) && autoRegistroValido())
         || isAdmin()
-        || (isGestor() && esRolCreablePorGestor(rolEntrante()));
+        || (
+          isGestor()
+          && esRolCreablePorGestor(rolEntrante())
+          && payloadMotorizadoValido()
+        );
 
       // La rama del propio usuario ya impedía tocar el rol: camposEditables
       // AutoUsuario() usa hasOnly(['name','theme','updatedAt']), así que 'rol'
@@ -252,9 +305,17 @@ service cloud.firestore {
           // editarlo, o cambiarse el rol a sí mismo.
           && !esRolPrivilegiado(rolActual())
           && rolSeConserva()
+          && camposEditablesGestorUsuario()
         );
 
-      allow delete: if isAdminOrGestor();
+      // Bloque 0C-B: el gestor ya no borra perfiles. Antes era
+      // isAdminOrGestor(), así que podía eliminar el documento de un admin o
+      // de otro gestor — dejando la cuenta de Auth viva pero sin perfil, es
+      // decir sin rol y sin acceso. No hay ninguna pantalla que borre
+      // usuarios/: no existe un solo deleteDoc sobre esta colección en todo el
+      // repositorio, así que cerrarlo al gestor no rompe ningún flujo. El
+      // admin conserva la capacidad que ya tenía.
+      allow delete: if isAdmin();
     }
 
     // comercios/{comercioId}: ID PERMANENTE del negocio, asignado una sola vez
