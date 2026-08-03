@@ -2,7 +2,7 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, connectFirestoreEmulator } from "./fs";
 import { getAuth, connectAuthEmulator } from 'firebase/auth'
-import { getStorage } from 'firebase/storage'
+import { getStorage, connectStorageEmulator } from 'firebase/storage'
 import { getFunctions, connectFunctionsEmulator } from 'firebase/functions'
 // TODO: Add SDKs for Firebase products that you want to use
 // https://firebase.google.com/docs/web/setup#available-libraries
@@ -35,13 +35,31 @@ export const EMULATOR_PROJECT_ID = 'demo-storkhub'
 // secundaria (fb/createAuthUser.ts).
 export const AUTH_EMULATOR_URL = 'http://127.0.0.1:9099'
 
+// Host y puerto del Storage Emulator. Debe coincidir con firebase.json
+// (emulators.storage.port). 9199 es además el puerto por defecto del
+// emulador, así que declararlo allí solo lo hace explícito.
+export const STORAGE_EMULATOR_HOST = '127.0.0.1'
+export const STORAGE_EMULATOR_PORT = 9199
+
 // En modo Emulator, el SDK cliente se inicializa contra `EMULATOR_PROJECT_ID`
 // en vez del proyecto real — así que incluso si algún código rompiera la
 // convención de "Firebase solo se usa dentro de useEffect/handlers" (ver
 // guard más abajo) y se ejecutara durante SSR, no habría ningún proyecto
 // real al que filtrar tráfico por error. `firebaseConfig` (el real) se deja
 // exportado sin cambios para quien necesite explícitamente el proyecto real.
-const emulatorConfig = { ...firebaseConfig, projectId: EMULATOR_PROJECT_ID, authDomain: `${EMULATOR_PROJECT_ID}.firebaseapp.com` }
+//
+// storageBucket también se reescribe al proyecto local. Antes NO se hacía, y
+// era el único servicio que en modo emulador conservaba nominalmente el
+// bucket REAL: `getStorage(app)` lo resolvía desde acá, así que toda
+// operación de Storage apuntaba a producción aunque Auth y Firestore
+// estuvieran aislados. El nombre local no necesita existir en ningún lado —
+// el emulador crea el bucket a demanda.
+const emulatorConfig = {
+  ...firebaseConfig,
+  projectId: EMULATOR_PROJECT_ID,
+  authDomain: `${EMULATOR_PROJECT_ID}.firebaseapp.com`,
+  storageBucket: `${EMULATOR_PROJECT_ID}.appspot.com`,
+}
 // Configuración activa: la que de hecho debe usar cualquier app de Firebase
 // en este proceso (principal o secundaria) — fuente única de verdad, para
 // que ningún módulo tenga que rearmar este ternario por su cuenta.
@@ -79,8 +97,13 @@ if (typeof window !== 'undefined' && usandoEmulator) {
     connectAuthEmulator(auth, AUTH_EMULATOR_URL, { disableWarnings: true })
     connectFirestoreEmulator(db, '127.0.0.1', 8080)
     connectFunctionsEmulator(functions, '127.0.0.1', 5001)
+    // Storage entra por el MISMO guard que los otros tres: si se conectara
+    // fuera de él, Fast Refresh volvería a ejecutarlo y el SDK lanzaría
+    // "already connected". No hay fallback: si 9199 no responde, la subida
+    // falla por conexión — nunca se degrada hacia el bucket real.
+    connectStorageEmulator(storage, STORAGE_EMULATOR_HOST, STORAGE_EMULATOR_PORT)
     // Aviso intencionalmente visible (no silencioso) para que sea imposible
     // no notar que una sesión quedó corriendo contra el emulador.
-    console.warn('[shenvio] Firebase Emulator activo (Auth/Firestore/Functions) — NUNCA debe verse este mensaje en producción.')
+    console.warn('[shenvio] Firebase Emulator activo (Auth/Firestore/Functions/Storage) — NUNCA debe verse este mensaje en producción.')
   }
 }
