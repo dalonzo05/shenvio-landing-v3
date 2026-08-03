@@ -17,6 +17,7 @@ import { auth, db } from '@/fb/config'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
+import { obtenerDistanciaMetros } from '@/lib/distancia'
 import { calcularRecargoZona, RECARGO_TERMINAL_BUS, type TipoServicio, type MetodoFueraManagua } from '@/lib/recargoZona'
 import { getPuntosActivos } from '@/fb/puntosLogisticos'
 import { type PuntoLogistico, sugerirPuntosParaDestino, encontrarCargotransMasCercano } from '@/lib/puntosLogisticos'
@@ -158,14 +159,7 @@ async function calcularDistancia(o: LatLng, d: LatLng): Promise<{ km: number; pr
     }
   } catch {}
 
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
-  const oStr = `${o.lat},${o.lng}`
-  const dStr = `${d.lat},${d.lng}`
-  const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${encodeURIComponent(oStr)}&destinations=${encodeURIComponent(dStr)}&mode=driving&key=${apiKey}`
-
-  const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`)
-  const data = await res.json()
-  const metros = data.rows?.[0]?.elements?.[0]?.distance?.value
+  const metros = await obtenerDistanciaMetros(`${o.lat},${o.lng}`, `${d.lat},${d.lng}`)
   if (!metros) return null
 
   const km = metros / 1000

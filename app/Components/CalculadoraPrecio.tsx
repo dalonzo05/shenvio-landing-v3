@@ -16,6 +16,7 @@ import {
 import { db, auth } from '@/fb/config'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto, ZonaGeografica } from '@/lib/zonas'
+import { obtenerDistanciaMetros } from '@/lib/distancia'
 import { SearchInput } from './calculadora/SearchInput'
 import { RecentDropdown } from './calculadora/RecentDropdown'
 import { FavoritosRetiro } from './calculadora/FavoritosRetiro'
@@ -394,11 +395,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
 
     setLoading(true)
     try {
-      const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
-      const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${encodeURIComponent(o)}&destinations=${encodeURIComponent(d)}&mode=driving&key=${apiKey}`
-      const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`)
-      const data = await res.json()
-      const metros = data.rows?.[0]?.elements?.[0]?.distance?.value
+      const metros = await obtenerDistanciaMetros(o, d)
       if (!metros) { setError('No se pudo calcular la distancia. Verificá los puntos.'); return }
       const km = metros / 1000
       const zr = zonas.length > 0 ? clasificarOrdenCompleto(origenCoord, destinoCoord, zonas) : null
