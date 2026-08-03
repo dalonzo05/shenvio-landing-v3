@@ -329,7 +329,36 @@ service cloud.firestore {
       // secas — así que una cuenta de cliente dada de baja seguía creando
       // órdenes. Las comprobaciones de propiedad y la rama de gestor/admin
       // quedan exactamente como estaban.
+      // ── Bloque 1: comercioId canónico en órdenes nuevas ──────────────────
+      // comercioId es la identidad canónica del comercio dueño de la orden;
+      // userId y comercioUid son alias en retirada que hoy se siguen
+      // escribiendo con el mismo valor. Los tres tienen que venir y coincidir:
+      // si divergieran, las reglas de pertenencia de los bloques siguientes no
+      // tendrían una sola fuente contra la cual comparar, y el backfill de los
+      // documentos históricos quedaría sin criterio.
+      // Se valida SOLO en create, a propósito: las órdenes anteriores a este
+      // bloque no tienen comercioId y deben seguir leyéndose y actualizándose
+      // igual que hasta ahora. Por eso tampoco se admite un fallback
+      // permanente del tipo comercioId || userId || comercioUid.
+      function aliasIdentidadCoherentes() {
+        return request.resource.data.comercioId is string
+          && request.resource.data.comercioId != ''
+          && request.resource.data.userId is string
+          && request.resource.data.comercioUid is string
+          && request.resource.data.comercioId == request.resource.data.userId
+          && request.resource.data.comercioId == request.resource.data.comercioUid;
+      }
+
       allow create: if isActiveUser()
+        && aliasIdentidadCoherentes()
+        // Un comercio solo puede crear órdenes a su propio nombre: el
+        // comercioId del payload tiene que ser el de su perfil, no uno elegido.
+        // Queda implicado por esCreadorDeSolicitud() más la igualdad de alias
+        // de arriba, pero se deja explícito para que la pertenencia no dependa
+        // de un encadenamiento transitivo que un cambio futuro podría romper.
+        // Para gestor y admin la condición no aplica (crean para el comercio
+        // que seleccionan), y por eso va cerrada con !isComercioRole().
+        && (!isComercioRole() || request.resource.data.comercioId == comercioIdDelUsuario())
         && (
           esCreadorDeSolicitud(request.resource.data.userId)
           || isAdminOrGestor()

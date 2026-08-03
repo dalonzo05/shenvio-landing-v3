@@ -1193,6 +1193,11 @@ export default function SolicitarEnvioPage() {
       const tieneCalculo = !!calcResult || !!draft
 
       await addDoc(collection(db, 'solicitudes_envio'), {
+        // comercioId es la identidad canónica del comercio dueño de la orden.
+        // userId y comercioUid quedan como alias en retirada: se siguen
+        // escribiendo con el mismo valor mientras los consumidores y el
+        // backfill de los documentos históricos no hayan migrado.
+        comercioId,
         userId: comercioId,
         comercioUid: comercioId,
         ownerSnapshot: {
