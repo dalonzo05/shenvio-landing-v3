@@ -354,21 +354,42 @@ service cloud.firestore {
       // a este bloque no tienen comercioId y deben seguir leyéndose y
       // actualizándose igual que hasta ahora. Por eso tampoco se admite un
       // fallback permanente del tipo comercioId || userId || comercioUid.
+      // Lectura SEGURA de un campo que es opcional por diseño: en una orden
+      // personal la clave comercioId no viene. Acceder a
+      // request.resource.data.comercioId directamente no devuelve null cuando
+      // falta — lanza "Property comercioId is undefined on object", y ese error
+      // aborta la evaluación de TODO el allow create, no solo la condición que
+      // lo provocó. El efecto era que ninguna orden sin comercioId podía
+      // crearse: ni la del gestor para un cliente individual, ni la del admin,
+      // ni la del propio cliente. Mismo patrón defensivo que ya usan
+      // comercioIdDelUsuario() y rolActual() por esta misma razón.
+      function comercioIdEntrante() {
+        return request.resource.data.get('comercioId', null);
+      }
+
       function ordenDeComercio() {
-        return request.resource.data.comercioId is string
-          && request.resource.data.comercioId != ''
+        return comercioIdEntrante() is string
+          && comercioIdEntrante() != ''
           && request.resource.data.userId is string
           && request.resource.data.comercioUid is string
-          && request.resource.data.comercioId == request.resource.data.userId
-          && request.resource.data.comercioId == request.resource.data.comercioUid
+          && comercioIdEntrante() == request.resource.data.userId
+          && comercioIdEntrante() == request.resource.data.comercioUid
           // Ancla de servidor: el comercioId tiene que ser un comercio que
           // exista de verdad. Un Auth UID de cliente individual no está en
           // comercios/, así que no puede colarse etiquetado como comercio.
-          && exists(/databases/$(database)/documents/comercios/$(request.resource.data.comercioId));
+          && exists(/databases/$(database)/documents/comercios/$(comercioIdEntrante()));
       }
 
       // Orden personal: sin comercioId, y el propietario tiene que ser
       // realmente un cliente individual según su propio documento de usuario.
+      //
+      // La comprobación es de AUSENCIA DE LA CLAVE, no de valor vacío, y esa
+      // diferencia importa: `in` es cierto en cuanto la clave viene, aunque
+      // traiga null, '', 0 o false. Así, un payload con comercioId presente
+      // pero inválido no pasa por ordenDeComercio() (falla `is string` o
+      // `!= ''`) y tampoco cae aquí — queda denegado en vez de convertirse en
+      // una orden personal ambigua, con una clave comercioId sin sentido que
+      // los consumidores y el backfill tendrían que interpretar después.
       function ordenPersonal() {
         return !('comercioId' in request.resource.data)
           && request.resource.data.userId is string
@@ -384,7 +405,7 @@ service cloud.firestore {
             // elegido. Para gestor y admin la condición no aplica — crean para
             // el comercio que seleccionan — y por eso va cerrada con
             // !isComercioRole().
-            ? (!isComercioRole() || request.resource.data.comercioId == comercioIdDelUsuario())
+            ? (!isComercioRole() || comercioIdEntrante() == comercioIdDelUsuario())
             // Rama personal. !isComercioRole() cierra el desvío: un comercio no
             // puede omitir comercioId para escaparse de la comprobación de
             // pertenencia de arriba.
