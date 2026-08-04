@@ -198,6 +198,24 @@ service cloud.firestore {
         return valor is string && valor in ['motorizado'];
       }
 
+      // Lista CERRADA de los perfiles que el gestor puede editar, por el mismo
+      // criterio que esRolCreablePorGestor. Sustituye a !esRolPrivilegiado(),
+      // que era una lista de BLOQUEO de dos valores: dejaba pasar cualquier rol
+      // que no fuera 'admin' ni 'gestor', incluidos los desconocidos y los que
+      // todavía no existen en el esquema. Con aquella forma, un rol
+      // privilegiado que se añadiera en el futuro quedaba editable por el
+      // gestor salvo que alguien recordara ampliar la lista a mano.
+      // Los tres valores son los perfiles operativos que la interfaz del gestor
+      // administra de verdad: 'motorizado' (gestor/motorizados), 'Comercio'
+      // (saveProfile en gestor/comercios) y 'cliente' (gestor/clientes).
+      // 'Comercio' lleva mayúscula inicial: es la capitalización real del
+      // esquema — ver isComercioRole().
+      // `is string` cubre de una sola vez el campo ausente, el null y cualquier
+      // valor no textual.
+      function esRolEditablePorGestor(valor) {
+        return valor is string && valor in ['motorizado', 'Comercio', 'cliente'];
+      }
+
       // .get() con default null: un usuario recién autoregistrado todavía no
       // tiene el campo, y leerlo directo lanzaría error de evaluación en vez
       // de denegar limpiamente.
@@ -300,10 +318,11 @@ service cloud.firestore {
         || isAdmin()
         || (
           isGestor()
-          // No puede tocar perfiles de admin ni de gestor, ni siquiera el
-          // suyo: sin esto podía degradar a un admin a rol operativo y después
-          // editarlo, o cambiarse el rol a sí mismo.
-          && !esRolPrivilegiado(rolActual())
+          // Solo perfiles operativos, enumerados uno a uno. Deja fuera admin y
+          // gestor —incluido el suyo propio: sin esto podía degradar a un admin
+          // a rol operativo y después editarlo, o cambiarse el rol a sí mismo— y
+          // también cualquier rol desconocido, que antes pasaba por omisión.
+          && esRolEditablePorGestor(rolActual())
           && rolSeConserva()
           && camposEditablesGestorUsuario()
         );
