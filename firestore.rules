@@ -367,6 +367,27 @@ service cloud.firestore {
         return request.resource.data.get('comercioId', null);
       }
 
+      // Lectura SEGURA en DOS niveles. ownerSnapshot puede faltar, venir null,
+      // o venir con un tipo que no sea mapa —un string, por ejemplo—, y en esos
+      // casos encadenar .get('uid') volvería a lanzar un error de evaluación
+      // que abortaría todo el allow create, exactamente el mismo modo de fallo
+      // que tuvo comercioId. Por eso se comprueba `is map` ANTES de descender:
+      // el default {} de la primera lectura cubre la clave ausente, y el
+      // ternario cubre null y los tipos que no son mapa. En todos los casos
+      // malformados esto devuelve null y la regla deniega limpiamente, en vez
+      // de romperse.
+      function ownerSnapshotUid() {
+        return request.resource.data.get('ownerSnapshot', {}) is map
+          ? request.resource.data.get('ownerSnapshot', {}).get('uid', null)
+          : null;
+      }
+
+      // uid utilizable: presente, string y no vacío. Deja fuera uid ausente,
+      // null, numérico, booleano y cadena vacía de una sola vez.
+      function ownerSnapshotUidValido() {
+        return ownerSnapshotUid() is string && ownerSnapshotUid() != '';
+      }
+
       function ordenDeComercio() {
         return comercioIdEntrante() is string
           && comercioIdEntrante() != ''
@@ -374,6 +395,15 @@ service cloud.firestore {
           && request.resource.data.comercioUid is string
           && comercioIdEntrante() == request.resource.data.userId
           && comercioIdEntrante() == request.resource.data.comercioUid
+          // ownerSnapshot es la copia del propietario que la orden lleva
+          // consigo, y es lo que leen las pantallas y los reportes sin volver a
+          // resolver la identidad. Si su uid pudiera divergir del comercioId, el
+          // documento afirmaría dos dueños distintos a la vez y cada consumidor
+          // creería a uno. Al exigir la igualdad con comercioId, y estando ya
+          // comprobado que comercioId == userId == comercioUid, los cuatro
+          // identificadores quedan atados a un único valor.
+          && ownerSnapshotUidValido()
+          && ownerSnapshotUid() == comercioIdEntrante()
           // Ancla de servidor: el comercioId tiene que ser un comercio que
           // exista de verdad. Un Auth UID de cliente individual no está en
           // comercios/, así que no puede colarse etiquetado como comercio.
@@ -393,6 +423,14 @@ service cloud.firestore {
       function ordenPersonal() {
         return !('comercioId' in request.resource.data)
           && request.resource.data.userId is string
+          // Mismo criterio de integridad que en la rama comercial: el uid del
+          // snapshot no puede señalar a alguien distinto del propietario. Aquí
+          // el ancla es userId, y se exige además la igualdad con comercioUid
+          // —leído con default null— para que un comercioUid ausente o divergente
+          // deniegue en vez de dejar la orden con dos dueños posibles.
+          && ownerSnapshotUidValido()
+          && ownerSnapshotUid() == request.resource.data.userId
+          && ownerSnapshotUid() == request.resource.data.get('comercioUid', null)
           && exists(/databases/$(database)/documents/usuarios/$(request.resource.data.userId))
           && get(/databases/$(database)/documents/usuarios/$(request.resource.data.userId)).data.get('rol', '') == 'cliente';
       }
