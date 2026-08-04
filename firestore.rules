@@ -705,25 +705,55 @@ service cloud.firestore {
           : {};
       }
 
-      // Primera carga: la orden no tiene boucher de nadie todavía. La AUSENCIA
-      // de subidoPor es lo que distingue "sin boucher" de "boucher del gestor":
-      // el gestor siempre escribe subidoPor='gestor', así que exigir que la
-      // clave no exista impide que el comercio pise una carga ajena por acá.
+      // "No hay boucher" tiene que comprobarse sobre las CUATRO claves, no solo
+      // sobre subidoPor. Un documento puede traer boucherUrl/boucherPath/
+      // boucherAt y no traer subidoPor —los históricos anteriores a que ese
+      // campo existiera son exactamente ese caso—, y mirar únicamente subidoPor
+      // lo haría pasar por una orden sin comprobante: el comercio sobrescribiría
+      // un boucher ajeno creyendo que hace una primera carga.
+      //
+      // Se usa `in`, que pregunta por la CLAVE y no por el valor. Es
+      // deliberado: null, '', 0 y false cuentan como PRESENTES. Un documento
+      // con boucherUrl:null está a medio escribir, no está limpio, y no debe
+      // tratarse como primera carga.
+      function sinRastroDeBoucher() {
+        return !('boucherUrl' in cobroDeliveryAnterior())
+          && !('boucherPath' in cobroDeliveryAnterior())
+          && !('boucherAt' in cobroDeliveryAnterior())
+          && !('subidoPor' in cobroDeliveryAnterior());
+      }
+
+      // Primera carga: la orden no tiene boucher de nadie todavía, ni rastro de
+      // uno anterior.
       function primeraCargaDeBoucher() {
         return (
           cobroDeliveryAnterior().get('estado', '') == ''
           || cobroDeliveryAnterior().get('estado', '') == 'pendiente'
         )
-        && !('subidoPor' in cobroDeliveryAnterior());
+        && sinRastroDeBoucher();
       }
 
-      // Reemplazo: solo sobre un boucher que subió el propio comercio y que
-      // sigue en revisión. Un boucher con subidoPor='gestor' queda fuera, y
-      // desde 'pagado' no se puede operar: ese estado ya tiene detrás una orden
-      // de depósito y un movimiento en el ledger.
+      // Reemplazo: solo sobre un boucher que subió el propio comercio, que
+      // sigue en revisión y que además está COMPLETO. Exigir url, path y
+      // timestamp válidos cierra los documentos inconsistentes —subidoPor
+      // 'comercio' pero sin URL, o sin path— que si no caerían en esta rama
+      // por el solo hecho de llevar la etiqueta de autor.
+      //
+      // El path anterior tiene que ser el de ESTA orden: un documento que
+      // apunte al objeto de otra orden no se repara reescribiéndolo desde el
+      // cliente, se deniega.
+      //
+      // Un boucher con subidoPor='gestor' queda fuera, y desde 'pagado' no se
+      // puede operar: ese estado ya tiene detrás una orden de depósito y un
+      // movimiento en el ledger.
       function reemplazoDeBoucherPropio() {
         return cobroDeliveryAnterior().get('estado', '') == 'en_revision_deposito'
-          && cobroDeliveryAnterior().get('subidoPor', '') == 'comercio';
+          && cobroDeliveryAnterior().get('subidoPor', '') == 'comercio'
+          && cobroDeliveryAnterior().get('boucherUrl', '') is string
+          && cobroDeliveryAnterior().get('boucherUrl', '') != ''
+          && cobroDeliveryAnterior().get('boucherPath', '')
+               == 'evidencias/' + id + '/delivery_boucher.jpg'
+          && cobroDeliveryAnterior().get('boucherAt', null) is timestamp;
       }
 
       allow update: if esMiOrdenDeComercio()

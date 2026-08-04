@@ -351,6 +351,22 @@ export default function MisOrdenesPage() {
                 const esTransferencia = o.pagoDelivery?.quienPaga === 'transferencia'
                 const cdEstado = o.cobroDelivery?.estado
                 const isUploading = uploadingId === o.id
+                // Espejo de sinRastroDeBoucher() en firestore.rules: se mira la
+                // presencia de las CUATRO claves, no solo la de subidoPor. Un
+                // boucher histórico sin autor no debe ofrecerse como primera
+                // carga. Se compara contra undefined a propósito: null o cadena
+                // vacía son un documento a medio escribir, no uno limpio.
+                const sinRastroBoucher =
+                  o.cobroDelivery?.boucherUrl === undefined &&
+                  o.cobroDelivery?.boucherPath === undefined &&
+                  o.cobroDelivery?.boucherAt === undefined &&
+                  o.cobroDelivery?.subidoPor === undefined
+                // Solo se reemplaza un boucher propio y completo.
+                const puedeReemplazar =
+                  cdEstado === 'en_revision_deposito' &&
+                  o.cobroDelivery?.subidoPor === 'comercio' &&
+                  !!o.cobroDelivery?.boucherUrl &&
+                  !!o.cobroDelivery?.boucherPath
 
                 return (
                   <tr key={o.id} className="hover:bg-gray-50 transition-colors">
@@ -441,11 +457,11 @@ export default function MisOrdenesPage() {
                             <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
                               🔍 En revisión
                             </span>
-                            {/* Solo se reemplaza el boucher propio. Uno cargado
-                                por el gestor —o uno sin subidoPor, de antes de
-                                este bloque— no se toca desde acá. Quitar el
-                                boucher queda para el 2B server-side. */}
-                            {o.cobroDelivery?.subidoPor === 'comercio' && (
+                            {/* Solo se reemplaza el boucher propio y completo.
+                                Uno cargado por el gestor —o uno sin subidoPor,
+                                de antes de este bloque— no se toca desde acá.
+                                Quitar el boucher queda para el 2B server-side. */}
+                            {puedeReemplazar && (
                               <button
                                 onClick={() => triggerUpload(o.id)}
                                 disabled={isUploading}
@@ -455,7 +471,7 @@ export default function MisOrdenesPage() {
                               </button>
                             )}
                           </div>
-                        ) : !cdEstado || cdEstado === 'pendiente' ? (
+                        ) : (!cdEstado || cdEstado === 'pendiente') && sinRastroBoucher ? (
                           <div className="flex flex-col gap-1.5">
                             <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 border border-yellow-200">
                               Pago x depósito
@@ -468,6 +484,26 @@ export default function MisOrdenesPage() {
                               <Upload size={10} />
                               {isUploading ? 'Subiendo…' : 'Subir boucher'}
                             </button>
+                          </div>
+                        ) : !cdEstado || cdEstado === 'pendiente' ? (
+                          /* Estado de primera carga pero YA hay rastro de un
+                             comprobante, y sin subidoPor no se puede afirmar
+                             que sea del comercio. No se ofrece ninguna acción
+                             que lo sobrescriba: solo se informa, y se deja
+                             verlo si hay URL. La resolución de estos
+                             documentos corresponde al gestor. */
+                          <div className="flex flex-col gap-1">
+                            <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">
+                              Comprobante registrado
+                            </span>
+                            {o.cobroDelivery?.boucherUrl && (
+                              <button
+                                onClick={() => setViendoBoucherUrl(o.cobroDelivery!.boucherUrl!)}
+                                className="text-[11px] font-semibold text-blue-600 hover:underline text-left"
+                              >
+                                Ver boucher →
+                              </button>
+                            )}
                           </div>
                         ) : (
                           /* 'no_cobrar' y 'revertido': el comercio no carga
