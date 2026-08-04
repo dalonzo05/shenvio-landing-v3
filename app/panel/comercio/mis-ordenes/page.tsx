@@ -351,6 +351,15 @@ export default function MisOrdenesPage() {
                 const esTransferencia = o.pagoDelivery?.quienPaga === 'transferencia'
                 const cdEstado = o.cobroDelivery?.estado
                 const isUploading = uploadingId === o.id
+                // Espejo de cobroDeliveryAnteriorTieneFormaValida(): ausente es
+                // una forma de partida válida, pero un cobroDelivery que llegue
+                // como string, número, null o array NO se trata como documento
+                // limpio. Se lee por unknown porque el tipo declarado no
+                // garantiza lo que hay de verdad guardado en Firestore.
+                const cdCrudo = o.cobroDelivery as unknown
+                const cdFormaValida =
+                  cdCrudo === undefined ||
+                  (typeof cdCrudo === 'object' && cdCrudo !== null && !Array.isArray(cdCrudo))
                 // Espejo de sinRastroDeBoucher() en firestore.rules: se mira la
                 // presencia de las CUATRO claves, no solo la de subidoPor. Un
                 // boucher histórico sin autor no debe ofrecerse como primera
@@ -471,7 +480,7 @@ export default function MisOrdenesPage() {
                               </button>
                             )}
                           </div>
-                        ) : (!cdEstado || cdEstado === 'pendiente') && sinRastroBoucher ? (
+                        ) : (!cdEstado || cdEstado === 'pendiente') && cdFormaValida && sinRastroBoucher ? (
                           <div className="flex flex-col gap-1.5">
                             <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 border border-yellow-200">
                               Pago x depósito
@@ -486,17 +495,17 @@ export default function MisOrdenesPage() {
                             </button>
                           </div>
                         ) : !cdEstado || cdEstado === 'pendiente' ? (
-                          /* Estado de primera carga pero YA hay rastro de un
-                             comprobante, y sin subidoPor no se puede afirmar
-                             que sea del comercio. No se ofrece ninguna acción
-                             que lo sobrescriba: solo se informa, y se deja
-                             verlo si hay URL. La resolución de estos
-                             documentos corresponde al gestor. */
+                          /* Dos casos, ninguno accionable desde acá: ya hay
+                             rastro de un comprobante y sin subidoPor no se
+                             puede afirmar que sea del comercio, o cobroDelivery
+                             llegó con una forma que no es un mapa. En ambos se
+                             informa y nada más; la resolución corresponde al
+                             gestor. */
                           <div className="flex flex-col gap-1">
                             <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">
-                              Comprobante registrado
+                              {cdFormaValida ? 'Comprobante registrado' : 'Requiere revisión'}
                             </span>
-                            {o.cobroDelivery?.boucherUrl && (
+                            {cdFormaValida && o.cobroDelivery?.boucherUrl && (
                               <button
                                 onClick={() => setViendoBoucherUrl(o.cobroDelivery!.boucherUrl!)}
                                 className="text-[11px] font-semibold text-blue-600 hover:underline text-left"

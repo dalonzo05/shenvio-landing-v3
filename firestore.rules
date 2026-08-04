@@ -705,6 +705,26 @@ service cloud.firestore {
           : {};
       }
 
+      // La normalización a {} de los dos helpers de arriba existe para que
+      // diff() no se rompa, pero NO puede servir de criterio de autorización:
+      // un cobroDelivery anterior que venga null, string, número o booleano
+      // queda indistinguible de uno AUSENTE —el mapa normalizado no tiene
+      // ninguna de las cuatro claves—, así que sinRastroDeBoucher() lo daría
+      // por limpio y habilitaría una primera carga sobre un documento corrupto.
+      //
+      // Acá se separan los dos casos: la ausencia del campo es una forma de
+      // partida legítima; el campo presente con un tipo que no es mapa se
+      // deniega, porque no se puede afirmar que no haya un comprobante detrás.
+      // Repararlo no es tarea del cliente.
+      //
+      // Se pregunta por la CLAVE con `in` y por el TIPO con .get(): ninguna de
+      // las dos lecturas puede lanzar error de propiedad ausente, así que el
+      // caso corrupto deniega limpiamente en vez de abortar la evaluación.
+      function cobroDeliveryAnteriorTieneFormaValida() {
+        return !('cobroDelivery' in resource.data)
+          || resource.data.get('cobroDelivery', null) is map;
+      }
+
       // "No hay boucher" tiene que comprobarse sobre las CUATRO claves, no solo
       // sobre subidoPor. Un documento puede traer boucherUrl/boucherPath/
       // boucherAt y no traer subidoPor —los históricos anteriores a que ese
@@ -757,6 +777,9 @@ service cloud.firestore {
       }
 
       allow update: if esMiOrdenDeComercio()
+        // El mapa ANTERIOR tiene que ser ausente o mapa. Un cobroDelivery
+        // corrupto no se trata como documento limpio: se deniega.
+        && cobroDeliveryAnteriorTieneFormaValida()
         // El mapa entrante tiene que ser un mapa de verdad: así un null o un
         // string deniegan por su propia condición y no de rebote.
         // Se lee con .get() y NO con acceso directo: un update que no incluya
