@@ -481,7 +481,126 @@ service cloud.firestore {
       // secas — así que una cuenta de cliente dada de baja seguía creando
       // órdenes. Las comprobaciones de propiedad y la rama de gestor/admin
       // quedan exactamente como estaban.
+      // ── Bloque 1: comercioId canónico en órdenes nuevas ──────────────────
+      // comercioId es la identidad canónica del comercio dueño de la orden;
+      // userId y comercioUid son alias en retirada que hoy se siguen
+      // escribiendo con el mismo valor. Cuando la orden pertenece a un
+      // comercio, los tres tienen que venir y coincidir: si divergieran, las
+      // reglas de pertenencia de los bloques siguientes no tendrían una sola
+      // fuente contra la cual comparar, y el backfill quedaría sin criterio.
+      //
+      // Pero NO todas las órdenes son de un comercio. El gestor también las
+      // crea para clientes individuales, cuyo identificador es el Auth UID de
+      // una persona (usuarios/{authUid} con rol 'cliente'), no un comercioId.
+      // Esas conservan su forma heredada y se quedan SIN comercioId: la
+      // ausencia del campo es preferible a un comercioId falso, que haría pasar
+      // a una persona por un negocio en las reglas de pertenencia de los
+      // bloques 4 y 5.
+      //
+      // El tipo de propietario no se deduce del payload — el navegador puede
+      // mentir sobre lo que está creando. Se comprueba contra los documentos
+      // reales: comercios/{id} para un comercio, usuarios/{id}.rol == 'cliente'
+      // para una persona.
+      //
+      // Todo esto se valida SOLO en create, a propósito: las órdenes anteriores
+      // a este bloque no tienen comercioId y deben seguir leyéndose y
+      // actualizándose igual que hasta ahora. Por eso tampoco se admite un
+      // fallback permanente del tipo comercioId || userId || comercioUid.
+      // Lectura SEGURA de un campo que es opcional por diseño: en una orden
+      // personal la clave comercioId no viene. Acceder a
+      // request.resource.data.comercioId directamente no devuelve null cuando
+      // falta — lanza "Property comercioId is undefined on object", y ese error
+      // aborta la evaluación de TODO el allow create, no solo la condición que
+      // lo provocó. El efecto era que ninguna orden sin comercioId podía
+      // crearse: ni la del gestor para un cliente individual, ni la del admin,
+      // ni la del propio cliente. Mismo patrón defensivo que ya usan
+      // comercioIdDelUsuario() y rolActual() por esta misma razón.
+      function comercioIdEntrante() {
+        return request.resource.data.get('comercioId', null);
+      }
+
+      // Lectura SEGURA en DOS niveles. ownerSnapshot puede faltar, venir null,
+      // o venir con un tipo que no sea mapa —un string, por ejemplo—, y en esos
+      // casos encadenar .get('uid') volvería a lanzar un error de evaluación
+      // que abortaría todo el allow create, exactamente el mismo modo de fallo
+      // que tuvo comercioId. Por eso se comprueba `is map` ANTES de descender:
+      // el default {} de la primera lectura cubre la clave ausente, y el
+      // ternario cubre null y los tipos que no son mapa. En todos los casos
+      // malformados esto devuelve null y la regla deniega limpiamente, en vez
+      // de romperse.
+      function ownerSnapshotUid() {
+        return request.resource.data.get('ownerSnapshot', {}) is map
+          ? request.resource.data.get('ownerSnapshot', {}).get('uid', null)
+          : null;
+      }
+
+      // uid utilizable: presente, string y no vacío. Deja fuera uid ausente,
+      // null, numérico, booleano y cadena vacía de una sola vez.
+      function ownerSnapshotUidValido() {
+        return ownerSnapshotUid() is string && ownerSnapshotUid() != '';
+      }
+
+      function ordenDeComercio() {
+        return comercioIdEntrante() is string
+          && comercioIdEntrante() != ''
+          && request.resource.data.userId is string
+          && request.resource.data.comercioUid is string
+          && comercioIdEntrante() == request.resource.data.userId
+          && comercioIdEntrante() == request.resource.data.comercioUid
+          // ownerSnapshot es la copia del propietario que la orden lleva
+          // consigo, y es lo que leen las pantallas y los reportes sin volver a
+          // resolver la identidad. Si su uid pudiera divergir del comercioId, el
+          // documento afirmaría dos dueños distintos a la vez y cada consumidor
+          // creería a uno. Al exigir la igualdad con comercioId, y estando ya
+          // comprobado que comercioId == userId == comercioUid, los cuatro
+          // identificadores quedan atados a un único valor.
+          && ownerSnapshotUidValido()
+          && ownerSnapshotUid() == comercioIdEntrante()
+          // Ancla de servidor: el comercioId tiene que ser un comercio que
+          // exista de verdad. Un Auth UID de cliente individual no está en
+          // comercios/, así que no puede colarse etiquetado como comercio.
+          && exists(/databases/$(database)/documents/comercios/$(comercioIdEntrante()));
+      }
+
+      // Orden personal: sin comercioId, y el propietario tiene que ser
+      // realmente un cliente individual según su propio documento de usuario.
+      //
+      // La comprobación es de AUSENCIA DE LA CLAVE, no de valor vacío, y esa
+      // diferencia importa: `in` es cierto en cuanto la clave viene, aunque
+      // traiga null, '', 0 o false. Así, un payload con comercioId presente
+      // pero inválido no pasa por ordenDeComercio() (falla `is string` o
+      // `!= ''`) y tampoco cae aquí — queda denegado en vez de convertirse en
+      // una orden personal ambigua, con una clave comercioId sin sentido que
+      // los consumidores y el backfill tendrían que interpretar después.
+      function ordenPersonal() {
+        return !('comercioId' in request.resource.data)
+          && request.resource.data.userId is string
+          // Mismo criterio de integridad que en la rama comercial: el uid del
+          // snapshot no puede señalar a alguien distinto del propietario. Aquí
+          // el ancla es userId, y se exige además la igualdad con comercioUid
+          // —leído con default null— para que un comercioUid ausente o divergente
+          // deniegue en vez de dejar la orden con dos dueños posibles.
+          && ownerSnapshotUidValido()
+          && ownerSnapshotUid() == request.resource.data.userId
+          && ownerSnapshotUid() == request.resource.data.get('comercioUid', null)
+          && exists(/databases/$(database)/documents/usuarios/$(request.resource.data.userId))
+          && get(/databases/$(database)/documents/usuarios/$(request.resource.data.userId)).data.get('rol', '') == 'cliente';
+      }
+
       allow create: if isActiveUser()
+        && (
+          ordenDeComercio()
+            // Un comercio solo puede crear órdenes a su propio nombre: el
+            // comercioId del payload tiene que ser el de su perfil, no uno
+            // elegido. Para gestor y admin la condición no aplica — crean para
+            // el comercio que seleccionan — y por eso va cerrada con
+            // !isComercioRole().
+            ? (!isComercioRole() || comercioIdEntrante() == comercioIdDelUsuario())
+            // Rama personal. !isComercioRole() cierra el desvío: un comercio no
+            // puede omitir comercioId para escaparse de la comprobación de
+            // pertenencia de arriba.
+            : (ordenPersonal() && !isComercioRole())
+        )
         && (
           esCreadorDeSolicitud(request.resource.data.userId)
           || isAdminOrGestor()

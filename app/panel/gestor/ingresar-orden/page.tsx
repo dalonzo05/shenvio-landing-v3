@@ -36,6 +36,13 @@ type DeducirDelivery = 'no_deducir' | 'deducir_del_cobro'
 
 type ComercioOption = {
   uid: string
+  // Origen real de la fila, fijado al construirla desde cada colección:
+  // 'comercio' -> comercios/{comercioId}, 'cliente' -> usuarios/{authUid} con
+  // rol 'cliente'. El selector mezcla ambas, y para un cliente individual el
+  // uid es un Auth UID de persona, NO un comercioId. Sin este discriminador no
+  // hay forma segura de distinguirlos: companyName vacío, el nombre o el
+  // formato del uid son heurísticas, no el origen del dato.
+  tipo: 'comercio' | 'cliente'
   nombre: string
   email: string
   phone?: string
@@ -1161,7 +1168,8 @@ export default function GestorIngresarOrdenPage() {
           .map((d) => ({ uid: d.id, ...(d.data() as any) }))
           .filter((u: any) => String(u.rol || '').toLowerCase() === 'cliente')
           .map((u: any) => ({
-            uid: u.uid,
+            uid: u.uid, // Auth UID de la persona — NUNCA un comercioId
+            tipo: 'cliente' as const,
             nombre: u.name || u.email || u.uid,
             email: u.email || '',
             phone: '',
@@ -1180,6 +1188,7 @@ export default function GestorIngresarOrdenPage() {
           const usuario = c.authUid ? usuarioPorAuthUid.get(c.authUid) : null
           return {
             uid: c.uid, // comercioId estable — nunca el Auth UID
+            tipo: 'comercio' as const,
             nombre: c.name || usuario?.name || c.emailAcceso || c.uid,
             email: usuario?.email || c.emailAcceso || c.emailContacto || '',
             phone: c.phone || '',
@@ -1732,6 +1741,19 @@ export default function GestorIngresarOrdenPage() {
       const tieneCalculo = !!calcResult || !!draft
 
       await addDoc(collection(db, 'solicitudes_envio'), {
+        // comercioId es la identidad canónica del comercio dueño de la orden.
+        // userId y comercioUid quedan como alias en retirada: se siguen
+        // escribiendo con el mismo valor mientras los consumidores y el
+        // backfill de los documentos históricos no hayan migrado.
+        //
+        // Solo se escribe cuando el propietario es realmente un comercio. Para
+        // un cliente individual, selectedOwner.uid es el Auth UID de una
+        // persona y no existe en comercios/: meterlo en comercioId lo haría
+        // pasar por un comercio y envenenaría las reglas de pertenencia que
+        // vienen después. La orden personal conserva su forma heredada
+        // (userId, comercioUid, ownerSnapshot) y se queda sin comercioId a
+        // propósito, hasta que exista un modelo canónico propio para clientes.
+        ...(selectedOwner.tipo === 'comercio' ? { comercioId: selectedOwner.uid } : {}),
         userId: selectedOwner.uid,
         comercioUid: selectedOwner.uid,
         ownerSnapshot: {
@@ -1958,6 +1980,7 @@ export default function GestorIngresarOrdenPage() {
       // Agregar a la lista local y auto-seleccionar
       const nuevo: ComercioOption = {
         uid,
+        tipo: 'comercio', // recién creado en comercios/ — ver setDoc de arriba
         nombre: ncNombre.trim(),
         email: ncEmail.trim(),
         phone: ncTelefono.trim(),
