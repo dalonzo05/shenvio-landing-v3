@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import {
   collection,
-  deleteField,
   doc,
   onSnapshot,
   query,
@@ -136,6 +135,7 @@ export default function MisOrdenesPage() {
   const [uploadTargetId, setUploadTargetId] = useState<string | null>(null)
   const [uploadingId, setUploadingId] = useState<string | null>(null)
   const [uploadErr, setUploadErr] = useState<string | null>(null)
+  const [uploadOk, setUploadOk] = useState<string | null>(null)
 
   // Boucher viewer modal
   const [viendoBoucherUrl, setViendoBoucherUrl] = useState<string | null>(null)
@@ -160,9 +160,15 @@ export default function MisOrdenesPage() {
   function triggerUpload(solicitudId: string) {
     setUploadTargetId(solicitudId)
     setUploadErr(null)
+    setUploadOk(null)
     fileInputRef.current?.click()
   }
 
+  // El comercio solo puede SUBIR y REEMPLAZAR su propio boucher. El payload se
+  // limita a las cinco claves del comprobante más updatedAt: monto,
+  // tipoCliente, quienPaga y registradoAt salieron a propósito porque son
+  // campos financieros que alimentan depósitos y KPIs, y los siembra el gestor.
+  // La allowlist de firestore.rules deniega el update si vuelven a aparecer.
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file || !uploadTargetId) return
@@ -170,43 +176,34 @@ export default function MisOrdenesPage() {
     const targetId = uploadTargetId
     setUploadingId(targetId)
     setUploadErr(null)
+    setUploadOk(null)
     try {
       const blob = await compressImage(file)
       const path = `evidencias/${targetId}/delivery_boucher.jpg`
       const { url, pathStorage } = await uploadEvidenciaPath(path, blob)
-      const s = ordenes.find((o) => o.id === targetId)
       await updateDoc(doc(db, 'solicitudes_envio', targetId), {
         'cobroDelivery.estado': 'en_revision_deposito',
         'cobroDelivery.boucherUrl': url,
         'cobroDelivery.boucherPath': pathStorage,
         'cobroDelivery.boucherAt': serverTimestamp(),
-        'cobroDelivery.monto': s?.confirmacion?.precioFinalCordobas ?? 0,
-        'cobroDelivery.tipoCliente': 'contado',
-        'cobroDelivery.quienPaga': 'transferencia',
-        'cobroDelivery.registradoAt': serverTimestamp(),
+        'cobroDelivery.subidoPor': 'comercio',
         updatedAt: serverTimestamp(),
       })
+      // El éxito se anuncia SOLO acá: hasta que updateDoc no resuelve, la
+      // subida a Storage por sí sola no significa que el boucher quedó
+      // registrado.
+      setUploadOk('Boucher enviado. Queda en revisión del gestor.')
     } catch (err) {
       console.error(err)
-      setUploadErr('Error al subir el boucher. Intentá de nuevo.')
+      // No se promete ninguna limpieza: el objeto puede haber quedado subido y
+      // el cliente no tiene forma segura de borrarlo. Al ser un nombre fijo
+      // por orden, un reintento sobrescribe ese mismo objeto.
+      setUploadErr(
+        'No se pudo registrar el boucher. Si el archivo alcanzó a subirse, queda un único comprobante para esta orden y el próximo intento lo reemplaza. Volvé a intentarlo.',
+      )
     } finally {
       setUploadingId(null)
       setUploadTargetId(null)
-    }
-  }
-
-  async function handleQuitarBoucher(solicitudId: string) {
-    try {
-      await updateDoc(doc(db, 'solicitudes_envio', solicitudId), {
-        'cobroDelivery.estado': 'pendiente',
-        'cobroDelivery.boucherUrl': deleteField(),
-        'cobroDelivery.boucherPath': deleteField(),
-        'cobroDelivery.boucherAt': deleteField(),
-        'cobroDelivery.subidoPor': deleteField(),
-        updatedAt: serverTimestamp(),
-      })
-    } catch (err) {
-      console.error(err)
     }
   }
 
@@ -315,6 +312,10 @@ export default function MisOrdenesPage() {
 
       {uploadErr && (
         <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{uploadErr}</div>
+      )}
+
+      {uploadOk && (
+        <div className="text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2">{uploadOk}</div>
       )}
 
       {/* Tabla */}
@@ -440,25 +441,21 @@ export default function MisOrdenesPage() {
                             <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
                               🔍 En revisión
                             </span>
-                            {o.cobroDelivery?.subidoPor !== 'gestor' && (
-                              <div className="flex gap-1">
-                                <button
-                                  onClick={() => triggerUpload(o.id)}
-                                  disabled={isUploading}
-                                  className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-100 transition disabled:opacity-50"
-                                >
-                                  {isUploading ? '…' : '↺ Reemplazar'}
-                                </button>
-                                <button
-                                  onClick={() => handleQuitarBoucher(o.id)}
-                                  className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-red-200 text-red-600 bg-red-50 hover:bg-red-100 transition"
-                                >
-                                  ✕ Quitar
-                                </button>
-                              </div>
+                            {/* Solo se reemplaza el boucher propio. Uno cargado
+                                por el gestor —o uno sin subidoPor, de antes de
+                                este bloque— no se toca desde acá. Quitar el
+                                boucher queda para el 2B server-side. */}
+                            {o.cobroDelivery?.subidoPor === 'comercio' && (
+                              <button
+                                onClick={() => triggerUpload(o.id)}
+                                disabled={isUploading}
+                                className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-100 transition disabled:opacity-50"
+                              >
+                                {isUploading ? '…' : '↺ Reemplazar'}
+                              </button>
                             )}
                           </div>
-                        ) : (
+                        ) : !cdEstado || cdEstado === 'pendiente' ? (
                           <div className="flex flex-col gap-1.5">
                             <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 border border-yellow-200">
                               Pago x depósito
@@ -472,6 +469,12 @@ export default function MisOrdenesPage() {
                               {isUploading ? 'Subiendo…' : 'Subir boucher'}
                             </button>
                           </div>
+                        ) : (
+                          /* 'no_cobrar' y 'revertido': el comercio no carga
+                             comprobante en estos estados. Solo se informa. */
+                          <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">
+                            {cdEstado === 'no_cobrar' ? 'No se cobra' : 'Revertido'}
+                          </span>
                         )
                       ) : debe === null ? (
                         <span className="text-gray-400 text-xs">—</span>

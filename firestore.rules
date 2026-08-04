@@ -659,6 +659,111 @@ service cloud.firestore {
         ])
         && marcadorSoloPendiente();
 
+      // ── Bloque 2A (PROVISIONAL): boucher de pago del comercio ──────────────
+      // Hasta ahora no existía NINGUNA rama de update para rol 'Comercio'
+      // (problema S-10): el comercio subía el archivo a Storage, Firestore le
+      // denegaba el update y el objeto quedaba huérfano, sin rollback. Esta
+      // rama abre exclusivamente la subida y el reemplazo del boucher, con
+      // allowlist cerrada en la raíz y dentro de cobroDelivery.
+      //
+      // Es PROVISIONAL: la pertenencia en Storage sigue sin validarse y el
+      // rollback solo puede resolverse desde servidor (Bloque 2B).
+
+      // Pertenencia por comercioUid y NO por comercioId: comercioUid es el
+      // alias heredado que llevan TODAS las órdenes, incluidas las anteriores
+      // al Bloque 1; comercioId solo existe en las órdenes nuevas, así que
+      // exigirlo dejaría fuera al histórico. Los guardias `is string` y `!= ''`
+      // no son decorativos: comercioIdDelUsuario() devuelve null cuando el
+      // perfil todavía no tiene comercioId, y sin ellos un documento con
+      // comercioUid null haría null == null y concedería acceso. Se lee con
+      // .get() por el mismo motivo que el resto del archivo: el acceso directo
+      // a una clave ausente aborta la evaluación entera en vez de denegar.
+      function esMiOrdenDeComercio() {
+        return isComercioRole()
+          && comercioIdDelUsuario() is string
+          && comercioIdDelUsuario() != ''
+          && resource.data.get('comercioUid', '') is string
+          && resource.data.get('comercioUid', '') != ''
+          && resource.data.get('comercioUid', '') == comercioIdDelUsuario();
+      }
+
+      // cobroDelivery es opcional y en documentos históricos puede venir
+      // ausente, null o con un tipo que no sea mapa. Se comprueba `is map`
+      // ANTES de descender y se normaliza a {} en cualquier otro caso — misma
+      // técnica que ownerSnapshotUid() del Bloque 1. Sin esto, un payload
+      // malformado produciría 'Property cobroDelivery is undefined on object',
+      // que aborta la evaluación de toda la regla en lugar de denegar limpio.
+      function cobroDeliveryAnterior() {
+        return resource.data.get('cobroDelivery', {}) is map
+          ? resource.data.get('cobroDelivery', {})
+          : {};
+      }
+
+      function cobroDeliveryNuevo() {
+        return request.resource.data.get('cobroDelivery', {}) is map
+          ? request.resource.data.get('cobroDelivery', {})
+          : {};
+      }
+
+      // Primera carga: la orden no tiene boucher de nadie todavía. La AUSENCIA
+      // de subidoPor es lo que distingue "sin boucher" de "boucher del gestor":
+      // el gestor siempre escribe subidoPor='gestor', así que exigir que la
+      // clave no exista impide que el comercio pise una carga ajena por acá.
+      function primeraCargaDeBoucher() {
+        return (
+          cobroDeliveryAnterior().get('estado', '') == ''
+          || cobroDeliveryAnterior().get('estado', '') == 'pendiente'
+        )
+        && !('subidoPor' in cobroDeliveryAnterior());
+      }
+
+      // Reemplazo: solo sobre un boucher que subió el propio comercio y que
+      // sigue en revisión. Un boucher con subidoPor='gestor' queda fuera, y
+      // desde 'pagado' no se puede operar: ese estado ya tiene detrás una orden
+      // de depósito y un movimiento en el ledger.
+      function reemplazoDeBoucherPropio() {
+        return cobroDeliveryAnterior().get('estado', '') == 'en_revision_deposito'
+          && cobroDeliveryAnterior().get('subidoPor', '') == 'comercio';
+      }
+
+      allow update: if esMiOrdenDeComercio()
+        // El mapa entrante tiene que ser un mapa de verdad: así un null o un
+        // string deniegan por su propia condición y no de rebote.
+        // Se lee con .get() y NO con acceso directo: un update que no incluya
+        // cobroDelivery sobre un documento que tampoco lo tiene lanzaría
+        // 'Property cobroDelivery is undefined on object', y ese error no se
+        // queda en esta rama — aborta la evaluación de la petición entera y se
+        // llevaría por delante los update legítimos de admin, gestor y
+        // motorizado. Con .get() el caso simplemente deniega acá y deja que las
+        // otras ramas resuelvan por su cuenta.
+        && request.resource.data.get('cobroDelivery', null) is map
+        // Allowlist de raíz: nada fuera de estas dos claves puede moverse.
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['cobroDelivery', 'updatedAt'])
+        // .get() en vez de acceso directo: si el payload omite updatedAt, el
+        // acceso directo lanzaría error de propiedad ausente. Así deniega.
+        && request.resource.data.get('updatedAt', null) == request.time
+        // Allowlist anidada: monto, tipoCliente, quienPaga y registradoAt
+        // quedan FUERA — son los campos financieros que alimentan depósitos y
+        // KPIs. hasOnly() cierra también cualquier clave futura.
+        && cobroDeliveryNuevo().diff(cobroDeliveryAnterior()).affectedKeys()
+             .hasOnly(['estado', 'boucherUrl', 'boucherPath', 'boucherAt', 'subidoPor'])
+        // Únicas dos transiciones legítimas del comercio. El retiro
+        // (en_revision_deposito -> pendiente) NO está autorizado en el 2A.
+        && (primeraCargaDeBoucher() || reemplazoDeBoucherPropio())
+        // Estado destino fijo: el comercio no elige a dónde va la orden.
+        && cobroDeliveryNuevo().get('estado', '') == 'en_revision_deposito'
+        && cobroDeliveryNuevo().get('boucherUrl', '') is string
+        && cobroDeliveryNuevo().get('boucherUrl', '') != ''
+        // La ruta queda atada al id de ESTA orden: sin esto, el comercio podría
+        // apuntar boucherPath al objeto de otra orden.
+        && cobroDeliveryNuevo().get('boucherPath', '')
+             == 'evidencias/' + id + '/delivery_boucher.jpg'
+        && cobroDeliveryNuevo().get('boucherAt', null) == request.time
+        // Etiqueta de actor, no Auth UID: el modelo ya usa 'gestor' y el panel
+        // del gestor lee este campo para mostrar quién cargó el comprobante.
+        && cobroDeliveryNuevo().get('subidoPor', '') == 'comercio';
+
       allow delete: if false;
     }
 
