@@ -9,61 +9,86 @@ service firebase.storage {
       allow read: if request.auth != null;
 
       // Motorizados, admin, gestores y comercios activos pueden escribir
-      allow write: if request.auth != null
+      allow create, update: if request.auth != null
         && firestore.get(
              /databases/(default)/documents/usuarios/$(request.auth.uid)
            ).data.activo == true
         && firestore.get(
              /databases/(default)/documents/usuarios/$(request.auth.uid)
-           ).data.rol in ['motorizado', 'admin', 'gestor', 'Comercio'];
+           ).data.rol in ['motorizado', 'admin', 'gestor', 'Comercio']
+        && request.resource.contentType == 'image/jpeg'
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024;
+
+      allow delete: if false;
     }
 
     // Bouchers de órdenes de depósito (un boucher por grupo, no por viaje)
     match /depositos/{depositoId}/{filename} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null
+      allow create, update: if request.auth != null
         && firestore.get(
              /databases/(default)/documents/usuarios/$(request.auth.uid)
            ).data.activo == true
         && firestore.get(
              /databases/(default)/documents/usuarios/$(request.auth.uid)
-           ).data.rol in ['motorizado', 'admin', 'gestor'];
+           ).data.rol in ['motorizado', 'admin', 'gestor']
+        && request.resource.contentType == 'image/jpeg'
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024;
+
+      allow delete: if false;
     }
 
     // Fotos de perfil de motorizados
     match /motorizados/{motorizadoId}/{filename} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null
+      allow create, update: if request.auth != null
         && firestore.get(
              /databases/(default)/documents/usuarios/$(request.auth.uid)
            ).data.activo == true
         && firestore.get(
              /databases/(default)/documents/usuarios/$(request.auth.uid)
-           ).data.rol in ['admin', 'gestor'];
+           ).data.rol in ['admin', 'gestor']
+        && request.resource.contentType == 'image/jpeg'
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024;
+
+      allow delete: if false;
     }
 
     // Comprobantes de abonos a saldos a cargo (solo gestor/admin sube)
     match /saldos/{saldoId}/{filename} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null
+      allow create, update: if request.auth != null
         && firestore.get(
              /databases/(default)/documents/usuarios/$(request.auth.uid)
            ).data.activo == true
         && firestore.get(
              /databases/(default)/documents/usuarios/$(request.auth.uid)
-           ).data.rol in ['admin', 'gestor'];
+           ).data.rol in ['admin', 'gestor']
+        && request.resource.contentType == 'image/jpeg'
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024;
+
+      allow delete: if false;
     }
 
     // PDFs de liquidaciones (solo gestor/admin sube y lee)
     match /liquidaciones/{liquidacionId}/{filename} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null
+      allow create, update: if request.auth != null
         && firestore.get(
              /databases/(default)/documents/usuarios/$(request.auth.uid)
            ).data.activo == true
         && firestore.get(
              /databases/(default)/documents/usuarios/$(request.auth.uid)
-           ).data.rol in ['admin', 'gestor'];
+           ).data.rol in ['admin', 'gestor']
+        && request.resource.contentType == 'application/pdf'
+        && request.resource.size > 0
+        && request.resource.size <= 10 * 1024 * 1024;
+
+      allow delete: if false;
     }
 
     // Denegar todo lo demás
