@@ -30,10 +30,23 @@ service cloud.firestore {
       return userDoc().data.get('comercioId', null);
     }
 
+    // P1-D6: el perfil puede existir INCOMPLETO. Un autoregistro a medio
+    // camino, un backfill interrumpido o una escritura parcial dejan
+    // usuarios/{uid} sin 'activo' o sin 'rol', y el acceso directo al campo
+    // (userDoc().data.activo) no deniega: aborta la evaluación con
+    // 'Property activo is undefined on object'. Ese error no se queda en la
+    // rama que lo provoca — se lleva por delante la petición entera, así que
+    // un perfil incompleto degradaba la denegación limpia de TODAS las ramas
+    // de la regla. Con .get() y un default que no concede nada, el caso
+    // deniega por su propia condición.
+    //
+    // El exists() de arriba sigue siendo imprescindible: sin documento,
+    // userDoc() no resuelve y .data fallaría igual.
+    // Default false: fail-closed. 'activo' ausente NO es activo.
     function isActiveUser() {
       return signedIn()
         && exists(/databases/$(database)/documents/usuarios/$(request.auth.uid))
-        && userDoc().data.activo == true;
+        && userDoc().data.get('activo', false) == true;
     }
 
     // Activo Y con un rol reconocido. isActiveUser() por sí solo NO alcanza
@@ -47,35 +60,40 @@ service cloud.firestore {
         && userDoc().data.get('rol', '') in ['admin', 'gestor', 'motorizado', 'Comercio', 'cliente'];
     }
 
+    // P1-D6: misma razón que en isActiveUser(), aplicada a 'rol'. Default '':
+    // ninguna cadena vacía coincide con un rol del esquema, así que un perfil
+    // sin rol deniega en vez de romper la evaluación. hasKnownActiveRole()
+    // (arriba) y comercioIdDelUsuario() ya usaban este mismo patrón; acá se
+    // completa para los seis helpers de rol que faltaban.
     function isAdminOrGestor() {
       return isActiveUser()
-        && (userDoc().data.rol == 'admin' || userDoc().data.rol == 'gestor');
+        && (userDoc().data.get('rol', '') == 'admin' || userDoc().data.get('rol', '') == 'gestor');
     }
 
     function isAdmin() {
-      return isActiveUser() && userDoc().data.rol == 'admin';
+      return isActiveUser() && userDoc().data.get('rol', '') == 'admin';
     }
 
     // Bloque 0C-A: hacía falta separar gestor de admin. isAdminOrGestor() los
     // trata igual, y eso es justo lo que permitía la escalada de privilegios
     // sobre usuarios/ — ver el bloque de control de rol en ese match.
     function isGestor() {
-      return isActiveUser() && userDoc().data.rol == 'gestor';
+      return isActiveUser() && userDoc().data.get('rol', '') == 'gestor';
     }
 
     function isMotorizadoRole() {
       return isActiveUser()
-        && userDoc().data.rol == 'motorizado';
+        && userDoc().data.get('rol', '') == 'motorizado';
     }
 
     function isClienteRole() {
       return isActiveUser()
-        && userDoc().data.rol == 'cliente';
+        && userDoc().data.get('rol', '') == 'cliente';
     }
 
     function isComercioRole() {
       return isActiveUser()
-        && userDoc().data.rol == 'Comercio';
+        && userDoc().data.get('rol', '') == 'Comercio';
     }
 
     // isMotorizadoRole() en vez de signedIn(): estar asignado a una orden no
