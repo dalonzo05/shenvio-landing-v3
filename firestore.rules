@@ -657,6 +657,99 @@ service cloud.firestore {
           );
       }
 
+      // ── Integridad de los mapas anidados del motorizado ───────────────────
+      // affectedKeys() solo mira la RAÍZ. Con 'cobroDelivery', 'registro' y
+      // 'pagoDelivery' en la allowlist de abajo, el CONTENIDO de esos mapas
+      // quedaba sin inspeccionar: un motorizado asignado podía escribir
+      // cualquier subcampo. Medido (caso 2A-28): podía crear boucherComercio /
+      // boucherGestor / boucherVigente, marcar pagadoAt y confirmadoPor, o
+      // poner el monto que quisiera. Estas tres funciones descienden dentro de
+      // cada mapa, siguiendo el precedente de marcadorSoloPendiente().
+      //
+      // Cada una se llama UNA vez y resuelve sus valores con `let`: la red de
+      // helpers que se llaman entre sí fue lo que agotó el presupuesto del
+      // motor en P1-S2B ("maximum of 1000 expressions").
+
+      // cobroDelivery: el motorizado lo ORIGINA al entregar y nunca lo vuelve
+      // a tocar (app/panel/motorizado/page.tsx, cambiarEstado() en la
+      // transición a 'entregado', única escritura viva). Por eso solo se
+      // admite la PRIMERA aparición del mapa: si ya existía, deniega — un
+      // update posterior no corresponde a ningún flujo real y sería la vía
+      // para pisar lo que escribieron el comercio o el gestor.
+      //
+      // quienPaga admite '' a propósito: el código hace
+      // `o.pagoDelivery?.quienPaga ?? ''`, así que una orden sin ese dato
+      // produce legítimamente cadena vacía.
+      // 'pagado' también es legítimo: el motorizado cobró en mano al entregar.
+      // Lo que no puede es acompañarlo de pagadoAt/confirmadoPor/formaPago —
+      // hasOnly() los deja fuera por construcción, igual que cualquier clave
+      // futura y todos los campos de boucher.
+      function cobroDeliveryDeMotorizadoValido() {
+        let ant = resource.data;
+        let nue = request.resource.data;
+        let cd = nue.get('cobroDelivery', {});
+        return !('cobroDelivery' in nue.diff(ant).affectedKeys())
+          || (
+            !('cobroDelivery' in ant)
+            && cd is map
+            && cd.keys().hasOnly(['monto', 'tipoCliente', 'quienPaga', 'estado', 'registradoAt', 'semanaKey'])
+            && cd.keys().hasAll(['monto', 'tipoCliente', 'quienPaga', 'estado', 'registradoAt'])
+            && cd.get('monto', -1) is number
+            && cd.get('tipoCliente', '') in ['contado', 'credito']
+            && cd.get('quienPaga', null) is string
+            && cd.get('quienPaga', 'x') in ['', 'credito_semanal', 'transferencia', 'entrega', 'recoleccion']
+            && cd.get('estado', '') in ['pendiente', 'pagado', 'no_cobrar']
+            && cd.get('registradoAt', null) == request.time
+            && (!('semanaKey' in cd) || cd.get('semanaKey', null) is string)
+          );
+      }
+
+      // registro: el motorizado solo marca el ID del depósito que acaba de
+      // crear (registro.deposito.storkhubDepositoId / .comercioDepositoId).
+      // Los campos de confirmación —confirmadoStorkhub, confirmadoStorkhubAt,
+      // confirmadoComercio, confirmadoComercioAt— los escribe EXCLUSIVAMENTE
+      // el gestor (app/panel/gestor/cobros y /depositos), y el propio panel
+      // del motorizado los LEE para decidir qué mostrar. Sin este control, un
+      // motorizado podía autoconfirmar su depósito y falsear esa lectura.
+      //
+      // Se usa diff() sobre los submapas: así todo lo que el motorizado no
+      // toca queda obligado a permanecer idéntico, sin enumerarlo.
+      function registroDeMotorizadoValido() {
+        let ant = resource.data.get('registro', {});
+        let nue = request.resource.data.get('registro', {});
+        let depAnt = ant is map ? ant.get('deposito', {}) : {};
+        let depNue = nue is map ? nue.get('deposito', {}) : {};
+        return !('registro' in request.resource.data.diff(resource.data).affectedKeys())
+          || (
+            nue is map
+            && (!(ant is map) ? false : nue.diff(ant).affectedKeys().hasOnly(['deposito']))
+            && depNue is map
+            && depAnt is map
+            && depNue.diff(depAnt).affectedKeys().hasOnly(['storkhubDepositoId', 'comercioDepositoId'])
+            && (!('storkhubDepositoId' in depNue) || depNue.get('storkhubDepositoId', null) is string)
+            && (!('comercioDepositoId' in depNue) || depNue.get('comercioDepositoId', null) is string)
+          );
+      }
+
+      // pagoDelivery: la única escritura viva del motorizado es
+      // pagoDelivery.quienPaga = 'entrega' (diferir el cobro del delivery a la
+      // entrega). El mapa también lleva 'tipo', 'montoSugerido' y
+      // 'deducirDelCobroContraEntrega', que alimentan el cálculo del depósito
+      // y no le corresponden. diff() sobre el submapa exige que todo lo demás
+      // quede intacto; el dot-path que usa la app ya lo cumple naturalmente,
+      // y también cubre el caso de que el mapa aún no existiera.
+      function pagoDeliveryDeMotorizadoValido() {
+        let ant = resource.data.get('pagoDelivery', {});
+        let nue = request.resource.data.get('pagoDelivery', {});
+        return !('pagoDelivery' in request.resource.data.diff(resource.data).affectedKeys())
+          || (
+            nue is map
+            && ant is map
+            && nue.diff(ant).affectedKeys().hasOnly(['quienPaga'])
+            && nue.get('quienPaga', '') == 'entrega'
+          );
+      }
+
       // Motorizado: solo puede modificar campos operativos, NO financieros
       allow update: if isAssignedMotorizado()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -675,7 +768,10 @@ service cloud.firestore {
           'pagoDelivery',
           'acumulacionCobroSemanal'
         ])
-        && marcadorSoloPendiente();
+        && marcadorSoloPendiente()
+        && cobroDeliveryDeMotorizadoValido()
+        && registroDeMotorizadoValido()
+        && pagoDeliveryDeMotorizadoValido();
 
       // ── Bloque 2A (PROVISIONAL): boucher de pago del comercio ──────────────
       // Hasta ahora no existía NINGUNA rama de update para rol 'Comercio'
