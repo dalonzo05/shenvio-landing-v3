@@ -52,13 +52,34 @@ export async function uploadEvidencia(
 
 /**
  * Uploads a deposit boucher (group receipt) to Firebase Storage under
- * depositos/{depositoId}/boucher.jpg
+ * depositos/{motorizadoAuthUid}/{depositoId}/boucher.jpg
+ *
+ * El Auth UID del motorizado va en el PATH, no solo en el documento, porque
+ * es la única fuente de pertenencia que Storage Rules puede verificar en la
+ * PRIMERA subida. El flujo real genera el depositoId, sube el boucher y solo
+ * después crea ordenes_deposito/{depositoId}: en el instante en que la regla
+ * decide, el documento todavía no existe, así que no hay nada contra qué
+ * comparar. Con el UID en el path, la regla contrasta ese segmento contra
+ * request.auth.uid y la pertenencia queda establecida por Auth, no por datos
+ * que el cliente escribe.
+ *
+ * El UID debe venir siempre de una fuente autenticada o ya resuelta por el
+ * flujo (auth.currentUser.uid en el panel del motorizado;
+ * asignacion.motorizadoAuthUid o el propio depósito en el panel del gestor).
+ * Nunca del motorizadoId interno, del nombre ni del teléfono.
  */
 export async function uploadDepositoBoucher(
+  motorizadoAuthUid: string,
   depositoId: string,
   blob: Blob,
 ): Promise<{ url: string; pathStorage: string }> {
-  const pathStorage = `depositos/${depositoId}/boucher.jpg`
+  // Un UID vacío produciría 'depositos//{id}/boucher.jpg', que ya no cae en el
+  // match de 3 segmentos y sería denegado por la regla catch-all. Fallar acá
+  // da un error entendible en vez de un permission-denied opaco.
+  if (!motorizadoAuthUid) {
+    throw new Error('uploadDepositoBoucher: falta el Auth UID del motorizado')
+  }
+  const pathStorage = `depositos/${motorizadoAuthUid}/${depositoId}/boucher.jpg`
   const storageRef = ref(storage, pathStorage)
   await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' })
   const url = await getDownloadURL(storageRef)

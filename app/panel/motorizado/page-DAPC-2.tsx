@@ -1600,8 +1600,9 @@ export default function PanelMotorizadoPage() {
                                 const bFile = groupBoucher[key];
                                 if (bFile) {
                                   const blob = await compressImage(bFile);
-                                  const { url, pathStorage } = await uploadDepositoBoucher(depositoId, blob);
-                                  boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: auth.currentUser?.uid ?? '' };
+                                  const motorizadoAuthUid = auth.currentUser?.uid ?? '';
+                                  const { url, pathStorage } = await uploadDepositoBoucher(motorizadoAuthUid, depositoId, blob);
+                                  boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motorizadoAuthUid };
                                 }
                                 await setDoc(depositoRef, {
                                   creadoAt: serverTimestamp(),
@@ -1732,8 +1733,9 @@ export default function PanelMotorizadoPage() {
                                 const bFile = groupBoucher[key];
                                 if (bFile) {
                                   const blob = await compressImage(bFile);
-                                  const { url, pathStorage } = await uploadDepositoBoucher(depositoId, blob);
-                                  boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: auth.currentUser?.uid ?? '' };
+                                  const motorizadoAuthUid = auth.currentUser?.uid ?? '';
+                                  const { url, pathStorage } = await uploadDepositoBoucher(motorizadoAuthUid, depositoId, blob);
+                                  boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motorizadoAuthUid };
                                 }
                                 await setDoc(depositoRef, {
                                   creadoAt: serverTimestamp(),

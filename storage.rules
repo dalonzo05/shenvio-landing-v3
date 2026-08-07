@@ -7,10 +7,10 @@ service firebase.storage {
     // pertenencia: cualquier comercio activo podía escribir sobre la orden de
     // otro comercio, y cualquier motorizado activo podía escribir sobre
     // cualquier orden, estuviera o no asignado a ella. Este bloque cierra esa
-    // brecha SOLO en storage.rules (sin tocar read/list/server-side/UI salvo
-    // que una incompatibilidad real lo exigiera — ver nota de 'depositos' más
-    // abajo, que sí exigió ajustar el diseño original tras confirmarlo contra
-    // el código real).
+    // brecha en storage.rules. El namespace de 'depositos' sí exigió además un
+    // cambio de path en la aplicación: era la única forma de tener una fuente
+    // autoritativa en la primera subida (ver la nota extensa sobre 'depositos'
+    // más abajo). read/list/server-side siguen fuera de alcance.
     //
     // Fuentes de pertenencia (confirmadas por lectura de código, no supuestas):
     // - Comercio: solicitudes_envio/{solicitudId}.comercioUid, comparado
@@ -21,8 +21,9 @@ service firebase.storage {
     // - Motorizado (evidencias): solicitudes_envio/{solicitudId}
     //   .asignacion.motorizadoAuthUid, comparado directamente contra
     //   request.auth.uid.
-    // - Motorizado (depositos): ordenes_deposito/{depositoId}.motorizadoUid,
-    //   comparado directamente contra request.auth.uid.
+    // - Motorizado (depositos): el Auth UID en el PROPIO PATH del objeto,
+    //   comparado contra request.auth.uid. No se consulta Firestore: el
+    //   documento del depósito todavía no existe cuando se sube el boucher.
     //
     // Gestor/admin conservan su modelo privilegiado (Decisión 2 del traspaso
     // P1-S2): no se les exige pertenencia ni existencia de la orden — ya son
@@ -88,44 +89,6 @@ service firebase.storage {
         && asignacion.get('motorizadoAuthUid', '') == uid;
     }
 
-    // ── Pertenencia de motorizado (boucher de depósito) ───────────────────
-    // NOTA DE DISEÑO (confirmado leyendo app/panel/motorizado/page.tsx): a
-    // diferencia de 'evidencias', el depósito NO sigue el patrón "la orden ya
-    // existe, subo evidencia sobre ella". El cliente genera un ID nuevo con
-    // doc(collection(db,'ordenes_deposito')), SUBE el boucher a Storage con
-    // ese ID, y solo DESPUÉS crea el documento ordenes_deposito/{id} con
-    // setDoc. Si esta regla exigiera firestore.exists(ordenes_deposito/{id})
-    // como condición dura (tal como lo planteaba el diseño original de P1-S2),
-    // denegaría la subida real en el 100% de los casos legítimos — el
-    // documento todavía no existe en el momento del write a Storage.
-    //
-    // Resolución: el ID de depósito es un ID de Firestore de 20 caracteres,
-    // no adivinable, así que "crear bajo un ID que todavía no existe" no es
-    // superficie de ataque real (no hay nada que robar: el documento no
-    // existe todavía para nadie). El riesgo real que sí hay que cerrar es
-    // "sobrescribir el boucher de un depósito que YA existe y no es mío". Por
-    // eso la regla se bifurca:
-    //   - si el documento AÚN no existe: cualquier motorizado activo puede
-    //     crear (mismo comportamiento que antes de P1-S2A para este caso,
-    //     porque no hay pertenencia que verificar todavía);
-    //   - si el documento YA existe: exige motorizadoUid == auth.uid.
-    // En el flujo real esto último nunca debería activarse (el ID es fresco
-    // en cada depósito y no se re-sube), pero cierra la ruta de un
-    // motorizado intentando reemplazar el boucher de un depósito ajeno ya
-    // creado.
-    function depositoExiste(depositoId) {
-      return firestore.exists(/databases/(default)/documents/ordenes_deposito/$(depositoId));
-    }
-
-    function motorizadoUidDeDeposito(depositoId) {
-      return firestore.get(/databases/(default)/documents/ordenes_deposito/$(depositoId)).data.get('motorizadoUid', null);
-    }
-
-    function esMotorizadoDuenoDeposito(uid, depositoId) {
-      let mUid = motorizadoUidDeDeposito(depositoId);
-      return mUid is string && mUid.size() > 0 && mUid == uid;
-    }
-
     // ── Allowlist de nombres de archivo ────────────────────────────────────
     // cargotrans_paquete_{n}: enteros positivos sin techo artificial
     // (Decisión 3 del traspaso P1-S2) — '[0-9]+' acepta 1, 2, 15, ... y
@@ -176,7 +139,37 @@ service firebase.storage {
     }
 
     // Bouchers de órdenes de depósito (un boucher por grupo, no por viaje)
-    match /depositos/{depositoId}/{filename} {
+    //
+    // El Auth UID del motorizado dueño va en el PATH. Esto no es cosmético:
+    // es lo que hace verificable la pertenencia en la PRIMERA subida.
+    //
+    // El flujo real (app/panel/motorizado/page.tsx, app/panel/gestor/
+    // depositos/page.tsx) genera el depositoId en el cliente, sube el boucher
+    // y solo DESPUÉS crea ordenes_deposito/{depositoId}. En el instante en que
+    // esta regla decide, ese documento no existe todavía, así que no hay
+    // ningún registro autoritativo contra el cual comparar: firestore.get()
+    // no tiene qué leer.
+    //
+    // Un intento anterior resolvió eso concediendo acceso cuando el documento
+    // no existía (`!depositoExiste(...)`). Estaba mal y se demostró
+    // empíricamente: el motorizado B podía escribir bajo un depositoId que el
+    // motorizado A ya estaba usando. Que el ID sea largo y aleatorio reduce la
+    // probabilidad de colisión, pero NO es pertenencia — quien conoce el ID
+    // escribe. Esa excepción queda eliminada: la inexistencia del documento no
+    // concede nada, nunca.
+    //
+    // Con el UID en el path, la pertenencia viene de request.auth (que el
+    // cliente no puede falsificar) y no de datos que el propio cliente
+    // escribe. Es fail-closed por construcción y no depende de ningún orden
+    // entre Storage y Firestore.
+    //
+    // Staff conserva su modelo privilegiado (Decisión 2): el gestor sube el
+    // boucher bajo el UID del motorizado TITULAR del depósito, no bajo el
+    // suyo, y por eso no se le exige que el segmento coincida con su propio
+    // uid — si se le exigiera, se romperían confirmarStorkhub,
+    // confirmarComercio y reemplazarBoucher, que son operaciones legítimas
+    // sobre depósitos de terceros.
+    match /depositos/{motorizadoAuthUid}/{depositoId}/{filename} {
       allow read: if request.auth != null;
 
       allow create, update: if signedIn()
@@ -186,10 +179,7 @@ service firebase.storage {
           esStaff(request.auth.uid)
           ||
           (rolDe(request.auth.uid) == 'motorizado'
-            && (
-                 !depositoExiste(depositoId)
-                 || esMotorizadoDuenoDeposito(request.auth.uid, depositoId)
-               ))
+            && request.auth.uid == motorizadoAuthUid)
         )
         && request.resource.contentType == 'image/jpeg'
         && request.resource.size > 0

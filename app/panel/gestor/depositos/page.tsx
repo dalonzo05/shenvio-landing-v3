@@ -674,7 +674,9 @@ export default function DepositosPage() {
     const depositoRef = doc(collection(db, 'ordenes_deposito'))
     const depositoId = depositoRef.id
     const blob = await compressImage(boucherFile)
-    const { url, pathStorage } = await uploadDepositoBoucher(depositoId, blob)
+    // El boucher vive bajo el UID del MOTORIZADO dueño del depósito, no bajo el
+    // del gestor que lo sube: el namespace identifica al titular del depósito.
+    const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
     const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
     const montoBruto = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
     const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motDocId)
@@ -725,7 +727,8 @@ export default function DepositosPage() {
     const depositoRef = doc(collection(db, 'ordenes_deposito'))
     const depositoId = depositoRef.id
     const blob = await compressImage(boucherFile)
-    const { url, pathStorage } = await uploadDepositoBoucher(depositoId, blob)
+    // Mismo criterio que confirmarStorkhub: el namespace es del motorizado.
+    const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
     const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
     const montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAlComercio, 0)
     await setDoc(depositoRef, {
@@ -932,7 +935,9 @@ export default function DepositosPage() {
     setReplacingBoucherId(dep.id)
     try {
       const blob = await compressImage(file)
-      const { url, pathStorage } = await uploadDepositoBoucher(dep.id, blob)
+      // El reemplazo conserva el namespace del motorizado dueño del depósito,
+      // que ya está guardado en el propio documento.
+      const { url, pathStorage } = await uploadDepositoBoucher(dep.motorizadoUid, dep.id, blob)
       await setDoc(doc(db, 'ordenes_deposito', dep.id), { boucher: { url, pathStorage } }, { merge: true })
       setEditingBoucherId(null)
     } catch (e: any) {
