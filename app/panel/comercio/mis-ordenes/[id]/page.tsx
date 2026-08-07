@@ -81,12 +81,25 @@ type Solicitud = {
   }
   cobroDelivery?: {
     estado?: string
+    // P1-S2B: un comprobante por actor + puntero de vigencia. Las claves
+    // planas siguen para documentos históricos.
+    boucherComercio?: { url?: string; path?: string; at?: Timestamp }
+    boucherGestor?: { url?: string; path?: string; at?: Timestamp }
+    boucherVigente?: 'comercio' | 'gestor'
     boucherUrl?: string
     boucherAt?: any
     subidoPor?: string
     pagadoAt?: any
     monto?: number
   }
+}
+
+/** URL del comprobante vigente; los históricos resuelven por boucherUrl. */
+function urlBoucherVigente(cd?: Solicitud['cobroDelivery']): string | undefined {
+  if (!cd) return undefined
+  if (cd.boucherVigente === 'gestor') return cd.boucherGestor?.url
+  if (cd.boucherVigente === 'comercio') return cd.boucherComercio?.url
+  return cd.boucherUrl
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -518,20 +531,20 @@ export default function OrdenDetallePage() {
                     : 'Pendiente — sube el boucher de tu transferencia'}
                   </p>
                 </div>
-                {orden.cobroDelivery?.boucherUrl && (
+                {urlBoucherVigente(orden.cobroDelivery) && (
                   <button
-                    onClick={() => setLightboxUrl(orden.cobroDelivery!.boucherUrl!)}
+                    onClick={() => setLightboxUrl(urlBoucherVigente(orden.cobroDelivery)!)}
                     className="text-xs font-semibold text-blue-600 hover:underline flex-shrink-0"
                   >
                     Ver boucher →
                   </button>
                 )}
               </div>
-              {orden.cobroDelivery?.boucherUrl && (
-                <button onClick={() => setLightboxUrl(orden.cobroDelivery!.boucherUrl!)} className="block w-full">
+              {urlBoucherVigente(orden.cobroDelivery) && (
+                <button onClick={() => setLightboxUrl(urlBoucherVigente(orden.cobroDelivery)!)} className="block w-full">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
-                    src={orden.cobroDelivery.boucherUrl}
+                    src={urlBoucherVigente(orden.cobroDelivery)}
                     alt="Boucher de transferencia"
                     className="w-full max-h-40 object-contain rounded-xl border border-blue-100 bg-blue-50 hover:opacity-90 transition"
                   />

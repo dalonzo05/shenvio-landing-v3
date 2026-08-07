@@ -30,7 +30,7 @@ import {
   ChevronUp,
   Upload,
 } from 'lucide-react'
-import { compressImage, uploadEvidenciaPath } from '@/fb/storage'
+import { compressImage, uploadDeliveryBoucher } from '@/fb/storage'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -48,6 +48,21 @@ type Resolucion = {
   tipo?: 'cliente_pagara' | 'se_pierde'
 }
 
+/** Referencia a un comprobante de delivery (P1-S2B: uno por actor). */
+type BoucherRef = { url?: string; path?: string; at?: Timestamp }
+
+/**
+ * URL del comprobante VIGENTE. Nunca "el último objeto que exista": el
+ * puntero manda. Los documentos históricos (modelo plano, sin boucherVigente)
+ * resuelven por boucherUrl.
+ */
+function urlBoucherVigente(cd?: CobroDelivery | null): string | undefined {
+  if (!cd) return undefined
+  if (cd.boucherVigente === 'gestor') return cd.boucherGestor?.url
+  if (cd.boucherVigente === 'comercio') return cd.boucherComercio?.url
+  return cd.boucherUrl
+}
+
 type CobroDelivery = {
   monto: number
   tipoCliente: 'contado' | 'credito'
@@ -58,9 +73,15 @@ type CobroDelivery = {
   semanaKey?: string
   formaPago?: 'efectivo' | 'transferencia' | string
   notaPago?: string
+  // P1-S2B: un submapa por actor + puntero de vigencia. Las claves planas
+  // siguen declaradas para documentos históricos.
+  boucherComercio?: BoucherRef
+  boucherGestor?: BoucherRef
+  boucherVigente?: 'comercio' | 'gestor'
   boucherUrl?: string
   boucherPath?: string
   boucherAt?: Timestamp
+  subidoPor?: string
   // Referencia al movimiento pago_recibido creado atómicamente junto con el
   // pago (ver marcarGrupoPagado / revertirPagada). Ausente en registros
   // pagados antes de esta corrección — revertirPagada resuelve esos casos
@@ -579,17 +600,32 @@ function BoucherModal({
   const [saving, setSaving] = useState(false)
   const [removing, setRemoving] = useState(false)
   const [uploading, setUploading] = useState(false)
-  const [localBoucherUrl, setLocalBoucherUrl] = useState(orden.cobroDelivery?.boucherUrl)
+  const [localBoucherUrl, setLocalBoucherUrl] = useState(urlBoucherVigente(orden.cobroDelivery))
   const [err, setErr] = useState<string | null>(null)
   const replaceInputRef = useRef<HTMLInputElement>(null)
   const nombre = getClienteNombre(orden, nombres)
   const monto = orden.cobroDelivery?.monto ?? (orden as any).confirmacion?.precioFinalCordobas
 
+  // P1-S2B: "Quitar" NO borra evidencia. Ningún archivo se elimina de Storage
+  // y ninguna referencia histórica se destruye: lo único que se mueve es el
+  // puntero de vigencia.
+  //   - vigente 'gestor' y existe boucherComercio  -> vuelve a 'comercio'
+  //     (la orden sigue en revisión con el comprobante original del comercio)
+  //   - en cualquier otro caso -> sin vigente y la orden vuelve a 'pendiente'
+  // Las cuatro claves planas del modelo anterior sí se limpian cuando existen:
+  // son el puntero viejo y dejarlas apuntando a un comprobante retirado sería
+  // justamente la incoherencia que este bloque elimina.
   async function handleQuitar() {
     setRemoving(true); setErr(null)
     try {
+      const cd = orden.cobroDelivery
+      const puedeVolverAComercio =
+        cd?.boucherVigente === 'gestor' && !!cd?.boucherComercio?.url
+
       await updateDoc(doc(db, 'solicitudes_envio', orden.id), {
-        'cobroDelivery.estado': 'pendiente',
+        'cobroDelivery.estado': puedeVolverAComercio ? 'en_revision_deposito' : 'pendiente',
+        'cobroDelivery.boucherVigente': puedeVolverAComercio ? 'comercio' : deleteField(),
+        // El histórico permanece: boucherComercio y boucherGestor NO se tocan.
         'cobroDelivery.boucherUrl': deleteField(),
         'cobroDelivery.boucherPath': deleteField(),
         'cobroDelivery.boucherAt': deleteField(),
@@ -611,14 +647,18 @@ function BoucherModal({
     setUploading(true); setErr(null)
     try {
       const blob = await compressImage(file)
-      const path = `evidencias/${orden.id}/delivery_boucher.jpg`
-      const { url, pathStorage } = await uploadEvidenciaPath(path, blob)
+      // P1-S2B (decisión B-1): la corrección del gestor SIEMPRE se materializa
+      // en su propio objeto. El comprobante del comercio no se sobrescribe ni
+      // se borra — queda archivado como evidencia histórica.
+      const { url, pathStorage } = await uploadDeliveryBoucher(orden.id, 'gestor', blob)
       setLocalBoucherUrl(url)
       await updateDoc(doc(db, 'solicitudes_envio', orden.id), {
-        'cobroDelivery.boucherUrl': url,
-        'cobroDelivery.boucherPath': pathStorage,
-        'cobroDelivery.boucherAt': serverTimestamp(),
-        'cobroDelivery.subidoPor': 'gestor',
+        'cobroDelivery.boucherGestor': {
+          url,
+          path: pathStorage,
+          at: serverTimestamp(),
+        },
+        'cobroDelivery.boucherVigente': 'gestor',
         updatedAt: serverTimestamp(),
       })
     } catch (e: any) {
@@ -648,7 +688,9 @@ function BoucherModal({
         motorizadoNombre: orden.asignacion?.motorizadoNombre ?? '',
         solicitudIds: [orden.id],
         montoTotal: montoFinal,
-        boucherUrl: orden.cobroDelivery?.boucherUrl ?? null,
+        // P1-S2B: se desnormaliza la URL del comprobante VIGENTE, resuelta por
+        // el puntero — nunca "el último objeto que exista".
+        boucherUrl: urlBoucherVigente(orden.cobroDelivery) ?? null,
         metadata: { clienteNombre: nombre },
       })
       b.update(doc(db, 'solicitudes_envio', orden.id), {
@@ -1304,19 +1346,21 @@ export default function CobrosPage() {
     e.target.value = ''
     try {
       const blob = await compressImage(file)
-      const path = `evidencias/${targetId}/delivery_boucher.jpg`
-      const { url, pathStorage } = await uploadEvidenciaPath(path, blob)
+      // P1-S2B: el gestor escribe su propio objeto también en la carga inicial.
+      const { url, pathStorage } = await uploadDeliveryBoucher(targetId, 'gestor', blob)
       const orden = contadoRaw.find((s) => s.id === targetId)
       await updateDoc(doc(db, 'solicitudes_envio', targetId), {
         'cobroDelivery.estado': 'en_revision_deposito',
-        'cobroDelivery.boucherUrl': url,
-        'cobroDelivery.boucherPath': pathStorage,
-        'cobroDelivery.boucherAt': serverTimestamp(),
+        'cobroDelivery.boucherGestor': {
+          url,
+          path: pathStorage,
+          at: serverTimestamp(),
+        },
+        'cobroDelivery.boucherVigente': 'gestor',
         'cobroDelivery.monto': (orden as any)?.confirmacion?.precioFinalCordobas ?? 0,
         'cobroDelivery.tipoCliente': 'contado',
         'cobroDelivery.quienPaga': 'transferencia',
         'cobroDelivery.registradoAt': serverTimestamp(),
-        'cobroDelivery.subidoPor': 'gestor',
         updatedAt: serverTimestamp(),
       })
     } catch (err) {
@@ -1554,7 +1598,7 @@ export default function CobrosPage() {
                   <tbody className="divide-y divide-gray-100">
                     {contadoOrdenes.map((s) => {
                       const esTransferencia = s.cobroDelivery?.quienPaga === 'transferencia' || s.pagoDelivery?.quienPaga === 'transferencia'
-                      const tieneBoucher = s.cobroDelivery?.estado === 'en_revision_deposito' || !!s.cobroDelivery?.boucherUrl
+                      const tieneBoucher = s.cobroDelivery?.estado === 'en_revision_deposito' || !!urlBoucherVigente(s.cobroDelivery)
                       return (
                         <tr key={s.id} className={`hover:bg-gray-50 transition-colors ${tieneBoucher ? 'bg-blue-50/40' : ''}`}>
                           <td className={tdCls}>{fmtDate(s.entregadoAt)}</td>
@@ -1764,7 +1808,7 @@ export default function CobrosPage() {
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-2">
-                              {esTrans && s.cobroDelivery?.boucherUrl && (
+                              {esTrans && urlBoucherVigente(s.cobroDelivery) && (
                                 <button
                                   onClick={() => setViendoBoucher(s)}
                                   className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 transition"

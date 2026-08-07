@@ -13,11 +13,14 @@ import {
   Timestamp,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
-import { compressImage, uploadEvidenciaPath } from '@/fb/storage'
+import { compressImage, uploadDeliveryBoucher } from '@/fb/storage'
 import { useUser } from '@/app/Components/UserProvider'
 import { Package, Upload, X } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+/** Referencia a un comprobante de delivery (P1-S2B: uno por actor). */
+type BoucherRef = { url?: string; path?: string; at?: Timestamp }
 
 type Solicitud = {
   id: string
@@ -50,6 +53,13 @@ type Solicitud = {
   }
   cobroDelivery?: {
     estado?: string
+    // P1-S2B: un submapa por actor, más el puntero de vigencia. Las cuatro
+    // claves planas del modelo anterior siguen declaradas porque documentos
+    // históricos pueden traerlas y la UI tiene que reconocerlas como rastro
+    // de comprobante (no como orden limpia).
+    boucherComercio?: BoucherRef
+    boucherGestor?: BoucherRef
+    boucherVigente?: 'comercio' | 'gestor'
     boucherUrl?: string
     boucherPath?: string
     boucherAt?: any
@@ -179,14 +189,17 @@ export default function MisOrdenesPage() {
     setUploadOk(null)
     try {
       const blob = await compressImage(file)
-      const path = `evidencias/${targetId}/delivery_boucher.jpg`
-      const { url, pathStorage } = await uploadEvidenciaPath(path, blob)
+      // P1-S2B: el comercio escribe SU objeto. El del gestor es otro archivo y
+      // ni Storage ni Firestore le permiten tocarlo.
+      const { url, pathStorage } = await uploadDeliveryBoucher(targetId, 'comercio', blob)
       await updateDoc(doc(db, 'solicitudes_envio', targetId), {
         'cobroDelivery.estado': 'en_revision_deposito',
-        'cobroDelivery.boucherUrl': url,
-        'cobroDelivery.boucherPath': pathStorage,
-        'cobroDelivery.boucherAt': serverTimestamp(),
-        'cobroDelivery.subidoPor': 'comercio',
+        'cobroDelivery.boucherComercio': {
+          url,
+          path: pathStorage,
+          at: serverTimestamp(),
+        },
+        'cobroDelivery.boucherVigente': 'comercio',
         updatedAt: serverTimestamp(),
       })
       // El éxito se anuncia SOLO acá: hasta que updateDoc no resuelve, la
@@ -365,17 +378,33 @@ export default function MisOrdenesPage() {
                 // boucher histórico sin autor no debe ofrecerse como primera
                 // carga. Se compara contra undefined a propósito: null o cadena
                 // vacía son un documento a medio escribir, no uno limpio.
+                // P1-S2B: se miran también las tres claves nuevas. Un
+                // boucherGestor presente es rastro: el comercio no hace una
+                // primera carga por encima de una corrección del gestor.
                 const sinRastroBoucher =
                   o.cobroDelivery?.boucherUrl === undefined &&
                   o.cobroDelivery?.boucherPath === undefined &&
                   o.cobroDelivery?.boucherAt === undefined &&
-                  o.cobroDelivery?.subidoPor === undefined
-                // Solo se reemplaza un boucher propio y completo.
+                  o.cobroDelivery?.subidoPor === undefined &&
+                  o.cobroDelivery?.boucherComercio === undefined &&
+                  o.cobroDelivery?.boucherGestor === undefined &&
+                  o.cobroDelivery?.boucherVigente === undefined
+                // Solo se reemplaza el boucher propio, completo y VIGENTE. Si
+                // el gestor ya corrigió, el comercio no reemplaza nada: espejo
+                // exacto de reemplazoDeBoucherPropio() en firestore.rules.
                 const puedeReemplazar =
                   cdEstado === 'en_revision_deposito' &&
-                  o.cobroDelivery?.subidoPor === 'comercio' &&
-                  !!o.cobroDelivery?.boucherUrl &&
-                  !!o.cobroDelivery?.boucherPath
+                  o.cobroDelivery?.boucherVigente === 'comercio' &&
+                  !!o.cobroDelivery?.boucherComercio?.url &&
+                  !!o.cobroDelivery?.boucherComercio?.path
+                // URL a mostrar: la del comprobante vigente. Los documentos
+                // históricos (modelo plano) siguen resolviendo por boucherUrl.
+                const boucherVigenteUrl =
+                  o.cobroDelivery?.boucherVigente === 'gestor'
+                    ? o.cobroDelivery?.boucherGestor?.url
+                    : o.cobroDelivery?.boucherVigente === 'comercio'
+                      ? o.cobroDelivery?.boucherComercio?.url
+                      : o.cobroDelivery?.boucherUrl
 
                 return (
                   <tr key={o.id} className="hover:bg-gray-50 transition-colors">
@@ -452,9 +481,9 @@ export default function MisOrdenesPage() {
                             <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">
                               ✓ Pagado
                             </span>
-                            {o.cobroDelivery?.boucherUrl && (
+                            {boucherVigenteUrl && (
                               <button
-                                onClick={() => setViendoBoucherUrl(o.cobroDelivery!.boucherUrl!)}
+                                onClick={() => setViendoBoucherUrl(boucherVigenteUrl)}
                                 className="text-[11px] font-semibold text-blue-600 hover:underline text-left"
                               >
                                 Ver boucher →
@@ -505,9 +534,9 @@ export default function MisOrdenesPage() {
                             <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">
                               {cdFormaValida ? 'Comprobante registrado' : 'Requiere revisión'}
                             </span>
-                            {cdFormaValida && o.cobroDelivery?.boucherUrl && (
+                            {cdFormaValida && boucherVigenteUrl && (
                               <button
-                                onClick={() => setViendoBoucherUrl(o.cobroDelivery!.boucherUrl!)}
+                                onClick={() => setViendoBoucherUrl(boucherVigenteUrl)}
                                 className="text-[11px] font-semibold text-blue-600 hover:underline text-left"
                               >
                                 Ver boucher →

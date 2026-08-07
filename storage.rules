@@ -101,8 +101,31 @@ service firebase.storage {
       ] || filename.matches('cargotrans_paquete_[0-9]+\\.jpg');
     }
 
+    // ── P1-S2B: boucher de delivery separado por actor ─────────────────────
+    // Comercio y gestor compartían el objeto 'delivery_boucher.jpg'. La regla
+    // de comercio no miraba quién lo había subido, así que el comercio podía
+    // sobrescribir FÍSICAMENTE el comprobante del gestor; Firestore rechazaba
+    // después reflejar el cambio, y el registro quedaba apuntando a un objeto
+    // cuyo contenido ya no era el registrado. Con un objeto por actor la
+    // colisión desaparece por construcción, y ambos comprobantes se conservan
+    // como evidencia histórica.
+    //
+    // El nombre viejo queda FUERA de las dos allowlists: ninguna escritura
+    // nueva puede usarlo. No hay datos reales que migrar.
+    function nombreBoucherComercio() {
+      return 'delivery_boucher_comercio.jpg';
+    }
+
+    function nombreBoucherGestor() {
+      return 'delivery_boucher_gestor.jpg';
+    }
+
+    // Staff sube su propio boucher (_gestor) y las evidencias de motorizado
+    // que ya operaba (cargotrans_*, terminal_*). NO incluye el objeto del
+    // comercio: la corrección del gestor se materializa creando/reemplazando
+    // SU objeto, nunca pisando el del comercio (decisión B-1).
     function nombreValidoEvidenciasStaff(filename) {
-      return filename == 'delivery_boucher.jpg' || nombreValidoEvidenciasMotorizado(filename);
+      return filename == nombreBoucherGestor() || nombreValidoEvidenciasMotorizado(filename);
     }
 
     // Evidencias fotográficas de órdenes
@@ -119,11 +142,12 @@ service firebase.storage {
           // Staff: modelo privilegiado, solo se le exige allowlist de nombre.
           (esStaff(request.auth.uid) && nombreValidoEvidenciasStaff(filename))
           ||
-          // Comercio: solo su propia orden, solo el boucher de delivery.
+          // Comercio: solo su propia orden, y SOLO su propio objeto. No puede
+          // escribir el del gestor ni el nombre viejo compartido.
           (rolDe(request.auth.uid) == 'Comercio'
             && solicitudExiste(solicitudId)
             && esComercioPropietario(request.auth.uid, solicitudId)
-            && filename == 'delivery_boucher.jpg')
+            && filename == nombreBoucherComercio())
           ||
           // Motorizado: solo la orden que tiene asignada, solo sus nombres.
           (rolDe(request.auth.uid) == 'motorizado'

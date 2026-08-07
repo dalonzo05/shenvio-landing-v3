@@ -743,55 +743,81 @@ service cloud.firestore {
           || resource.data.get('cobroDelivery', null) is map;
       }
 
-      // "No hay boucher" tiene que comprobarse sobre las CUATRO claves, no solo
-      // sobre subidoPor. Un documento puede traer boucherUrl/boucherPath/
-      // boucherAt y no traer subidoPor —los históricos anteriores a que ese
-      // campo existiera son exactamente ese caso—, y mirar únicamente subidoPor
-      // lo haría pasar por una orden sin comprobante: el comercio sobrescribiría
-      // un boucher ajeno creyendo que hace una primera carga.
+      // ── P1-S2B: referencias separadas por actor ───────────────────────────
+      // Antes existía UN solo triplete plano (boucherUrl/boucherPath/
+      // boucherAt) más una etiqueta subidoPor. Eso solo podía representar el
+      // comprobante VIGENTE: cuando el gestor corregía al comercio, el del
+      // comercio se perdía del modelo y del disco (mismo objeto físico).
       //
-      // Se usa `in`, que pregunta por la CLAVE y no por el valor. Es
-      // deliberado: null, '', 0 y false cuentan como PRESENTES. Un documento
-      // con boucherUrl:null está a medio escribir, no está limpio, y no debe
-      // tratarse como primera carga.
-      function sinRastroDeBoucher() {
-        return !('boucherUrl' in cobroDeliveryAnterior())
-          && !('boucherPath' in cobroDeliveryAnterior())
-          && !('boucherAt' in cobroDeliveryAnterior())
-          && !('subidoPor' in cobroDeliveryAnterior());
-      }
-
-      // Primera carga: la orden no tiene boucher de nadie todavía, ni rastro de
-      // uno anterior.
-      function primeraCargaDeBoucher() {
-        return (
-          cobroDeliveryAnterior().get('estado', '') == ''
-          || cobroDeliveryAnterior().get('estado', '') == 'pendiente'
-        )
-        && sinRastroDeBoucher();
-      }
-
-      // Reemplazo: solo sobre un boucher que subió el propio comercio, que
-      // sigue en revisión y que además está COMPLETO. Exigir url, path y
-      // timestamp válidos cierra los documentos inconsistentes —subidoPor
-      // 'comercio' pero sin URL, o sin path— que si no caerían en esta rama
-      // por el solo hecho de llevar la etiqueta de autor.
-      //
-      // El path anterior tiene que ser el de ESTA orden: un documento que
-      // apunte al objeto de otra orden no se repara reescribiéndolo desde el
-      // cliente, se deniega.
-      //
-      // Un boucher con subidoPor='gestor' queda fuera, y desde 'pagado' no se
-      // puede operar: ese estado ya tiene detrás una orden de depósito y un
-      // movimiento en el ledger.
-      function reemplazoDeBoucherPropio() {
-        return cobroDeliveryAnterior().get('estado', '') == 'en_revision_deposito'
-          && cobroDeliveryAnterior().get('subidoPor', '') == 'comercio'
-          && cobroDeliveryAnterior().get('boucherUrl', '') is string
-          && cobroDeliveryAnterior().get('boucherUrl', '') != ''
-          && cobroDeliveryAnterior().get('boucherPath', '')
-               == 'evidencias/' + id + '/delivery_boucher.jpg'
-          && cobroDeliveryAnterior().get('boucherAt', null) is timestamp;
+      // Ahora hay dos submapas independientes y un puntero de vigencia:
+      //   boucherComercio: { url, path, at }
+      //   boucherGestor:   { url, path, at }
+      //   boucherVigente:  'comercio' | 'gestor' | (ausente)
+      // Ninguno pisa al otro, y el histórico queda accesible para auditoría.
+      // ── Presupuesto de expresiones ────────────────────────────────────────
+      // Todo el perímetro del comercio vive en UNA función con `let`. La
+      // versión anterior lo repartía en siete funciones que se llamaban entre
+      // sí, y cada llamada REEVALUABA la cadena entera: sinRastroDeBoucher()
+      // por sí sola invocaba cobroDeliveryAnterior() siete veces. Medido
+      // contra el emulador, la rama de reemplazo agotaba el límite del motor
+      // ("maximum of 1000 expressions to evaluate has been reached") y la
+      // petición fallaba por presupuesto en vez de decidir por condición —el
+      // mismo modo de fallo que P1-D6 corrigió para los perfiles incompletos.
+      // Con `let` cada valor se calcula una sola vez.
+      function comercioBoucherUpdateValido() {
+        let ant = cobroDeliveryAnterior();
+        let nue = cobroDeliveryNuevo();
+        let bcAnt = ant.get('boucherComercio', {}) is map ? ant.get('boucherComercio', {}) : {};
+        let bcNue = nue.get('boucherComercio', {}) is map ? nue.get('boucherComercio', {}) : {};
+        let pathComercio = 'evidencias/' + id + '/delivery_boucher_comercio.jpg';
+        let estadoAnt = ant.get('estado', '');
+        // "No hay boucher" se comprueba sobre TODAS las claves que puedan
+        // delatar un comprobante: las cuatro planas del modelo anterior —que
+        // siguen existiendo en documentos históricos— y las tres nuevas.
+        // Se usa `in`, que pregunta por la CLAVE y no por el valor: null, '',
+        // 0 y false cuentan como PRESENTES. Un documento a medio escribir no
+        // es un documento limpio.
+        // boucherGestor cuenta como rastro: si el gestor ya cargó lo suyo, el
+        // comercio no hace una primera carga por encima.
+        let sinRastro = !('boucherUrl' in ant)
+          && !('boucherPath' in ant)
+          && !('boucherAt' in ant)
+          && !('subidoPor' in ant)
+          && !('boucherComercio' in ant)
+          && !('boucherGestor' in ant)
+          && !('boucherVigente' in ant);
+        let primeraCarga = (estadoAnt == '' || estadoAnt == 'pendiente') && sinRastro;
+        // Reemplazo: solo sobre un comprobante propio, completo y VIGENTE. Si
+        // el gestor ya corrigió, el comercio no reemplaza nada.
+        let reemplazoPropio = estadoAnt == 'en_revision_deposito'
+          && ant.get('boucherVigente', '') == 'comercio'
+          && bcAnt.get('url', '') is string
+          && bcAnt.get('url', '') != ''
+          && bcAnt.get('path', '') == pathComercio
+          && bcAnt.get('at', null) is timestamp;
+        return
+          // Allowlist anidada: monto, tipoCliente, quienPaga y registradoAt
+          // quedan FUERA — son los campos financieros que alimentan depósitos
+          // y KPIs. 'boucherGestor' tampoco está: cualquier intento del
+          // comercio de crearlo o mutarlo aparece en affectedKeys() y deniega.
+          nue.diff(ant).affectedKeys().hasOnly(['estado', 'boucherComercio', 'boucherVigente'])
+          // Defensa en profundidad: el submapa del gestor idéntico, no solo
+          // "no listado como afectado".
+          && nue.get('boucherGestor', null) == ant.get('boucherGestor', null)
+          && (primeraCarga || reemplazoPropio)
+          // Estado destino fijo: el comercio no elige a dónde va la orden.
+          && nue.get('estado', '') == 'en_revision_deposito'
+          // Forma exacta del submapa entrante y ruta atada a ESTA orden y al
+          // objeto del COMERCIO: sin esto podría apuntar a un objeto ajeno.
+          && nue.get('boucherComercio', null) is map
+          && bcNue.keys().hasOnly(['url', 'path', 'at'])
+          && bcNue.keys().hasAll(['url', 'path', 'at'])
+          && bcNue.get('url', '') is string
+          && bcNue.get('url', '') != ''
+          && bcNue.get('path', '') == pathComercio
+          && bcNue.get('at', null) == request.time
+          // El comercio solo puede dejarse a sí mismo como vigente.
+          && nue.get('boucherVigente', '') == 'comercio';
       }
 
       allow update: if esMiOrdenDeComercio()
@@ -814,26 +840,9 @@ service cloud.firestore {
         // .get() en vez de acceso directo: si el payload omite updatedAt, el
         // acceso directo lanzaría error de propiedad ausente. Así deniega.
         && request.resource.data.get('updatedAt', null) == request.time
-        // Allowlist anidada: monto, tipoCliente, quienPaga y registradoAt
-        // quedan FUERA — son los campos financieros que alimentan depósitos y
-        // KPIs. hasOnly() cierra también cualquier clave futura.
-        && cobroDeliveryNuevo().diff(cobroDeliveryAnterior()).affectedKeys()
-             .hasOnly(['estado', 'boucherUrl', 'boucherPath', 'boucherAt', 'subidoPor'])
-        // Únicas dos transiciones legítimas del comercio. El retiro
-        // (en_revision_deposito -> pendiente) NO está autorizado en el 2A.
-        && (primeraCargaDeBoucher() || reemplazoDeBoucherPropio())
-        // Estado destino fijo: el comercio no elige a dónde va la orden.
-        && cobroDeliveryNuevo().get('estado', '') == 'en_revision_deposito'
-        && cobroDeliveryNuevo().get('boucherUrl', '') is string
-        && cobroDeliveryNuevo().get('boucherUrl', '') != ''
-        // La ruta queda atada al id de ESTA orden: sin esto, el comercio podría
-        // apuntar boucherPath al objeto de otra orden.
-        && cobroDeliveryNuevo().get('boucherPath', '')
-             == 'evidencias/' + id + '/delivery_boucher.jpg'
-        && cobroDeliveryNuevo().get('boucherAt', null) == request.time
-        // Etiqueta de actor, no Auth UID: el modelo ya usa 'gestor' y el panel
-        // del gestor lee este campo para mostrar quién cargó el comprobante.
-        && cobroDeliveryNuevo().get('subidoPor', '') == 'comercio';
+        // Todo el perímetro de cobroDelivery, en una sola función con `let`
+        // para no agotar el presupuesto de expresiones del motor.
+        && comercioBoucherUpdateValido();
 
       allow delete: if false;
     }

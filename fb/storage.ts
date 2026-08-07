@@ -87,6 +87,51 @@ export async function uploadDepositoBoucher(
 }
 
 /**
+ * Actor que sube el comprobante de pago del delivery. Es un tipo cerrado a
+ * propósito: el actor determina el objeto físico y, por tanto, quién puede
+ * sobrescribirlo. Nunca debe derivarse de un input del usuario.
+ */
+export type ActorBoucherDelivery = 'comercio' | 'gestor'
+
+/**
+ * Ruta canónica del boucher de delivery por actor.
+ *
+ * P1-S2B: comercio y gestor tenían el MISMO objeto físico
+ * (evidencias/{id}/delivery_boucher.jpg). Storage autorizaba al comercio a
+ * escribirlo sin mirar quién lo había subido, así que el comercio podía
+ * sobrescribir físicamente el comprobante del gestor aunque Firestore
+ * rechazara después reflejar el cambio: el registro quedaba apuntando a un
+ * objeto cuyo contenido ya no era el registrado. Separar el nombre por actor
+ * elimina esa colisión por construcción y conserva ambos comprobantes como
+ * evidencia histórica.
+ */
+export function pathBoucherDelivery(
+  solicitudId: string,
+  actor: ActorBoucherDelivery,
+): string {
+  return `evidencias/${solicitudId}/delivery_boucher_${actor}.jpg`
+}
+
+/**
+ * Sube el comprobante de pago del delivery al objeto que corresponde al actor.
+ *
+ * Centraliza la construcción de la ruta: los call sites NO arman strings. El
+ * actor es un tipo cerrado, no un valor libre, para que ningún flujo pueda
+ * escribir en el objeto del otro actor por error.
+ */
+export async function uploadDeliveryBoucher(
+  solicitudId: string,
+  actor: ActorBoucherDelivery,
+  blob: Blob,
+): Promise<{ url: string; pathStorage: string }> {
+  const pathStorage = pathBoucherDelivery(solicitudId, actor)
+  const storageRef = ref(storage, pathStorage)
+  await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' })
+  const url = await getDownloadURL(storageRef)
+  return { url, pathStorage }
+}
+
+/**
  * Uploads a blob to an arbitrary Storage path (useful for indexed items like cargotrans packages).
  */
 export async function uploadEvidenciaPath(

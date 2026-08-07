@@ -104,6 +104,10 @@ export type SolicitudDetalle = {
   cobroDelivery?: {
     estado?: string; formaPago?: string; notaPago?: string; pagadoAt?: any; monto?: number
     boucherUrl?: string; boucherPath?: string; boucherAt?: any; subidoPor?: string
+    // P1-S2B: un comprobante por actor + puntero de vigencia.
+    boucherComercio?: { url?: string; path?: string; at?: Timestamp }
+    boucherGestor?: { url?: string; path?: string; at?: Timestamp }
+    boucherVigente?: 'comercio' | 'gestor'
   }
   registro?: {
     semana?: number; zona?: string
@@ -1022,28 +1026,59 @@ export function SolicitudDrawer({
                       } />
                       <InfoRow label="Monto" value={solicitud.cobroDelivery?.monto != null ? money(solicitud.cobroDelivery.monto) : solicitud.confirmacion?.precioFinalCordobas != null ? money(solicitud.confirmacion.precioFinalCordobas) : undefined} />
                       {solicitud.cobroDelivery?.pagadoAt && <InfoRow label="Confirmado" value={formatDateTime(solicitud.cobroDelivery.pagadoAt)} />}
-                      {solicitud.cobroDelivery?.subidoPor && <InfoRow label="Subido por" value={solicitud.cobroDelivery.subidoPor === 'gestor' ? 'Gestor' : 'Comercio'} />}
-                      {solicitud.cobroDelivery?.boucherAt && <InfoRow label="Fecha boucher" value={formatDateTime(solicitud.cobroDelivery.boucherAt)} />}
+                      {solicitud.cobroDelivery?.boucherVigente && <InfoRow label="Vigente" value={solicitud.cobroDelivery.boucherVigente === 'gestor' ? 'Gestor' : 'Comercio'} />}
+                      {!solicitud.cobroDelivery?.boucherVigente && solicitud.cobroDelivery?.subidoPor && <InfoRow label="Subido por" value={solicitud.cobroDelivery.subidoPor === 'gestor' ? 'Gestor' : 'Comercio'} />}
                     </div>
-                    {solicitud.cobroDelivery?.boucherUrl ? (
-                      <div className="space-y-2">
-                        <div className="text-[10px] font-bold uppercase tracking-wide text-blue-500">📎 Boucher adjunto</div>
-                        <button onClick={() => setLightboxUrl(solicitud.cobroDelivery!.boucherUrl!)} className="block w-full text-left">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={solicitud.cobroDelivery.boucherUrl}
-                            alt="Boucher de transferencia"
-                            className="w-full max-h-48 object-contain rounded-xl border border-blue-100 bg-blue-50 hover:opacity-90 transition"
-                            loading="lazy"
-                          />
-                          <p className="text-xs text-center text-blue-600 mt-1 hover:underline">Ver imagen completa →</p>
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="rounded-xl border border-dashed border-blue-200 py-5 text-center text-xs text-blue-400">
-                        Sin boucher adjunto aún
-                      </div>
-                    )}
+                    {/* P1-S2B: los comprobantes de comercio y gestor son objetos
+                        distintos y ambos se conservan. Acá se muestran los dos
+                        cuando existen, marcando cuál está vigente — es la
+                        pantalla donde la separación rinde como auditoría. */}
+                    {(() => {
+                      const bC = solicitud.cobroDelivery?.boucherComercio
+                      const bG = solicitud.cobroDelivery?.boucherGestor
+                      const vigente = solicitud.cobroDelivery?.boucherVigente
+                      // Documentos históricos: modelo plano, un solo boucher.
+                      const legacyUrl = !bC && !bG ? solicitud.cobroDelivery?.boucherUrl : undefined
+                      const items: { titulo: string; url: string; at?: Timestamp; esVigente: boolean }[] = []
+                      if (bC?.url) items.push({ titulo: 'Boucher del comercio', url: bC.url, at: bC.at, esVigente: vigente === 'comercio' })
+                      if (bG?.url) items.push({ titulo: 'Boucher del gestor', url: bG.url, at: bG.at, esVigente: vigente === 'gestor' })
+                      if (legacyUrl) items.push({ titulo: 'Boucher adjunto', url: legacyUrl, at: solicitud.cobroDelivery?.boucherAt, esVigente: true })
+
+                      if (items.length === 0) {
+                        return (
+                          <div className="rounded-xl border border-dashed border-blue-200 py-5 text-center text-xs text-blue-400">
+                            Sin boucher adjunto aún
+                          </div>
+                        )
+                      }
+                      return (
+                        <div className="space-y-3">
+                          {items.map((it) => (
+                            <div key={it.url} className="space-y-1.5">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] font-bold uppercase tracking-wide text-blue-500">📎 {it.titulo}</span>
+                                {it.esVigente ? (
+                                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-green-50 text-green-700 border border-green-200">VIGENTE</span>
+                                ) : (
+                                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 border border-gray-200">histórico</span>
+                                )}
+                              </div>
+                              {it.at && <p className="text-[11px] text-gray-400">{formatDateTime(it.at)}</p>}
+                              <button onClick={() => setLightboxUrl(it.url)} className="block w-full text-left">
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={it.url}
+                                  alt={it.titulo}
+                                  className={`w-full max-h-48 object-contain rounded-xl border bg-blue-50 hover:opacity-90 transition ${it.esVigente ? 'border-green-200' : 'border-gray-200 opacity-75'}`}
+                                  loading="lazy"
+                                />
+                                <p className="text-xs text-center text-blue-600 mt-1 hover:underline">Ver imagen completa →</p>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )
+                    })()}
                   </div>
                 </Section>
               )}
