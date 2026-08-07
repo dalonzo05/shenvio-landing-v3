@@ -131,10 +131,33 @@ service firebase.storage {
     // Evidencias fotográficas de órdenes
     match /evidencias/{solicitudId}/{filename} {
 
-      // Cualquier usuario autenticado puede leer (gestor, motorizado, comercio)
-      // P1-S3 (pendiente, fuera de alcance de S2A) resolverá pertenencia de
-      // lectura.
-      allow read: if request.auth != null;
+      // ── P1-S3: lectura por pertenencia ────────────────────────────────────
+      // Antes: cualquier autenticado leía y listaba cualquier objeto. El
+      // comercio propietario puede leer CUALQUIER filename de SU propia
+      // orden —no solo el boucher—: es lo que necesita SolicitudDrawer para
+      // mostrarle evidencia operativa (terminal_*, cargotrans_*) cuando abre
+      // el detalle de un depósito propio, y también para ver el boucher del
+      // gestor cuando ese es el vigente en su orden. Restringir por filename
+      // en lectura habría roto ese flujo real sin cerrar ningún riesgo
+      // adicional: la pertenencia ya la da esComercioPropietario().
+      allow get: if signedIn()
+        && perfilActivo(request.auth.uid)
+        && (
+          esStaff(request.auth.uid)
+          ||
+          (rolDe(request.auth.uid) == 'Comercio'
+            && solicitudExiste(solicitudId)
+            && esComercioPropietario(request.auth.uid, solicitudId))
+          ||
+          (rolDe(request.auth.uid) == 'motorizado'
+            && solicitudExiste(solicitudId)
+            && esMotorizadoAsignado(request.auth.uid, solicitudId))
+        );
+
+      // Ningún call site vivo enumera Storage (sin listAll en el repo).
+      // Denegado para todos, incluido staff: permitir lectura de un objeto
+      // conocido no implica permitir enumerar el namespace.
+      allow list: if false;
 
       allow create, update: if signedIn()
         && perfilActivo(request.auth.uid)
@@ -193,8 +216,47 @@ service firebase.storage {
     // uid — si se le exigiera, se romperían confirmarStorkhub,
     // confirmarComercio y reemplazarBoucher, que son operaciones legítimas
     // sobre depósitos de terceros.
+    // ── P1-S3: pertenencia de comercio para leer el boucher de un depósito ──
+    // El path está namespaced por el UID del MOTORIZADO, no del comercio: no
+    // hay forma de derivar pertenencia de comercio desde el path, a
+    // diferencia de motorizado (segmento) o staff (privilegiado). Requiere el
+    // único lookup nuevo de este bloque, contra el documento que sí declara
+    // quién es el destinatario.
+    //
+    // exists() primero y cortocircuita: sin documento, el .data del segundo
+    // helper no llega a evaluarse. 'destinatario'/'destinatarioId' se leen
+    // con .get() y default fail-closed, mismo patrón que el resto del
+    // archivo — un documento a medio escribir no debe colarse como "es mío".
+    function esComercioDestinatarioDeDepositoExistente(uid, depositoId) {
+      let dep = firestore.get(/databases/(default)/documents/ordenes_deposito/$(depositoId)).data;
+      let cIdPerfil = comercioIdDelPerfil(uid);
+      return dep.get('destinatario', null) is string
+        && dep.get('destinatario', '') == 'comercio'
+        && dep.get('destinatarioId', null) is string
+        && dep.get('destinatarioId', '').size() > 0
+        && cIdPerfil is string && cIdPerfil.size() > 0
+        && dep.get('destinatarioId', '') == cIdPerfil;
+    }
+
+    function esComercioDestinatarioDeDeposito(uid, depositoId) {
+      return firestore.exists(/databases/(default)/documents/ordenes_deposito/$(depositoId))
+        && esComercioDestinatarioDeDepositoExistente(uid, depositoId);
+    }
+
     match /depositos/{motorizadoAuthUid}/{depositoId}/{filename} {
-      allow read: if request.auth != null;
+      // El motorizado no necesita lookup adicional: el segmento del path YA
+      // establece pertenencia (mismo criterio que en la escritura de S2A).
+      allow get: if signedIn()
+        && perfilActivo(request.auth.uid)
+        && (
+          esStaff(request.auth.uid)
+          ||
+          (rolDe(request.auth.uid) == 'motorizado' && request.auth.uid == motorizadoAuthUid)
+          ||
+          (rolDe(request.auth.uid) == 'Comercio' && esComercioDestinatarioDeDeposito(request.auth.uid, depositoId))
+        );
+
+      allow list: if false;
 
       allow create, update: if signedIn()
         && perfilActivo(request.auth.uid)
@@ -214,7 +276,12 @@ service firebase.storage {
 
     // Fotos de perfil de motorizados (las sube gestor/admin, no el propio motorizado)
     match /motorizados/{motorizadoId}/{filename} {
-      allow read: if request.auth != null;
+      // P1-S3: solo staff. motorizadoId es el ID interno del doc, no el Auth
+      // UID (confirmado en gestor/motorizados/page.tsx: docRef.id), y ningún
+      // panel del propio motorizado renderiza su foto — el único lector real
+      // es el catálogo de gestor/motorizados.
+      allow get: if signedIn() && perfilActivo(request.auth.uid) && esStaff(request.auth.uid);
+      allow list: if false;
       allow create, update: if signedIn()
         && perfilActivo(request.auth.uid)
         && esStaff(request.auth.uid)
@@ -228,7 +295,9 @@ service firebase.storage {
 
     // Comprobantes de abonos a saldos a cargo (solo gestor/admin sube)
     match /saldos/{saldoId}/{filename} {
-      allow read: if request.auth != null;
+      // P1-S3: solo staff — único lector real es gestor/saldos/page.tsx.
+      allow get: if signedIn() && perfilActivo(request.auth.uid) && esStaff(request.auth.uid);
+      allow list: if false;
       allow create, update: if signedIn()
         && perfilActivo(request.auth.uid)
         && esStaff(request.auth.uid)
@@ -242,7 +311,9 @@ service firebase.storage {
 
     // PDFs de liquidaciones (solo gestor/admin sube y lee)
     match /liquidaciones/{liquidacionId}/{filename} {
-      allow read: if request.auth != null;
+      // P1-S3: solo staff — único lector real es gestor/liquidaciones/page.tsx.
+      allow get: if signedIn() && perfilActivo(request.auth.uid) && esStaff(request.auth.uid);
+      allow list: if false;
       allow create, update: if signedIn()
         && perfilActivo(request.auth.uid)
         && esStaff(request.auth.uid)
