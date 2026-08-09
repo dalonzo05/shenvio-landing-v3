@@ -243,6 +243,45 @@ service firebase.storage {
         && esComercioDestinatarioDeDepositoExistente(uid, depositoId);
     }
 
+    // ── AUDITORÍA FINAL DIGITADOR V1: ownership real del boucher ──────────
+    // El path no trae ningún segmento de digitador (está namespaced por
+    // motorizado, no por quien digita) — a diferencia de motorizado y staff,
+    // acá no hay identidad verificable en el propio path. La única fuente de
+    // pertenencia posible es el documento ordenes_deposito/{depositoId}: por
+    // eso depositos/page.tsx crea ese documento ANTES de subir el archivo
+    // (digitarDepositoStorkhub/digitarDepositoComercio), y estas funciones
+    // exigen que el documento YA EXISTA — mismo criterio fail-closed que el
+    // resto de este archivo aplica a motorizado más abajo: "la inexistencia
+    // del documento no concede nada, nunca". Sin esto, cualquier digitador
+    // podía leer/escribir el boucher de CUALQUIER depósito (de otro
+    // digitador o del propio motorizado) sin relación real con él.
+    function depositoDigitadoPorMiExistente(motorizadoAuthUid, depositoId) {
+      let dep = firestore.get(/databases/(default)/documents/ordenes_deposito/$(depositoId)).data;
+      return dep.get('digitadoPorUid', null) == request.auth.uid
+        && dep.get('motorizadoUid', null) == motorizadoAuthUid;
+    }
+
+    function depositoDigitadoPorMi(motorizadoAuthUid, depositoId) {
+      return firestore.exists(/databases/(default)/documents/ordenes_deposito/$(depositoId))
+        && depositoDigitadoPorMiExistente(motorizadoAuthUid, depositoId);
+    }
+
+    // Para escribir además exige que la digitación siga 'en_revision' — una
+    // vez confirmada o rechazada, ni el propio digitador puede reemplazar el
+    // archivo (D2, terminal), igual que ya exige firestore.rules sobre
+    // ordenes_deposito para esa misma transición.
+    function depositoDigitadoPorMiYEditableExistente(motorizadoAuthUid, depositoId) {
+      let dep = firestore.get(/databases/(default)/documents/ordenes_deposito/$(depositoId)).data;
+      return dep.get('digitadoPorUid', null) == request.auth.uid
+        && dep.get('motorizadoUid', null) == motorizadoAuthUid
+        && dep.get('estado', 'en_revision') == 'en_revision';
+    }
+
+    function depositoEditablePorDigitador(motorizadoAuthUid, depositoId) {
+      return firestore.exists(/databases/(default)/documents/ordenes_deposito/$(depositoId))
+        && depositoDigitadoPorMiYEditableExistente(motorizadoAuthUid, depositoId);
+    }
+
     match /depositos/{motorizadoAuthUid}/{depositoId}/{filename} {
       // El motorizado no necesita lookup adicional: el segmento del path YA
       // establece pertenencia (mismo criterio que en la escritura de S2A).
@@ -255,16 +294,13 @@ service firebase.storage {
           ||
           (rolDe(request.auth.uid) == 'Comercio' && esComercioDestinatarioDeDeposito(request.auth.uid, depositoId))
           ||
-          rolDe(request.auth.uid) == 'digitador'
+          (rolDe(request.auth.uid) == 'digitador' && depositoDigitadoPorMi(motorizadoAuthUid, depositoId))
         );
 
       allow list: if false;
 
-      // DIGITADOR V1: puede subir/reemplazar el mismo boucher.jpg que sube el
-      // gestor — no hay pertenencia que exigirle acá (no es "su" depósito,
-      // digita en nombre de un motorizado). El estado 'en_revision' y la
-      // ventana de corrección mientras sigue pendiente los exige
-      // firestore.rules sobre ordenes_deposito, no este archivo.
+      // DIGITADOR V1: solo puede subir/reemplazar el boucher de UNA
+      // digitación propia y todavía editable — ver funciones arriba.
       allow create, update: if signedIn()
         && perfilActivo(request.auth.uid)
         && filename == 'boucher.jpg'
@@ -274,7 +310,7 @@ service firebase.storage {
           (rolDe(request.auth.uid) == 'motorizado'
             && request.auth.uid == motorizadoAuthUid)
           ||
-          rolDe(request.auth.uid) == 'digitador'
+          (rolDe(request.auth.uid) == 'digitador' && depositoEditablePorDigitador(motorizadoAuthUid, depositoId))
         )
         && request.resource.contentType == 'image/jpeg'
         && request.resource.size > 0

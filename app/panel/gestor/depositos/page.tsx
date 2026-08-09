@@ -10,6 +10,7 @@ import {
   doc,
   getDoc,
   setDoc,
+  updateDoc,
   writeBatch,
   deleteDoc,
   serverTimestamp,
@@ -808,6 +809,16 @@ export default function DepositosPage() {
   // aprueba después. confirmarStorkhub/confirmarComercio (arriba) quedan
   // intactos: son la vía de un solo paso que sigue usando el gestor.
 
+  // AUDITORÍA FINAL (ownership real del boucher): el documento Firestore se
+  // crea PRIMERO (sin boucher) y recién después se sube el archivo — al
+  // revés que en confirmarStorkhub/confirmarComercio, que son de gestor y no
+  // necesitan esa prueba de pertenencia. Con el documento ya existiendo
+  // cuando se llama a uploadDepositoBoucher, storage.rules puede verificar
+  // digitadoPorUid/motorizadoUid sin depender de si el documento existe o
+  // no — el mismo hueco que este archivo ya cerró una vez para motorizado
+  // ("la inexistencia del documento no concede nada, nunca", ver
+  // storage.rules líneas 200-206) quedaría abierto para digitador si se
+  // subiera el archivo antes de crear el documento.
   async function digitarDepositoStorkhub(ordenes: Solicitud[], motId: string, motNombre: string, boucherFile: File) {
     const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
     const motDocId = await resolverMotorizadoDocId(motAuthUid)
@@ -815,13 +826,12 @@ export default function DepositosPage() {
 
     const depositoRef = doc(collection(db, 'ordenes_deposito'))
     const depositoId = depositoRef.id
-    const blob = await compressImage(boucherFile)
-    const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
-    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
     const montoBruto = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
     const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motDocId)
     const gastosDescontados = gastosDeMotorizado.reduce((s, g) => s + g.monto, 0)
     const montoTotal = Math.max(0, montoBruto - gastosDescontados)
+
+    // 1) Documento primero — ownership real para Storage antes de subir nada.
     await setDoc(depositoRef, {
       creadoAt: serverTimestamp(),
       tipo: 'recaudacion_motorizado_storkhub',
@@ -837,10 +847,18 @@ export default function DepositosPage() {
       montoBruto,
       gastosDescontados,
       gastosIds: gastosDeMotorizado.map((g) => g.id),
-      boucher: boucherData,
       digitadoPorUid: uid,
       digitadoAt: serverTimestamp(),
     })
+
+    // 2) Subir boucher — el documento ya existe y ya declara digitadoPorUid.
+    const blob = await compressImage(boucherFile)
+    const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
+    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
+
+    // 3) Completar metadata — mismo shape que la corrección posterior
+    //    (allowlist ['boucher','updatedAt'] en firestore.rules).
+    await updateDoc(depositoRef, { boucher: boucherData })
   }
 
   async function digitarDepositoComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File) {
@@ -849,10 +867,8 @@ export default function DepositosPage() {
 
     const depositoRef = doc(collection(db, 'ordenes_deposito'))
     const depositoId = depositoRef.id
-    const blob = await compressImage(boucherFile)
-    const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
-    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
     const montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAlComercio, 0)
+
     await setDoc(depositoRef, {
       creadoAt: serverTimestamp(),
       tipo: 'recaudacion_motorizado_comercio',
@@ -865,10 +881,15 @@ export default function DepositosPage() {
       motorizadoNombre: motNombre,
       solicitudIds: ordenes.map((o) => o.id),
       montoTotal,
-      boucher: boucherData,
       digitadoPorUid: uid,
       digitadoAt: serverTimestamp(),
     })
+
+    const blob = await compressImage(boucherFile)
+    const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
+    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
+
+    await updateDoc(depositoRef, { boucher: boucherData })
   }
 
   // ── Confirmar depósito existente (creado por motorizado o digitador) ──────
