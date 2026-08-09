@@ -26,6 +26,7 @@ import type {
   MetodoAbono,
   OrigenSaldo,
   PropietarioEfectivo,
+  PropuestaAbonoSaldo,
 } from './financial-types'
 import { cuentas } from './financial-types'
 
@@ -753,4 +754,71 @@ export async function condonarDeudaMotorizado(params: {
       propietario: 'storkhub',
     })
   })
+}
+
+// ─── Propuestas de abono (DIGITADOR V1 — doble control, D3) ──────────────────
+//
+// Estas dos funciones son las ÚNICAS escrituras de cliente sobre
+// propuestas_abono_saldo. Confirmar/rechazar NO están acá — son exclusivas
+// de confirmarPropuestaAbono/rechazarPropuestaAbono (Cloud Functions, Admin
+// SDK), que aplican el efecto contable real. Ver DIGITADOR V1, secciones
+// 12-14 y functions/src/propuestas-abono.ts.
+
+/**
+ * Registra una propuesta de abono pendiente de revisión. NO toca
+ * saldos_cargo_motorizado ni movimientos_financieros — eso ocurre solo si
+ * un Gestor/Admin la confirma después.
+ */
+export async function crearPropuestaAbono(params: {
+  saldoId: string
+  motorizadoId: string
+  motorizadoUid: string
+  motorizadoNombre: string
+  monto: number
+  metodoAbono: MetodoAbono
+  nota?: string
+  operadorId: string
+  comprobanteUrl?: string
+  comprobantePath?: string
+}): Promise<string> {
+  const {
+    saldoId, motorizadoId, motorizadoUid, motorizadoNombre, monto, metodoAbono,
+    nota, operadorId, comprobanteUrl, comprobantePath,
+  } = params
+
+  const propuesta: Omit<PropuestaAbonoSaldo, 'id'> = {
+    saldoId,
+    motorizadoId,
+    motorizadoUid,
+    motorizadoNombre,
+    monto,
+    metodoAbono,
+    ...(nota ? { nota } : {}),
+    ...(comprobanteUrl ? { comprobanteUrl } : {}),
+    ...(comprobantePath ? { comprobantePath } : {}),
+    estado: 'pendiente',
+    digitadoPorUid: operadorId,
+    digitadoAt: serverTimestamp(),
+  }
+
+  const ref = await addDoc(collection(db, 'propuestas_abono_saldo'), propuesta)
+  return ref.id
+}
+
+/**
+ * Corrige una propuesta propia MIENTRAS sigue pendiente (D2). Firestore
+ * Rules son las que realmente exigen ownership y estado — este helper solo
+ * evita mandar campos fuera de la allowlist por accidente.
+ */
+export async function corregirPropuestaAbono(
+  propuestaId: string,
+  patch: {
+    monto?: number
+    metodoAbono?: MetodoAbono
+    nota?: string
+    comprobanteUrl?: string
+    comprobantePath?: string
+  }
+): Promise<void> {
+  await updateDoc(doc(db, 'propuestas_abono_saldo', propuestaId), { ...patch })
 }

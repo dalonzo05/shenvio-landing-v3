@@ -161,6 +161,28 @@ export async function uploadComprobante(
 }
 
 /**
+ * Uploads a comprobante image for a PENDING propuesta de abono (DIGITADOR V1).
+ * propuestaId lo genera el cliente antes de crear el documento Firestore —
+ * mismo motivo que uploadDepositoBoucher: el path es la fuente de pertenencia
+ * mientras el documento todavía no existe. Path:
+ * saldos/{saldoId}/propuestas/{propuestaId}/comprobante.jpg
+ */
+export async function uploadComprobantePropuesta(
+  saldoId: string,
+  propuestaId: string,
+  blob: Blob,
+): Promise<{ url: string; pathStorage: string }> {
+  if (!saldoId || !propuestaId) {
+    throw new Error('uploadComprobantePropuesta: falta saldoId o propuestaId')
+  }
+  const pathStorage = `saldos/${saldoId}/propuestas/${propuestaId}/comprobante.jpg`
+  const storageRef = ref(storage, pathStorage)
+  await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' })
+  const url = await getDownloadURL(storageRef)
+  return { url, pathStorage }
+}
+
+/**
  * Uploads a liquidacion PDF to Firebase Storage.
  * Path: liquidaciones/{liquidacionId}/comprobante.pdf
  */

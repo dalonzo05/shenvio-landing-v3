@@ -57,6 +57,7 @@ export type TipoMovimiento =
   | 'cliente_transferencia_confirmada'
   | 'pago_comercio_aplicado'
   | 'deposito_efectivo_storkhub' // ya emitido por Depósitos — no se re-implementa, solo se referencia el nombre
+  | 'abono_deuda_motorizado' // emitido por confirmarPropuestaAbono (DIGITADOR V1)
 
 // ─── Movimiento financiero (colección movimientos_financieros) ─────────────────
 export interface MovimientoFinanciero {

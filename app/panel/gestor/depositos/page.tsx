@@ -120,6 +120,13 @@ type DepositoOrderDoc = {
   motivoRechazo?: string
   notaConversion?: string
   saldoId?: string
+  // DIGITADOR V1 (D2/D3): presentes cuando el depósito lo creó un digitador
+  // en vez del motorizado o gestor directo. Ver rechazarDeposito/
+  // confirmarDepositoExistente más abajo.
+  digitadoPorUid?: string
+  digitadoAt?: Timestamp
+  confirmadoPorUid?: string
+  confirmadoAt?: Timestamp
 }
 
 type BankAccount = { bank: string; number: string; holder: string; currency: string }
@@ -250,6 +257,10 @@ export default function DepositosPage() {
   const [confirmandoId, setConfirmandoId] = useState<string | null>(null)
   const [devolviendoId, setDevolviendoId] = useState<string | null>(null)
   const [motivoDevolucion, setMotivoDevolucion] = useState<string>('')
+  // DIGITADOR V1: rechazo con trazabilidad (distinto de devolverAlMotorizado,
+  // que borra el doc — acá el estado 'rechazado' queda como registro).
+  const [rechazandoId, setRechazandoId] = useState<string | null>(null)
+  const [motivoRechazoDeposito, setMotivoRechazoDeposito] = useState<string>('')
   const [convirtiendo, setConvirtiendo] = useState<string | null>(null)
   const [motivoConversion, setMotivoConversion] = useState<string>('')
   const [editingBoucherId, setEditingBoucherId] = useState<string | null>(null)
@@ -337,16 +348,27 @@ export default function DepositosPage() {
     })
   }, [])
 
-  // Query: ordenes_deposito pendientes de revisión gestora (motorizado las creó, gestor aún no confirmó)
+  // Query: ordenes_deposito pendientes de revisión gestora (motorizado o
+  // digitador las creó, gestor aún no confirmó).
+  //
+  // DIGITADOR V1: Firestore Rules solo le permiten leer SUS PROPIAS
+  // digitaciones (digitadoPorUid == su uid) — una query sin ese where()
+  // fallaría entera (Rules no puede filtrar parcialmente un list()). Por eso
+  // esta query se vuelve condicional al rol: mientras userRol no se resuelve
+  // (null) no se dispara ninguna, evitando el intento con la query "amplia".
   useEffect(() => {
-    const q = query(collection(db, 'ordenes_deposito'), where('estado', 'in', ['pendiente_boucher', 'en_revision']))
+    if (userRol === null) return
+    const uid = auth.currentUser?.uid
+    const q = userRol === 'digitador' && uid
+      ? query(collection(db, 'ordenes_deposito'), where('digitadoPorUid', '==', uid))
+      : query(collection(db, 'ordenes_deposito'), where('estado', 'in', ['pendiente_boucher', 'en_revision']))
     return onSnapshot(q, (snap) => {
       const list = snap.docs
         .map((d) => ({ id: d.id, ...(d.data() as any) } as DepositoOrderDoc))
         .sort((a, b) => (tsToDate(b.creadoAt)?.getTime() ?? 0) - (tsToDate(a.creadoAt)?.getTime() ?? 0))
       setPorRevisar(list)
     })
-  }, [])
+  }, [userRol])
 
   // Fetch nombres reales de motorizados desde la colección 'motorizado' por authUid
   useEffect(() => {
@@ -391,7 +413,16 @@ export default function DepositosPage() {
   }, [porRevisar])
 
   // Query: ordenes_deposito procesados por gestor (historial: confirmados y convertidos en deuda)
+  //
+  // DIGITADOR V1: sin where() por digitadoPorUid, esta query no es algo que
+  // Firestore Rules pueda probar para su lectura acotada (misma razón que la
+  // de "Por revisar" arriba) — se salta entera para esa sesión. Su propio
+  // historial (incluido lo ya confirmado/rechazado) ya viaja en `porRevisar`.
   useEffect(() => {
+    // Espera a conocer el rol real antes de disparar — para Digitador esta
+    // query nunca se dispara (ver nota arriba). userRol arranca en null
+    // hasta que resuelva el getDoc de más abajo.
+    if (userRol === null || userRol === 'digitador') return
     const q = query(collection(db, 'ordenes_deposito'), where('estado', 'in', ['confirmado', 'convertido_en_deuda']))
     return onSnapshot(q, (snap) => {
       const list = snap.docs
@@ -399,7 +430,7 @@ export default function DepositosPage() {
         .sort((a, b) => (tsToDate(b.creadoAt)?.getTime() ?? 0) - (tsToDate(a.creadoAt)?.getTime() ?? 0))
       setHistorialDepositos(list)
     })
-  }, [])
+  }, [userRol])
 
   // ── Fetch nombres de comercios que no tienen ownerSnapshot ────────────────
 
@@ -552,7 +583,10 @@ export default function DepositosPage() {
     ...kpis,
     totalGastosDescontados: gruposMotorizado.reduce((s, g) => s + g.storkhub.gastosDeducibles, 0),
     motorizadosConPendientes: gruposMotorizado.length,
-    totalPorRevisar: porRevisar.length,
+    // Filtrado explícito por estado: para Digitador, `porRevisar` ahora trae
+    // TODO su historial (la query se amplió para poder leerlo bajo Rules —
+    // ver el useEffect de arriba), no solo lo pendiente.
+    totalPorRevisar: porRevisar.filter((d) => d.estado === 'pendiente_boucher' || d.estado === 'en_revision').length,
   }), [kpis, gruposMotorizado, porRevisar])
 
   // ── Historial ──────────────────────────────────────────────────────────────
@@ -765,19 +799,98 @@ export default function DepositosPage() {
     )
   }
 
-  // ── Confirmar depósito existente (creado por motorizado) ──────────────────
+  // ── Digitar depósito (DIGITADOR V1) ────────────────────────────────────────
+  // Mismo cálculo que confirmarStorkhub/confirmarComercio, pero el resultado
+  // NUNCA llega a 'confirmado' directamente: nace 'en_revision', con
+  // digitadoPorUid/digitadoAt, y queda en la misma cola "Por revisar" que ya
+  // usa el gestor para lo que sube el motorizado. Ni solicitudes_envio ni el
+  // ledger se tocan acá — eso ocurre solo si confirmarDepositoExistente lo
+  // aprueba después. confirmarStorkhub/confirmarComercio (arriba) quedan
+  // intactos: son la vía de un solo paso que sigue usando el gestor.
+
+  async function digitarDepositoStorkhub(ordenes: Solicitud[], motId: string, motNombre: string, boucherFile: File) {
+    const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
+    const motDocId = await resolverMotorizadoDocId(motAuthUid)
+    const uid = auth.currentUser?.uid ?? ''
+
+    const depositoRef = doc(collection(db, 'ordenes_deposito'))
+    const depositoId = depositoRef.id
+    const blob = await compressImage(boucherFile)
+    const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
+    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
+    const montoBruto = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
+    const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motDocId)
+    const gastosDescontados = gastosDeMotorizado.reduce((s, g) => s + g.monto, 0)
+    const montoTotal = Math.max(0, montoBruto - gastosDescontados)
+    await setDoc(depositoRef, {
+      creadoAt: serverTimestamp(),
+      tipo: 'recaudacion_motorizado_storkhub',
+      estado: 'en_revision',
+      destinatario: 'storkhub',
+      destinatarioId: 'storkhub',
+      destinatarioNombre: 'Storkhub',
+      cuentasDestino: [],
+      motorizadoUid: motAuthUid,
+      motorizadoNombre: motNombre,
+      solicitudIds: ordenes.map((o) => o.id),
+      montoTotal,
+      montoBruto,
+      gastosDescontados,
+      gastosIds: gastosDeMotorizado.map((g) => g.id),
+      boucher: boucherData,
+      digitadoPorUid: uid,
+      digitadoAt: serverTimestamp(),
+    })
+  }
+
+  async function digitarDepositoComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File) {
+    const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
+    const uid = auth.currentUser?.uid ?? ''
+
+    const depositoRef = doc(collection(db, 'ordenes_deposito'))
+    const depositoId = depositoRef.id
+    const blob = await compressImage(boucherFile)
+    const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
+    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
+    const montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAlComercio, 0)
+    await setDoc(depositoRef, {
+      creadoAt: serverTimestamp(),
+      tipo: 'recaudacion_motorizado_comercio',
+      estado: 'en_revision',
+      destinatario: 'comercio',
+      destinatarioId: comercioUid,
+      destinatarioNombre: comercioNombre,
+      cuentasDestino: [],
+      motorizadoUid: motAuthUid,
+      motorizadoNombre: motNombre,
+      solicitudIds: ordenes.map((o) => o.id),
+      montoTotal,
+      boucher: boucherData,
+      digitadoPorUid: uid,
+      digitadoAt: serverTimestamp(),
+    })
+  }
+
+  // ── Confirmar depósito existente (creado por motorizado o digitador) ──────
 
   async function confirmarDepositoExistente(dep: DepositoOrderDoc) {
     setConfirmandoId(dep.id)
     try {
       // dep.motorizadoUid es el authUid; resolvemos el doc ID para las cuentas del ledger
       const motDocId = await resolverMotorizadoDocId(dep.motorizadoUid)
+      const uid = auth.currentUser?.uid ?? ''
 
       const { doc: docRef } = await import('firebase/firestore')
       const ref = docRef(db, 'ordenes_deposito', dep.id)
       const b = writeBatch(db)
       b.update(ref, {
         estado: 'confirmado',
+        // Trazabilidad DIGITADOR V1 (sección 11): si dep.digitadoPorUid ya
+        // existe, queda junto a confirmadoPorUid — ambos identifican actores
+        // distintos. Si el depósito lo subió el motorizado directamente,
+        // esto solo agrega quién confirmó, sin cambiar nada más.
+        confirmadoPorUid: uid,
+        confirmadoAt: serverTimestamp(),
       })
       const fieldKey = dep.destinatario === 'storkhub'
         ? 'registro.deposito.confirmadoStorkhub'
@@ -843,6 +956,30 @@ export default function DepositosPage() {
     } finally {
       setDevolviendoId(null)
       setMotivoDevolucion('')
+    }
+  }
+
+  // ── Rechazar digitación (DIGITADOR V1) ─────────────────────────────────────
+  // A diferencia de devolverAlMotorizado, esto NO borra el documento: deja
+  // estado:'rechazado' con trazabilidad completa (D2 — terminal para el
+  // digitador, igual que pagos_comercio). Reservado para depósitos que sí
+  // tienen digitadoPorUid; los que subió el motorizado directamente siguen
+  // usando devolverAlMotorizado, sin cambios.
+  async function rechazarDeposito(dep: DepositoOrderDoc, motivo: string) {
+    setRechazandoId(dep.id)
+    try {
+      const uid = auth.currentUser?.uid ?? ''
+      await setDoc(doc(db, 'ordenes_deposito', dep.id), {
+        estado: 'rechazado',
+        rechazadoPor: uid,
+        rechazadoAt: serverTimestamp(),
+        motivoRechazo: motivo,
+      }, { merge: true })
+      // No se registra movimiento financiero: el depósito nunca fue
+      // confirmado, no hay ningún efecto contable que revertir.
+    } finally {
+      setRechazandoId(null)
+      setMotivoRechazoDeposito('')
     }
   }
 
@@ -1047,9 +1184,11 @@ export default function DepositosPage() {
         </div>
       </div>
 
-      {/* Tabs */}
+      {/* Tabs — Digitador no tiene "Historial": su query (todo lo confirmado/
+          convertido globalmente) no es algo que pueda leer bajo Rules; su
+          propio historial ya viaja completo en "Mis digitaciones". */}
       <div className="flex gap-2 flex-wrap">
-        {(['pendientes', 'por_revisar', 'historial'] as MainTab[]).map((t) => (
+        {(userRol === 'digitador' ? (['pendientes', 'por_revisar'] as MainTab[]) : (['pendientes', 'por_revisar', 'historial'] as MainTab[])).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -1059,15 +1198,15 @@ export default function DepositosPage() {
                 : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
             }`}
           >
-            {t === 'pendientes' ? 'Pendientes' : t === 'por_revisar' ? 'Por revisar' : 'Historial'}
+            {t === 'pendientes' ? 'Pendientes' : t === 'por_revisar' ? (userRol === 'digitador' ? 'Mis digitaciones' : 'Por revisar') : 'Historial'}
             {t === 'pendientes' && !loading && gruposMotorizado.length > 0 && (
               <span className="ml-1.5 inline-flex items-center justify-center w-5 h-5 rounded-full bg-orange-500 text-white text-[10px] font-black">
                 {gruposMotorizado.length}
               </span>
             )}
-            {t === 'por_revisar' && porRevisar.length > 0 && (
+            {t === 'por_revisar' && kpisExtended.totalPorRevisar > 0 && (
               <span className="ml-1.5 inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-500 text-white text-[10px] font-black">
-                {porRevisar.length}
+                {kpisExtended.totalPorRevisar}
               </span>
             )}
           </button>
@@ -1261,7 +1400,10 @@ export default function DepositosPage() {
                                     expandKey={`${gm.motorizadoId}-storkhub`}
                                     expanded={expandedGroups.has(`${gm.motorizadoId}-storkhub`)}
                                     onToggle={() => toggleExpand(`${gm.motorizadoId}-storkhub`)}
-                                    onConfirmar={(f) => confirmarStorkhub(gm.storkhub.ordenes, gm.motorizadoId, gm.motorizadoNombre, f)}
+                                    onConfirmar={(f) => userRol === 'digitador'
+                                      ? digitarDepositoStorkhub(gm.storkhub.ordenes, gm.motorizadoId, gm.motorizadoNombre, f)
+                                      : confirmarStorkhub(gm.storkhub.ordenes, gm.motorizadoId, gm.motorizadoNombre, f)}
+                                    modoDigitador={userRol === 'digitador'}
                                     tipoDeposito="storkhub"
                                     onSelectOrden={setSelectedOrdenId}
                                     comercioNames={comercioNames}
@@ -1282,7 +1424,10 @@ export default function DepositosPage() {
                                     expandKey={`${gm.motorizadoId}-${gc.uid}`}
                                     expanded={expandedGroups.has(`${gm.motorizadoId}-${gc.uid}`)}
                                     onToggle={() => toggleExpand(`${gm.motorizadoId}-${gc.uid}`)}
-                                    onConfirmar={(f) => confirmarComercio(gc.ordenes, gc.uid, gc.nombre, gm.motorizadoId, gm.motorizadoNombre, f)}
+                                    onConfirmar={(f) => userRol === 'digitador'
+                                      ? digitarDepositoComercio(gc.ordenes, gc.uid, gc.nombre, gm.motorizadoId, gm.motorizadoNombre, f)
+                                      : confirmarComercio(gc.ordenes, gc.uid, gc.nombre, gm.motorizadoId, gm.motorizadoNombre, f)}
+                                    modoDigitador={userRol === 'digitador'}
                                     tipoDeposito="comercio"
                                     onSelectOrden={setSelectedOrdenId}
                                     comercioNames={comercioNames}
@@ -1357,7 +1502,11 @@ export default function DepositosPage() {
                     const esStorkhub = dep.destinatario === 'storkhub'
                     const bankInfo = dep.destinatarioId ? comercioBankInfo[dep.destinatarioId] : undefined
                     const isExp = expandedPorRevisar.has(dep.id)
-                    const isBusy = confirmandoId === dep.id || devolviendoId === dep.id || convirtiendo === dep.id
+                    const isBusy = confirmandoId === dep.id || devolviendoId === dep.id || convirtiendo === dep.id || rechazandoId === dep.id
+                    const esDigitadorSesion = userRol === 'digitador'
+                    // Digitado por un Digitador: el rechazo preserva trazabilidad
+                    // (rechazarDeposito) en vez de borrar el doc (devolverAlMotorizado).
+                    const esDeDigitador = !!dep.digitadoPorUid
                     return (
                       <Fragment key={dep.id}>
                         {/* ── FILA RESUMEN ── */}
@@ -1402,18 +1551,37 @@ export default function DepositosPage() {
                             )}
                           </td>
                           <td className="px-3 py-3 text-right">
-                            <div className="flex items-center justify-end gap-1">
-                              {/* Devolver */}
-                              {devolviendoId !== dep.id && convirtiendo !== dep.id && (
+                            {esDigitadorSesion ? (
+                              // Digitador: sin botones de acción — solo su propio estado
+                              // (D2/D6). Confirmar/rechazar es exclusivo de gestor/admin.
+                              <div className="flex items-center justify-end gap-2">
+                                <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${
+                                  dep.estado === 'confirmado' ? 'bg-green-50 text-green-700 border-green-200'
+                                  : dep.estado === 'rechazado' ? 'bg-red-50 text-red-700 border-red-200'
+                                  : 'bg-amber-50 text-amber-700 border-amber-200'
+                                }`}>
+                                  {dep.estado === 'confirmado' ? 'Confirmado' : dep.estado === 'rechazado' ? 'Rechazado' : 'Pendiente de revisión'}
+                                </span>
                                 <button
-                                  onClick={() => setDevolviendoId(dep.id)}
+                                  onClick={() => toggleExpandPorRevisar(dep.id)}
+                                  className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition flex items-center gap-1"
+                                >
+                                  <Eye className="h-3 w-3" />
+                                </button>
+                              </div>
+                            ) : (
+                            <div className="flex items-center justify-end gap-1">
+                              {/* Devolver (motorizado) / Rechazar con trazabilidad (digitador) */}
+                              {devolviendoId !== dep.id && convirtiendo !== dep.id && rechazandoId !== dep.id && (
+                                <button
+                                  onClick={() => esDeDigitador ? setRechazandoId(dep.id) : setDevolviendoId(dep.id)}
                                   disabled={isBusy}
                                   className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-orange-200 text-orange-500 hover:bg-orange-50 transition disabled:opacity-40"
-                                  title="Devolver al motorizado"
+                                  title={esDeDigitador ? 'Rechazar digitación' : 'Devolver al motorizado'}
                                 >↩</button>
                               )}
                               {/* Confirmar */}
-                              {devolviendoId !== dep.id && convirtiendo !== dep.id && (
+                              {devolviendoId !== dep.id && convirtiendo !== dep.id && rechazandoId !== dep.id && (
                                 <button
                                   onClick={() => confirmarDepositoExistente(dep)}
                                   disabled={isBusy}
@@ -1423,7 +1591,7 @@ export default function DepositosPage() {
                                 </button>
                               )}
                               {/* Deuda (solo Storkhub) */}
-                              {esStorkhub && devolviendoId !== dep.id && convirtiendo !== dep.id && (
+                              {esStorkhub && devolviendoId !== dep.id && convirtiendo !== dep.id && rechazandoId !== dep.id && (
                                 <button
                                   onClick={() => setConvirtiendo(dep.id)}
                                   disabled={isBusy}
@@ -1439,11 +1607,12 @@ export default function DepositosPage() {
                                 <Eye className="h-3 w-3" />
                               </button>
                             </div>
+                            )}
                           </td>
                         </tr>
 
                         {/* ── DETALLE / FORMULARIOS EXPANDIDOS ── */}
-                        {(isExp || devolviendoId === dep.id || convirtiendo === dep.id) && (
+                        {(isExp || devolviendoId === dep.id || convirtiendo === dep.id || rechazandoId === dep.id) && (
                           <tr>
                             <td colSpan={8} className="bg-gray-50/60 px-4 py-4 border-t border-gray-100">
                               <div className="flex flex-col gap-3">
@@ -1477,7 +1646,9 @@ export default function DepositosPage() {
                                   </div>
                                 )}
 
-                                {/* Boucher detalle */}
+                                {/* Boucher detalle. Reemplazar solo visible si el propio Digitador
+                                    todavía puede corregir (D2) — Rules deniega igual si intentara
+                                    después, esto es solo para no ofrecer un botón que va a fallar. */}
                                 {isExp && (
                                   <div className="flex items-center gap-3 flex-wrap">
                                     {dep.boucher?.url ? (
@@ -1488,13 +1659,15 @@ export default function DepositosPage() {
                                           <img src={dep.boucher.url} alt="boucher" className="h-8 w-8 rounded object-cover border border-gray-200" />
                                           Ver comprobante
                                         </button>
-                                        <button onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
-                                          disabled={replacingBoucherId === dep.id}
-                                          className="text-[11px] text-blue-500 hover:text-blue-700 hover:underline transition disabled:opacity-40">
-                                          {replacingBoucherId === dep.id ? '⏳ Subiendo…' : '📷 Reemplazar'}
-                                        </button>
+                                        {(!esDigitadorSesion || dep.estado === 'en_revision') && (
+                                          <button onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
+                                            disabled={replacingBoucherId === dep.id}
+                                            className="text-[11px] text-blue-500 hover:text-blue-700 hover:underline transition disabled:opacity-40">
+                                            {replacingBoucherId === dep.id ? '⏳ Subiendo…' : '📷 Reemplazar'}
+                                          </button>
+                                        )}
                                       </>
-                                    ) : (
+                                    ) : (!esDigitadorSesion || dep.estado === 'en_revision') && (
                                       <button onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
                                         disabled={replacingBoucherId === dep.id}
                                         className="text-[11px] font-semibold text-blue-500 hover:text-blue-700 transition border border-blue-200 bg-blue-50 px-3 py-1.5 rounded-lg disabled:opacity-40">
@@ -1505,7 +1678,22 @@ export default function DepositosPage() {
                                   </div>
                                 )}
 
-                                {/* Form devolver */}
+                                {/* Trazabilidad DIGITADOR V1 (sección 18) */}
+                                {isExp && (dep.digitadoPorUid || dep.confirmadoPorUid || dep.rechazadoPor) && (
+                                  <div className="flex flex-wrap gap-3 text-[11px] text-gray-500">
+                                    {dep.digitadoPorUid && (
+                                      <span>Digitado por <span className="font-mono">{dep.digitadoPorUid.slice(0, 8)}</span> · {fmtDateTime(dep.digitadoAt)}</span>
+                                    )}
+                                    {dep.confirmadoPorUid && (
+                                      <span>Confirmado por <span className="font-mono">{dep.confirmadoPorUid.slice(0, 8)}</span> · {fmtDateTime(dep.confirmadoAt)}</span>
+                                    )}
+                                    {dep.rechazadoPor && (
+                                      <span>Rechazado por <span className="font-mono">{dep.rechazadoPor.slice(0, 8)}</span> · {fmtDateTime(dep.rechazadoAt)}{dep.motivoRechazo ? ` · ${dep.motivoRechazo}` : ''}</span>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* Form devolver (motorizado) */}
                                 {devolviendoId === dep.id && (
                                   <div className="flex flex-col gap-2 max-w-lg">
                                     <input value={motivoDevolucion} onChange={(e) => setMotivoDevolucion(e.target.value)}
@@ -1521,6 +1709,27 @@ export default function DepositosPage() {
                                         disabled={!motivoDevolucion.trim()}
                                         className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-orange-500 text-white hover:bg-orange-600 transition disabled:opacity-40 disabled:cursor-not-allowed">
                                         Confirmar devolución
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Form rechazar (digitador) — con trazabilidad, no borra el doc */}
+                                {rechazandoId === dep.id && (
+                                  <div className="flex flex-col gap-2 max-w-lg">
+                                    <input value={motivoRechazoDeposito} onChange={(e) => setMotivoRechazoDeposito(e.target.value)}
+                                      placeholder="Motivo del rechazo…"
+                                      className="text-xs border border-orange-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-orange-300"
+                                      autoFocus />
+                                    <div className="flex gap-2">
+                                      <button onClick={() => { setRechazandoId(null); setMotivoRechazoDeposito('') }}
+                                        className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition">
+                                        Cancelar
+                                      </button>
+                                      <button onClick={() => rechazarDeposito(dep, motivoRechazoDeposito)}
+                                        disabled={!motivoRechazoDeposito.trim()}
+                                        className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-orange-500 text-white hover:bg-orange-600 transition disabled:opacity-40 disabled:cursor-not-allowed">
+                                        Confirmar rechazo
                                       </button>
                                     </div>
                                   </div>
@@ -1779,6 +1988,7 @@ function DepositoGrupo({
   expanded,
   onToggle,
   onConfirmar,
+  modoDigitador = false,
   tipoDeposito,
   onSelectOrden,
   comercioNames,
@@ -1796,6 +2006,10 @@ function DepositoGrupo({
   expanded: boolean
   onToggle: () => void
   onConfirmar: (boucherFile: File) => Promise<void>
+  // DIGITADOR V1: mismo componente, mismo botón — solo cambia el texto y lo
+  // que pasa después (queda 'en_revision' en vez de 'confirmado'). El
+  // padre decide qué función pasar en onConfirmar; esto es puramente UX.
+  modoDigitador?: boolean
   tipoDeposito: 'storkhub' | 'comercio'
   onSelectOrden: (id: string) => void
   comercioNames: Record<string, string>
@@ -1900,13 +2114,13 @@ function DepositoGrupo({
         </div>
       )}
 
-      {/* Boucher obligatorio + botón confirmar */}
+      {/* Boucher obligatorio + botón confirmar/digitar */}
       <div className="px-4 py-3 border-t border-gray-100">
         <button
           onClick={() => setModalOpen(true)}
           className="w-full text-xs font-semibold py-2 px-3 rounded-lg border transition bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100"
         >
-          📸 Adjuntar boucher del depósito (obligatorio)
+          {modoDigitador ? '📸 Digitar comprobante del depósito' : '📸 Adjuntar boucher del depósito (obligatorio)'}
         </button>
       </div>
 
@@ -1917,6 +2131,7 @@ function DepositoGrupo({
           success={success}
           err={err}
           tipoDeposito={tipoDeposito}
+          modoDigitador={modoDigitador}
           onFile={setBoucherFile}
           onSubmit={handleConfirmar}
           onCancel={() => { if (!uploading) { setModalOpen(false); setBoucherFile(null); setErr(null) } }}
@@ -1926,16 +2141,17 @@ function DepositoGrupo({
   )
 }
 
-// ── Modal de boucher para gestor ──────────────────────────────────────────────
+// ── Modal de boucher para gestor/digitador ────────────────────────────────────
 
 function BoucherDepositoModal({
-  file, uploading, success, err, tipoDeposito, onFile, onSubmit, onCancel,
+  file, uploading, success, err, tipoDeposito, modoDigitador = false, onFile, onSubmit, onCancel,
 }: {
   file: File | null
   uploading: boolean
   success: boolean
   err: string | null
   tipoDeposito: 'storkhub' | 'comercio'
+  modoDigitador?: boolean
   onFile: (f: File) => void
   onSubmit: () => void
   onCancel: () => void
@@ -1951,9 +2167,9 @@ function BoucherDepositoModal({
           <div style={{ width: 72, height: 72, borderRadius: '50%', background: '#f0fdf4', border: '3px solid #16a34a', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <span style={{ fontSize: 36 }}>✅</span>
           </div>
-          <p style={{ fontSize: 20, fontWeight: 900, color: '#15803d', margin: 0, textAlign: 'center' as const }}>¡Boucher cargado!</p>
+          <p style={{ fontSize: 20, fontWeight: 900, color: '#15803d', margin: 0, textAlign: 'center' as const }}>{modoDigitador ? '¡Comprobante digitado!' : '¡Boucher cargado!'}</p>
           <p style={{ fontSize: 14, color: '#6b7280', margin: 0, textAlign: 'center' as const, lineHeight: 1.5 }}>
-            El depósito fue confirmado correctamente.
+            {modoDigitador ? 'Queda pendiente de revisión por un gestor o admin.' : 'El depósito fue confirmado correctamente.'}
           </p>
           <div style={{ width: '100%', height: 4, background: '#f3f4f6', borderRadius: 4, overflow: 'hidden', marginTop: 8 }}>
             <div style={{ height: '100%', background: '#16a34a', borderRadius: 4, animation: 'progress2s 2s linear forwards' }} />
@@ -2031,7 +2247,7 @@ function BoucherDepositoModal({
             onClick={onSubmit}
             disabled={!file || uploading}
             style={{ flex: 2, background: !file || uploading ? '#d1d5db' : confirmColor, border: 'none', borderRadius: 14, padding: '13px', color: '#fff', fontSize: 14, fontWeight: 800, cursor: !file || uploading ? 'not-allowed' : 'pointer' }}>
-            {uploading ? 'Subiendo…' : file ? '✓ Confirmar depósito' : 'Seleccioná una foto'}
+            {uploading ? 'Subiendo…' : file ? (modoDigitador ? '✓ Digitar depósito' : '✓ Confirmar depósito') : 'Seleccioná una foto'}
           </button>
         </div>
       </div>

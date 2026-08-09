@@ -307,6 +307,11 @@ export interface AbonoSaldo {
   fecha: unknown
   metodoAbono: MetodoAbono
   nota?: string
+  // Quien disparó la escritura que aplicó el abono — sin cambios de
+  // significado. Cuando el abono viene de una propuesta de Digitador
+  // confirmada (ver PropuestaAbonoSaldo más abajo), este es el UID de quien
+  // CONFIRMÓ (Gestor/Admin), nunca el del Digitador que la propuso — ese se
+  // preserva aparte en digitadoPorUid, aditivo, sin sustituir este campo.
   creadoPorUid: string
   comprobanteUrl?: string   // URL pública del comprobante/boucher subido a Storage
   comprobantePath?: string  // path en Firebase Storage para referencia
@@ -319,6 +324,52 @@ export interface AbonoSaldo {
   // liquidación a lo largo del tiempo.
   liquidacionId?: string
   aplicacionId?: string
+
+  // ── Trazabilidad de Digitador V1 (doble control) ────────────────────────
+  // Presentes solo cuando el abono se originó en propuestas_abono_saldo,
+  // aplicado por confirmarPropuestaAbono (Cloud Function). digitadoPorUid es
+  // quien registró la propuesta; propuestaId enlaza al documento origen.
+  digitadoPorUid?: string
+  propuestaId?: string
+}
+
+// ─── Propuestas de abono de saldo (colección propuestas_abono_saldo) ──────────
+// DIGITADOR V1 — doble control (D3): el Digitador solo puede REGISTRAR una
+// propuesta; nunca aplica el abono directamente. confirmarPropuestaAbono /
+// rechazarPropuestaAbono (functions/src/propuestas-abono.ts, Admin SDK) son
+// las únicas vías para resolverla — el cliente nunca escribe esa transición
+// (ver firestore.rules, match /propuestas_abono_saldo/{id}).
+//
+// Es una colección focal nueva, no una extensión de
+// SaldoCargoMotorizado.abonos[]: ese arreglo representa abonos YA APLICADOS
+// (su suma es la fuente de "totalAbonado" en otros cálculos) — mezclar ahí
+// una propuesta todavía pendiente rompería esa invariante y la idempotencia
+// de la confirmación. Ver DIGITADOR V1, sección 13.
+export type EstadoPropuestaAbono = 'pendiente' | 'confirmado' | 'rechazado'
+
+export interface PropuestaAbonoSaldo {
+  id?: string
+  saldoId: string
+  motorizadoId: string
+  motorizadoUid: string
+  motorizadoNombre: string
+  monto: number
+  metodoAbono: MetodoAbono
+  nota?: string
+  comprobanteUrl?: string
+  comprobantePath?: string
+  estado: EstadoPropuestaAbono
+  digitadoPorUid: string
+  digitadoAt: unknown
+  // Presentes solo si estado === 'confirmado'.
+  confirmadoPorUid?: string
+  confirmadoAt?: unknown
+  abonoIndex?: number  // índice del abono resultante en saldos_cargo_motorizado.abonos[]
+  movimientoId?: string // movimientos_financieros creado al confirmar
+  // Presentes solo si estado === 'rechazado'.
+  rechazadoPorUid?: string
+  rechazadoAt?: unknown
+  motivoRechazo?: string
 }
 
 export interface SaldoCargoMotorizado {

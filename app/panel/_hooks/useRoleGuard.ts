@@ -6,7 +6,7 @@ import { onAuthStateChanged, signOut, type User } from 'firebase/auth'
 import { doc, onSnapshot } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 
-export type Rol = 'admin' | 'gestor' | 'motorizado' | 'Comercio' | null
+export type Rol = 'admin' | 'gestor' | 'motorizado' | 'Comercio' | 'digitador' | null
 
 // 'verificando' → todavía no se sabe quién es; 'autorizado' → puede operar el
 // panel; 'redirigiendo' → no le corresponde este panel y ya se pidió el cambio
@@ -23,6 +23,10 @@ export function rutaDeRol(rol: Rol, activo: boolean): string {
   if (rol === 'admin' || rol === 'gestor') return '/panel/gestor'
   if (rol === 'motorizado') return '/panel/motorizado'
   if (rol === 'Comercio') return '/panel/comercio'
+  // Digitador V1: no aterriza en el dashboard completo del gestor — tiene su
+  // propia entrada mínima que solo enlaza a los módulos financieros que
+  // reutiliza (depósitos, saldos). Ver app/panel/digitador/page.tsx.
+  if (rol === 'digitador') return '/panel/digitador'
   return '/login'
 }
 

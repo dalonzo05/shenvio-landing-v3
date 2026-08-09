@@ -8,7 +8,7 @@ import { doc, getDoc } from 'firebase/firestore'
 import { db } from '@/fb/config'
 import { useUser } from '@/app/Components/UserProvider'
 
-type Rol = 'admin' | 'gestor' | 'motorizado' | 'Comercio' | null
+type Rol = 'admin' | 'gestor' | 'motorizado' | 'Comercio' | 'digitador' | null
 
 async function getUserRole(uid: string): Promise<Rol> {
   const ref = doc(db, 'usuarios', uid)
@@ -56,6 +56,11 @@ export default function PanelHome() {
 
         if (rol === 'Comercio') {
           router.replace('/panel/comercio')
+          return
+        }
+
+        if (rol === 'digitador') {
+          router.replace('/panel/digitador')
           return
         }
 

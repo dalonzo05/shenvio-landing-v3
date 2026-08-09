@@ -7,6 +7,7 @@ admin.initializeApp();
 export { crearAccesoComercio } from './comercio-acceso';
 export { acumularCobroSemanalPorOrden } from './cobro-semanal';
 export { responderAsignacion, confirmarTransicionConCobro } from './motorizado-transiciones';
+export { confirmarPropuestaAbono, rechazarPropuestaAbono } from './propuestas-abono';
 
 /**
  * Daily cleanup: deletes photo evidence from Storage and Firestore

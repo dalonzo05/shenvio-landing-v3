@@ -254,10 +254,17 @@ service firebase.storage {
           (rolDe(request.auth.uid) == 'motorizado' && request.auth.uid == motorizadoAuthUid)
           ||
           (rolDe(request.auth.uid) == 'Comercio' && esComercioDestinatarioDeDeposito(request.auth.uid, depositoId))
+          ||
+          rolDe(request.auth.uid) == 'digitador'
         );
 
       allow list: if false;
 
+      // DIGITADOR V1: puede subir/reemplazar el mismo boucher.jpg que sube el
+      // gestor — no hay pertenencia que exigirle acá (no es "su" depósito,
+      // digita en nombre de un motorizado). El estado 'en_revision' y la
+      // ventana de corrección mientras sigue pendiente los exige
+      // firestore.rules sobre ordenes_deposito, no este archivo.
       allow create, update: if signedIn()
         && perfilActivo(request.auth.uid)
         && filename == 'boucher.jpg'
@@ -266,6 +273,8 @@ service firebase.storage {
           ||
           (rolDe(request.auth.uid) == 'motorizado'
             && request.auth.uid == motorizadoAuthUid)
+          ||
+          rolDe(request.auth.uid) == 'digitador'
         )
         && request.resource.contentType == 'image/jpeg'
         && request.resource.size > 0
@@ -302,6 +311,28 @@ service firebase.storage {
         && perfilActivo(request.auth.uid)
         && esStaff(request.auth.uid)
         && filename.matches('abono_[0-9]+\\.jpg')
+        && request.resource.contentType == 'image/jpeg'
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024;
+
+      allow delete: if false;
+    }
+
+    // Comprobantes de PROPUESTAS de abono (DIGITADOR V1). El digitador sube
+    // el comprobante antes de que exista el documento Firestore de la
+    // propuesta — mismo motivo que 'depositos/' arriba: el ID lo genera el
+    // cliente y el documento se crea después apuntando a este mismo path.
+    // Ownership real de "quién puede editar SU propia propuesta mientras
+    // sigue pendiente" lo exige firestore.rules sobre propuestas_abono_saldo
+    // — acá solo se exige el rol correcto, no pertenencia de la propuesta.
+    match /saldos/{saldoId}/propuestas/{propuestaId}/{filename} {
+      allow get: if signedIn() && perfilActivo(request.auth.uid)
+        && (esStaff(request.auth.uid) || rolDe(request.auth.uid) == 'digitador');
+      allow list: if false;
+      allow create, update: if signedIn()
+        && perfilActivo(request.auth.uid)
+        && (esStaff(request.auth.uid) || rolDe(request.auth.uid) == 'digitador')
+        && filename == 'comprobante.jpg'
         && request.resource.contentType == 'image/jpeg'
         && request.resource.size > 0
         && request.resource.size <= 5 * 1024 * 1024;

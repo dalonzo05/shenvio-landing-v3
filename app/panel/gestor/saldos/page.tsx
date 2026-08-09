@@ -3,20 +3,28 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   collection,
+  doc,
+  getDoc,
   onSnapshot,
   query,
   orderBy,
+  where,
 } from 'firebase/firestore'
-import { auth, db } from '@/fb/config'
-import { registrarAbonoSaldo, anularSaldoCargo, revertirConversionEnDeuda, condonarDeudaMotorizado } from '@/lib/financial-writes'
+import { httpsCallable } from 'firebase/functions'
+import { auth, db, functions } from '@/fb/config'
+import {
+  registrarAbonoSaldo, anularSaldoCargo, revertirConversionEnDeuda, condonarDeudaMotorizado,
+  crearPropuestaAbono, corregirPropuestaAbono,
+} from '@/lib/financial-writes'
 import {
   LABELS_TIPO_SALDO,
   type SaldoCargoMotorizado,
   type AbonoSaldo,
   type EstadoSaldo,
   type MetodoAbono,
+  type PropuestaAbonoSaldo,
 } from '@/lib/financial-types'
-import { compressImage, uploadComprobante } from '@/fb/storage'
+import { compressImage, uploadComprobante, uploadComprobantePropuesta } from '@/fb/storage'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -26,6 +34,17 @@ import {
   Paperclip,
   Image as ImageIcon,
 } from 'lucide-react'
+
+// DIGITADOR V1 — doble control de abonos (D3). Los callables son las únicas
+// vías para confirmar/rechazar una propuesta; ver functions/src/propuestas-abono.ts.
+const confirmarPropuestaAbonoCallable = httpsCallable<
+  { propuestaId: string },
+  { ok: true; movimientoId: string }
+>(functions, 'confirmarPropuestaAbono')
+const rechazarPropuestaAbonoCallable = httpsCallable<
+  { propuestaId: string; motivo?: string },
+  { ok: true }
+>(functions, 'rechazarPropuestaAbono')
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -109,7 +128,27 @@ export default function SaldosPage() {
   const [errAbono, setErrAbono] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // ── DIGITADOR V1 — doble control de abonos (D3) ───────────────────────────
+  const [userRol, setUserRol] = useState<string | null>(null)
+  const esDigitador = userRol === 'digitador'
+  const [propuestas, setPropuestas] = useState<(PropuestaAbonoSaldo & { id: string })[]>([])
+  // Reutiliza el mismo form (montoAbono/metodoAbono/notaAbono/comprobanteFile)
+  // que el abono directo del gestor — abonoId hace de "propuesta en edición"
+  // cuando esDigitador. propuestaCorrigiendoId != null → PATCH en vez de create.
+  const [propuestaCorrigiendoId, setPropuestaCorrigiendoId] = useState<string | null>(null)
+  const [confirmandoPropuestaId, setConfirmandoPropuestaId] = useState<string | null>(null)
+  const [rechazandoPropuestaId, setRechazandoPropuestaId] = useState<string | null>(null)
+  const [motivoRechazoPropuesta, setMotivoRechazoPropuesta] = useState<Record<string, string>>({})
+
   // ── Queries ────────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const uid = auth.currentUser?.uid
+    if (!uid) return
+    getDoc(doc(db, 'usuarios', uid)).then((snap) => {
+      setUserRol(snap.exists() ? ((snap.data() as { rol?: string })?.rol ?? null) : null)
+    })
+  }, [])
 
   useEffect(() => {
     const q = query(collection(db, 'motorizado'))
@@ -129,6 +168,21 @@ export default function SaldosPage() {
       setLoading(false)
     })
   }, [])
+
+  // Propuestas de abono. Digitador: Rules solo le permiten leer las SUYAS —
+  // el where() acá es lo que permite a Firestore probar esa condición para un
+  // list() (mismo motivo que en depositos/page.tsx). Gestor/admin leen todas
+  // sin filtro (Rules se lo permite sin condición).
+  useEffect(() => {
+    if (userRol === null) return
+    const uid = auth.currentUser?.uid
+    const q = userRol === 'digitador' && uid
+      ? query(collection(db, 'propuestas_abono_saldo'), where('digitadoPorUid', '==', uid))
+      : query(collection(db, 'propuestas_abono_saldo'))
+    return onSnapshot(q, (snap) => {
+      setPropuestas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as PropuestaAbonoSaldo & { id: string })))
+    })
+  }, [userRol])
 
   // ── Filtros ────────────────────────────────────────────────────────────────
 
@@ -164,6 +218,7 @@ export default function SaldosPage() {
 
   function resetAbono() {
     setAbonoId(null)
+    setPropuestaCorrigiendoId(null)
     setMontoAbono('')
     setNotaAbono('')
     setMetodoAbono('transferencia')
@@ -221,6 +276,123 @@ export default function SaldosPage() {
       setErrAbono(e?.message || 'Error al registrar abono')
     } finally {
       setSavingAbono(false)
+    }
+  }
+
+  // ── Proponer / corregir abono (DIGITADOR V1) ──────────────────────────────
+  // Nunca toca saldos_cargo_motorizado — crea o corrige un documento en
+  // propuestas_abono_saldo, 'pendiente'. Solo confirmarPropuestaAbono (Cloud
+  // Function) aplica el efecto real. Mismas validaciones de monto que
+  // handleAbono, replicadas porque el flujo de datos es distinto (create vs
+  // corregir) y no comparten la escritura final.
+  async function handleProponerAbono(saldo: Saldo) {
+    setErrAbono(null)
+    const monto = parseFloat(montoAbono)
+    if (isNaN(monto) || monto <= 0) {
+      setErrAbono('Ingresa un monto válido')
+      return
+    }
+    if (monto > saldo.saldoPendiente) {
+      setErrAbono(`El monto no puede superar el saldo pendiente (${fmt(saldo.saldoPendiente)})`)
+      return
+    }
+    if (METODOS_REQUIEREN_COMPROBANTE.includes(metodoAbono) && !comprobanteFile && !propuestaCorrigiendoId) {
+      setErrAbono('Este método requiere subir un comprobante')
+      return
+    }
+
+    setSavingAbono(true)
+    try {
+      const uid = auth.currentUser?.uid ?? ''
+
+      if (propuestaCorrigiendoId) {
+        // Corrección de una propuesta propia mientras sigue pendiente (D2).
+        let comprobanteUrl: string | undefined
+        let comprobantePath: string | undefined
+        if (comprobanteFile) {
+          const blob = await compressImage(comprobanteFile)
+          const r = await uploadComprobantePropuesta(saldo.id, propuestaCorrigiendoId, blob)
+          comprobanteUrl = r.url
+          comprobantePath = r.pathStorage
+        }
+        await corregirPropuestaAbono(propuestaCorrigiendoId, {
+          monto,
+          metodoAbono,
+          nota: notaAbono,
+          ...(comprobanteUrl ? { comprobanteUrl, comprobantePath } : {}),
+        })
+      } else {
+        // Propuesta nueva: el ID lo genera el cliente para poder subir el
+        // comprobante ANTES de crear el documento — mismo patrón que
+        // ordenes_deposito/pagos_comercio en el resto del proyecto.
+        const propuestaRef = doc(collection(db, 'propuestas_abono_saldo'))
+        const propuestaId = propuestaRef.id
+        let comprobanteUrl: string | undefined
+        let comprobantePath: string | undefined
+        if (comprobanteFile) {
+          const blob = await compressImage(comprobanteFile)
+          const r = await uploadComprobantePropuesta(saldo.id, propuestaId, blob)
+          comprobanteUrl = r.url
+          comprobantePath = r.pathStorage
+        }
+        await crearPropuestaAbono({
+          saldoId: saldo.id,
+          motorizadoId: saldo.motorizadoId,
+          motorizadoUid: saldo.motorizadoUid,
+          motorizadoNombre: saldo.motorizadoNombre,
+          monto,
+          metodoAbono,
+          nota: notaAbono,
+          operadorId: uid,
+          comprobanteUrl,
+          comprobantePath,
+        })
+      }
+      resetAbono()
+      setPropuestaCorrigiendoId(null)
+    } catch (e: unknown) {
+      console.error('Error registrando propuesta de abono:', e)
+      setErrAbono(e instanceof Error ? e.message : 'Error al registrar la propuesta')
+    } finally {
+      setSavingAbono(false)
+    }
+  }
+
+  function iniciarCorreccionPropuesta(p: PropuestaAbonoSaldo & { id: string }) {
+    setAbonoId(p.saldoId)
+    setPropuestaCorrigiendoId(p.id)
+    setMontoAbono(String(p.monto))
+    setMetodoAbono(p.metodoAbono)
+    setNotaAbono(p.nota ?? '')
+    setComprobanteFile(null)
+    setComprobantePreview(p.comprobanteUrl ?? null)
+    setExpandedId(p.saldoId)
+  }
+
+  // ── Confirmar / rechazar propuesta (Gestor/Admin — Cloud Functions) ──────
+  async function handleConfirmarPropuesta(p: PropuestaAbonoSaldo & { id: string }) {
+    setConfirmandoPropuestaId(p.id)
+    try {
+      await confirmarPropuestaAbonoCallable({ propuestaId: p.id })
+    } catch (e: unknown) {
+      console.error('Error confirmando propuesta:', e)
+      alert('Error al confirmar: ' + (e instanceof Error ? e.message : 'Error desconocido'))
+    } finally {
+      setConfirmandoPropuestaId(null)
+    }
+  }
+
+  async function handleRechazarPropuesta(p: PropuestaAbonoSaldo & { id: string }) {
+    const motivo = motivoRechazoPropuesta[p.id]?.trim()
+    setRechazandoPropuestaId(p.id)
+    try {
+      await rechazarPropuestaAbonoCallable({ propuestaId: p.id, ...(motivo ? { motivo } : {}) })
+      setMotivoRechazoPropuesta((prev) => ({ ...prev, [p.id]: '' }))
+    } catch (e: unknown) {
+      console.error('Error rechazando propuesta:', e)
+      alert('Error al rechazar: ' + (e instanceof Error ? e.message : 'Error desconocido'))
+    } finally {
+      setRechazandoPropuestaId(null)
     }
   }
 
@@ -633,14 +805,23 @@ export default function SaldosPage() {
                             Cancelar
                           </button>
                           <button
-                            onClick={() => handleAbono(s)}
+                            onClick={() => esDigitador ? handleProponerAbono(s) : handleAbono(s)}
                             disabled={savingAbono || !montoAbono}
                             className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition disabled:opacity-40"
                           >
-                            {savingAbono ? 'Guardando…' : '✓ Registrar abono'}
+                            {savingAbono ? 'Guardando…' : propuestaCorrigiendoId ? '✓ Guardar corrección' : esDigitador ? '✓ Proponer abono' : '✓ Registrar abono'}
                           </button>
                         </div>
                       </div>
+                    ) : esDigitador ? (
+                      // Digitador (D3): solo propone. Nunca revertir/condonar/anular
+                      // — eso sigue siendo exclusivo de Gestor/Admin más abajo.
+                      <button
+                        onClick={() => { setAbonoId(s.id); setExpandedId(s.id) }}
+                        className="w-full text-xs font-semibold px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition"
+                      >
+                        + Proponer abono
+                      </button>
                     ) : (
                       <div className="flex gap-2">
                         <button
@@ -680,6 +861,81 @@ export default function SaldosPage() {
                     )}
                   </div>
                 )}
+
+                {/* ── Propuestas de abono (DIGITADOR V1, D3) ── */}
+                {(() => {
+                  const propuestasDelSaldo = propuestas.filter((p) => p.saldoId === s.id)
+                  if (propuestasDelSaldo.length === 0) return null
+                  return (
+                    <div className="border-t border-gray-100 px-4 py-3 flex flex-col gap-2 bg-amber-50/40">
+                      <p className="text-[11px] font-bold text-amber-700 uppercase tracking-wide">
+                        Propuestas de abono
+                      </p>
+                      {propuestasDelSaldo.map((p) => (
+                        <div key={p.id} className="rounded-lg border border-amber-200 bg-white px-3 py-2 flex flex-col gap-1.5">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <span className="text-xs font-semibold text-gray-800">{fmt(p.monto)} · {p.metodoAbono}</span>
+                            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                              p.estado === 'pendiente' ? 'bg-amber-100 text-amber-700'
+                              : p.estado === 'confirmado' ? 'bg-green-100 text-green-700'
+                              : 'bg-red-100 text-red-700'
+                            }`}>
+                              {p.estado === 'pendiente' ? 'Pendiente de revisión' : p.estado === 'confirmado' ? 'Confirmado' : 'Rechazado'}
+                            </span>
+                          </div>
+                          {p.nota && <p className="text-[11px] text-gray-500">{p.nota}</p>}
+                          {p.comprobanteUrl && (
+                            <a href={p.comprobanteUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-blue-600 hover:underline font-semibold">
+                              Ver comprobante
+                            </a>
+                          )}
+                          <p className="text-[10px] text-gray-400">
+                            Digitado por <span className="font-mono">{p.digitadoPorUid.slice(0, 8)}</span>
+                            {p.estado === 'rechazado' && p.motivoRechazo ? ` · Motivo: ${p.motivoRechazo}` : ''}
+                          </p>
+
+                          {/* Digitador: corregir mientras sigue pendiente (D2) */}
+                          {esDigitador && p.estado === 'pendiente' && abonoId !== s.id && (
+                            <button
+                              onClick={() => iniciarCorreccionPropuesta(p)}
+                              className="self-start text-[11px] font-semibold text-blue-600 hover:text-blue-800 hover:underline"
+                            >
+                              Corregir
+                            </button>
+                          )}
+
+                          {/* Gestor/Admin: confirmar/rechazar (Cloud Functions) */}
+                          {!esDigitador && p.estado === 'pendiente' && (
+                            <div className="flex flex-col gap-1.5 mt-1">
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => handleConfirmarPropuesta(p)}
+                                  disabled={confirmandoPropuestaId === p.id || rechazandoPropuestaId === p.id}
+                                  className="flex-1 text-[11px] font-semibold px-2 py-1.5 rounded-lg bg-green-600 text-white hover:bg-green-700 transition disabled:opacity-40"
+                                >
+                                  {confirmandoPropuestaId === p.id ? 'Confirmando…' : '✓ Confirmar'}
+                                </button>
+                                <input
+                                  value={motivoRechazoPropuesta[p.id] ?? ''}
+                                  onChange={(e) => setMotivoRechazoPropuesta((prev) => ({ ...prev, [p.id]: e.target.value }))}
+                                  placeholder="Motivo de rechazo (opcional)"
+                                  className="flex-1 border border-gray-200 rounded-lg px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-red-300"
+                                />
+                                <button
+                                  onClick={() => handleRechazarPropuesta(p)}
+                                  disabled={confirmandoPropuestaId === p.id || rechazandoPropuestaId === p.id}
+                                  className="text-[11px] font-semibold px-2 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 transition disabled:opacity-40"
+                                >
+                                  {rechazandoPropuestaId === p.id ? '…' : 'Rechazar'}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )
+                })()}
               </div>
             )
           })

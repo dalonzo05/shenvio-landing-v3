@@ -3,8 +3,8 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { db } from '@/fb/config'
-import { collection, onSnapshot, query, where, orderBy } from 'firebase/firestore'
+import { auth, db } from '@/fb/config'
+import { collection, doc, getDoc, onSnapshot, query, where, orderBy } from 'firebase/firestore'
 import { useRoleGuard, type Rol } from '../_hooks/useRoleGuard'
 import {
   LayoutDashboard,
@@ -35,7 +35,21 @@ const MAX_TOASTS = 3
 
 // Constante de módulo a propósito: useRoleGuard la recibe como dependencia del
 // efecto, así que un literal en línea lo reejecutaría en cada render.
-const ROLES_GESTOR: readonly Rol[] = ['admin', 'gestor']
+//
+// Digitador V1: reutiliza este mismo layout y estas mismas rutas — no tiene
+// árbol de paneles propio (ver investigación DIGITADOR V1, sección "Panel
+// recomendado"). El guard lo deja entrar para no duplicar componentes; lo
+// que lo diferencia del gestor es (a) la navegación visible, filtrada más
+// abajo, y (b) Firestore Rules, que niegan cualquier escritura/lectura fuera
+// de lo que Digitador V1 autorizó explícitamente. La UI oculta enlaces por
+// claridad, NUNCA por seguridad — entrar a una URL oculta sin permiso real
+// simplemente no devuelve datos ni permite escribir.
+// Módulos permitidos para Digitador V1 en la nav de abajo: solo Depósitos y
+// Saldos. Todo lo demás (motorizados, comercios, clientes, base de datos,
+// reportes, zonas, cobros, liquidaciones, gastos, financiero, auditoría)
+// queda fuera de su navegación por diseño (ver D3/D4 y sección 7 del bloque
+// DIGITADOR V1) — Firestore Rules deniega igual si se entra por URL directa.
+const ROLES_GESTOR: readonly Rol[] = ['admin', 'gestor', 'digitador']
 
 export default function GestorLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
@@ -44,6 +58,20 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
   // en true para siempre cuando el rol no correspondía.
   const estadoGuard = useRoleGuard(ROLES_GESTOR, '/panel/gestor')
   const autorizado = estadoGuard === 'autorizado'
+  const [rolPropio, setRolPropio] = useState<Rol>(null)
+  const esDigitador = rolPropio === 'digitador'
+
+  // Rol propio — solo para filtrar la navegación visible (UX). El guard de
+  // arriba ya resolvió si puede estar acá; esto NO es una segunda capa de
+  // seguridad, Firestore Rules es la única que importa para eso.
+  useEffect(() => {
+    if (!autorizado) return
+    const uid = auth.currentUser?.uid
+    if (!uid) return
+    getDoc(doc(db, 'usuarios', uid)).then((snap) => {
+      setRolPropio(snap.exists() ? ((snap.data() as { rol?: Rol })?.rol ?? null) : null)
+    })
+  }, [autorizado])
   const [collapsed, setCollapsed] = useState(false)
   const [cobrosPendientes, setCobrosPendientes] = useState(0)
   const [metricas, setMetricas] = useState({ activas: 0, entregadasHoy: 0, conProblema: 0, pendCobro: 0, prioritarias: 0 })
@@ -80,7 +108,8 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
   // validación de rol, así que con sesión de comercio o motorizado pegaba
   // contra las reglas y el permission-denied sin manejar tumbaba al SDK.
   useEffect(() => {
-    if (!autorizado) return
+    // Digitador V1 no opera cobros/solicitudes — el badge no le aplica.
+    if (!autorizado || esDigitador) return
     const q = query(
       collection(db, 'solicitudes_envio'),
       where('cobroPendiente', '==', true)
@@ -103,11 +132,12 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
       setCobrosPendientes(0)
     })
     return () => unsub()
-  }, [autorizado])
+  }, [autorizado, esDigitador])
 
   // ── Métricas globales + detección de nuevas órdenes ──────────────────────
   useEffect(() => {
-    if (!autorizado) return
+    // Digitador V1 no opera solicitudes — sin métricas ni toasts de "nueva orden".
+    if (!autorizado || esDigitador) return
     const q = query(collection(db, 'solicitudes_envio'), orderBy('createdAt', 'desc'))
     const unsub = onSnapshot(q, (snap) => {
       const docs = snap.docs.map(d => ({ id: d.id, ...d.data() } as any))
@@ -162,7 +192,7 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
       console.warn('[gestor] listener de métricas detenido:', error.code)
     })
     return () => unsub()
-  }, [autorizado, addToast])
+  }, [autorizado, esDigitador, addToast])
 
   // ── Resetear "nuevas no vistas" al entrar a solicitudes ──────────────────
   useEffect(() => {
@@ -218,6 +248,34 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
             {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           </button>
 
+          {/* Digitador V1: navegación reducida — solo los módulos que reutiliza
+              (ver HREFS_DIGITADOR). Todo lo demás queda fuera de su vista;
+              Firestore Rules deniega igual aunque alguien tipee la URL a mano. */}
+          {esDigitador ? (
+            <nav className="flex-1 space-y-2 overflow-y-auto p-3">
+              <NavItem
+                href="/panel/digitador"
+                icon={<LayoutDashboard size={18} />}
+                label="Inicio"
+                active={pathname === '/panel/digitador'}
+                collapsed={collapsed}
+              />
+              <NavItem
+                href="/panel/gestor/depositos"
+                icon={<Wallet size={18} />}
+                label="Depósitos"
+                active={pathname.startsWith('/panel/gestor/depositos')}
+                collapsed={collapsed}
+              />
+              <NavItem
+                href="/panel/gestor/saldos"
+                icon={<BadgeDollarSign size={18} />}
+                label="Saldos a cargo"
+                active={pathname.startsWith('/panel/gestor/saldos')}
+                collapsed={collapsed}
+              />
+            </nav>
+          ) : (
           <nav className="flex-1 space-y-2 overflow-y-auto p-3">
             <NavItem
               href="/panel/gestor"
@@ -352,13 +410,16 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               collapsed={collapsed}
             />
           </nav>
+          )}
         </div>
       </aside>
 
       <main className="min-w-0 flex-1 overflow-hidden flex flex-col">
         <div className="flex-1 overflow-auto flex flex-col p-4 min-h-0">{children}</div>
 
-        {/* ── BARRA INFERIOR GLOBAL ────────────────────────────────────────── */}
+        {/* ── BARRA INFERIOR GLOBAL ── oculta para Digitador: son métricas y
+            accesos de solicitudes, fuera de su alcance (D3/D4). ────────────── */}
+        {!esDigitador && (
         <div className="shrink-0 bg-white border-t border-gray-200 shadow-[0_-1px_4px_rgba(0,0,0,0.06)]">
           <div className="flex items-center gap-2 px-4 py-2 overflow-x-auto">
 
@@ -413,10 +474,11 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
             })}
           </div>
         </div>
+        )}
       </main>
 
-      {/* ── Toasts de nuevas órdenes ────────────────────────────────────────── */}
-      <ToastNuevaOrden toasts={toasts} onDismiss={dismissToast} />
+      {/* Toasts de nuevas órdenes — mismo alcance que la barra inferior. */}
+      {!esDigitador && <ToastNuevaOrden toasts={toasts} onDismiss={dismissToast} />}
     </div>
   )
 }

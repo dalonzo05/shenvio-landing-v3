@@ -38,6 +38,10 @@ async function getRedirectByRole(uid: string) {
   if (rol === 'admin' || rol === 'gestor') return '/panel/gestor'
   if (rol === 'motorizado') return '/panel/motorizado'
   if (rol === 'Comercio') return '/panel/comercio'
+  // DIGITADOR V1: mismo destino que rutaDeRol() en app/panel/_hooks/useRoleGuard.ts
+  // — si alguno cambia, el otro tiene que cambiar también (deuda de duplicación
+  // ya documentada ahí, no introducida por este bloque).
+  if (rol === 'digitador') return '/panel/digitador'
 
   throw new Error('No tenés un rol asignado. Contacta al administrador.')
 }
