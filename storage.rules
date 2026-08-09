@@ -326,12 +326,25 @@ service firebase.storage {
     // sigue pendiente" lo exige firestore.rules sobre propuestas_abono_saldo
     // — acá solo se exige el rol correcto, no pertenencia de la propuesta.
     match /saldos/{saldoId}/propuestas/{propuestaId}/{filename} {
+      // AUDITORÍA FINAL: la propuesta debe seguir 'pendiente' (o no existir
+      // aún — el ID lo genera el cliente antes del documento, mismo caso que
+      // 'depositos/' arriba) para poder escribir este archivo. Sin esto, el
+      // comprobante de una propuesta ya confirmada/rechazada podía
+      // sobreescribirse en Storage sin dejar ningún rastro en Firestore — la
+      // propia propuesta ya lo impide (estado != 'pendiente' deniega el
+      // update), pero Storage no lo heredaba automáticamente.
+      function propuestaSigueEditable() {
+        return !firestore.exists(/databases/(default)/documents/propuestas_abono_saldo/$(propuestaId))
+          || firestore.get(/databases/(default)/documents/propuestas_abono_saldo/$(propuestaId)).data.get('estado', 'pendiente') == 'pendiente';
+      }
+
       allow get: if signedIn() && perfilActivo(request.auth.uid)
         && (esStaff(request.auth.uid) || rolDe(request.auth.uid) == 'digitador');
       allow list: if false;
       allow create, update: if signedIn()
         && perfilActivo(request.auth.uid)
         && (esStaff(request.auth.uid) || rolDe(request.auth.uid) == 'digitador')
+        && propuestaSigueEditable()
         && filename == 'comprobante.jpg'
         && request.resource.contentType == 'image/jpeg'
         && request.resource.size > 0

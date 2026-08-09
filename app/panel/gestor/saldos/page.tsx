@@ -180,7 +180,7 @@ export default function SaldosPage() {
       ? query(collection(db, 'propuestas_abono_saldo'), where('digitadoPorUid', '==', uid))
       : query(collection(db, 'propuestas_abono_saldo'))
     return onSnapshot(q, (snap) => {
-      setPropuestas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as PropuestaAbonoSaldo & { id: string })))
+      setPropuestas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as PropuestaAbonoSaldo) })))
     })
   }, [userRol])
 
