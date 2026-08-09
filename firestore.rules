@@ -751,6 +751,30 @@ service cloud.firestore {
       }
 
       // Motorizado: solo puede modificar campos operativos, NO financieros
+      //
+      // ── P1-FN-MOTO: asignacion y cobrosMotorizado salieron de esta
+      // allowlist ────────────────────────────────────────────────────────
+      // P1-RF demostró empíricamente que no había presupuesto de expresiones
+      // en el motor para validar el CONTENIDO de estos dos mapas junto con
+      // lo que ya evalúan las ramas de admin y comercio en este mismo match
+      // (ver comentario histórico de P1-RF, revertido). En vez de forzar esa
+      // validación acá, las dos únicas escrituras legítimas del motorizado
+      // sobre estas claves —responder una asignación (aceptar/rechazar) y
+      // registrar cobrosMotorizado.delivery/producto— se movieron a
+      // Cloud Functions (functions/src/motorizado-transiciones.ts:
+      // responderAsignacion, confirmarTransicionConCobro), que usan Admin
+      // SDK y por lo tanto NO evalúan estas reglas: son ahora la ÚNICA
+      // puerta de entrada para esas dos claves, y hacen ellas mismas todas
+      // las comprobaciones que antes intentaba replicar acá (identidad,
+      // transición válida, forma y tipos de cada submapa).
+      //
+      // fueraManagua sigue —como ya estaba— fuera de esta lista: su única
+      // escritura legítima (fueraManagua.efectivoRecibidoMotorizado) también
+      // vive ahora en confirmarTransicionConCobro.
+      //
+      // Un motorizado que intente escribir 'asignacion' o 'cobrosMotorizado'
+      // por updateDoc directo (bypaseando las Functions) deniega acá, limpio
+      // — ver P1-FN-MOTO sección 17 (prueba anti-bypass).
       allow update: if isAssignedMotorizado()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'estado',
@@ -760,10 +784,8 @@ service cloud.firestore {
           'evidencias',
           'evidenciasTerminal',
           'evidenciasCargotrans',
-          'cobrosMotorizado',
           'cobroPendiente',
           'cobroDelivery',
-          'asignacion',
           'registro',
           'pagoDelivery',
           'acumulacionCobroSemanal'

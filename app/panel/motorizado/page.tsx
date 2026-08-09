@@ -257,6 +257,38 @@ const acumularCallable = httpsCallable<{ ordenId: string }, { ok: true; yaAcumul
   'acumularCobroSemanalPorOrden'
 )
 
+// ─── Migración server-side de escrituras sensibles (P1-FN-MOTO) ──────────────
+//
+// asignacion (aceptar/rechazar), cobrosMotorizado y
+// fueraManagua.efectivoRecibidoMotorizado ya no se escriben directo desde el
+// cliente: firestore.rules le retira esas tres claves al motorizado (P1-RF
+// demostró que no había presupuesto de expresiones para validarlas ahí), así
+// que estas dos callables son ahora la única vía legítima. El servidor
+// deriva identidad (context.auth.uid), timestamps y el monto de
+// cobrosMotorizado.delivery/producto — este último NUNCA lo edita el usuario
+// en esta pantalla (se muestra como texto fijo, ver calcDeposito()), así que
+// el cliente ya no lo envía. Lo único que el cliente aporta genuinamente es:
+// accion, recibio/justificacion por cobro, y cargotransCobro.monto (un
+// monto real que el motorizado cuenta en efectivo, no derivable del
+// documento).
+
+type RespuestaCobroPayload = { recibio: boolean; justificacion?: string }
+
+const responderAsignacionCallable = httpsCallable<
+  { solicitudId: string; accion: 'aceptar' | 'rechazar' },
+  { ok: true; accion: 'aceptar' | 'rechazar' }
+>(functions, 'responderAsignacion')
+
+const confirmarTransicionCallable = httpsCallable<
+  {
+    solicitudId: string;
+    nuevo: 'retirado' | 'entregado';
+    cobros?: { delivery?: RespuestaCobroPayload; producto?: RespuestaCobroPayload };
+    cargotransCobro?: { monto: number };
+  },
+  { ok: true; necesitaAcumularCobroSemanal: boolean }
+>(functions, 'confirmarTransicionConCobro')
+
 // Dos reintentos con backoff corto (0.8s, 2.4s). Suficiente para una caída
 // momentánea de red sin dejar al motorizado esperando: si no sale, la orden
 // queda 'pendiente' y el barrido de la pantalla la recoge después. La callable
@@ -542,12 +574,10 @@ export default function PanelMotorizadoPage() {
     if (!o.id) return;
     setErr(null); setActionId(o.id);
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', o.id), {
-        'asignacion.estadoAceptacion': 'aceptada',
-        'asignacion.aceptadoAt': serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      await responderAsignacionCallable({ solicitudId: o.id, accion: 'aceptar' });
       // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
+      // — best-effort, nunca fue atómico con la escritura de la solicitud
+      // (ni antes ni ahora): si falla, no revierte la aceptación.
       if (motorizadoDocId) {
         await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: 'ocupado', updatedAt: serverTimestamp() });
         registrarAceptacion(motorizadoDocId, o.asignacion?.asignadoAt ?? null);
@@ -560,11 +590,7 @@ export default function PanelMotorizadoPage() {
     if (!o.id) return;
     setErr(null); setActionId(o.id);
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', o.id), {
-        estado: 'confirmada',
-        asignacion: null,
-        updatedAt: serverTimestamp(),
-      });
+      await responderAsignacionCallable({ solicitudId: o.id, accion: 'rechazar' });
       // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
       if (motorizadoDocId) {
         await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: 'disponible', updatedAt: serverTimestamp() });
@@ -585,40 +611,16 @@ export default function PanelMotorizadoPage() {
     finally { setToggling(false); }
   }
 
-  async function executeCambiar(
-    o: Solicitud,
-    nuevo: EstadoSolicitud,
-    cobros?: { delivery?: { monto: number; recibio: boolean; justificacion?: string }; producto?: { monto: number; recibio: boolean; justificacion?: string } },
-    cargotransCobro?: { monto: number }
-  ) {
+  // Transición SIN confirmación de cobro: no toca cobrosMotorizado ni
+  // fueraManagua, así que sigue siendo un updateDoc directo del cliente —
+  // 'estado'/'historial'/'entregadoAt'/'cobroDelivery'/'acumulacionCobroSemanal'
+  // se quedan en el allowlist de firestore.rules del motorizado, sin cambios.
+  async function executeCambiar(o: Solicitud, nuevo: EstadoSolicitud) {
     if (!o.id) return;
     setErr(null); setActionId(`${o.id}:${nuevo}`);
     try {
       const p: any = { estado: nuevo, updatedAt: serverTimestamp(), [`historial.${nuevo}At`]: serverTimestamp() };
-      if (cargotransCobro) {
-        p['fueraManagua.efectivoRecibidoMotorizado'] = cargotransCobro.monto;
-      }
       if (nuevo === 'entregado') p.entregadoAt = serverTimestamp();
-      let hayPendiente = false;
-      if (cobros) {
-        if (cobros.delivery) {
-          const rec = { monto: cobros.delivery.monto, recibio: cobros.delivery.recibio, at: serverTimestamp(), ...(cobros.delivery.justificacion ? { justificacion: cobros.delivery.justificacion } : {}) };
-          p['cobrosMotorizado.delivery'] = rec;
-          if (!cobros.delivery.recibio) hayPendiente = true;
-        }
-        if (cobros.producto) {
-          const rec = { monto: cobros.producto.monto, recibio: cobros.producto.recibio, at: serverTimestamp(), ...(cobros.producto.justificacion ? { justificacion: cobros.producto.justificacion } : {}) };
-          p['cobrosMotorizado.producto'] = rec;
-          if (!cobros.producto.recibio) hayPendiente = true;
-        }
-      }
-      // Si se proveyeron cobros, actualizar cobroPendiente siempre (para limpiar incidencias resueltas)
-      if (cobros !== undefined) p.cobroPendiente = hayPendiente;
-
-      // ── Defer delivery a entrega ──────────────────────────────────────────
-      if (cobros?.delivery?.justificacion === 'Se acordó cobrar en la entrega') {
-        p['pagoDelivery.quienPaga'] = 'entrega';
-      }
 
       // ── Al entregar: registrar cobroDelivery ──────────────────────────────
       if (nuevo === 'entregado') {
@@ -627,13 +629,12 @@ export default function PanelMotorizadoPage() {
         const esCredito = o.tipoCliente === 'credito' || quienPaga === 'credito_semanal'
         const semanaKey = esCredito ? getSemanaKey(new Date()) : undefined
 
-        // Si el motorizado ya cobró el delivery en la entrega, marcarlo como pagado directamente.
-        // Para recolección, el cobro se confirma en el paso 'retirado' (cobrosMotorizado.delivery).
-        // Solo queda 'pendiente' si no se cobró (el gestor deberá gestionarlo).
+        // Sin cobros en esta llamada: el único cobro ya registrado (si lo
+        // hay) es el de una recolección confirmada en 'retirado', vía la
+        // Function. Se lee de o.cobrosMotorizado, ya escrito por esa llamada
+        // previa.
         const esRecoleccion = quienPaga === 'recoleccion'
-        const motorizadoYaCobro =
-          cobros?.delivery?.recibio === true ||
-          (esRecoleccion && o.cobrosMotorizado?.delivery?.recibio === true)
+        const motorizadoYaCobro = esRecoleccion && o.cobrosMotorizado?.delivery?.recibio === true
         p['cobroDelivery'] = {
           monto: precioDelivery,
           tipoCliente: esCredito ? 'credito' : 'contado',
@@ -694,6 +695,53 @@ export default function PanelMotorizadoPage() {
         if (motorizadoDocId && coordFinal) {
           actualizarUbicacionOperativa(motorizadoDocId, coordFinal);
         }
+      }
+    } catch (e) { console.error(e); setErr('No se pudo cambiar.'); }
+    finally { setActionId(null); }
+  }
+
+  // Transición CON confirmación de cobro: cobrosMotorizado y/o
+  // fueraManagua.efectivoRecibidoMotorizado se escriben server-side —
+  // firestore.rules ya no le permite al motorizado tocar esas claves
+  // directo. El monto de delivery/producto NUNCA lo edita el usuario en esta
+  // UI (ver calcDeposito()) — el servidor lo recalcula, así que no se envía.
+  async function executeConfirmarConCobro(
+    o: Solicitud,
+    nuevo: 'retirado' | 'entregado',
+    cobros?: { delivery?: RespuestaCobroPayload; producto?: RespuestaCobroPayload },
+    cargotransCobro?: { monto: number }
+  ) {
+    if (!o.id) return;
+    setErr(null); setActionId(`${o.id}:${nuevo}`);
+    try {
+      const resultado = await confirmarTransicionCallable({
+        solicitudId: o.id,
+        nuevo,
+        ...(cobros ? { cobros } : {}),
+        ...(cargotransCobro ? { cargotransCobro } : {}),
+      });
+      // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
+      if (motorizadoDocId) {
+        await updateDoc(doc(db, 'motorizado', motorizadoDocId), {
+          estado: nuevo === 'entregado' ? 'disponible' : 'ocupado',
+          updatedAt: serverTimestamp(),
+        });
+      }
+      if (nuevo === 'retirado' && motorizadoDocId && o.recoleccion?.coord) {
+        actualizarUbicacionOperativa(motorizadoDocId, o.recoleccion.coord);
+      }
+      if (nuevo === 'entregado') {
+        const coordFinal =
+          o.entrega?.coord ??
+          (o.tipoServicio === 'fuera_managua' ? o.fueraManagua?.coordsPuntoLogistico ?? null : null)
+        if (motorizadoDocId && coordFinal) {
+          actualizarUbicacionOperativa(motorizadoDocId, coordFinal);
+        }
+      }
+      // La entrega ya está confirmada: si esto falla, la orden queda
+      // entregada y 'pendiente', y se reintenta sola al reabrir la pantalla.
+      if (resultado.data.necesitaAcumularCobroSemanal) {
+        void acumularConReintento(o.id, setErr);
       }
     } catch (e) { console.error(e); setErr('No se pudo cambiar.'); }
     finally { setActionId(null); }
@@ -1346,17 +1394,20 @@ export default function PanelMotorizadoPage() {
                                     // Cuando el delivery está deducido del CE, no se pregunta por separado.
                                     // Al confirmar el producto se registra el delivery implícitamente
                                     // con el mismo resultado (recibido o no) que el producto.
+                                    // monto ya NO se envía: nunca lo edita el usuario acá (ver
+                                    // calcDeposito()) — el servidor lo recalcula desde el
+                                    // documento, no confía en lo que mande el cliente.
                                     const deliveryCobro = pc.showDelivery
-                                      ? { monto: pc.montoDelivery, recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? pc.justDelivery : undefined }
+                                      ? { recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? pc.justDelivery : undefined }
                                       : (deducirPcConfirm && pc.showProducto && pc.montoDelivery > 0)
-                                        ? { monto: pc.montoDelivery, recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? pc.justProducto : undefined }
+                                        ? { recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? pc.justProducto : undefined }
                                         : undefined;
-                                    executeCambiar(
+                                    executeConfirmarConCobro(
                                       pc.order,
-                                      pc.nuevo,
+                                      pc.nuevo as 'retirado' | 'entregado',
                                       {
                                         delivery: deliveryCobro,
-                                        producto: pc.showProducto ? { monto: pc.montoProducto, recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? pc.justProducto : undefined } : undefined,
+                                        producto: pc.showProducto ? { recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? pc.justProducto : undefined } : undefined,
                                       },
                                       pc.showCargotransCobro ? { monto: Number(pc.montoCargotrans) } : undefined,
                                     );
