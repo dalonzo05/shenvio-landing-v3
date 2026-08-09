@@ -1053,12 +1053,18 @@ service cloud.firestore {
       // desde una cuenta que ya no debería operar.
       //
       // DIGITADOR V1 (D2/D3, sección 9): el digitador también puede crear un
-      // depósito, pero NUNCA directo a 'confirmado' — nace en 'en_revision',
-      // con digitadoPorUid/digitadoAt auto-atribuidos, y queda en la misma
-      // cola "Por revisar" que ya usa el gestor para lo que sube el
-      // motorizado. Solo Gestor/Admin puede llevarlo a 'confirmado'/'rechazado'
-      // (allow update de abajo, sin cambios). Lista cerrada de campos: el
-      // digitador no es un actor de confianza total como gestor/admin.
+      // depósito, pero NUNCA directo a 'confirmado'. Nace en 'pendiente_boucher'
+      // (sin boucher todavía) — mismo estado que ya usa el motorizado antes de
+      // subir el suyo, no se inventa uno nuevo — y solo pasa a 'en_revision'
+      // en un segundo update, JUNTO con el campo boucher (ver ÚLTIMA
+      // VERIFICACIÓN: si compressImage/uploadDepositoBoucher falla del lado
+      // del cliente, el documento queda en 'pendiente_boucher' — nunca
+      // aparenta estar listo para revisión sin comprobante real). digitadoPorUid/
+      // digitadoAt auto-atribuidos, misma cola "Por revisar" que el gestor ya
+      // usa para lo del motorizado. Solo Gestor/Admin lleva a
+      // 'confirmado'/'rechazado' (allow update de abajo, sin cambios). Lista
+      // cerrada de campos: el digitador no es un actor de confianza total
+      // como gestor/admin.
       function camposDigitacionDeposito() {
         return request.resource.data.keys().hasOnly([
           'creadoAt', 'tipo', 'estado', 'destinatario', 'destinatarioId', 'destinatarioNombre',
@@ -1078,7 +1084,7 @@ service cloud.firestore {
         || (
           isDigitador()
           && camposDigitacionDeposito()
-          && request.resource.data.estado == 'en_revision'
+          && request.resource.data.estado == 'pendiente_boucher'
           && request.resource.data.montoTotal is number
           && request.resource.data.montoTotal >= 0
           && digitacionAutoatribuida()
@@ -1109,6 +1115,16 @@ service cloud.firestore {
           'updatedAt'
         ])
         && request.resource.data.estado == 'en_revision';
+
+      // Digitador: adjunta el boucher y recién ahí pasa a 'en_revision' —
+      // única transición permitida desde 'pendiente_boucher' (ver ÚLTIMA
+      // VERIFICACIÓN arriba). Sin esto, un digitador que crea el documento
+      // nunca podría completarlo.
+      allow update: if isDigitador()
+        && resource.data.get('digitadoPorUid', null) == request.auth.uid
+        && resource.data.estado == 'pendiente_boucher'
+        && request.resource.data.estado == 'en_revision'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['boucher', 'estado', 'updatedAt']);
 
       // Digitador: solo puede corregir el COMPROBANTE de su propia
       // digitación mientras el gestor todavía no la revisó (D2). Una vez

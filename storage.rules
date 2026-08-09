@@ -274,7 +274,10 @@ service firebase.storage {
       let dep = firestore.get(/databases/(default)/documents/ordenes_deposito/$(depositoId)).data;
       return dep.get('digitadoPorUid', null) == request.auth.uid
         && dep.get('motorizadoUid', null) == motorizadoAuthUid
-        && dep.get('estado', 'en_revision') == 'en_revision';
+        // 'pendiente_boucher': primera subida (el documento nace así, ver
+        // ÚLTIMA VERIFICACIÓN en depositos/page.tsx). 'en_revision': subidas
+        // posteriores de corrección mientras el gestor no lo revisó todavía.
+        && dep.get('estado', 'en_revision') in ['pendiente_boucher', 'en_revision'];
     }
 
     function depositoEditablePorDigitador(motorizadoAuthUid, depositoId) {

@@ -819,6 +819,15 @@ export default function DepositosPage() {
   // ("la inexistencia del documento no concede nada, nunca", ver
   // storage.rules líneas 200-206) quedaría abierto para digitador si se
   // subiera el archivo antes de crear el documento.
+  //
+  // ÚLTIMA VERIFICACIÓN (compensación de fallo de upload): el documento nace
+  // en 'pendiente_boucher' (mismo estado que ya usa el motorizado antes de
+  // subir su propio boucher — no se inventa ninguno nuevo) y solo pasa a
+  // 'en_revision' en el update final, JUNTO con el campo boucher, en una
+  // sola escritura. Si compressImage/uploadDepositoBoucher falla, el
+  // documento queda en 'pendiente_boucher' — nunca aparenta estar listo
+  // para revisión sin comprobante real, y el propio digitador puede
+  // reintentar subiendo el boucher desde la misma fila ("Sin boucher").
   async function digitarDepositoStorkhub(ordenes: Solicitud[], motId: string, motNombre: string, boucherFile: File) {
     const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
     const motDocId = await resolverMotorizadoDocId(motAuthUid)
@@ -831,11 +840,12 @@ export default function DepositosPage() {
     const gastosDescontados = gastosDeMotorizado.reduce((s, g) => s + g.monto, 0)
     const montoTotal = Math.max(0, montoBruto - gastosDescontados)
 
-    // 1) Documento primero — ownership real para Storage antes de subir nada.
+    // 1) Documento primero, SIN boucher — ownership real para Storage antes
+    //    de subir nada, y punto de reintento si el paso 2 falla.
     await setDoc(depositoRef, {
       creadoAt: serverTimestamp(),
       tipo: 'recaudacion_motorizado_storkhub',
-      estado: 'en_revision',
+      estado: 'pendiente_boucher',
       destinatario: 'storkhub',
       destinatarioId: 'storkhub',
       destinatarioNombre: 'Storkhub',
@@ -852,13 +862,16 @@ export default function DepositosPage() {
     })
 
     // 2) Subir boucher — el documento ya existe y ya declara digitadoPorUid.
+    //    Si esto falla, el documento queda en 'pendiente_boucher': el error
+    //    se propaga al llamador (mismo manejo que ya hace DepositoGrupo con
+    //    su catch/setErr), sin dejar rastro de "listo para revisar".
     const blob = await compressImage(boucherFile)
     const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
     const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
 
-    // 3) Completar metadata — mismo shape que la corrección posterior
-    //    (allowlist ['boucher','updatedAt'] en firestore.rules).
-    await updateDoc(depositoRef, { boucher: boucherData })
+    // 3) Recién acá pasa a 'en_revision' — boucher y transición en la MISMA
+    //    escritura, nunca uno sin el otro.
+    await updateDoc(depositoRef, { boucher: boucherData, estado: 'en_revision' })
   }
 
   async function digitarDepositoComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File) {
@@ -872,7 +885,7 @@ export default function DepositosPage() {
     await setDoc(depositoRef, {
       creadoAt: serverTimestamp(),
       tipo: 'recaudacion_motorizado_comercio',
-      estado: 'en_revision',
+      estado: 'pendiente_boucher',
       destinatario: 'comercio',
       destinatarioId: comercioUid,
       destinatarioNombre: comercioNombre,
@@ -889,7 +902,7 @@ export default function DepositosPage() {
     const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
     const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
 
-    await updateDoc(depositoRef, { boucher: boucherData })
+    await updateDoc(depositoRef, { boucher: boucherData, estado: 'en_revision' })
   }
 
   // ── Confirmar depósito existente (creado por motorizado o digitador) ──────
