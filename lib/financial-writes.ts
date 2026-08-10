@@ -8,6 +8,7 @@ import {
   query,
   runTransaction,
   serverTimestamp,
+  setDoc,
   updateDoc,
   where,
   writeBatch,
@@ -765,11 +766,22 @@ export async function condonarDeudaMotorizado(params: {
 // 12-14 y functions/src/propuestas-abono.ts.
 
 /**
- * Registra una propuesta de abono pendiente de revisión. NO toca
- * saldos_cargo_motorizado ni movimientos_financieros — eso ocurre solo si
- * un Gestor/Admin la confirma después.
+ * Registra una propuesta de abono pendiente de revisión SIN comprobante
+ * (métodos que no lo requieren — ver METODOS_REQUIEREN_COMPROBANTE en
+ * saldos/page.tsx). NO toca saldos_cargo_motorizado ni
+ * movimientos_financieros — eso ocurre solo si un Gestor/Admin la confirma
+ * después.
+ *
+ * STORAGE ORPHANS BLOQUE 1: propuestaId ahora lo genera y provee el
+ * llamador (antes esta función usaba addDoc con un id propio, DISTINTO del
+ * que el llamador ya había generado para el path de Storage cuando SÍ había
+ * comprobante — un desajuste real entre el id del documento y el segmento
+ * de carpeta en Storage). Cuando el método requiere comprobante, usar
+ * crearPropuestaAbonoPendienteComprobante + completarComprobantePropuesta
+ * en su lugar — ver esas dos funciones más abajo.
  */
 export async function crearPropuestaAbono(params: {
+  propuestaId: string
   saldoId: string
   motorizadoId: string
   motorizadoUid: string
@@ -780,9 +792,9 @@ export async function crearPropuestaAbono(params: {
   operadorId: string
   comprobanteUrl?: string
   comprobantePath?: string
-}): Promise<string> {
+}): Promise<void> {
   const {
-    saldoId, motorizadoId, motorizadoUid, motorizadoNombre, monto, metodoAbono,
+    propuestaId, saldoId, motorizadoId, motorizadoUid, motorizadoNombre, monto, metodoAbono,
     nota, operadorId, comprobanteUrl, comprobantePath,
   } = params
 
@@ -801,8 +813,64 @@ export async function crearPropuestaAbono(params: {
     digitadoAt: serverTimestamp(),
   }
 
-  const ref = await addDoc(collection(db, 'propuestas_abono_saldo'), propuesta)
-  return ref.id
+  await setDoc(doc(db, 'propuestas_abono_saldo', propuestaId), propuesta)
+}
+
+/**
+ * Crea el documento de una propuesta ANTES de subir el comprobante —
+ * STORAGE ORPHANS BLOQUE 1. El doc nace en 'pendiente_comprobante' (nunca
+ * 'pendiente' — ese estado significa "lista para revisión" y el Gestor
+ * actúa sobre él; un doc sin comprobante real nunca debe aparecer ahí). El
+ * llamador debe generar propuestaId ANTES de llamar a esta función y
+ * reutilizarlo tanto acá como en el upload a Storage
+ * (saldos/{saldoId}/propuestas/{propuestaId}/comprobante.jpg) — así un
+ * reintento tras un fallo de upload reutiliza el mismo path en vez de
+ * generar uno nuevo cada vez.
+ */
+export async function crearPropuestaAbonoPendienteComprobante(params: {
+  propuestaId: string
+  saldoId: string
+  motorizadoId: string
+  motorizadoUid: string
+  motorizadoNombre: string
+  monto: number
+  metodoAbono: MetodoAbono
+  nota?: string
+  operadorId: string
+}): Promise<void> {
+  const { propuestaId, saldoId, motorizadoId, motorizadoUid, motorizadoNombre, monto, metodoAbono, nota, operadorId } = params
+
+  const propuesta: Omit<PropuestaAbonoSaldo, 'id'> = {
+    saldoId,
+    motorizadoId,
+    motorizadoUid,
+    motorizadoNombre,
+    monto,
+    metodoAbono,
+    ...(nota ? { nota } : {}),
+    estado: 'pendiente_comprobante',
+    digitadoPorUid: operadorId,
+    digitadoAt: serverTimestamp(),
+  }
+
+  await setDoc(doc(db, 'propuestas_abono_saldo', propuestaId), propuesta)
+}
+
+/**
+ * Completa una propuesta 'pendiente_comprobante' con el comprobante ya
+ * subido y la transiciona a 'pendiente' (recién ahí queda visible para el
+ * Gestor). Boucher y transición en la MISMA escritura, nunca uno sin el
+ * otro — mismo criterio que digitarDepositoStorkhub en depositos/page.tsx.
+ */
+export async function completarComprobantePropuesta(
+  propuestaId: string,
+  comprobante: { comprobanteUrl: string; comprobantePath: string }
+): Promise<void> {
+  await updateDoc(doc(db, 'propuestas_abono_saldo', propuestaId), {
+    comprobanteUrl: comprobante.comprobanteUrl,
+    comprobantePath: comprobante.comprobantePath,
+    estado: 'pendiente',
+  })
 }
 
 /**

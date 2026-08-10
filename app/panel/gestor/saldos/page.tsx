@@ -15,6 +15,7 @@ import { auth, db, functions } from '@/fb/config'
 import {
   registrarAbonoSaldo, anularSaldoCargo, revertirConversionEnDeuda, condonarDeudaMotorizado,
   crearPropuestaAbono, corregirPropuestaAbono,
+  crearPropuestaAbonoPendienteComprobante, completarComprobantePropuesta,
 } from '@/lib/financial-writes'
 import {
   LABELS_TIPO_SALDO,
@@ -127,6 +128,12 @@ export default function SaldosPage() {
   const [savingAbono, setSavingAbono] = useState(false)
   const [errAbono, setErrAbono] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // STORAGE ORPHANS BLOQUE 1: id de la propuesta NUEVA que se está creando,
+  // generado una sola vez por sesión de "proponer abono" y reutilizado en
+  // cada reintento (ver handleProponerAbono) — nunca uno nuevo mientras la
+  // operación siga recuperable. Se resetea junto con el resto del form en
+  // resetAbono().
+  const pendingPropuestaIdRef = useRef<string | null>(null)
 
   // ── DIGITADOR V1 — doble control de abonos (D3) ───────────────────────────
   const [userRol, setUserRol] = useState<string | null>(null)
@@ -225,6 +232,7 @@ export default function SaldosPage() {
     setComprobanteFile(null)
     setComprobantePreview(null)
     setErrAbono(null)
+    pendingPropuestaIdRef.current = null
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -322,31 +330,81 @@ export default function SaldosPage() {
           ...(comprobanteUrl ? { comprobanteUrl, comprobantePath } : {}),
         })
       } else {
-        // Propuesta nueva: el ID lo genera el cliente para poder subir el
-        // comprobante ANTES de crear el documento — mismo patrón que
-        // ordenes_deposito/pagos_comercio en el resto del proyecto.
-        const propuestaRef = doc(collection(db, 'propuestas_abono_saldo'))
-        const propuestaId = propuestaRef.id
-        let comprobanteUrl: string | undefined
-        let comprobantePath: string | undefined
-        if (comprobanteFile) {
-          const blob = await compressImage(comprobanteFile)
-          const r = await uploadComprobantePropuesta(saldo.id, propuestaId, blob)
-          comprobanteUrl = r.url
-          comprobantePath = r.pathStorage
+        // Propuesta nueva — STORAGE ORPHANS BLOQUE 1: el ID lo genera el
+        // cliente UNA sola vez por sesión (persistido en
+        // pendingPropuestaIdRef, no en cada llamada a esta función) y se
+        // reutiliza en cada reintento — antes crearPropuestaAbono generaba
+        // su PROPIO id distinto vía addDoc, así que el id usado en el path
+        // de Storage nunca coincidía con el id real del documento.
+        if (!pendingPropuestaIdRef.current) {
+          pendingPropuestaIdRef.current = doc(collection(db, 'propuestas_abono_saldo')).id
         }
-        await crearPropuestaAbono({
-          saldoId: saldo.id,
-          motorizadoId: saldo.motorizadoId,
-          motorizadoUid: saldo.motorizadoUid,
-          motorizadoNombre: saldo.motorizadoNombre,
-          monto,
-          metodoAbono,
-          nota: notaAbono,
-          operadorId: uid,
-          comprobanteUrl,
-          comprobantePath,
-        })
+        const propuestaId = pendingPropuestaIdRef.current
+
+        if (comprobanteFile) {
+          // Dos fases — mismo criterio que digitarDepositoStorkhub: el doc
+          // nace 'pendiente_comprobante' (nunca aparece como lista para
+          // revisar), LUEGO se sube el comprobante al MISMO propuestaId,
+          // y recién ahí se transiciona a 'pendiente'. Idempotente: si un
+          // intento previo con este mismo propuestaId ya llegó a
+          // 'pendiente', no se repite nada.
+          //
+          // El digitador NUNCA puede leer un doc que no existe todavía
+          // (firestore.rules deniega limpio — 'resource' es null para un
+          // digitador, que no es admin/gestor) — en el primer intento (el
+          // caso normal) este getDoc() SIEMPRE lanza, no solo en teoría.
+          // Se trata como "todavía no existe" — que es exactamente lo que
+          // significa: si el doc no existe, o existe pero no es propio, no
+          // hay nada que saltar.
+          let yaExiste = false
+          let yaCompleta = false
+          try {
+            const existente = await getDoc(doc(db, 'propuestas_abono_saldo', propuestaId))
+            yaExiste = existente.exists()
+            yaCompleta = yaExiste && existente.data()?.estado !== 'pendiente_comprobante'
+          } catch {
+            yaExiste = false
+          }
+
+          if (!yaCompleta) {
+            // Crear el doc en pendiente_comprobante SOLO si todavía no
+            // existe — firestore.rules solo concede 'create' al digitador
+            // para un doc nuevo; reescribirlo ya existente se evalúa como
+            // 'update' y el único update de digitador es la transición
+            // final (pendiente_comprobante -> pendiente, ver más abajo),
+            // así que repetir este paso en un reintento sería denegado.
+            if (!yaExiste) {
+              await crearPropuestaAbonoPendienteComprobante({
+                propuestaId,
+                saldoId: saldo.id,
+                motorizadoId: saldo.motorizadoId,
+                motorizadoUid: saldo.motorizadoUid,
+                motorizadoNombre: saldo.motorizadoNombre,
+                monto,
+                metodoAbono,
+                nota: notaAbono,
+                operadorId: uid,
+              })
+            }
+            const blob = await compressImage(comprobanteFile)
+            const r = await uploadComprobantePropuesta(saldo.id, propuestaId, blob)
+            await completarComprobantePropuesta(propuestaId, { comprobanteUrl: r.url, comprobantePath: r.pathStorage })
+          }
+        } else {
+          // Método sin comprobante — sin Storage de por medio, sin riesgo
+          // de huérfano; un solo paso directo a 'pendiente'.
+          await crearPropuestaAbono({
+            propuestaId,
+            saldoId: saldo.id,
+            motorizadoId: saldo.motorizadoId,
+            motorizadoUid: saldo.motorizadoUid,
+            motorizadoNombre: saldo.motorizadoNombre,
+            monto,
+            metodoAbono,
+            nota: notaAbono,
+            operadorId: uid,
+          })
+        }
       }
       resetAbono()
       setPropuestaCorrigiendoId(null)
@@ -876,11 +934,21 @@ export default function SaldosPage() {
                           <div className="flex items-center justify-between gap-2 flex-wrap">
                             <span className="text-xs font-semibold text-gray-800">{fmt(p.monto)} · {p.metodoAbono}</span>
                             <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                              p.estado === 'pendiente' ? 'bg-amber-100 text-amber-700'
+                              p.estado === 'pendiente_comprobante' ? 'bg-gray-100 text-gray-500'
+                              : p.estado === 'pendiente' ? 'bg-amber-100 text-amber-700'
                               : p.estado === 'confirmado' ? 'bg-green-100 text-green-700'
                               : 'bg-red-100 text-red-700'
                             }`}>
-                              {p.estado === 'pendiente' ? 'Pendiente de revisión' : p.estado === 'confirmado' ? 'Confirmado' : 'Rechazado'}
+                              {/* STORAGE ORPHANS BLOQUE 1: 'pendiente_comprobante' es un
+                                  estado intermedio — nunca debe leerse como "Rechazado"
+                                  (antes caía en el else por descarte). No es accionable
+                                  por el Gestor (ver el chequeo === 'pendiente' sin cambios
+                                  más abajo) ni corregible por el Digitador (nada que
+                                  corregir todavía). */}
+                              {p.estado === 'pendiente_comprobante' ? 'Incompleta — sin comprobante'
+                                : p.estado === 'pendiente' ? 'Pendiente de revisión'
+                                : p.estado === 'confirmado' ? 'Confirmado'
+                                : 'Rechazado'}
                             </span>
                           </div>
                           {p.nota && <p className="text-[11px] text-gray-500">{p.nota}</p>}

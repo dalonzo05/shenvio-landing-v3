@@ -345,7 +345,14 @@ export interface AbonoSaldo {
 // (su suma es la fuente de "totalAbonado" en otros cálculos) — mezclar ahí
 // una propuesta todavía pendiente rompería esa invariante y la idempotencia
 // de la confirmación. Ver DIGITADOR V1, sección 13.
-export type EstadoPropuestaAbono = 'pendiente' | 'confirmado' | 'rechazado'
+// STORAGE ORPHANS BLOQUE 1: 'pendiente_comprobante' es un estado intermedio
+// — documento creado, comprobante todavía NO subido/confirmado. Nunca lleva
+// comprobanteUrl/comprobantePath (esos llegan recién en la transición a
+// 'pendiente') y nunca debe tratarse como "lista para revisión" — el Gestor
+// solo actúa sobre 'pendiente' (ver el chequeo sin cambios en
+// confirmarPropuestaAbono/rechazarPropuestaAbono y en saldos/page.tsx).
+// Mismo criterio de nombre que 'pendiente_boucher' en ordenes_deposito.
+export type EstadoPropuestaAbono = 'pendiente_comprobante' | 'pendiente' | 'confirmado' | 'rechazado'
 
 export interface PropuestaAbonoSaldo {
   id?: string

@@ -1090,15 +1090,27 @@ service cloud.firestore {
           && digitacionAutoatribuida()
         );
 
+      // STORAGE ORPHANS BLOQUE 1: 'resource != null' en cada rama no-staff
+      // — digitarDepositoStorkhub/digitarDepositoComercio (depositos/page.tsx)
+      // ahora hacen un getDoc() de idempotencia sobre un depositoId que en
+      // el primer intento (el caso normal) TODAVÍA no existe. Sin este
+      // chequeo, 'resource' es null para un doc inexistente y
+      // resource.data revienta con "Null value error" en vez de denegar
+      // limpio — mismo criterio fail-closed que exists() antes de .data en
+      // el resto del archivo, acá aplicado al propio 'resource' de la
+      // regla. isAdminOrGestor() ya estaba a salvo (corto-circuita antes de
+      // tocar resource.data), por eso confirmarStorkhub/confirmarComercio
+      // (gestor) nunca lo sufrieron.
       allow read: if isAdminOrGestor()
-        || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid)
+        || (isMotorizadoRole() && resource != null && resource.data.motorizadoUid == request.auth.uid)
         || (isComercioRole()
+            && resource != null
             && resource.data.destinatario == 'comercio'
             && resource.data.destinatarioId == comercioIdDelUsuario())
         // Digitador ve únicamente lo que él mismo digitó (D2/D6) — el
         // cliente debe filtrar la query por digitadoPorUid == su propio uid
         // para que Firestore pueda probar esta condición en un list().
-        || (isDigitador() && resource.data.get('digitadoPorUid', null) == request.auth.uid);
+        || (isDigitador() && resource != null && resource.data.get('digitadoPorUid', null) == request.auth.uid);
 
       // Gestor/admin: puede confirmar, rechazar y editar libremente
       allow update: if isAdminOrGestor();
@@ -1396,15 +1408,43 @@ service cloud.firestore {
                .data.get('estado', '') in ['pendiente', 'abonado_parcial'];
       }
 
-      allow read: if isAdminOrGestor()
-        || (isDigitador() && resource.data.digitadoPorUid == request.auth.uid);
+      // STORAGE ORPHANS BLOQUE 1: 'pendiente_comprobante' es el estado
+      // intermedio antes de subir el comprobante — el documento nace acá
+      // (mismo id que usará el path de Storage) y nunca lleva
+      // comprobanteUrl/comprobantePath todavía; esos llegan recién en la
+      // transición pendiente_comprobante -> pendiente (ver el segundo
+      // allow update más abajo). El chequeo de UI (=== 'pendiente') y el
+      // chequeo server-side en confirmarPropuestaAbono/rechazarPropuestaAbono
+      // (functions/src/propuestas-abono.ts) ya excluyen este estado sin
+      // cambios adicionales.
+      function creacionPropuestaValida() {
+        return camposPermitidosPropuestaAbono()
+          && montoValidoPropuesta()
+          && digitacionAutoatribuidaPropuesta()
+          && saldoAbonable()
+          && (
+            request.resource.data.estado == 'pendiente'
+            || (
+              request.resource.data.estado == 'pendiente_comprobante'
+              && !('comprobanteUrl' in request.resource.data)
+              && !('comprobantePath' in request.resource.data)
+            )
+          );
+      }
 
-      allow create: if isDigitador()
-        && camposPermitidosPropuestaAbono()
-        && request.resource.data.estado == 'pendiente'
-        && montoValidoPropuesta()
-        && digitacionAutoatribuidaPropuesta()
-        && saldoAbonable();
+      // STORAGE ORPHANS BLOQUE 1: 'resource != null' antes de 'resource.data'
+      // — el guard de idempotencia nuevo en saldos/page.tsx hace un getDoc()
+      // sobre un propuestaId que en el primer intento TODAVÍA no existe.
+      // Sin este chequeo, Firestore evalúa la regla igual (get() no filtra
+      // por existencia) y 'resource' es null para un doc inexistente:
+      // resource.data revienta con "Null value error" en vez de denegar
+      // limpio. Mismo criterio fail-closed que el resto del archivo aplica
+      // con exists() antes de .data en otros lados — acá el equivalente
+      // para el propio 'resource' de la regla es resource != null.
+      allow read: if isAdminOrGestor()
+        || (isDigitador() && resource != null && resource.data.digitadoPorUid == request.auth.uid);
+
+      allow create: if isDigitador() && creacionPropuestaValida();
 
       // Corrección: solo el propio digitador, mientras sigue 'pendiente', sin
       // tocar identidad/timestamp de digitación ni el saldo referenciado —
@@ -1412,6 +1452,12 @@ service cloud.firestore {
       // confirmadoAt/rechazadoPorUid/rechazadoAt no están en esta allowlist:
       // ni el propio digitador ni gestor/admin los escriben desde el
       // cliente, exclusivos de las Cloud Functions.
+      //
+      // STORAGE ORPHANS BLOQUE 1: segunda rama — completar comprobante,
+      // pendiente_comprobante -> pendiente, mismo digitador dueño, solo
+      // agrega comprobanteUrl/comprobantePath y cambia estado. Nada más
+      // puede tocarse en esta transición (monto/metodoAbono/saldoId/
+      // digitadoPorUid/digitadoAt deben llegar exactamente iguales).
       allow update: if isDigitador()
         && resource.data.digitadoPorUid == request.auth.uid
         && resource.data.estado == 'pendiente'
@@ -1422,7 +1468,21 @@ service cloud.firestore {
         && montoValidoPropuesta()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'monto', 'metodoAbono', 'nota', 'comprobanteUrl', 'comprobantePath'
-        ]);
+        ])
+        || (
+          isDigitador()
+          && resource.data.digitadoPorUid == request.auth.uid
+          && resource.data.estado == 'pendiente_comprobante'
+          && request.resource.data.estado == 'pendiente'
+          && request.resource.data.digitadoPorUid == resource.data.digitadoPorUid
+          && request.resource.data.digitadoAt == resource.data.digitadoAt
+          && request.resource.data.saldoId == resource.data.saldoId
+          && request.resource.data.monto == resource.data.monto
+          && request.resource.data.metodoAbono == resource.data.metodoAbono
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['comprobanteUrl', 'comprobantePath', 'estado'])
+          && request.resource.data.comprobanteUrl is string
+          && request.resource.data.comprobantePath is string
+        );
 
       allow delete: if false;
     }

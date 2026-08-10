@@ -700,40 +700,71 @@ export default function DepositosPage() {
   }
 
   // ── Confirmar depósito ─────────────────────────────────────────────────────
+  //
+  // STORAGE ORPHANS BLOQUE 1: depositoId ahora lo genera y persiste el
+  // llamador (DepositoGrupo) una sola vez por sesión de confirmación, para
+  // que un reintento reutilice el MISMO id/path en vez de generar uno
+  // nuevo cada vez. El doc nace en 'pendiente_boucher' (mismo estado que ya
+  // usa Digitador — nada nuevo) y solo pasa a 'confirmado' junto con el
+  // campo boucher, en la misma escritura. Guard de idempotencia: si un
+  // intento previo con este MISMO depositoId ya dejó el depósito
+  // 'confirmado' con boucher (falló algo DESPUÉS, p.ej. el batch de
+  // órdenes), no se repite el upload ni la escritura del doc — se salta
+  // directo a los side effects, que reutilizar es seguro porque nunca
+  // llegan a ejecutarse dos veces (ver nota en registrarMovimiento).
 
-  async function confirmarStorkhub(ordenes: Solicitud[], motId: string, motNombre: string, boucherFile: File) {
+  async function confirmarStorkhub(ordenes: Solicitud[], motId: string, motNombre: string, boucherFile: File, depositoId: string) {
     // Resolver el doc ID canónico del motorizado (motId puede ser authUid en docs antiguos)
     const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
     const motDocId = await resolverMotorizadoDocId(motAuthUid)
 
-    const depositoRef = doc(collection(db, 'ordenes_deposito'))
-    const depositoId = depositoRef.id
-    const blob = await compressImage(boucherFile)
-    // El boucher vive bajo el UID del MOTORIZADO dueño del depósito, no bajo el
-    // del gestor que lo sube: el namespace identifica al titular del depósito.
-    const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
-    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
-    const montoBruto = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
-    const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motDocId)
-    const gastosDescontados = gastosDeMotorizado.reduce((s, g) => s + g.monto, 0)
-    const montoTotal = Math.max(0, montoBruto - gastosDescontados)
-    await setDoc(depositoRef, {
-      creadoAt: serverTimestamp(),
-      tipo: 'recaudacion_motorizado_storkhub',
-      estado: 'confirmado',
-      destinatario: 'storkhub',
-      destinatarioId: 'storkhub',
-      destinatarioNombre: 'Storkhub',
-      cuentasDestino: [],
-      motorizadoUid: motAuthUid,
-      motorizadoNombre: motNombre,
-      solicitudIds: ordenes.map((o) => o.id),
-      montoTotal,
-      montoBruto,
-      gastosDescontados,
-      gastosIds: gastosDeMotorizado.map((g) => g.id),
-      boucher: boucherData,
-    })
+    const depositoRef = doc(db, 'ordenes_deposito', depositoId)
+    const existente = await getDoc(depositoRef)
+    const yaConfirmado = existente.exists() && existente.data()?.estado === 'confirmado' && !!existente.data()?.boucher
+
+    let montoTotal: number
+    if (!yaConfirmado) {
+      // El boucher vive bajo el UID del MOTORIZADO dueño del depósito, no bajo el
+      // del gestor que lo sube: el namespace identifica al titular del depósito.
+      const montoBruto = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
+      const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motDocId)
+      const gastosDescontados = gastosDeMotorizado.reduce((s, g) => s + g.monto, 0)
+      montoTotal = Math.max(0, montoBruto - gastosDescontados)
+
+      // 1) Documento primero, sin boucher — path determinístico ligado a
+      //    este depositoId, punto de reintento si el paso 2 falla. Antes de
+      //    esta escritura, compressImage() puede fallar sin dejar rastro
+      //    (nada se escribió todavía) — no hace falta que corra antes.
+      await setDoc(depositoRef, {
+        creadoAt: serverTimestamp(),
+        tipo: 'recaudacion_motorizado_storkhub',
+        estado: 'pendiente_boucher',
+        destinatario: 'storkhub',
+        destinatarioId: 'storkhub',
+        destinatarioNombre: 'Storkhub',
+        cuentasDestino: [],
+        motorizadoUid: motAuthUid,
+        motorizadoNombre: motNombre,
+        solicitudIds: ordenes.map((o) => o.id),
+        montoTotal,
+        montoBruto,
+        gastosDescontados,
+        gastosIds: gastosDeMotorizado.map((g) => g.id),
+      })
+
+      // 2) Comprimir y subir boucher al MISMO depositoId — si cualquiera de
+      //    los dos falla, el doc queda en 'pendiente_boucher' y un
+      //    reintento reutiliza este mismo path.
+      const blob = await compressImage(boucherFile)
+      const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
+      const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
+
+      // 3) Boucher y transición a 'confirmado' en la MISMA escritura.
+      await updateDoc(depositoRef, { boucher: boucherData, estado: 'confirmado' })
+    } else {
+      montoTotal = existente.data()?.montoTotal ?? 0
+    }
+
     const b = writeBatch(db)
     ordenes.forEach((o) =>
       b.update(doc(db, 'solicitudes_envio', o.id), {
@@ -754,32 +785,43 @@ export default function DepositosPage() {
     )
   }
 
-  async function confirmarComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File) {
+  async function confirmarComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File, depositoId: string) {
     // Resolver el doc ID canónico del motorizado
     const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
     const motDocId = await resolverMotorizadoDocId(motAuthUid)
 
-    const depositoRef = doc(collection(db, 'ordenes_deposito'))
-    const depositoId = depositoRef.id
-    const blob = await compressImage(boucherFile)
-    // Mismo criterio que confirmarStorkhub: el namespace es del motorizado.
-    const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
-    const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
-    const montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAlComercio, 0)
-    await setDoc(depositoRef, {
-      creadoAt: serverTimestamp(),
-      tipo: 'recaudacion_motorizado_comercio',
-      estado: 'confirmado',
-      destinatario: 'comercio',
-      destinatarioId: comercioUid,
-      destinatarioNombre: comercioNombre,
-      cuentasDestino: [],
-      motorizadoUid: motAuthUid,
-      motorizadoNombre: motNombre,
-      solicitudIds: ordenes.map((o) => o.id),
-      montoTotal,
-      boucher: boucherData,
-    })
+    const depositoRef = doc(db, 'ordenes_deposito', depositoId)
+    const existente = await getDoc(depositoRef)
+    const yaConfirmado = existente.exists() && existente.data()?.estado === 'confirmado' && !!existente.data()?.boucher
+
+    let montoTotal: number
+    if (!yaConfirmado) {
+      montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAlComercio, 0)
+
+      await setDoc(depositoRef, {
+        creadoAt: serverTimestamp(),
+        tipo: 'recaudacion_motorizado_comercio',
+        estado: 'pendiente_boucher',
+        destinatario: 'comercio',
+        destinatarioId: comercioUid,
+        destinatarioNombre: comercioNombre,
+        cuentasDestino: [],
+        motorizadoUid: motAuthUid,
+        motorizadoNombre: motNombre,
+        solicitudIds: ordenes.map((o) => o.id),
+        montoTotal,
+      })
+
+      // Mismo criterio que confirmarStorkhub: el namespace es del motorizado.
+      const blob = await compressImage(boucherFile)
+      const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
+      const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
+
+      await updateDoc(depositoRef, { boucher: boucherData, estado: 'confirmado' })
+    } else {
+      montoTotal = existente.data()?.montoTotal ?? 0
+    }
+
     const b = writeBatch(db)
     ordenes.forEach((o) =>
       b.update(doc(db, 'solicitudes_envio', o.id), {
@@ -828,38 +870,68 @@ export default function DepositosPage() {
   // documento queda en 'pendiente_boucher' — nunca aparenta estar listo
   // para revisión sin comprobante real, y el propio digitador puede
   // reintentar subiendo el boucher desde la misma fila ("Sin boucher").
-  async function digitarDepositoStorkhub(ordenes: Solicitud[], motId: string, motNombre: string, boucherFile: File) {
+  //
+  // STORAGE ORPHANS BLOQUE 1: depositoId también lo genera y persiste ahora
+  // DepositoGrupo (mismo criterio que confirmarStorkhub/confirmarComercio)
+  // — antes se generaba adentro de esta función, así que un reintento desde
+  // la UI (tras un fallo en el paso 2) invocaba esta función de nuevo con un
+  // id fresco, dejando el doc anterior varado en 'pendiente_boucher' para
+  // siempre y, si el paso 2 ya había subido el archivo, un huérfano de
+  // Storage sin ningún doc que lo referencie. Guard de idempotencia: si el
+  // doc con este MISMO depositoId ya está 'en_revision', no repetir nada.
+  async function digitarDepositoStorkhub(ordenes: Solicitud[], motId: string, motNombre: string, boucherFile: File, depositoId: string) {
     const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
     const motDocId = await resolverMotorizadoDocId(motAuthUid)
     const uid = auth.currentUser?.uid ?? ''
 
-    const depositoRef = doc(collection(db, 'ordenes_deposito'))
-    const depositoId = depositoRef.id
-    const montoBruto = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
-    const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motDocId)
-    const gastosDescontados = gastosDeMotorizado.reduce((s, g) => s + g.monto, 0)
-    const montoTotal = Math.max(0, montoBruto - gastosDescontados)
+    // El digitador nunca puede leer un doc que no existe todavía
+    // (firestore.rules deniega limpio — 'resource' es null y el digitador
+    // no es admin/gestor) — en el primer intento (el caso normal, no
+    // reintento) este getDoc() SIEMPRE lanza. Se trata como "todavía no
+    // existe", que es exactamente lo que significa.
+    const depositoRef = doc(db, 'ordenes_deposito', depositoId)
+    let yaExiste = false
+    let yaEnRevision = false
+    try {
+      const existente = await getDoc(depositoRef)
+      yaExiste = existente.exists()
+      yaEnRevision = yaExiste && existente.data()?.estado === 'en_revision'
+    } catch {
+      yaExiste = false
+    }
+    if (yaEnRevision) return
 
     // 1) Documento primero, SIN boucher — ownership real para Storage antes
-    //    de subir nada, y punto de reintento si el paso 2 falla.
-    await setDoc(depositoRef, {
-      creadoAt: serverTimestamp(),
-      tipo: 'recaudacion_motorizado_storkhub',
-      estado: 'pendiente_boucher',
-      destinatario: 'storkhub',
-      destinatarioId: 'storkhub',
-      destinatarioNombre: 'Storkhub',
-      cuentasDestino: [],
-      motorizadoUid: motAuthUid,
-      motorizadoNombre: motNombre,
-      solicitudIds: ordenes.map((o) => o.id),
-      montoTotal,
-      montoBruto,
-      gastosDescontados,
-      gastosIds: gastosDeMotorizado.map((g) => g.id),
-      digitadoPorUid: uid,
-      digitadoAt: serverTimestamp(),
-    })
+    //    de subir nada, y punto de reintento si el paso 2 falla. SOLO si
+    //    todavía no existe: firestore.rules solo concede 'create' al
+    //    digitador para un doc nuevo — reescribir el mismo doc ya existente
+    //    se evalúa como 'update' y ningún update permite repetir este paso
+    //    (el único update de digitador es la transición final, más abajo),
+    //    así que repetirlo en un reintento sería denegado.
+    if (!yaExiste) {
+      const montoBruto = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
+      const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motDocId)
+      const gastosDescontados = gastosDeMotorizado.reduce((s, g) => s + g.monto, 0)
+      const montoTotal = Math.max(0, montoBruto - gastosDescontados)
+      await setDoc(depositoRef, {
+        creadoAt: serverTimestamp(),
+        tipo: 'recaudacion_motorizado_storkhub',
+        estado: 'pendiente_boucher',
+        destinatario: 'storkhub',
+        destinatarioId: 'storkhub',
+        destinatarioNombre: 'Storkhub',
+        cuentasDestino: [],
+        motorizadoUid: motAuthUid,
+        motorizadoNombre: motNombre,
+        solicitudIds: ordenes.map((o) => o.id),
+        montoTotal,
+        montoBruto,
+        gastosDescontados,
+        gastosIds: gastosDeMotorizado.map((g) => g.id),
+        digitadoPorUid: uid,
+        digitadoAt: serverTimestamp(),
+      })
+    }
 
     // 2) Subir boucher — el documento ya existe y ya declara digitadoPorUid.
     //    Si esto falla, el documento queda en 'pendiente_boucher': el error
@@ -874,29 +946,41 @@ export default function DepositosPage() {
     await updateDoc(depositoRef, { boucher: boucherData, estado: 'en_revision' })
   }
 
-  async function digitarDepositoComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File) {
+  async function digitarDepositoComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File, depositoId: string) {
     const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
     const uid = auth.currentUser?.uid ?? ''
 
-    const depositoRef = doc(collection(db, 'ordenes_deposito'))
-    const depositoId = depositoRef.id
-    const montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAlComercio, 0)
+    // Mismo criterio que digitarDepositoStorkhub — ver comentario ahí.
+    const depositoRef = doc(db, 'ordenes_deposito', depositoId)
+    let yaExiste = false
+    let yaEnRevision = false
+    try {
+      const existente = await getDoc(depositoRef)
+      yaExiste = existente.exists()
+      yaEnRevision = yaExiste && existente.data()?.estado === 'en_revision'
+    } catch {
+      yaExiste = false
+    }
+    if (yaEnRevision) return
 
-    await setDoc(depositoRef, {
-      creadoAt: serverTimestamp(),
-      tipo: 'recaudacion_motorizado_comercio',
-      estado: 'pendiente_boucher',
-      destinatario: 'comercio',
-      destinatarioId: comercioUid,
-      destinatarioNombre: comercioNombre,
-      cuentasDestino: [],
-      motorizadoUid: motAuthUid,
-      motorizadoNombre: motNombre,
-      solicitudIds: ordenes.map((o) => o.id),
-      montoTotal,
-      digitadoPorUid: uid,
-      digitadoAt: serverTimestamp(),
-    })
+    if (!yaExiste) {
+      const montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAlComercio, 0)
+      await setDoc(depositoRef, {
+        creadoAt: serverTimestamp(),
+        tipo: 'recaudacion_motorizado_comercio',
+        estado: 'pendiente_boucher',
+        destinatario: 'comercio',
+        destinatarioId: comercioUid,
+        destinatarioNombre: comercioNombre,
+        cuentasDestino: [],
+        motorizadoUid: motAuthUid,
+        motorizadoNombre: motNombre,
+        solicitudIds: ordenes.map((o) => o.id),
+        montoTotal,
+        digitadoPorUid: uid,
+        digitadoAt: serverTimestamp(),
+      })
+    }
 
     const blob = await compressImage(boucherFile)
     const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
@@ -1434,9 +1518,9 @@ export default function DepositosPage() {
                                     expandKey={`${gm.motorizadoId}-storkhub`}
                                     expanded={expandedGroups.has(`${gm.motorizadoId}-storkhub`)}
                                     onToggle={() => toggleExpand(`${gm.motorizadoId}-storkhub`)}
-                                    onConfirmar={(f) => userRol === 'digitador'
-                                      ? digitarDepositoStorkhub(gm.storkhub.ordenes, gm.motorizadoId, gm.motorizadoNombre, f)
-                                      : confirmarStorkhub(gm.storkhub.ordenes, gm.motorizadoId, gm.motorizadoNombre, f)}
+                                    onConfirmar={(f, depositoId) => userRol === 'digitador'
+                                      ? digitarDepositoStorkhub(gm.storkhub.ordenes, gm.motorizadoId, gm.motorizadoNombre, f, depositoId)
+                                      : confirmarStorkhub(gm.storkhub.ordenes, gm.motorizadoId, gm.motorizadoNombre, f, depositoId)}
                                     modoDigitador={userRol === 'digitador'}
                                     tipoDeposito="storkhub"
                                     onSelectOrden={setSelectedOrdenId}
@@ -1458,9 +1542,9 @@ export default function DepositosPage() {
                                     expandKey={`${gm.motorizadoId}-${gc.uid}`}
                                     expanded={expandedGroups.has(`${gm.motorizadoId}-${gc.uid}`)}
                                     onToggle={() => toggleExpand(`${gm.motorizadoId}-${gc.uid}`)}
-                                    onConfirmar={(f) => userRol === 'digitador'
-                                      ? digitarDepositoComercio(gc.ordenes, gc.uid, gc.nombre, gm.motorizadoId, gm.motorizadoNombre, f)
-                                      : confirmarComercio(gc.ordenes, gc.uid, gc.nombre, gm.motorizadoId, gm.motorizadoNombre, f)}
+                                    onConfirmar={(f, depositoId) => userRol === 'digitador'
+                                      ? digitarDepositoComercio(gc.ordenes, gc.uid, gc.nombre, gm.motorizadoId, gm.motorizadoNombre, f, depositoId)
+                                      : confirmarComercio(gc.ordenes, gc.uid, gc.nombre, gm.motorizadoId, gm.motorizadoNombre, f, depositoId)}
                                     modoDigitador={userRol === 'digitador'}
                                     tipoDeposito="comercio"
                                     onSelectOrden={setSelectedOrdenId}
@@ -2039,7 +2123,12 @@ function DepositoGrupo({
   expandKey: string
   expanded: boolean
   onToggle: () => void
-  onConfirmar: (boucherFile: File) => Promise<void>
+  // STORAGE ORPHANS BLOQUE 1: onConfirmar ahora recibe el depositoId — lo
+  // genera y persiste ESTE componente (ver pendingDepositoIdRef), no cada
+  // función confirmarX/digitarX por separado, para que un reintento dentro
+  // de la misma sesión de modal reutilice el mismo id/path en vez de uno
+  // nuevo en cada llamada.
+  onConfirmar: (boucherFile: File, depositoId: string) => Promise<void>
   // DIGITADOR V1: mismo componente, mismo botón — solo cambia el texto y lo
   // que pasa después (queda 'en_revision' en vez de 'confirmado'). El
   // padre decide qué función pasar en onConfirmar; esto es puramente UX.
@@ -2053,13 +2142,27 @@ function DepositoGrupo({
   const [uploading, setUploading] = useState(false)
   const [success, setSuccess] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  // STORAGE ORPHANS BLOQUE 1: generado UNA sola vez por sesión de
+  // confirmación (lazy, en el primer intento) y reutilizado en cada
+  // reintento dentro del mismo modal — nunca un id nuevo mientras la
+  // operación siga recuperable (sección 16). Se resetea solo tras éxito
+  // real; si el gestor cierra el modal sin confirmar y lo reabre, sigue
+  // apuntando al mismo intento recuperable a propósito.
+  const pendingDepositoIdRef = useRef<string | null>(null)
+  function depositoIdActual(): string {
+    if (!pendingDepositoIdRef.current) {
+      pendingDepositoIdRef.current = doc(collection(db, 'ordenes_deposito')).id
+    }
+    return pendingDepositoIdRef.current
+  }
 
   async function handleConfirmar() {
     if (!boucherFile) return
     setUploading(true)
     setErr(null)
     try {
-      await onConfirmar(boucherFile)
+      await onConfirmar(boucherFile, depositoIdActual())
+      pendingDepositoIdRef.current = null
       setSuccess(true)
       setTimeout(() => {
         setSuccess(false)

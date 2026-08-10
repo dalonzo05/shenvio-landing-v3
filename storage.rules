@@ -372,9 +372,16 @@ service firebase.storage {
       // sobreescribirse en Storage sin dejar ningún rastro en Firestore — la
       // propia propuesta ya lo impide (estado != 'pendiente' deniega el
       // update), pero Storage no lo heredaba automáticamente.
+      //
+      // STORAGE ORPHANS BLOQUE 1: 'pendiente_comprobante' también cuenta
+      // como editable — es el estado intermedio en el que el documento YA
+      // existe (creado antes de subir, mismo motivo de ownership que
+      // 'depositos/') pero el comprobante todavía no se subió. Sin esto, el
+      // propio flujo nuevo (crearPropuestaAbonoPendienteComprobante ->
+      // uploadComprobantePropuesta) quedaba denegado en el segundo paso.
       function propuestaSigueEditable() {
         return !firestore.exists(/databases/(default)/documents/propuestas_abono_saldo/$(propuestaId))
-          || firestore.get(/databases/(default)/documents/propuestas_abono_saldo/$(propuestaId)).data.get('estado', 'pendiente') == 'pendiente';
+          || firestore.get(/databases/(default)/documents/propuestas_abono_saldo/$(propuestaId)).data.get('estado', 'pendiente') in ['pendiente', 'pendiente_comprobante'];
       }
 
       allow get: if signedIn() && perfilActivo(request.auth.uid)
