@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { Resend } from 'resend'
 import { adminAuth, adminDb, emulatorActivo } from '@/fb/admin'
 import { FieldValue } from 'firebase-admin/firestore'
+import { getAppUrl } from '@/lib/env'
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
@@ -49,7 +50,7 @@ export async function POST(req: NextRequest) {
   // link real fuera de ese modo.
   const firebaseLink = await adminAuth.generatePasswordResetLink(email.trim())
   const oobCode = new URL(firebaseLink).searchParams.get('oobCode')
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'https://shenvios.com'
+  const appUrl = getAppUrl()
   const resetLink = `${appUrl}/crear-password?oobCode=${oobCode}`
 
   // Resend real NUNCA se llama en modo emulador — mismo criterio que

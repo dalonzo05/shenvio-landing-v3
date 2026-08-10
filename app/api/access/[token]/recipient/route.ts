@@ -21,6 +21,7 @@ import {
   estadoPermiteDestinatario,
   crearLimitadorDeTasa,
 } from '@/lib/temporary-access'
+import { getAppUrl } from '@/lib/env'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -87,7 +88,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     })
     if (!resultado.ok) return rechazar(401, 'parent_invalido')
 
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'https://shenvios.com'
+    const appUrl = getAppUrl()
     const url = `${appUrl}/s/${resultado.token}`
 
     return NextResponse.json(

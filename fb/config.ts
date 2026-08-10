@@ -4,31 +4,23 @@ import { getFirestore, connectFirestoreEmulator } from "./fs";
 import { getAuth, connectAuthEmulator } from 'firebase/auth'
 import { getStorage, connectStorageEmulator } from 'firebase/storage'
 import { getFunctions, connectFunctionsEmulator } from 'firebase/functions'
+import { getAppEnv, isEmulatorMode, assertFirebaseIdentity, LOCAL_EMULATOR_PROJECT_ID } from '@/lib/env'
 // TODO: Add SDKs for Firebase products that you want to use
 // https://firebase.google.com/docs/web/setup#available-libraries
-
-// Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
-export const firebaseConfig = {
-  apiKey: "AIzaSyDamiCHolJ7VYX2mAYVINENEiOACBa-qT0",
-  authDomain: "storkhub-9f719.firebaseapp.com",
-  projectId: "storkhub-9f719",
-  storageBucket: "storkhub-9f719.firebasestorage.app",
-  messagingSenderId: "1092479828671",
-  appId: "1:1092479828671:web:0d3cb4f653716a30ddfc0a",
-  measurementId: "G-62YJLMLPSM"
-};
 
 // ─── Señal centralizada de Emulator (fuente única de verdad) ───────────────
 // Cualquier otro módulo que necesite saber "¿estamos en Emulator?" importa
 // `usandoEmulator` de acá — nunca debe releer NEXT_PUBLIC_USE_EMULATOR por
 // su cuenta (evita que dos módulos se desincronicen sobre qué modo es).
-export const usandoEmulator = process.env.NEXT_PUBLIC_USE_EMULATOR === 'true'
+// La lectura real vive en lib/env.ts (isEmulatorMode) — mismo criterio que
+// `getAppEnv()` para APP_ENV: una sola función, un solo lugar que lee la
+// variable de process.env.
+export const usandoEmulator = isEmulatorMode()
 
 // "demo-*" es un prefijo que Firebase reconoce especialmente: nunca lo
 // resuelve contra infraestructura real (sin billing, sin datos reales).
 // Debe coincidir con .firebaserc y con LOCAL_PROJECT_ID en fb/admin.ts.
-export const EMULATOR_PROJECT_ID = 'demo-storkhub'
+export const EMULATOR_PROJECT_ID = LOCAL_EMULATOR_PROJECT_ID
 
 // Endpoint del Auth Emulator — un solo lugar para no duplicar el literal
 // entre la conexión de la app principal (más abajo) y cualquier app
@@ -41,29 +33,57 @@ export const AUTH_EMULATOR_URL = 'http://127.0.0.1:9099'
 export const STORAGE_EMULATOR_HOST = '127.0.0.1'
 export const STORAGE_EMULATOR_PORT = 9199
 
-// En modo Emulator, el SDK cliente se inicializa contra `EMULATOR_PROJECT_ID`
-// en vez del proyecto real — así que incluso si algún código rompiera la
-// convención de "Firebase solo se usa dentro de useEffect/handlers" (ver
-// guard más abajo) y se ejecutara durante SSR, no habría ningún proyecto
-// real al que filtrar tráfico por error. `firebaseConfig` (el real) se deja
-// exportado sin cambios para quien necesite explícitamente el proyecto real.
+// ─── Firebase Client config real — ENVIRONMENT ISOLATION V1 ────────────────
+// Antes hardcodeada acá (apiKey/projectId/etc. del proyecto real
+// storkhub-9f719 en texto plano). Ahora viene de variables de entorno
+// NEXT_PUBLIC_FIREBASE_* — ver .env.example. Estas variables NO son
+// secretas por definición (viajan al bundle del navegador de cualquier
+// forma), pero deben pertenecer al ambiente correcto: staging usa sus
+// propias NEXT_PUBLIC_FIREBASE_* apuntando a SU proyecto, production a
+// las suyas. El guard de abajo (assertFirebaseIdentity) es lo que impide
+// que una combinación incorrecta llegue a inicializarse.
 //
-// storageBucket también se reescribe al proyecto local. Antes NO se hacía, y
-// era el único servicio que en modo emulador conservaba nominalmente el
-// bucket REAL: `getStorage(app)` lo resolvía desde acá, así que toda
-// operación de Storage apuntaba a producción aunque Auth y Firestore
-// estuvieran aislados. El nombre local no necesita existir en ningún lado —
-// el emulador crea el bucket a demanda.
+// measurementId (Analytics) se retira: no hay ningún getAnalytics() en el
+// código vivo, era config muerta.
+const firebaseConfig = {
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+}
+
+// Config del Emulator: SIEMPRE valores demo fijos, nunca derivada de
+// firebaseConfig. Antes se armaba con `{...firebaseConfig, projectId:
+// EMULATOR_PROJECT_ID, ...}`, lo que significaba que apiKey/appId/
+// messagingSenderId reales terminaban viajando igual en modo Emulator —
+// funcionaba porque el Auth Emulator no valida esos campos, pero violaba
+// el requisito "el modo local Emulator nunca debe necesitar credenciales
+// reales" (un dev sin ninguna NEXT_PUBLIC_FIREBASE_* seteada debe poder
+// levantar el Emulator igual).
 const emulatorConfig = {
-  ...firebaseConfig,
-  projectId: EMULATOR_PROJECT_ID,
+  apiKey: 'demo-emulator-api-key',
   authDomain: `${EMULATOR_PROJECT_ID}.firebaseapp.com`,
+  projectId: EMULATOR_PROJECT_ID,
   storageBucket: `${EMULATOR_PROJECT_ID}.appspot.com`,
+  messagingSenderId: 'demo-emulator-sender-id',
+  appId: 'demo-emulator-app-id',
 }
 // Configuración activa: la que de hecho debe usar cualquier app de Firebase
 // en este proceso (principal o secundaria) — fuente única de verdad, para
 // que ningún módulo tenga que rearmar este ternario por su cuenta.
 export const activeConfig = usandoEmulator ? emulatorConfig : firebaseConfig
+
+// ─── Guard fail-closed ANTES de inicializar cualquier app ──────────────────
+// Misma función que usa fb/admin.ts server-side — ver lib/env.ts. Si la
+// combinación (APP_ENV, Emulator, projectId, storageBucket) no es válida
+// para este ambiente, esto lanza y ninguna app de Firebase llega a
+// inicializarse con una config equivocada.
+assertFirebaseIdentity(getAppEnv(), usandoEmulator, {
+  projectId: activeConfig.projectId ?? '',
+  storageBucket: activeConfig.storageBucket ?? '',
+})
 
 // Initialize Firebase
 export const app = getApps().length ? getApp() : initializeApp(activeConfig);
@@ -106,4 +126,4 @@ if (typeof window !== 'undefined' && usandoEmulator) {
     // no notar que una sesión quedó corriendo contra el emulador.
     console.warn('[shenvio] Firebase Emulator activo (Auth/Firestore/Functions/Storage) — NUNCA debe verse este mensaje en producción.')
   }
-}
+}

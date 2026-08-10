@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { adminAuth, adminDb } from '@/fb/admin'
 import { crearAccesoComercioTemporal } from '@/lib/temporary-access'
+import { getAppUrl } from '@/lib/env'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -116,7 +117,7 @@ export async function POST(req: NextRequest) {
       creadoPorRol: auth.rol,
     })
 
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'https://shenvios.com'
+    const appUrl = getAppUrl()
     const url = `${appUrl}/s/${token}`
 
     return NextResponse.json(

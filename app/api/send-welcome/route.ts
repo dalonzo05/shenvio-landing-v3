@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { Resend } from 'resend'
 import { adminAuth, adminDb, emulatorActivo } from '@/fb/admin'
 import { FieldValue } from 'firebase-admin/firestore'
+import { getAppUrl } from '@/lib/env'
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
@@ -99,7 +100,7 @@ export async function POST(req: NextRequest) {
   try {
     const firebaseLink = await adminAuth.generatePasswordResetLink(emailAcceso)
     const oobCode = new URL(firebaseLink).searchParams.get('oobCode')
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'https://shenvios.com'
+    const appUrl = getAppUrl()
     resetLink = `${appUrl}/crear-password?oobCode=${oobCode}`
   } catch {
     return NextResponse.json(GENERIC_ERROR, { status: 500 })

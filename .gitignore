@@ -32,6 +32,10 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ENVIRONMENT ISOLATION V1: excepción explícita — .env.example es la
+# plantilla versionada (cero secretos, cero valores reales), debe quedar
+# trackeada pese al glob .env* de arriba.
+!.env.example
 
 # vercel
 .vercel
