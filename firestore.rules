@@ -1337,6 +1337,15 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    // STORAGE CLEANUP V1: snapshots de scan (candidatos + resultados de
+    // execute). Server-only — el cliente nunca lee ni escribe esta
+    // colección directamente, solo a través de /api/admin/storage-cleanup
+    // (scan + execute), que usa Admin SDK y por tanto ignora estas reglas.
+    // No hay ningún caso de uso de cliente que justifique abrir lectura acá.
+    match /storage_cleanup_scans/{scanId} {
+      allow read, write: if false;
+    }
+
     // Liquidaciones semanales de motorizado: gestor/admin escribe, motorizado puede leer la suya
     match /liquidaciones_motorizado/{id} {
       allow read: if isAdminOrGestor()
