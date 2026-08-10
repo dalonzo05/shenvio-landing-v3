@@ -39,6 +39,7 @@ export const SCOPE_COMERCIO = [
   'evidence:terminal',
   'evidence:cargotrans',
   'voucher:delivery',
+  'motorizado:foto',
 ] as const
 
 // ─── Tipos ──────────────────────────────────────────────────────────────────
@@ -211,7 +212,13 @@ export interface VistaComercioTemporal {
     detalle?: string
   }
   timeline: Array<{ key: string; label: string; at: number }>
-  motorizado?: { nombre: string; fotoUrl?: string | null }
+  // AUDITORÍA FINAL (Gate B): NUNCA fotoUrl cruda — asignacion.motorizadoFotoUrl
+  // es una URL de Firebase Storage; entregarla tal cual (a) filtra un
+  // recurso permanente de Firebase igual que cualquier evidencia, y (b) esa
+  // carga de imagen de un tercero mandaría el token completo como Referer
+  // sin política explícita. 'tieneFoto' es solo una señal — la imagen real
+  // se sirve por el kind 'motorizado-foto' del propio endpoint de evidencia.
+  motorizado?: { nombre: string; tieneFoto: boolean }
   financiero: {
     delivery: { monto: number | null; pagado: boolean | null; label: string }
     cobroContraEntrega?: { monto: number; recibido: boolean | null }
@@ -275,7 +282,7 @@ function resumenFinanciero(s: FirebaseFirestore.DocumentData): VistaComercioTemp
 
 const KIND_SIMPLES = new Set([
   'retiro', 'entrega', 'terminal-paquete', 'terminal-ticket', 'terminal-bus',
-  'cargotrans-factura', 'delivery-boucher',
+  'cargotrans-factura', 'delivery-boucher', 'motorizado-foto',
 ])
 const KIND_CARGOTRANS_PAQUETE = /^cargotrans-paquete-([0-9]+)$/
 
@@ -287,6 +294,7 @@ const KIND_SCOPE: Record<string, string> = {
   'terminal-bus': 'evidence:terminal',
   'cargotrans-factura': 'evidence:cargotrans',
   'delivery-boucher': 'voucher:delivery',
+  'motorizado-foto': 'motorizado:foto',
 }
 
 export function scopeRequeridoParaKind(kind: string): string | null {
@@ -332,6 +340,18 @@ export function resolverEvidencia(s: FirebaseFirestore.DocumentData, kind: strin
       // al resto de evidencias — confirmado en el tipo real, no asumido).
       return obj?.path ? { pathStorage: obj.path, contentType: 'image/jpeg' } : null
     }
+    case 'motorizado-foto': {
+      // Gate B: la orden solo guarda asignacion.motorizadoFotoUrl (una URL
+      // de Firebase), nunca un pathStorage — pero el path real es
+      // predecible: motorizados/{motorizadoId}/foto.jpg (ver
+      // uploadFotoMotorizado en fb/storage.ts y storage.rules). motorizadoId
+      // es el doc-id interno; se usa solo server-side para construir el
+      // path, nunca sale hacia el cliente.
+      const motorizadoId = s.asignacion?.motorizadoId
+      return typeof motorizadoId === 'string' && motorizadoId.length > 0
+        ? { pathStorage: `motorizados/${motorizadoId}/foto.jpg`, contentType: 'image/jpeg' }
+        : null
+    }
     default: {
       const m = kind.match(KIND_CARGOTRANS_PAQUETE)
       if (!m) return null
@@ -342,9 +362,13 @@ export function resolverEvidencia(s: FirebaseFirestore.DocumentData, kind: strin
   }
 }
 
+// 'motorizado-foto' se resuelve aparte (VistaComercioTemporal.motorizado.tieneFoto)
+// y se renderiza como avatar, no en la galería general de evidencias.
+const KINDS_GALERIA = [...KIND_SIMPLES].filter((k) => k !== 'motorizado-foto')
+
 function kindsDisponibles(s: FirebaseFirestore.DocumentData): string[] {
   const kinds: string[] = []
-  for (const kind of KIND_SIMPLES) {
+  for (const kind of KINDS_GALERIA) {
     if (resolverEvidencia(s, kind)) kinds.push(kind)
   }
   const fotos = Array.isArray(s.evidenciasCargotrans?.fotos) ? s.evidenciasCargotrans.fotos : []
@@ -390,8 +414,12 @@ export function construirVistaComercio(solicitudId: string, s: FirebaseFirestore
       detalle: s.detalle,
     },
     timeline: construirTimeline(s),
+    // tieneFoto usa motorizadoFotoUrl SOLO como señal booleana de "se subió
+    // una foto" — su valor (una URL de Firebase) nunca se lee ni se expone;
+    // la imagen real la sirve el kind 'motorizado-foto' en el momento del
+    // request, con su propio chequeo de existencia en Storage.
     motorizado: s.asignacion?.motorizadoNombre
-      ? { nombre: s.asignacion.motorizadoNombre, fotoUrl: s.asignacion.motorizadoFotoUrl ?? null }
+      ? { nombre: s.asignacion.motorizadoNombre, tieneFoto: !!s.asignacion?.motorizadoId && !!s.asignacion?.motorizadoFotoUrl }
       : undefined,
     financiero: resumenFinanciero(s),
     rechazo: (s.estado === 'rechazada' && s.rechazo?.visibleParaComercio === true)

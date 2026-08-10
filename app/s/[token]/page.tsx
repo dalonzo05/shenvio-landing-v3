@@ -8,16 +8,33 @@
 // por apertura de vista, nunca desde el endpoint de evidencia).
 
 import type { Metadata } from 'next'
+import { headers } from 'next/headers'
 import { adminDb } from '@/fb/admin'
 import {
   validarAcceso,
   registrarAccesoVista,
   construirVistaComercio,
+  crearLimitadorDeTasa,
   type VistaComercioTemporal,
 } from '@/lib/temporary-access'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+
+// Sección 6 (auditoría final): rate limit de la vista principal, mismo
+// helper y mismo patrón module-scope ya usado en
+// app/api/access/[token]/evidence/[kind]/route.ts. Un Server Component no
+// recibe un NextRequest, pero headers() de next/headers expone la misma
+// cabecera x-forwarded-for de forma soportada — no hace falta arquitectura
+// nueva. 30/min por IP es holgado para un usuario real (nadie recarga la
+// vista 30 veces en un minuto) y limita el barrido de tokens al vuelo; la
+// autorización real sigue siendo el token de 256 bits + expiración/revocación.
+const superaRateLimit = crearLimitadorDeTasa(30, 60_000)
+
+async function ipDelRequest(): Promise<string> {
+  const hdrs = await headers()
+  return hdrs.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
+}
 
 // Sección 23: metadata genérica, sin datos de la orden — nunca el nombre del
 // cliente, dirección, monto o comercio en <title>/OpenGraph.
@@ -75,6 +92,8 @@ export default async function VistaTemporalComercioPage({
   const { token } = await params
 
   if (!token || token.length > 128) return <NoDisponible />
+
+  if (superaRateLimit(await ipDelRequest())) return <NoDisponible />
 
   const resultado = await validarAcceso(token)
   if (!resultado.ok) return <NoDisponible />
@@ -184,9 +203,9 @@ function VistaComercio({ vista, token }: { vista: VistaComercioTemporal; token: 
         {vista.motorizado && (
           <div className="rounded-2xl border border-gray-200 bg-white shadow-sm p-4 flex items-center gap-4">
             <div className="w-12 h-12 rounded-2xl bg-[#004aad]/10 grid place-items-center overflow-hidden border border-gray-200 flex-shrink-0">
-              {vista.motorizado.fotoUrl ? (
+              {vista.motorizado.tieneFoto ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={vista.motorizado.fotoUrl} alt={vista.motorizado.nombre} className="w-full h-full object-cover" />
+                <img src={`/api/access/${token}/evidence/motorizado-foto`} alt={vista.motorizado.nombre} className="w-full h-full object-cover" />
               ) : (
                 <span className="text-lg font-black text-[#004aad]">{vista.motorizado.nombre[0]?.toUpperCase()}</span>
               )}
