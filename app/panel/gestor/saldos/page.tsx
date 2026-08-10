@@ -875,7 +875,19 @@ export default function SaldosPage() {
                       // Digitador (D3): solo propone. Nunca revertir/condonar/anular
                       // — eso sigue siendo exclusivo de Gestor/Admin más abajo.
                       <button
-                        onClick={() => { setAbonoId(s.id); setExpandedId(s.id) }}
+                        onClick={() => {
+                          // STORAGE ORPHANS BLOQUE 1 (auditoría): abrir el
+                          // form para ESTE saldo es siempre el inicio de un
+                          // intento nuevo (si el form ya estaba abierto para
+                          // este mismo saldo, este botón no es visible — ver
+                          // la rama esDigitador de arriba). Resetear acá
+                          // evita que un propuestaId varado de un intento
+                          // anterior contra OTRO saldo se reutilice, lo que
+                          // finalizaría una propuesta con el saldoId
+                          // equivocado.
+                          pendingPropuestaIdRef.current = null
+                          setAbonoId(s.id); setExpandedId(s.id)
+                        }}
                         className="w-full text-xs font-semibold px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition"
                       >
                         + Proponer abono

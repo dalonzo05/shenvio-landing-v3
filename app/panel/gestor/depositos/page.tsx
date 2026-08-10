@@ -2271,7 +2271,21 @@ function DepositoGrupo({
           modoDigitador={modoDigitador}
           onFile={setBoucherFile}
           onSubmit={handleConfirmar}
-          onCancel={() => { if (!uploading) { setModalOpen(false); setBoucherFile(null); setErr(null) } }}
+          onCancel={() => {
+            if (!uploading) {
+              // STORAGE ORPHANS BLOQUE 1 (auditoría): abandono explícito —
+              // a diferencia de un fallo (que conserva el id para que un
+              // reintento inmediato reutilice el mismo path), cerrar acá
+              // es una decisión deliberada de no continuar. Resetear el id
+              // evita que una operación futura distinta (posiblemente con
+              // órdenes/montos ya cambiados) reutilice un pendiente_boucher
+              // viejo cuyo montoTotal quedó congelado en el intento
+              // abandonado — mismo criterio que resetAbono() ya aplica en
+              // saldos/page.tsx.
+              pendingDepositoIdRef.current = null
+              setModalOpen(false); setBoucherFile(null); setErr(null)
+            }
+          }}
         />
       )}
     </div>
