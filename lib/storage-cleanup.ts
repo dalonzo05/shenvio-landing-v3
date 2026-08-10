@@ -100,6 +100,28 @@ function basename(path: string): string {
   return parts[parts.length - 1] ?? ''
 }
 
+interface BucketFileEntry {
+  name: string
+  timeCreatedMillis: number | null
+}
+
+/**
+ * Lista objetos bajo `prefix` normalizados a {name, timeCreatedMillis}.
+ * `timeCreatedMillis` viene del metadata que ya incluye la respuesta de
+ * listado de GCS (sin round-trip extra de getMetadata por archivo).
+ * Defensivo: cualquier error de red/permiso devuelve [] en vez de tumbar
+ * el scan completo — mismo criterio que el resto de este módulo.
+ */
+async function listEvidenciaPrefix(prefix: string, maxResults?: number): Promise<BucketFileEntry[]> {
+  const [files] = await adminBucket
+    .getFiles(maxResults ? { prefix, maxResults } : { prefix })
+    .catch(() => [[]] as [Array<{ name: string; metadata?: { timeCreated?: string } }>])
+  return files.map((f) => ({
+    name: f.name,
+    timeCreatedMillis: f.metadata?.timeCreated ? new Date(f.metadata.timeCreated).getTime() : null,
+  }))
+}
+
 interface ExtractedRef {
   kind: CandidateKind
   pathStorage: string
@@ -153,6 +175,15 @@ export interface RunScanResult {
  * evidencias/{solicitudId}/ de una orden ya vieja, pero sin referencia en
  * Firestore. V1 conservador: SIEMPRE eligibleForDelete=false — no se fuerza
  * limpieza de huérfanos ambiguos (decisión de negocio ya cerrada).
+ *
+ * Cobertura de huérfanos con orden eliminada (pass 2 más abajo): un objeto
+ * evidencias/{solicitudId}/archivo.jpg cuyo documento solicitudes_envio/
+ * {solicitudId} ya no existe NUNCA aparecería en el loop de arriba, porque
+ * ese loop solo visita `doc.id` de órdenes que la query devuelve. Ese caso
+ * también se reporta como orphan_unreferenced/eligibleForDelete=false,
+ * acotado por prefijo fijo 'evidencias/' (nunca depositos/saldos/
+ * liquidaciones — namespaces distintos, ver storage.rules) y por el mismo
+ * MAX_CANDIDATES_PER_SCAN — nunca un listado global del bucket.
  */
 export async function runScan(actorUid: string): Promise<RunScanResult> {
   const cutoffMillis = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000
@@ -172,8 +203,12 @@ export async function runScan(actorUid: string): Promise<RunScanResult> {
   const candidates: Record<string, StorageCleanupCandidate> = {}
   let hasMore = snap.size === MAX_CANDIDATES_PER_SCAN
   let seq = 0
+  // Órdenes ya recorridas por el loop principal — pass 2 las salta para no
+  // reprocesar ni duplicar candidatos sobre la misma solicitudId.
+  const visitedSolicitudIds = new Set<string>()
 
   outer: for (const doc of snap.docs) {
+    visitedSolicitudIds.add(doc.id)
     const data = doc.data()
     const entregadoAtMillis = data.entregadoAt instanceof Timestamp ? data.entregadoAt.toMillis() : null
     const ageDays = entregadoAtMillis ? Math.floor((Date.now() - entregadoAtMillis) / 86_400_000) : null
@@ -236,6 +271,59 @@ export async function runScan(actorUid: string): Promise<RunScanResult> {
         eligibleForDelete: false,
         entregadoAtMillis,
         ageDays,
+      }
+    }
+  }
+
+  // ── Pass 2: huérfanos de órdenes eliminadas de Firestore ────────────────
+  // Ver comentario de runScan más arriba. Acotado: prefijo fijo
+  // 'evidencias/', maxResults=MAX_CANDIDATES_PER_SCAN sobre el listado
+  // superior, allowlist idéntica (classifyFilename), eligibleForDelete
+  // SIEMPRE false y respeta el mismo tope de candidatos que el resto.
+  if (seq < MAX_CANDIDATES_PER_SCAN) {
+    const topLevel = await listEvidenciaPrefix('evidencias/', MAX_CANDIDATES_PER_SCAN)
+    if (topLevel.length === MAX_CANDIDATES_PER_SCAN) hasMore = true
+
+    const unvisitedSolicitudIds = new Set<string>()
+    for (const f of topLevel) {
+      const parts = f.name.split('/')
+      if (parts.length < 3 || parts[0] !== 'evidencias') continue
+      if (!visitedSolicitudIds.has(parts[1])) unvisitedSolicitudIds.add(parts[1])
+    }
+
+    pass2: for (const solicitudId of unvisitedSolicitudIds) {
+      visitedSolicitudIds.add(solicitudId) // no reprocesar el mismo id dos veces
+
+      // La orden existe pero no calificó en la query (no entregada / no
+      // vieja todavía) → no es el caso 'orden eliminada', no se toca acá.
+      const solicitudSnap = await adminDb.collection(SOLICITUDES_COLLECTION).doc(solicitudId).get()
+      if (solicitudSnap.exists) continue
+
+      const orphanFiles = await listEvidenciaPrefix(`evidencias/${solicitudId}/`)
+      for (const f of orphanFiles) {
+        if (seq >= MAX_CANDIDATES_PER_SCAN) {
+          hasMore = true
+          break pass2
+        }
+        const filename = basename(f.name)
+        const kind = classifyFilename(filename)
+        if (!kind) continue // no reconocido o hard deny (financiero/boucher) → nunca candidato
+        // Sin doc de orden no hay entregadoAt de referencia — se usa la
+        // antigüedad del objeto mismo en Storage.
+        if (!f.timeCreatedMillis || f.timeCreatedMillis >= cutoffMillis) continue
+
+        const candidateId = `c${seq}`
+        seq++
+        candidates[candidateId] = {
+          candidateId,
+          solicitudId,
+          kind,
+          pathStorage: f.name,
+          classification: 'orphan_unreferenced',
+          eligibleForDelete: false,
+          entregadoAtMillis: null,
+          ageDays: Math.floor((Date.now() - f.timeCreatedMillis) / 86_400_000),
+        }
       }
     }
   }
@@ -372,11 +460,77 @@ export async function executeCandidates(
       await skip('candidato_no_pertenece_al_scan')
       continue
     }
-    if (stored.result) {
-      // Ya procesado antes — idempotente, nunca reintenta un delete en silencio.
+
+    // 'deleted' y 'skipped_revalidation' son terminales: el primero ya
+    // completó Storage+metadata, el segundo requiere un scan nuevo, no un
+    // retry ciego. 'storage_delete_failed' y 'metadata_cleanup_failed' NO
+    // son terminales — ver más abajo — nunca deben caer en este bloque.
+    if (stored.result === 'deleted' || stored.result === 'skipped_revalidation') {
       outcomes.push({ candidateId, result: stored.result, reason: 'ya_procesado' })
       continue
     }
+
+    if (stored.result === 'metadata_cleanup_failed') {
+      // Recovery focal: el intento anterior YA borró el objeto de Storage
+      // (ver orden obligatorio de executeCandidates) — acá nunca se
+      // reintenta ese delete. Solo se repara metadata, y solo si el estado
+      // actual lo confirma exactamente: si el objeto reapareció/cambió, no
+      // se toca nada ciegamente.
+      if (scanExpired) {
+        await skip('scan_expirado')
+        continue
+      }
+      if (!classifyFilename(basename(stored.pathStorage))) {
+        await skip('kind_no_allowlisted')
+        continue
+      }
+      const solicitudRefMcf = adminDb.collection(SOLICITUDES_COLLECTION).doc(stored.solicitudId)
+      const solicitudSnapMcf = await solicitudRefMcf.get()
+      if (!solicitudSnapMcf.exists) {
+        await skip('solicitud_inexistente')
+        continue
+      }
+      const dataMcf = solicitudSnapMcf.data() ?? {}
+      const refsMcf = extractEvidenciaOperativa(dataMcf)
+      const stillReferencedMcf = refsMcf.some(
+        (r) => r.kind === stored.kind && r.pathStorage === stored.pathStorage,
+      )
+      if (!stillReferencedMcf) {
+        // Metadata ya no referencia el path — el estado deseado (Storage
+        // borrado + metadata limpia) ya está alcanzado por otra vía.
+        await persistResult(scanRef, candidateId, 'deleted', actorUid, 'metadata_ya_resuelta')
+        outcomes.push({ candidateId, result: 'deleted', reason: 'metadata_ya_resuelta' })
+        continue
+      }
+      // Fail-safe: si no se puede confirmar la ausencia, se asume que
+      // existe y no se toca metadata.
+      const [existeAhora] = await adminBucket
+        .file(stored.pathStorage)
+        .exists()
+        .catch(() => [true] as [boolean])
+      if (existeAhora) {
+        // El objeto reapareció/cambió respecto al delete original — estado
+        // ambiguo, no se borra nada ciegamente.
+        await skip('objeto_reapareciendo_recovery_manual')
+        continue
+      }
+      try {
+        await cleanupMetadata(solicitudRefMcf, stored)
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'metadata_cleanup_error'
+        await persistResult(scanRef, candidateId, 'metadata_cleanup_failed', actorUid, reason)
+        outcomes.push({ candidateId, result: 'metadata_cleanup_failed', reason })
+        continue
+      }
+      await persistResult(scanRef, candidateId, 'deleted', actorUid, 'metadata_reparada')
+      outcomes.push({ candidateId, result: 'deleted', reason: 'metadata_reparada' })
+      continue
+    }
+
+    // A partir de acá: stored.result es undefined (nunca procesado) o
+    // 'storage_delete_failed' (retry normal — la metadata sigue intacta
+    // porque el delete de Storage nunca llegó a completarse, así que se
+    // revalida todo desde cero exactamente igual que un candidato nuevo).
     if (scanExpired) {
       await skip('scan_expirado')
       continue
