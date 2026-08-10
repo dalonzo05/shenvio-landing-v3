@@ -25,11 +25,13 @@ const COLECCION = 'accesos_temporales'
 // D1: vigencia fija, sin selector configurable en V1.
 export const VIGENCIA_COMERCIO_MS = 48 * 60 * 60 * 1000
 
+// Bloque 2 (destinatario) — D1: 24h máximo, pero nunca más que el padre
+// (ver calcularExpiresAtDestinatario).
+export const VIGENCIA_DESTINATARIO_MS = 24 * 60 * 60 * 1000
+
 // Scope V1 — lista cerrada. La existencia del array no es decorativa: el
 // endpoint de evidencia efectivamente revisa que el kind pedido esté cubierto
 // por el scope guardado en el acceso (ver scopeRequeridoParaKind más abajo).
-// Bloque 2 (destinatario) usará un scope mucho más chico, ya con este mismo
-// mecanismo — por eso el chequeo existe desde ahora, no como "por si acaso".
 export const SCOPE_COMERCIO = [
   'order:read',
   'timeline:read',
@@ -42,9 +44,22 @@ export const SCOPE_COMERCIO = [
   'motorizado:foto',
 ] as const
 
+// Bloque 2 — D7/D6: cero información económica, cero retiro/terminal/
+// cargotrans/bouchers. La ausencia de esos strings en este array es lo que
+// hace DENY al endpoint de evidencia genérico (scopeRequeridoParaKind +
+// acceso.scope.includes) sin tocar ese endpoint kind por kind.
+export const SCOPE_DESTINATARIO = [
+  'order-status:read',
+  'timeline:read',
+  'delivery-info:read',
+  'motorizado:read',
+  'evidence:entrega',
+  'motorizado:foto',
+] as const
+
 // ─── Tipos ──────────────────────────────────────────────────────────────────
 
-export type TipoAccesoTemporal = 'comercio' // 'destinatario' llega en Bloque 2
+export type TipoAccesoTemporal = 'comercio' | 'destinatario'
 
 export interface AccesoTemporal {
   tipo: TipoAccesoTemporal
@@ -52,8 +67,17 @@ export interface AccesoTemporal {
   solicitudId: string
   comercioId: string
   scope: string[]
-  creadoPorUid: string
-  creadoPorRol: 'gestor' | 'admin'
+
+  // D2 (destinatario): puntero obligatorio al acceso comercio padre. Ausente
+  // en accesos tipo 'comercio'.
+  parentAccessId?: string
+
+  // creadoPorUid ausente cuando el hijo se crea desde el link temporal
+  // comercio (sin Firebase Auth) — sección 6: "NO inventar UID". parentAccessId
+  // ya es la trazabilidad completa en ese caso, no hace falta un campo extra.
+  creadoPorUid?: string
+  creadoPorRol: 'gestor' | 'admin' | 'comercio'
+
   createdAt: Timestamp
   expiresAt: Timestamp
   revokedAt?: Timestamp
@@ -92,6 +116,21 @@ export async function buscarAccesoPorToken(token: string): Promise<AccesoTempora
   return { id: d.id, ...(d.data() as AccesoTemporal) }
 }
 
+// Bloque 2: el hijo apunta al padre por id de documento (parentAccessId), no
+// por token — nunca guardamos el token en claro del padre en ningún lado, así
+// que la validación del padre se hace releyendo el doc directamente.
+export async function obtenerAccesoPorId(accessId: string): Promise<AccesoTemporalConId | null> {
+  const snap = await adminDb.collection(COLECCION).doc(accessId).get()
+  if (!snap.exists) return null
+  return { id: snap.id, ...(snap.data() as AccesoTemporal) }
+}
+
+function accesoVigente(acceso: AccesoTemporal): boolean {
+  if (acceso.revokedAt) return false
+  if (acceso.expiresAt.toMillis() <= Date.now()) return false
+  return true
+}
+
 export type ResultadoValidacion =
   | { ok: true; acceso: AccesoTemporalConId }
   | { ok: false; motivo: 'no_encontrado' | 'expirado' | 'revocado' }
@@ -107,6 +146,35 @@ export async function validarAcceso(token: string): Promise<ResultadoValidacion>
   return { ok: true, acceso }
 }
 
+// ─── Validación parent/child (Bloque 2 — D3) ────────────────────────────────
+//
+// Fail-closed: TODO request de un acceso tipo 'destinatario' revalida el
+// padre en vivo — nunca basta con que el hijo mismo no esté vencido/revocado,
+// porque expiresAt del hijo es una copia tomada al crearlo (sección 21: "no
+// confiar solo en expiresAt copiado al hijo"). Esta función es la única
+// entrada que usan tanto la vista (/s/[token]) como el endpoint de evidencia
+// — ningún otro código vuelve a validar el padre por su cuenta.
+export type ResultadoValidacionCompleta =
+  | { ok: true; acceso: AccesoTemporalConId; parent?: AccesoTemporalConId }
+  | { ok: false; motivo: 'no_encontrado' | 'expirado' | 'revocado' | 'parent_invalido' }
+
+export async function validarAccesoCompleto(token: string): Promise<ResultadoValidacionCompleta> {
+  const base = await validarAcceso(token)
+  if (!base.ok) return base
+  const { acceso } = base
+  if (acceso.tipo !== 'destinatario') return { ok: true, acceso }
+
+  if (!acceso.parentAccessId) return { ok: false, motivo: 'parent_invalido' }
+  const parent = await obtenerAccesoPorId(acceso.parentAccessId)
+  if (!parent) return { ok: false, motivo: 'parent_invalido' }
+  if (parent.tipo !== 'comercio') return { ok: false, motivo: 'parent_invalido' }
+  if (parent.solicitudId !== acceso.solicitudId) return { ok: false, motivo: 'parent_invalido' }
+  if (parent.comercioId !== acceso.comercioId) return { ok: false, motivo: 'parent_invalido' }
+  if (!accesoVigente(parent)) return { ok: false, motivo: 'parent_invalido' }
+
+  return { ok: true, acceso, parent }
+}
+
 // D5: "un acceso" es la apertura de la vista/datos principal — una vez por
 // request de vista, NUNCA desde el endpoint de evidencia (ver comentario en
 // ese route handler).
@@ -117,9 +185,14 @@ export async function registrarAccesoVista(accessId: string): Promise<void> {
   })
 }
 
+// revokedByUid opcional (Bloque 2, sección 15): cuando la revocación la
+// dispara el propio comercio vía su link temporal (sin Firebase Auth), no
+// hay UID que registrar — nunca se inventa uno. 'motivo' lleva la
+// explicación real ('replaced', 'comercio_link_revoke', etc.) para que el
+// documento siga siendo auditable sin falsear identidad.
 export async function revocarAcceso(
   accessId: string,
-  revokedByUid: string,
+  revokedByUid: string | undefined,
   motivo?: string
 ): Promise<{ ok: true; yaEstabaRevocado: boolean } | { ok: false; motivo: 'no_encontrado' }> {
   const ref = adminDb.collection(COLECCION).doc(accessId)
@@ -131,7 +204,7 @@ export async function revocarAcceso(
   if (data.revokedAt) return { ok: true, yaEstabaRevocado: true }
   await ref.update({
     revokedAt: FieldValue.serverTimestamp(),
-    revokedByUid,
+    ...(revokedByUid ? { revokedByUid } : {}),
     ...(motivo ? { motivoRevocacion: motivo } : {}),
   })
   return { ok: true, yaEstabaRevocado: false }
@@ -143,7 +216,7 @@ export async function crearAccesoComercioTemporal(params: {
   solicitudId: string
   comercioId: string
   creadoPorUid: string
-  creadoPorRol: 'gestor' | 'admin'
+  creadoPorRol: 'gestor' | 'admin' | 'comercio'
 }): Promise<{ id: string; token: string }> {
   const token = generarToken()
   const tokenHash = hashToken(token)
@@ -163,6 +236,160 @@ export async function crearAccesoComercioTemporal(params: {
   }
   const ref = await adminDb.collection(COLECCION).add(doc)
   return { id: ref.id, token }
+}
+
+// ─── Generación (destinatario) — Bloque 2 ───────────────────────────────────
+
+// D5: allowlist explícita releída de los estados reales del flujo (ver
+// EstadoSolicitud en app/panel/gestor/solicitudes/page.tsx) — nunca una
+// comparación ambigua de strings. 'pendiente_confirmacion', 'rechazada' y
+// 'cancelada' quedan fuera a propósito.
+const ESTADOS_PERMITIDOS_DESTINATARIO = new Set([
+  'confirmada', 'asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado',
+])
+
+export function estadoPermiteDestinatario(estado: unknown): boolean {
+  return typeof estado === 'string' && ESTADOS_PERMITIDOS_DESTINATARIO.has(estado)
+}
+
+// D1: nunca más de 24h, y nunca más que lo que le queda al padre — sección 21
+// ("parent vence en 6 horas → nuevo hijo expiresAt <= 6 horas", "no 24h ciegas").
+function calcularExpiresAtDestinatario(parent: AccesoTemporalConId): Timestamp {
+  const now = Date.now()
+  const techoPropio = now + VIGENCIA_DESTINATARIO_MS
+  const techoPadre = parent.expiresAt.toMillis()
+  return Timestamp.fromMillis(Math.min(techoPropio, techoPadre))
+}
+
+// Comercio autenticado (sección 7 / decisión sección 9, opción A): reutiliza
+// un acceso comercio vigente y no revocado de esta orden si ya existe;
+// si no, crea uno nuevo — nunca deja un hijo sin un parent real. No hay
+// límite de "un parent por orden" en el modelo (ya existían múltiples
+// accesos comercio por gestor/admin antes de este bloque); simplemente se
+// prefiere reutilizar el más reciente vigente para no acumular parents
+// invisibles innecesarios.
+export async function resolverOCrearAccesoComercioParent(params: {
+  solicitudId: string
+  comercioId: string
+  creadoPorUid: string
+}): Promise<AccesoTemporalConId> {
+  const snap = await adminDb
+    .collection(COLECCION)
+    .where('tipo', '==', 'comercio')
+    .where('solicitudId', '==', params.solicitudId)
+    .where('comercioId', '==', params.comercioId)
+    .get()
+
+  const ahora = Date.now()
+  let mejor: AccesoTemporalConId | null = null
+  snap.docs.forEach((d) => {
+    const data = { id: d.id, ...(d.data() as AccesoTemporal) }
+    if (data.revokedAt) return
+    if (data.expiresAt.toMillis() <= ahora) return
+    if (!mejor || data.expiresAt.toMillis() > mejor.expiresAt.toMillis()) mejor = data
+  })
+  if (mejor) return mejor
+
+  const { id } = await crearAccesoComercioTemporal({
+    solicitudId: params.solicitudId,
+    comercioId: params.comercioId,
+    creadoPorUid: params.creadoPorUid,
+    creadoPorRol: 'comercio',
+  })
+  const creado = await obtenerAccesoPorId(id)
+  if (!creado) throw new Error('No se pudo releer el acceso comercio recién creado.')
+  return creado
+}
+
+// D4: al crear un destinatario nuevo para el mismo parent, revoca los
+// destinatarios activos previos de ese mismo parent — nunca acumula links
+// vivos olvidados. No hay índice compuesto nuevo: se filtra en memoria sobre
+// el resultado de una única query por parentAccessId (cardinalidad esperada
+// muy baja — unos pocos documentos por parent en toda su vida).
+async function revocarDestinatariosPreviosDelParent(parentAccessId: string): Promise<void> {
+  const snap = await adminDb
+    .collection(COLECCION)
+    .where('tipo', '==', 'destinatario')
+    .where('parentAccessId', '==', parentAccessId)
+    .get()
+
+  const activos = snap.docs.filter((d) => !(d.data() as AccesoTemporal).revokedAt)
+  if (activos.length === 0) return
+
+  const batch = adminDb.batch()
+  activos.forEach((d) => {
+    batch.update(d.ref, { revokedAt: FieldValue.serverTimestamp(), motivoRevocacion: 'replaced' })
+  })
+  await batch.commit()
+}
+
+export type ResultadoCrearDestinatario =
+  | { ok: true; id: string; token: string }
+  | { ok: false; motivo: 'parent_invalido' }
+
+// Función central usada por AMBOS orígenes (comercio autenticado y link
+// temporal comercio) — sección 1: "reutilizar... NO construir una segunda
+// infraestructura paralela". El caller ya validó pertenencia/estado de la
+// orden antes de llegar acá; esta función solo sabe de accesos.
+export async function crearAccesoDestinatarioTemporal(params: {
+  parent: AccesoTemporalConId
+  solicitudId: string
+  comercioId: string
+  creadoPorUid?: string
+}): Promise<ResultadoCrearDestinatario> {
+  if (params.parent.tipo !== 'comercio' || !accesoVigente(params.parent)) {
+    return { ok: false, motivo: 'parent_invalido' }
+  }
+  if (params.parent.solicitudId !== params.solicitudId || params.parent.comercioId !== params.comercioId) {
+    return { ok: false, motivo: 'parent_invalido' }
+  }
+
+  await revocarDestinatariosPreviosDelParent(params.parent.id)
+
+  const token = generarToken()
+  const tokenHash = hashToken(token)
+  const now = Timestamp.now()
+  const expiresAt = calcularExpiresAtDestinatario(params.parent)
+
+  const doc: AccesoTemporal = {
+    tipo: 'destinatario',
+    tokenHash,
+    solicitudId: params.solicitudId,
+    comercioId: params.comercioId,
+    scope: [...SCOPE_DESTINATARIO],
+    parentAccessId: params.parent.id,
+    ...(params.creadoPorUid ? { creadoPorUid: params.creadoPorUid } : {}),
+    creadoPorRol: 'comercio',
+    createdAt: now,
+    expiresAt,
+  }
+  const ref = await adminDb.collection(COLECCION).add(doc)
+  return { ok: true, id: ref.id, token }
+}
+
+// Sección 16: "comercio vía link temporal puede revocar solo hijos cuyo
+// parentAccessId == access comercio actual" — no recibe un id de destinatario
+// desde el cliente (evita tener que verificar ownership de un id arbitrario);
+// revoca lo que sea que esté activo bajo ESE parent, que es inequívoco por
+// construcción (D4 ya garantiza que hay a lo sumo un hijo activo por parent).
+export async function revocarDestinatarioActivoDelParent(
+  parentAccessId: string
+): Promise<{ huboActivo: boolean }> {
+  const snap = await adminDb
+    .collection(COLECCION)
+    .where('tipo', '==', 'destinatario')
+    .where('parentAccessId', '==', parentAccessId)
+    .get()
+
+  const activos = snap.docs.filter((d) => !(d.data() as AccesoTemporal).revokedAt)
+  if (activos.length === 0) return { huboActivo: false }
+
+  const batch = adminDb.batch()
+  activos.forEach((d) => {
+    batch.update(d.ref, { revokedAt: FieldValue.serverTimestamp(), motivoRevocacion: 'comercio_link_revoke' })
+  })
+  await batch.commit()
+  return { huboActivo: true }
 }
 
 // ─── DTO — vista comercio (D6) ──────────────────────────────────────────────
@@ -188,6 +415,56 @@ function toMillis(v: unknown): number | null {
   return typeof t.toMillis === 'function' ? t.toMillis() : null
 }
 
+// Compartido entre comercio y destinatario (Bloque 2) — datos operativos de
+// logística fuera de Managua, cero costos (costoFlete/costoCargotrans quedan
+// fuera de ambos DTOs, no solo del de destinatario).
+export interface FueraManaguaDTO {
+  metodoEnvio?: string
+  destinoFinal?: string | null
+  puntoLogisticoNombre?: string | null
+  direccionPuntoLogistico?: string | null
+  horarioApertura?: string | null
+  horarioCierre?: string | null
+  transporteNombre?: string | null
+  transporteHoraSalida?: string | null
+  terminalSugerida?: string | null
+  cantidadPaquetes?: number
+}
+
+function construirFueraManagua(s: FirebaseFirestore.DocumentData): FueraManaguaDTO | undefined {
+  if (s.tipoServicio !== 'fuera_managua' || !s.fueraManagua) return undefined
+  return {
+    metodoEnvio: s.fueraManagua.metodoEnvio,
+    destinoFinal: s.fueraManagua.destinoFinal ?? null,
+    puntoLogisticoNombre: s.fueraManagua.puntoLogisticoNombre ?? null,
+    direccionPuntoLogistico: s.fueraManagua.direccionPuntoLogistico ?? null,
+    horarioApertura: s.fueraManagua.horarioApertura ?? null,
+    horarioCierre: s.fueraManagua.horarioCierre ?? null,
+    transporteNombre: s.fueraManagua.transporteNombre ?? null,
+    transporteHoraSalida: s.fueraManagua.transporteHoraSalida ?? null,
+    terminalSugerida: s.fueraManagua.terminalSugerida ?? null,
+    cantidadPaquetes: s.fueraManagua.cantidadPaquetes,
+  }
+}
+
+// Compartido entre comercio y destinatario — AUDITORÍA FINAL (Gate B): NUNCA
+// fotoUrl cruda — asignacion.motorizadoFotoUrl es una URL de Firebase
+// Storage; entregarla tal cual (a) filtra un recurso permanente de Firebase
+// igual que cualquier evidencia, y (b) esa carga de imagen de un tercero
+// mandaría el token completo como Referer sin política explícita. 'tieneFoto'
+// es solo una señal — la imagen real se sirve por el kind 'motorizado-foto'
+// del propio endpoint de evidencia. Nunca motorizadoId/authUid.
+export interface MotorizadoDTO {
+  nombre: string
+  tieneFoto: boolean
+}
+
+function construirMotorizado(s: FirebaseFirestore.DocumentData): MotorizadoDTO | undefined {
+  return s.asignacion?.motorizadoNombre
+    ? { nombre: s.asignacion.motorizadoNombre, tieneFoto: !!s.asignacion?.motorizadoId && !!s.asignacion?.motorizadoFotoUrl }
+    : undefined
+}
+
 export interface VistaComercioTemporal {
   id: string
   estado: string
@@ -197,28 +474,11 @@ export interface VistaComercioTemporal {
   ruta: {
     recoleccion: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null }
     entrega: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null }
-    fueraManagua?: {
-      metodoEnvio?: string
-      destinoFinal?: string | null
-      puntoLogisticoNombre?: string | null
-      direccionPuntoLogistico?: string | null
-      horarioApertura?: string | null
-      horarioCierre?: string | null
-      transporteNombre?: string | null
-      transporteHoraSalida?: string | null
-      terminalSugerida?: string | null
-      cantidadPaquetes?: number
-    }
+    fueraManagua?: FueraManaguaDTO
     detalle?: string
   }
   timeline: Array<{ key: string; label: string; at: number }>
-  // AUDITORÍA FINAL (Gate B): NUNCA fotoUrl cruda — asignacion.motorizadoFotoUrl
-  // es una URL de Firebase Storage; entregarla tal cual (a) filtra un
-  // recurso permanente de Firebase igual que cualquier evidencia, y (b) esa
-  // carga de imagen de un tercero mandaría el token completo como Referer
-  // sin política explícita. 'tieneFoto' es solo una señal — la imagen real
-  // se sirve por el kind 'motorizado-foto' del propio endpoint de evidencia.
-  motorizado?: { nombre: string; tieneFoto: boolean }
+  motorizado?: MotorizadoDTO
   financiero: {
     delivery: { monto: number | null; pagado: boolean | null; label: string }
     cobroContraEntrega?: { monto: number; recibido: boolean | null }
@@ -379,7 +639,6 @@ function kindsDisponibles(s: FirebaseFirestore.DocumentData): string[] {
 }
 
 export function construirVistaComercio(solicitudId: string, s: FirebaseFirestore.DocumentData): VistaComercioTemporal {
-  const esFuera = s.tipoServicio === 'fuera_managua'
   return {
     id: solicitudId,
     estado: s.estado ?? 'desconocido',
@@ -399,33 +658,56 @@ export function construirVistaComercio(solicitudId: string, s: FirebaseFirestore
         direccionEscrita: s.entrega?.direccionEscrita,
         nota: s.entrega?.nota ?? null,
       },
-      fueraManagua: esFuera && s.fueraManagua ? {
-        metodoEnvio: s.fueraManagua.metodoEnvio,
-        destinoFinal: s.fueraManagua.destinoFinal ?? null,
-        puntoLogisticoNombre: s.fueraManagua.puntoLogisticoNombre ?? null,
-        direccionPuntoLogistico: s.fueraManagua.direccionPuntoLogistico ?? null,
-        horarioApertura: s.fueraManagua.horarioApertura ?? null,
-        horarioCierre: s.fueraManagua.horarioCierre ?? null,
-        transporteNombre: s.fueraManagua.transporteNombre ?? null,
-        transporteHoraSalida: s.fueraManagua.transporteHoraSalida ?? null,
-        terminalSugerida: s.fueraManagua.terminalSugerida ?? null,
-        cantidadPaquetes: s.fueraManagua.cantidadPaquetes,
-      } : undefined,
+      fueraManagua: construirFueraManagua(s),
       detalle: s.detalle,
     },
     timeline: construirTimeline(s),
-    // tieneFoto usa motorizadoFotoUrl SOLO como señal booleana de "se subió
-    // una foto" — su valor (una URL de Firebase) nunca se lee ni se expone;
-    // la imagen real la sirve el kind 'motorizado-foto' en el momento del
-    // request, con su propio chequeo de existencia en Storage.
-    motorizado: s.asignacion?.motorizadoNombre
-      ? { nombre: s.asignacion.motorizadoNombre, tieneFoto: !!s.asignacion?.motorizadoId && !!s.asignacion?.motorizadoFotoUrl }
-      : undefined,
+    motorizado: construirMotorizado(s),
     financiero: resumenFinanciero(s),
     rechazo: (s.estado === 'rechazada' && s.rechazo?.visibleParaComercio === true)
       ? { motivoTexto: s.rechazo.motivoTexto, detalle: s.rechazo.detalle ?? undefined }
       : undefined,
     evidenciasDisponibles: kindsDisponibles(s),
+  }
+}
+
+// ─── DTO — vista destinatario (Bloque 2, D6/D7/D8) ──────────────────────────
+//
+// Mismo principio que construirVistaComercio: cada campo escrito a mano.
+// Deliberadamente SIN: financiero (D7 — cero información económica), SIN
+// recoleccion (no es asunto del destinatario ver el punto de retiro del
+// comercio), SIN rechazo (D5 hace que generar un hijo para una orden
+// 'rechazada' sea imposible desde el inicio, y la máquina de estados real no
+// permite 'confirmada'→'rechazada', así que ese estado nunca puede aparecer
+// bajo un hijo ya emitido — no hace falta el campo).
+export interface VistaDestinatarioTemporal {
+  id: string
+  estado: string
+  estadoLabel: string
+  createdAt: number | null
+  entrega: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null }
+  fueraManagua?: FueraManaguaDTO
+  timeline: Array<{ key: string; label: string; at: number }>
+  motorizado?: MotorizadoDTO
+  evidenciaEntregaDisponible: boolean
+}
+
+export function construirVistaDestinatario(solicitudId: string, s: FirebaseFirestore.DocumentData): VistaDestinatarioTemporal {
+  return {
+    id: solicitudId,
+    estado: s.estado ?? 'desconocido',
+    estadoLabel: ESTADO_LABEL[s.estado] ?? String(s.estado ?? '—'),
+    createdAt: toMillis(s.createdAt),
+    entrega: {
+      nombreApellido: s.entrega?.nombreApellido,
+      celular: s.entrega?.celular,
+      direccionEscrita: s.entrega?.direccionEscrita,
+      nota: s.entrega?.nota ?? null,
+    },
+    fueraManagua: construirFueraManagua(s),
+    timeline: construirTimeline(s),
+    motorizado: construirMotorizado(s),
+    evidenciaEntregaDisponible: !!resolverEvidencia(s, 'entrega'),
   }
 }
 

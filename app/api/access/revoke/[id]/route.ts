@@ -1,9 +1,15 @@
 // app/api/access/revoke/[id]/route.ts
 //
-// Revoca un acceso temporal. Cualquier Gestor/Admin puede revocar cualquier
-// acceso — no se exige creadoPorUid == self (D4/sección 21, mismo criterio
-// que el resto del panel gestor). Idempotente: revocar dos veces responde
-// 200 sin sobreescribir quién/cuándo revocó la primera vez.
+// Revoca un acceso temporal. Gestor/Admin pueden revocar cualquier acceso —
+// no se exige creadoPorUid == self (D4/sección 21, mismo criterio que el
+// resto del panel gestor). Idempotente: revocar dos veces responde 200 sin
+// sobreescribir quién/cuándo revocó la primera vez.
+//
+// Bloque 2 (sección 16): Comercio autenticado también puede revocar, pero
+// SOLO su propio destinatario — nunca un acceso 'comercio' (ni propio ni
+// ajeno), nunca un destinatario de otra orden. La verificación de propiedad
+// vive acá (releyendo el doc antes de revocar), no en revocarAcceso(), que
+// sigue siendo un primitivo genérico sin noción de "dueño".
 //
 // Ruta 'revoke/[id]' (no '[id]/revoke'): Next.js exige el MISMO nombre de
 // segmento dinámico en toda la posición del árbol bajo /api/access/ — ya
@@ -13,12 +19,12 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { adminAuth, adminDb } from '@/fb/admin'
-import { revocarAcceso } from '@/lib/temporary-access'
+import { revocarAcceso, obtenerAccesoPorId } from '@/lib/temporary-access'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const ROLES_PERMITIDOS = new Set(['admin', 'gestor'])
+const ROLES_STAFF = new Set(['admin', 'gestor'])
 const MAX_MOTIVO = 300
 
 const ERROR_AUTENTICACION = { error: 'No autorizado.' }
@@ -41,7 +47,7 @@ function rechazar(status: number, codigoInterno: string, rol = '-'): NextRespons
 }
 
 type Autorizacion =
-  | { ok: true; uid: string; rol: 'admin' | 'gestor' }
+  | { ok: true; uid: string; rol: 'admin' | 'gestor' | 'comercio'; comercioId?: string }
   | { ok: false; status: 401 | 403; codigo: string }
 
 async function autorizar(req: NextRequest): Promise<Autorizacion> {
@@ -60,10 +66,21 @@ async function autorizar(req: NextRequest): Promise<Autorizacion> {
   if (!snap.exists) return { ok: false, status: 403, codigo: 'sin_perfil' }
   const perfil = snap.data()
   if (perfil?.activo !== true) return { ok: false, status: 403, codigo: 'inactivo' }
-  const rol = typeof perfil?.rol === 'string' ? perfil.rol : ''
-  if (!ROLES_PERMITIDOS.has(rol)) return { ok: false, status: 403, codigo: 'rol_no_permitido' }
+  const rolReal = typeof perfil?.rol === 'string' ? perfil.rol : ''
 
-  return { ok: true, uid, rol: rol as 'admin' | 'gestor' }
+  if (ROLES_STAFF.has(rolReal)) {
+    return { ok: true, uid, rol: rolReal as 'admin' | 'gestor' }
+  }
+  // 'Comercio' (mayúscula) es el valor real del campo — ver firestore.rules
+  // isComercioRole(). Se normaliza a 'comercio' minúscula para el resto de
+  // este archivo, coherente con AccesoTemporal.creadoPorRol.
+  if (rolReal === 'Comercio') {
+    const comercioId = typeof perfil?.comercioId === 'string' ? perfil.comercioId : ''
+    if (!comercioId) return { ok: false, status: 403, codigo: 'comercio_sin_comercioId' }
+    return { ok: true, uid, rol: 'comercio', comercioId }
+  }
+
+  return { ok: false, status: 403, codigo: 'rol_no_permitido' }
 }
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -72,6 +89,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   const { id } = await params
   if (!id || id.length > 200) return rechazar(400, 'id_invalido', auth.rol)
+
+  if (auth.rol === 'comercio') {
+    const acceso = await obtenerAccesoPorId(id)
+    if (!acceso) return rechazar(404, 'acceso_inexistente', auth.rol)
+    if (acceso.tipo !== 'destinatario' || acceso.comercioId !== auth.comercioId) {
+      // Mismo 404 que "no existe" (sección 16: nunca revelar si un id ajeno
+      // existe) — no se distingue "no es tuyo" de "no existe".
+      return rechazar(404, 'acceso_ajeno', auth.rol)
+    }
+  }
 
   // Body opcional: solo se acepta 'motivo', cualquier otro campo rechaza.
   let motivo: string | undefined

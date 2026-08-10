@@ -4,12 +4,12 @@ import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { doc, onSnapshot, Timestamp } from 'firebase/firestore'
-import { db } from '@/fb/config'
+import { db, auth } from '@/fb/config'
 import { useUser } from '@/app/Components/UserProvider'
 import {
   ChevronLeft, MapPin, Package, Truck, CreditCard,
   Clock, CheckCircle2, XCircle, Camera,
-  Navigation, User, Phone, FileText, Calendar, X,
+  Navigation, User, Phone, FileText, Calendar, X, Share2,
 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -246,6 +246,71 @@ function InfoRow({ label, value, mono = false }: { label: string; value?: React.
   )
 }
 
+// ─── Compartir seguimiento con cliente (Bloque 2 — Accesos Temporales) ──────
+//
+// Espejo del "solo señal, la autoridad real es el servidor": este gate local
+// es solo para no mostrar un botón que el servidor de todos modos rechazaría
+// — /api/access/recipient/generate revalida el mismo estado con su propia
+// allowlist (estadoPermiteDestinatario en lib/temporary-access.ts). Si algún
+// día divergen, el servidor gana; esto nunca es la autorización.
+const ESTADOS_CON_ENVIO_COMPARTIBLE = new Set([
+  'confirmada', 'asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado',
+])
+
+async function copiarTexto(texto: string) {
+  try {
+    await navigator.clipboard.writeText(texto)
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = texto
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+  }
+}
+
+function CompartirSeguimientoButton({ solicitudId }: { solicitudId: string }) {
+  const [estado, setEstado] = useState<'idle' | 'loading' | 'listo' | 'error'>('idle')
+  const [copiado, setCopiado] = useState(false)
+
+  async function generar() {
+    setEstado('loading')
+    try {
+      const user = auth.currentUser
+      if (!user) throw new Error('Sin sesión.')
+      const idToken = await user.getIdToken()
+      const res = await fetch('/api/access/recipient/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ solicitudId }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data?.url) throw new Error(data?.error || 'No se pudo generar el enlace.')
+      await copiarTexto(data.url)
+      setCopiado(true)
+      setEstado('listo')
+      setTimeout(() => setCopiado(false), 2000)
+    } catch {
+      setEstado('error')
+    }
+  }
+
+  return (
+    <button
+      onClick={generar}
+      disabled={estado === 'loading'}
+      className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#004aad] bg-blue-50 border border-blue-200 rounded-full px-3 py-1.5 hover:bg-blue-100 transition disabled:opacity-50"
+    >
+      <Share2 size={12} />
+      {estado === 'loading' ? 'Generando…'
+        : estado === 'listo' ? (copiado ? '✓ Copiado' : 'Generar de nuevo')
+        : estado === 'error' ? 'Reintentar'
+        : 'Compartir seguimiento con cliente'}
+    </button>
+  )
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function OrdenDetallePage() {
@@ -328,6 +393,9 @@ export default function OrdenDetallePage() {
               <span className="inline-flex text-xs font-semibold px-2.5 py-1 rounded-full bg-violet-50 text-violet-700">
                 {esCargotrans ? 'Cargotrans' : 'Bus / Terminal'}
               </span>
+            )}
+            {ESTADOS_CON_ENVIO_COMPARTIBLE.has(orden.estado || '') && (
+              <CompartirSeguimientoButton solicitudId={id} />
             )}
           </div>
         </div>

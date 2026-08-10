@@ -17,7 +17,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { adminDb, adminBucket } from '@/fb/admin'
 import {
-  validarAcceso,
+  validarAccesoCompleto,
   kindValido,
   scopeRequeridoParaKind,
   resolverEvidencia,
@@ -61,7 +61,10 @@ export async function GET(
 
   if (superaRateLimit(ipDelRequest(req))) return rechazar(429, 'rate_limit')
 
-  const resultado = await validarAcceso(token)
+  // Bloque 2 (D3): validarAccesoCompleto también revalida el padre en vivo
+  // cuando el token es tipo 'destinatario' — nunca basta con que el hijo
+  // mismo no esté vencido/revocado (ver comentario en esa función).
+  const resultado = await validarAccesoCompleto(token)
   if (!resultado.ok) return rechazar(401, `acceso_${resultado.motivo}`)
   const { acceso } = resultado
 
