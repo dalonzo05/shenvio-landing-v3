@@ -270,6 +270,104 @@ export async function copyToClipboard(text: string) {
   }
 }
 
+// ─── Link temporal de comercio (Bloque 1 — Accesos Temporales) ──────────────
+// Genera/copia/revoca vía app/api/access/*. El token en sí NUNCA se guarda
+// acá — solo la URL ya armada que devuelve el endpoint, y el accessId (no
+// sensible, solo identifica el documento para poder revocarlo).
+function LinkComercioTemporalButton({ solicitudId }: { solicitudId: string }) {
+  const [estado, setEstado] = useState<'idle' | 'loading' | 'listo' | 'error'>('idle')
+  const [url, setUrl] = useState<string | null>(null)
+  const [accessId, setAccessId] = useState<string | null>(null)
+  const [copiado, setCopiado] = useState(false)
+  const [revocando, setRevocando] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function generar() {
+    setEstado('loading'); setErr(null)
+    try {
+      const user = auth.currentUser
+      if (!user) throw new Error('Sin sesión.')
+      const idToken = await user.getIdToken()
+      const res = await fetch('/api/access/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ solicitudId }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data?.error || 'No se pudo generar el enlace.')
+      setUrl(data.url); setAccessId(data.id); setEstado('listo')
+      await copyToClipboard(data.url)
+      setCopiado(true)
+      setTimeout(() => setCopiado(false), 2000)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'No se pudo generar el enlace.')
+      setEstado('error')
+    }
+  }
+
+  async function copiarDeNuevo() {
+    if (!url) return
+    await copyToClipboard(url)
+    setCopiado(true)
+    setTimeout(() => setCopiado(false), 2000)
+  }
+
+  async function revocar() {
+    if (!accessId) return
+    setRevocando(true)
+    try {
+      const user = auth.currentUser
+      if (!user) throw new Error('Sin sesión.')
+      const idToken = await user.getIdToken()
+      await fetch(`/api/access/revoke/${accessId}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}` },
+      })
+      setUrl(null); setAccessId(null); setEstado('idle')
+    } catch {
+      // Silencioso a propósito: el botón "Copiar link para comercio" sigue
+      // disponible para reintentar sin bloquear al gestor con un error duro.
+    } finally {
+      setRevocando(false)
+    }
+  }
+
+  if (estado === 'listo' && url) {
+    return (
+      <div className="flex shrink-0 items-center gap-1.5">
+        <button
+          onClick={copiarDeNuevo}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-2.5 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100 transition"
+        >
+          <Copy size={12} /> {copiado ? '¡Copiado!' : 'Copiar link comercio'}
+        </button>
+        <button
+          onClick={revocar}
+          disabled={revocando}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-xs font-medium text-red-500 hover:bg-red-50 transition disabled:opacity-50"
+        >
+          {revocando ? 'Revocando…' : 'Revocar'}
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex shrink-0 items-center gap-1.5">
+      <button
+        onClick={generar}
+        disabled={estado === 'loading'}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition disabled:opacity-50"
+        title="Genera un enlace temporal (48h) para que el comercio consulte esta orden sin cuenta"
+      >
+        <Copy size={12} />
+        {estado === 'loading' ? 'Generando…' : 'Copiar link para comercio'}
+      </button>
+      {err && <span className="text-[11px] text-red-500">{err}</span>}
+    </div>
+  )
+}
+
 // ─── Sub-componentes ──────────────────────────────────────────────────────────
 
 type AccentColor = 'blue' | 'orange' | 'emerald' | 'amber' | 'indigo' | 'purple' | 'teal' | 'gray' | 'red'
@@ -689,14 +787,17 @@ export function SolicitudDrawer({
               )}
             </div>
           </div>
-          <Link
-            href={`/panel/gestor/solicitudes/${solicitudId}`}
-            target="_blank"
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition"
-          >
-            <ExternalLink size={12} />
-            Ver página
-          </Link>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <LinkComercioTemporalButton solicitudId={solicitudId} />
+            <Link
+              href={`/panel/gestor/solicitudes/${solicitudId}`}
+              target="_blank"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition"
+            >
+              <ExternalLink size={12} />
+              Ver página
+            </Link>
+          </div>
         </div>
 
         {/* Contenido */}

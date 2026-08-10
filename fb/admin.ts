@@ -1,6 +1,7 @@
 import { cert, getApps, initializeApp } from 'firebase-admin/app'
 import { getAuth } from 'firebase-admin/auth'
 import { getFirestore } from 'firebase-admin/firestore'
+import { getStorage } from 'firebase-admin/storage'
 
 // ─── Modo Emulator (server-side, fail-closed) ──────────────────────────────
 // NEXT_PUBLIC_USE_EMULATOR es una variable pública (para que el SDK cliente
@@ -30,20 +31,38 @@ const USE_EMULATOR = process.env.NEXT_PUBLIC_USE_EMULATOR === 'true'
 // .firebaserc y con el projectId que usa el SDK cliente en fb/config.ts.
 const LOCAL_PROJECT_ID = 'demo-storkhub'
 
+// Bucket real de este proyecto (ver fb/config.ts, mismo valor). En modo
+// emulador se usa el bucket local — el emulador lo crea a demanda, no
+// necesita existir en ningún lado, mismo criterio que fb/config.ts aplica
+// para el SDK cliente.
+const REAL_STORAGE_BUCKET = 'storkhub-9f719.firebasestorage.app'
+const LOCAL_STORAGE_BUCKET = `${LOCAL_PROJECT_ID}.appspot.com`
+
 if (USE_EMULATOR) {
   process.env.FIRESTORE_EMULATOR_HOST ??= '127.0.0.1:8080'
   process.env.FIREBASE_AUTH_EMULATOR_HOST ??= '127.0.0.1:9099'
+  // Mismo criterio que los otros dos: sin esta variable, el Admin SDK de
+  // Storage hablaría contra el bucket real aunque Auth/Firestore ya
+  // estuvieran aislados — exactamente el mismo riesgo que motivó reescribir
+  // storageBucket para el SDK cliente en fb/config.ts.
+  process.env.FIREBASE_STORAGE_EMULATOR_HOST ??= '127.0.0.1:9199'
 }
 
 const adminApp =
   getApps().find((a) => a.name === 'admin') ??
   (USE_EMULATOR
-    ? initializeApp({ projectId: LOCAL_PROJECT_ID }, 'admin')
+    ? initializeApp({ projectId: LOCAL_PROJECT_ID, storageBucket: LOCAL_STORAGE_BUCKET }, 'admin')
     : initializeApp(
-        { credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON!)) },
+        {
+          credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON!)),
+          storageBucket: REAL_STORAGE_BUCKET,
+        },
         'admin'
       ))
 
 export const adminAuth = getAuth(adminApp)
 export const adminDb = getFirestore(adminApp)
+// .bucket() sin argumento resuelve al storageBucket declarado arriba en
+// initializeApp — un solo lugar donde el nombre del bucket puede cambiar.
+export const adminBucket = getStorage(adminApp).bucket()
 export const emulatorActivo = USE_EMULATOR

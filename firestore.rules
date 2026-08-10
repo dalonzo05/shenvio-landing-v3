@@ -1450,5 +1450,21 @@ service cloud.firestore {
       allow delete: if isAdminOrGestor();
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // ACCESOS TEMPORALES (Bloque 1 — comercio) — server-only por diseño.
+    // ═══════════════════════════════════════════════════════════════════════
+    // El visitante de un link temporal NUNCA tiene sesión de Firebase Auth —
+    // es exactamente el punto del diseño (D7): navegador → Route Handler de
+    // ShEnvíos → Admin SDK → Storage/Firestore. Admin SDK no evalúa estas
+    // reglas, así que esta colección no necesita — y no debe tener — ninguna
+    // rama que autorice por token: eso convertiría a Firestore Rules en un
+    // segundo lugar donde reimplementar la validación de expiración/
+    // revocación, con el riesgo de que diverja de la del servidor. La única
+    // superficie de autorización real vive en lib/temporary-access.ts y los
+    // Route Handlers que lo usan.
+    match /accesos_temporales/{accessId} {
+      allow read, write: if false;
+    }
+
   }
 }
