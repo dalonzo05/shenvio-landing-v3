@@ -1,5 +1,6 @@
 {
   "projects": {
-    "default": "demo-storkhub"
+    "default": "demo-storkhub",
+    "staging": "shenvios-staging"
   }
 }
