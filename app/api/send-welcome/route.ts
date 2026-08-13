@@ -3,6 +3,7 @@ import { Resend } from 'resend'
 import { adminAuth, adminDb, emulatorActivo } from '@/fb/admin'
 import { FieldValue } from 'firebase-admin/firestore'
 import { getAppUrl } from '@/lib/env'
+import { isStagingSendBlocked } from '@/lib/email-safety'
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
@@ -11,6 +12,15 @@ const MAX_ATTEMPTS = 5
 const WINDOW_MS = 24 * 60 * 60 * 1000 // 24 horas
 
 const GENERIC_ERROR = { error: 'No se pudo procesar la solicitud.' }
+// RESEND STAGING SAFETY V1 — a diferencia de send-reset-password, esta ruta
+// ya es privilegiada (admin/gestor autenticado), así que sí puede informar
+// al operador que staging bloqueó el envío en vez de devolver el genérico
+// de siempre. `code` es para que el cliente lo distinga programáticamente
+// sin parsear el texto.
+const STAGING_EMAIL_BLOCKED = {
+  error: 'Envío bloqueado: el destinatario no está en la allowlist de staging.',
+  code: 'staging_email_not_allowed',
+}
 
 // ── Autenticación + autorización ────────────────────────────────────────────
 // Mismo criterio que functions/src/comercio-acceso.ts: operador autenticado
@@ -77,6 +87,17 @@ export async function POST(req: NextRequest) {
     !EMAIL_RE.test(emailAcceso)
   ) {
     return NextResponse.json(GENERIC_ERROR, { status: 400 })
+  }
+
+  // ── RESEND STAGING SAFETY V1 ─────────────────────────────────────────────
+  // En staging, si emailAcceso no está en STAGING_EMAIL_ALLOWLIST: cero
+  // Resend, cero link de activación generado, cero incremento de
+  // welcomeAttempts. Ruta privilegiada (ya pasó autorización admin/gestor
+  // arriba), así que sí se informa al operador con un código explícito —
+  // no es no-enumeración como en send-reset-password. En local/Emulator y
+  // production esta función es un no-op (siempre false).
+  if (isStagingSendBlocked(emailAcceso)) {
+    return NextResponse.json(STAGING_EMAIL_BLOCKED, { status: 403 })
   }
 
   // ── Rate limiting por comercioId — defensa contra abuso incluso desde una

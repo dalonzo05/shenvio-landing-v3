@@ -68,14 +68,21 @@
 // hasta ahí sin errores) — ver tabla de reanudación en el código.
 //
 // ── Enlace de activación de contraseña (punto 6) ────────────────────────────
-// Auditamos app/api/send-welcome/route.ts: HOY genera su PROPIO enlace con
-// adminAuth.generatePasswordResetLink(email) y lo envía por Resend — pero no
-// tiene NINGUNA autenticación/autorización (cualquiera puede invocarlo con
-// cualquier email) y no acepta un enlace externo como parámetro (lo que le
-// pasáramos sería ignorado). No lo llamamos desde esta función ni le
-// delegamos nada — eso sería "implementar un envío inseguro para completar
-// el flujo", exactamente lo que se pidió evitar. Mientras no exista un envío
-// de correo seguro y auditado:
+// Auditamos app/api/send-welcome/route.ts (última revisión: RESEND STAGING
+// SAFETY V1): genera su PROPIO enlace con
+// adminAuth.generatePasswordResetLink(email) y lo envía por Resend. La ruta
+// SÍ está protegida — requiere Bearer token verificado server-side
+// (adminAuth.verifyIdToken) con usuarios/{uid}.rol en ('admin'|'gestor') y
+// activo===true, y el destinatario NUNCA lo manda el cliente: se lee
+// exclusivamente de comercios/{comercioId}.emailAcceso, con
+// accesoEstado==='activo' y authUid presentes como precondición. (Nota
+// histórica: una versión anterior de este comentario afirmaba que la ruta
+// no tenía autenticación — eso ya no es así, quedó desactualizado tras un
+// fix posterior; ver el propio route.ts como fuente de verdad.) No la
+// llamamos desde esta función ni le delegamos nada — eso sería
+// "implementar un envío inseguro para completar el flujo", exactamente lo
+// que se pidió evitar. Mientras no exista un envío de correo productivo
+// completo y auditado de punta a punta:
 //   - en el emulador (FUNCTIONS_EMULATOR==='true'): se genera y se devuelve
 //     enlaceActivacionDev, para poder probar el flujo sin correo real.
 //   - fuera del emulador (se asume producción, fail-closed): NUNCA se genera
@@ -83,16 +90,16 @@
 //     estructurada avisando que el acceso quedó activo pero sin notificación
 //     automática todavía.
 //
-// ── ⚠️ BLOQUEO OBLIGATORIO ANTES DE DEPLOY (pendiente de seguridad) ─────────
-//   1. app/api/send-welcome/route.ts NO tiene autenticación ni autorización
-//      — cualquiera puede invocarlo con cualquier email existente en Auth.
-//   2. Esta Cloud Function todavía NO envía el enlace de activación en
-//      producción (solo lo genera/devuelve en el emulador).
-//   3. El acceso productivo NO se considera completo hasta que exista un
-//      envío de correo server-side seguro y auditado para este flujo.
-//   4. En producción, el enlace de activación NUNCA debe devolverse al
+// ── ⚠️ PENDIENTE ANTES DE PRODUCCIÓN (no es un problema de autenticación) ──
+//   1. Esta Cloud Function todavía NO envía el enlace de activación en
+//      producción (solo lo genera/devuelve en el emulador) — el acceso
+//      queda activo pero sin notificación automática al comercio.
+//   2. El acceso productivo NO se considera completo hasta validar de punta
+//      a punta el envío de correo (app/api/send-welcome/route.ts, ya
+//      autenticado/autorizado — ver arriba) contra un entorno real.
+//   3. En producción, el enlace de activación NUNCA debe devolverse al
 //      cliente bajo ninguna circunstancia.
-// No desplegar este Bloque a producción hasta resolver los 4 puntos.
+// No desplegar este Bloque a producción hasta resolver estos 3 puntos.
 //
 // ── Nombre autoritativo (ajuste posterior a la aprobación) ──────────────────
 // displayName de Auth y usuarios/{authUid}.name se toman EXCLUSIVAMENTE de

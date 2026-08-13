@@ -3,6 +3,7 @@ import { Resend } from 'resend'
 import { adminAuth, adminDb, emulatorActivo } from '@/fb/admin'
 import { FieldValue } from 'firebase-admin/firestore'
 import { getAppUrl } from '@/lib/env'
+import { isStagingSendBlocked } from '@/lib/email-safety'
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
@@ -14,6 +15,17 @@ export async function POST(req: NextRequest) {
 
   if (!email) {
     return NextResponse.json({ error: 'Correo requerido.' }, { status: 400 })
+  }
+
+  // ── RESEND STAGING SAFETY V1 ─────────────────────────────────────────────
+  // En staging, un destinatario fuera de STAGING_EMAIL_ALLOWLIST recibe
+  // EXACTAMENTE la misma respuesta que un email inexistente (ver el catch
+  // de abajo) — misma forma, mismo status, sin tocar Firestore, sin generar
+  // el link de reset. Nunca revela que fue staging quien bloqueó, ni si el
+  // email existe en Firebase Auth. En local/Emulator y production esta
+  // función es un no-op (siempre false) — cero cambio de comportamiento.
+  if (isStagingSendBlocked(email)) {
+    return NextResponse.json({ ok: true })
   }
 
   // Buscar usuario en Firebase Auth
