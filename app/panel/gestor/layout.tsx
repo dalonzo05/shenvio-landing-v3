@@ -62,19 +62,23 @@ const MAX_TOASTS = 3
 // Constante de módulo a propósito: useRoleGuard la recibe como dependencia del
 // efecto, así que un literal en línea lo reejecutaría en cada render.
 //
-// Digitador V1: reutiliza este mismo layout y estas mismas rutas — no tiene
+// Digitador: reutiliza este mismo layout y estas mismas rutas — no tiene
 // árbol de paneles propio (ver investigación DIGITADOR V1, sección "Panel
 // recomendado"). El guard lo deja entrar para no duplicar componentes; lo
-// que lo diferencia del gestor es (a) la navegación visible, filtrada más
-// abajo, y (b) Firestore Rules, que niegan cualquier escritura/lectura fuera
-// de lo que Digitador V1 autorizó explícitamente. La UI oculta enlaces por
-// claridad, NUNCA por seguridad — entrar a una URL oculta sin permiso real
-// simplemente no devuelve datos ni permite escribir.
-// Módulos permitidos para Digitador V1 en la nav de abajo: solo Depósitos y
-// Saldos. Todo lo demás (motorizados, comercios, clientes, base de datos,
-// reportes, zonas, cobros, liquidaciones, gastos, financiero, auditoría)
-// queda fuera de su navegación por diseño (ver D3/D4 y sección 7 del bloque
-// DIGITADOR V1) — Firestore Rules deniega igual si se entra por URL directa.
+// que lo diferencia del gestor es (a) la navegación visible, resuelta por
+// la matriz central (ver lib/permissions.ts, RBAC INTERNO V1), y (b)
+// Firestore Rules, que niegan cualquier escritura/lectura fuera de lo que
+// esté explícitamente autorizado. La UI oculta enlaces por claridad, NUNCA
+// por seguridad — entrar a una URL oculta sin permiso real simplemente no
+// devuelve datos ni permite escribir, y desde RBAC INTERNO V1 además cada
+// página de gestor/** tiene su propio useModuleGuard que redirige antes de
+// montar el contenido.
+// Módulos permitidos para Digitador (matriz vigente, RBAC INTERNO V1 —
+// ajuste final): Depósitos, Saldos, Reportes, Liquidaciones, Financiero.
+// Todo lo demás (dashboard de gestor, solicitudes, ingresar orden,
+// motorizados, comercios, clientes, base de datos, zonas, calculadora,
+// cobros, gastos, auditoría) queda denegado — ver lib/permissions.ts como
+// única fuente de verdad, este comentario es solo documentación.
 const ROLES_GESTOR: readonly Rol[] = ['admin', 'gestor', 'digitador']
 
 export default function GestorLayout({ children }: { children: React.ReactNode }) {
@@ -281,9 +285,9 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               sidebar (solo acceso rápido desde el Dashboard). Digitador
               conserva su "Inicio" propio (fuera de la matriz, es su home,
               no un módulo de gestor) prefijado a lo que la matriz le
-              habilite — hoy eso resuelve a Depósitos y Saldos, igual que
-              antes, pero ahora es la matriz quien lo decide, no un array
-              paralelo mantenido a mano. */}
+              habilite — hoy eso resuelve a Depósitos, Saldos, Reportes,
+              Liquidaciones y Financiero, y es la matriz quien lo decide,
+              no un array paralelo mantenido a mano. */}
           <nav className="flex-1 space-y-2 overflow-y-auto p-3">
             {esDigitador && (
               <NavItem

@@ -75,15 +75,15 @@ export const MODULOS_PANEL: Readonly<Record<ModuleId, ModuloDef>> = {
   comercios:     { label: 'Comercios',          ruta: '/panel/gestor/comercios',             roles: ['admin', 'gestor'] },
   clientes:      { label: 'Clientes',           ruta: '/panel/gestor/clientes',              roles: ['admin', 'gestor'] },
   baseDatos:     { label: 'Base de datos',      ruta: '/panel/gestor/base-datos',            roles: ['admin'], hardLocked: true },
-  reportes:      { label: 'Reportes',           ruta: '/panel/gestor/reportes',              roles: ['admin'] },
+  reportes:      { label: 'Reportes',           ruta: '/panel/gestor/reportes',              roles: ['admin', 'digitador'] },
   zonas:         { label: 'Zonas',              ruta: '/panel/gestor/zonas',                 roles: ['admin'] },
   calculadora:   { label: 'Calculadora',        ruta: '/panel/gestor/calculadora',            roles: ['admin', 'gestor'] },
   cobros:        { label: 'Cobros',             ruta: '/panel/gestor/cobros',                 roles: ['admin', 'gestor'] },
   depositos:     { label: 'Depósitos',          ruta: '/panel/gestor/depositos',              roles: ['admin', 'gestor', 'digitador'] },
-  liquidaciones: { label: 'Liquidaciones',      ruta: '/panel/gestor/liquidaciones',          roles: ['admin'] },
+  liquidaciones: { label: 'Liquidaciones',      ruta: '/panel/gestor/liquidaciones',          roles: ['admin', 'digitador'] },
   gastos:        { label: 'Gastos motorizados', ruta: '/panel/gestor/gastos',                 roles: ['admin', 'gestor'] },
   saldos:        { label: 'Saldos a cargo',     ruta: '/panel/gestor/saldos',                 roles: ['admin', 'digitador'] },
-  financiero:    { label: 'Financiero',         ruta: '/panel/gestor/financiero',             roles: ['admin'] },
+  financiero:    { label: 'Financiero',         ruta: '/panel/gestor/financiero',             roles: ['admin', 'digitador'] },
   auditoria:     { label: 'Auditoría',          ruta: '/panel/gestor/auditoria-financiera',   roles: ['admin'] },
 }
 
