@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { getMapsLoader } from '@/lib/googleMaps'
+import { useModuleGuard } from '../../../_hooks/useModuleGuard'
 import {
   doc,
   getDoc,
@@ -591,6 +592,20 @@ function TimelineStep({
 }
 
 export default function GestorSolicitudDetallePage() {
+  // Mismo módulo que el listado ('solicitudes'): esta es su ruta de detalle,
+  // no un módulo aparte — ver lib/permissions.ts.
+  const estadoGuardModulo = useModuleGuard('solicitudes')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <GestorSolicitudDetallePageContent />
+}
+
+function GestorSolicitudDetallePageContent() {
   const params = useParams()
   const router = useRouter()
   const id = String(params?.id || '')

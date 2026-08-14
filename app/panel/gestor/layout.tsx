@@ -30,6 +30,32 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import { ToastNuevaOrden, type ToastData } from './_components/ToastNuevaOrden'
+import { MODULOS_PANEL, modulosVisiblesParaRol, type ModuleId } from '@/lib/permissions'
+
+// Íconos por módulo — RBAC INTERNO V1. Un solo mapa reemplaza los dos
+// bloques de NavItem hardcodeados que existían antes (uno por rol): el
+// sidebar ahora se construye filtrando MODULOS_PANEL contra el rol propio,
+// nunca listando roles a mano acá. "ingresarOrden" no tiene ícono propio
+// porque nunca fue (ni pasa a ser en este bloque) un NavItem de sidebar —
+// se accede solo desde el acceso rápido del Dashboard, ver gestor/page.tsx.
+const ICONOS_MODULO: Partial<Record<ModuleId, React.ReactNode>> = {
+  dashboard: <LayoutDashboard size={18} />,
+  solicitudes: <ClipboardList size={18} />,
+  motorizados: <Bike size={18} />,
+  comercios: <Store size={18} />,
+  clientes: <Users size={18} />,
+  baseDatos: <Database size={18} />,
+  reportes: <BarChart3 size={18} />,
+  zonas: <Map size={18} />,
+  calculadora: <Calculator size={18} />,
+  cobros: <AlertCircle size={18} />,
+  depositos: <Wallet size={18} />,
+  liquidaciones: <Receipt size={18} />,
+  gastos: <FileText size={18} />,
+  saldos: <BadgeDollarSign size={18} />,
+  financiero: <TrendingUp size={18} />,
+  auditoria: <ShieldCheck size={18} />,
+}
 
 const MAX_TOASTS = 3
 
@@ -248,11 +274,18 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
             {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           </button>
 
-          {/* Digitador V1: navegación reducida — solo los módulos que reutiliza
-              (ver HREFS_DIGITADOR). Todo lo demás queda fuera de su vista;
-              Firestore Rules deniega igual aunque alguien tipee la URL a mano. */}
-          {esDigitador ? (
-            <nav className="flex-1 space-y-2 overflow-y-auto p-3">
+          {/* RBAC INTERNO V1: la lista de módulos visibles sale de
+              modulosVisiblesParaRol(rolPropio) — la matriz central en
+              lib/permissions.ts — no de una rama hardcodeada por rol.
+              "ingresarOrden" se omite a propósito: nunca fue un NavItem de
+              sidebar (solo acceso rápido desde el Dashboard). Digitador
+              conserva su "Inicio" propio (fuera de la matriz, es su home,
+              no un módulo de gestor) prefijado a lo que la matriz le
+              habilite — hoy eso resuelve a Depósitos y Saldos, igual que
+              antes, pero ahora es la matriz quien lo decide, no un array
+              paralelo mantenido a mano. */}
+          <nav className="flex-1 space-y-2 overflow-y-auto p-3">
+            {esDigitador && (
               <NavItem
                 href="/panel/digitador"
                 icon={<LayoutDashboard size={18} />}
@@ -260,157 +293,38 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
                 active={pathname === '/panel/digitador'}
                 collapsed={collapsed}
               />
-              <NavItem
-                href="/panel/gestor/depositos"
-                icon={<Wallet size={18} />}
-                label="Depósitos"
-                active={pathname.startsWith('/panel/gestor/depositos')}
-                collapsed={collapsed}
-              />
-              <NavItem
-                href="/panel/gestor/saldos"
-                icon={<BadgeDollarSign size={18} />}
-                label="Saldos a cargo"
-                active={pathname.startsWith('/panel/gestor/saldos')}
-                collapsed={collapsed}
-              />
-            </nav>
-          ) : (
-          <nav className="flex-1 space-y-2 overflow-y-auto p-3">
-            <NavItem
-              href="/panel/gestor"
-              icon={<LayoutDashboard size={18} />}
-              label="Dashboard"
-              active={pathname === '/panel/gestor'}
-              collapsed={collapsed}
-            />
-
-            {/* Solicitudes — badge con estado visual diferenciado */}
-            <NavItem
-              href="/panel/gestor/solicitudes"
-              icon={<ClipboardList size={18} />}
-              label="Solicitudes"
-              active={pathname.startsWith('/panel/gestor/solicitudes')}
-              collapsed={collapsed}
-              badge={pendientesCount > 0 ? pendientesCount : undefined}
-              badgeVariant={solicitudesBadgeVariant}
-            />
-
-            <NavItem
-              href="/panel/gestor/motorizados"
-              icon={<Bike size={18} />}
-              label="Motorizados"
-              active={pathname.startsWith('/panel/gestor/motorizados')}
-              collapsed={collapsed}
-            />
-
-            <NavItem
-              href="/panel/gestor/comercios"
-              icon={<Store size={18} />}
-              label="Comercios"
-              active={pathname.startsWith('/panel/gestor/comercios')}
-              collapsed={collapsed}
-            />
-
-            <NavItem
-              href="/panel/gestor/clientes"
-              icon={<Users size={18} />}
-              label="Clientes"
-              active={pathname.startsWith('/panel/gestor/clientes')}
-              collapsed={collapsed}
-            />
-
-            <NavItem
-              href="/panel/gestor/base-datos"
-              icon={<Database size={18} />}
-              label="Base de datos"
-              active={pathname.startsWith('/panel/gestor/base-datos')}
-              collapsed={collapsed}
-            />
-
-            <NavItem
-              href="/panel/gestor/reportes"
-              icon={<BarChart3 size={18} />}
-              label="Reportes"
-              active={pathname.startsWith('/panel/gestor/reportes')}
-              collapsed={collapsed}
-            />
-
-            <NavItem
-              href="/panel/gestor/zonas"
-              icon={<Map size={18} />}
-              label="Zonas"
-              active={pathname.startsWith('/panel/gestor/zonas')}
-              collapsed={collapsed}
-            />
-
-            <NavItem
-              href="/panel/gestor/calculadora"
-              icon={<Calculator size={18} />}
-              label="Calculadora"
-              active={pathname.startsWith('/panel/gestor/calculadora')}
-              collapsed={collapsed}
-            />
-
-            {/* Cobros — con badge si hay pendientes */}
-            <NavItem
-              href="/panel/gestor/cobros"
-              icon={<AlertCircle size={18} />}
-              label="Cobros"
-              active={pathname.startsWith('/panel/gestor/cobros')}
-              collapsed={collapsed}
-              badge={cobrosPendientes > 0 ? cobrosPendientes : undefined}
-            />
-
-            <NavItem
-              href="/panel/gestor/depositos"
-              icon={<Wallet size={18} />}
-              label="Depósitos"
-              active={pathname.startsWith('/panel/gestor/depositos')}
-              collapsed={collapsed}
-            />
-
-            <NavItem
-              href="/panel/gestor/liquidaciones"
-              icon={<Receipt size={18} />}
-              label="Liquidaciones"
-              active={pathname.startsWith('/panel/gestor/liquidaciones')}
-              collapsed={collapsed}
-            />
-
-            <NavItem
-              href="/panel/gestor/gastos"
-              icon={<FileText size={18} />}
-              label="Gastos motorizados"
-              active={pathname.startsWith('/panel/gestor/gastos')}
-              collapsed={collapsed}
-            />
-
-            <NavItem
-              href="/panel/gestor/saldos"
-              icon={<BadgeDollarSign size={18} />}
-              label="Saldos a cargo"
-              active={pathname.startsWith('/panel/gestor/saldos')}
-              collapsed={collapsed}
-            />
-
-            <NavItem
-              href="/panel/gestor/financiero"
-              icon={<TrendingUp size={18} />}
-              label="Financiero"
-              active={pathname.startsWith('/panel/gestor/financiero')}
-              collapsed={collapsed}
-            />
-
-            <NavItem
-              href="/panel/gestor/auditoria-financiera"
-              icon={<ShieldCheck size={18} />}
-              label="Auditoría"
-              active={pathname.startsWith('/panel/gestor/auditoria-financiera')}
-              collapsed={collapsed}
-            />
+            )}
+            {modulosVisiblesParaRol(rolPropio)
+              .filter((moduleId): moduleId is Exclude<ModuleId, 'ingresarOrden'> => moduleId !== 'ingresarOrden')
+              .map((moduleId) => {
+                const modulo = MODULOS_PANEL[moduleId]
+                const active = moduleId === 'dashboard'
+                  ? pathname === modulo.ruta
+                  : pathname.startsWith(modulo.ruta)
+                return (
+                  <NavItem
+                    key={moduleId}
+                    href={modulo.ruta}
+                    icon={ICONOS_MODULO[moduleId]}
+                    label={modulo.label}
+                    active={active}
+                    collapsed={collapsed}
+                    badge={
+                      moduleId === 'solicitudes' ? (pendientesCount > 0 ? pendientesCount : undefined)
+                      : moduleId === 'cobros' ? (cobrosPendientes > 0 ? cobrosPendientes : undefined)
+                      : undefined
+                    }
+                    badgeVariant={moduleId === 'solicitudes' ? solicitudesBadgeVariant : undefined}
+                  />
+                )
+              })}
           </nav>
-          )}
+          {/* NOTA DE SEGURIDAD (sin cambios de fondo): esto sigue siendo
+              filtrado de UI por claridad, NUNCA la barrera de seguridad
+              real. Esa barrera hoy tiene dos capas: useRoleGuard (admite al
+              panel) + useModuleGuard por página (admite al módulo) +,
+              debajo de ambas, Firestore Rules — que es quien de verdad
+              decide qué datos se leen o escriben. */}
         </div>
       </aside>
 

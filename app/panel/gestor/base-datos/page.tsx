@@ -16,6 +16,8 @@ import {
   serverTimestamp,
 } from 'firebase/firestore'
 import { db, auth } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
+import { useRoleGuard, type Rol } from '../../_hooks/useRoleGuard'
 import {
   X,
   ExternalLink,
@@ -737,7 +739,34 @@ function BoolCell({ value, onToggle, labelTrue = 'Sí', labelFalse = 'No' }: {
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
+// Base de Datos: único módulo hard-locked del negocio (ver RBAC INTERNO
+// V1) — Admin-only, no configurable. Doble capa a propósito, cada una
+// suficiente por sí sola:
+//   1) useModuleGuard('baseDatos') — matriz central (lib/permissions.ts).
+//   2) useRoleGuard(['admin']) — chequeo LITERAL, hardcodeado acá mismo,
+//      independiente de lib/permissions.ts. Si algún día la matriz central
+//      tuviera un error de configuración (p. ej. alguien agrega 'gestor'
+//      a baseDatos.roles por accidente), esta línea igual bloquea, porque
+//      no lee esa matriz en absoluto.
+// Cualquiera de las dos que deniegue basta para no montar el contenido.
+const ROLES_SOLO_ADMIN: readonly Rol[] = ['admin']
+
 export default function BaseDatosPage() {
+  const estadoGuardModulo = useModuleGuard('baseDatos')
+  const estadoGuardAdmin = useRoleGuard(ROLES_SOLO_ADMIN, '/panel/gestor/base-datos')
+  const autorizado = estadoGuardModulo === 'autorizado' && estadoGuardAdmin === 'autorizado'
+  if (!autorizado) {
+    const redirigiendo = estadoGuardModulo === 'redirigiendo' || estadoGuardAdmin === 'redirigiendo'
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {redirigiendo ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <BaseDatosPageContent />
+}
+
+function BaseDatosPageContent() {
   const [solicitudes, setSolicitudes] = useState<Solicitud[]>([])
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [search, setSearch] = useState('')

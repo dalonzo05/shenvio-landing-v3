@@ -8,6 +8,7 @@ import {
   where,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
   TrendingUp,
   AlertCircle,
@@ -41,6 +42,18 @@ function fmt(n?: number) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function FinancieroDashboard() {
+  const estadoGuardModulo = useModuleGuard('financiero')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <FinancieroDashboardContent />
+}
+
+function FinancieroDashboardContent() {
   const [kpis, setKpis] = useState<KpiData>({
     cuentasPorCobrar: 0,
     cuentasPorCobrarCount: 0,

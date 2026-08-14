@@ -9,6 +9,7 @@ import {
   Timestamp,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
   ShieldCheck,
   AlertTriangle,
@@ -168,6 +169,18 @@ const tdCls = 'px-3 py-2.5 text-xs text-gray-700'
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function AuditoriaFinancieraPage() {
+  const estadoGuardModulo = useModuleGuard('auditoria')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <AuditoriaFinancieraPageContent />
+}
+
+function AuditoriaFinancieraPageContent() {
   const [tab, setTab] = useState<Tab>('resumen')
   const [loading, setLoading] = useState(true)
   const [loadedAt, setLoadedAt] = useState<Date | null>(null)

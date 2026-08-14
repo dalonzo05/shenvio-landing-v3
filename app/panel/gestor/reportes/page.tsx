@@ -11,6 +11,7 @@ import {
   Timestamp,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -145,6 +146,18 @@ function getPrevPeriodDates(period: Period, customStart: string, customEnd: stri
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function ReportesPage() {
+  const estadoGuardModulo = useModuleGuard('reportes')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <ReportesPageContent />
+}
+
+function ReportesPageContent() {
   const [period, setPeriod] = useState<Period>('mes')
   const [customStart, setCustomStart] = useState('')
   const [customEnd, setCustomEnd] = useState('')

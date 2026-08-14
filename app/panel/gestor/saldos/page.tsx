@@ -12,6 +12,7 @@ import {
 } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { auth, db, functions } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
   registrarAbonoSaldo, anularSaldoCargo, revertirConversionEnDeuda, condonarDeudaMotorizado,
   crearPropuestaAbono, corregirPropuestaAbono,
@@ -106,6 +107,18 @@ const METODOS_MUESTRAN_COMPROBANTE:  string[] = ['transferencia']
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function SaldosPage() {
+  const estadoGuardModulo = useModuleGuard('saldos')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <SaldosPageContent />
+}
+
+function SaldosPageContent() {
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [saldos, setSaldos] = useState<Saldo[]>([])
   const [loading, setLoading] = useState(true)

@@ -20,6 +20,7 @@ import {
 import { collection, onSnapshot, query, where, limit, Timestamp } from 'firebase/firestore'
 import { db } from '@/fb/config'
 import { SolicitudDrawer } from './_components/SolicitudDrawer'
+import { useModuleGuard } from '../_hooks/useModuleGuard'
 
 type OrdenActiva = {
   id: string
@@ -105,7 +106,23 @@ function ordenarMotorizados(arr: Motorizado[]) {
   })
 }
 
+// RBAC INTERNO V1: wrapper de guard de módulo. El contenido real
+// (PanelGestorPageContent) no se monta —ni sus listeners de Firestore se
+// suscriben— hasta que useModuleGuard resuelve 'autorizado'. Mismo patrón
+// en las 17 páginas de gestor/**, ver lib/permissions.ts.
 export default function PanelGestorPage() {
+  const estadoGuardModulo = useModuleGuard('dashboard')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <PanelGestorPageContent />
+}
+
+function PanelGestorPageContent() {
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [loadingMotos, setLoadingMotos] = useState(true)
   const [busqueda, setBusqueda] = useState('')

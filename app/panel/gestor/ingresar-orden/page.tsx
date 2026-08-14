@@ -14,6 +14,7 @@ import {
   where,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
@@ -1134,6 +1135,18 @@ const blankEntrega = (): EntregaState => ({
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function GestorIngresarOrdenPage() {
+  const estadoGuardModulo = useModuleGuard('ingresarOrden')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <GestorIngresarOrdenPageContent />
+}
+
+function GestorIngresarOrdenPageContent() {
   // ── Comercios ──
   const [comercios, setComercios] = useState<ComercioOption[]>([])
   const [loadingComercios, setLoadingComercios] = useState(true)

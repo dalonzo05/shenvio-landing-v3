@@ -1,5 +1,6 @@
 'use client'
 import dynamic from 'next/dynamic'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 
 const CalculadoraPrecio = dynamic(
   () => import('@/app/Components/CalculadoraPrecio').then(m => m.default),
@@ -7,6 +8,18 @@ const CalculadoraPrecio = dynamic(
 )
 
 export default function CalculadoraGestorPage() {
+  const estadoGuardModulo = useModuleGuard('calculadora')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <CalculadoraGestorPageContent />
+}
+
+function CalculadoraGestorPageContent() {
   return (
     <div className="space-y-6">
       <div className="rounded-2xl bg-white border shadow-sm p-6">

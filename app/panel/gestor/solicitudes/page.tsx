@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
   rankearMotorizados,
   type MotorizadoConRanking,
@@ -520,6 +521,18 @@ function incluyeTexto(value: string | undefined | null, q: string) {
 }
 
 export default function GestorSolicitudesPage() {
+  const estadoGuardModulo = useModuleGuard('solicitudes')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <GestorSolicitudesPageContent />
+}
+
+function GestorSolicitudesPageContent() {
   const hoy = useMemo(() => new Date(), [])
   const [estadoFiltro, setEstadoFiltro] = useState<EstadoSolicitud>('pendiente_confirmacion')
   const [allItems, setAllItems] = useState<Solicitud[]>([])

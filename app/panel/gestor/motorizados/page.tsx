@@ -18,6 +18,7 @@ import {
   Timestamp,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { compressImage, uploadFotoMotorizado } from '@/fb/storage'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
@@ -131,6 +132,18 @@ async function fetchStats(motorizadoId: string): Promise<Stats> {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function MotorizadosPage() {
+  const estadoGuardModulo = useModuleGuard('motorizados')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <MotorizadosPageContent />
+}
+
+function MotorizadosPageContent() {
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [loading, setLoading] = useState(true)
 

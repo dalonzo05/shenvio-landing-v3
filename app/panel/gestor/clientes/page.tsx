@@ -15,6 +15,7 @@ import {
   where,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto } from '@/lib/zonas'
 import { Search, X, Users, Phone, MapPin, Package, ChevronRight, Edit3 } from 'lucide-react'
@@ -90,6 +91,18 @@ function estadoBadge(estado?: string) {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function GestorClientesPage() {
+  const estadoGuardModulo = useModuleGuard('clientes')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <GestorClientesPageContent />
+}
+
+function GestorClientesPageContent() {
   const [clientes, setClientes] = useState<ClienteEnvio[]>([])
   const [comercios, setComercios] = useState<ComercioRef[]>([])
   const [loading, setLoading] = useState(true)

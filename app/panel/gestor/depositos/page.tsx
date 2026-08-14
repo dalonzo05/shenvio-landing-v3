@@ -17,6 +17,7 @@ import {
   Timestamp,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { compressImage, uploadDepositoBoucher } from '@/fb/storage'
 import { registrarMovimiento, convertirDepositoEnDeuda } from '@/lib/financial-writes'
 import { getDepositoEstado, cuentas } from '@/lib/financial-types'
@@ -244,6 +245,18 @@ const tdCls = 'px-3 py-2.5 text-xs text-gray-700'
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function DepositosPage() {
+  const estadoGuardModulo = useModuleGuard('depositos')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <DepositosPageContent />
+}
+
+function DepositosPageContent() {
   const [tab, setTab] = useState<MainTab>('pendientes')
   const [ordenes, setOrdenes] = useState<Solicitud[]>([])
   const [loading, setLoading] = useState(true)

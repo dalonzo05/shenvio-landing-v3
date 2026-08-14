@@ -13,6 +13,7 @@ import {
 } from 'firebase/firestore'
 import { httpsCallable, type HttpsCallableResult } from 'firebase/functions'
 import { db, functions, auth } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { upsertCompanyByUid, type BankAccount, type CompanyPayload } from '@/fb/data'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { Search, X, ChevronDown, ChevronUp, Building2, Phone, MapPin, CreditCard, Star, Lock } from 'lucide-react'
@@ -152,6 +153,18 @@ const BANKS_NI = ['BAC', 'LAFISE', 'Bampro']
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function ComerciosPage() {
+  const estadoGuardModulo = useModuleGuard('comercios')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <ComerciosPageContent />
+}
+
+function ComerciosPageContent() {
   const [comercios, setComerciosList] = useState<Comercio[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')

@@ -17,6 +17,7 @@ import {
   deleteField,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { registrarMovimiento } from '@/lib/financial-writes'
 import {
   AlertCircle,
@@ -959,6 +960,18 @@ function EstadoBadge({ estado }: { estado: CobroSemanal['estado'] }) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function CobrosPage() {
+  const estadoGuardModulo = useModuleGuard('cobros')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <CobrosPageContent />
+}
+
+function CobrosPageContent() {
   const [mainTab, setMainTab] = useState<MainTab>('contado')
   const [contadoSub, setContadoSub] = useState<ContadoSub>('por_orden')
   const [incidenciasTab, setIncidenciasTab] = useState<IncidenciasTab>('pendientes')

@@ -11,6 +11,7 @@ import {
   Timestamp,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { crearGastoMotorizado, anularGastoMotorizado } from '@/lib/financial-writes'
 import {
   LABELS_TIPO_GASTO,
@@ -279,6 +280,18 @@ function OrdenSelector({
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function GastosPage() {
+  const estadoGuardModulo = useModuleGuard('gastos')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <GastosPageContent />
+}
+
+function GastosPageContent() {
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [gastos, setGastos] = useState<Gasto[]>([])
   const [loading, setLoading] = useState(true)

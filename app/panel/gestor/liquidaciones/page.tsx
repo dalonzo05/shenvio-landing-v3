@@ -17,6 +17,7 @@ import {
   arrayUnion,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { uploadLiquidacionPDF } from '@/fb/storage'
 import { registrarMovimiento, crearSaldoCargo } from '@/lib/financial-writes'
 import {
@@ -415,6 +416,18 @@ async function generateLiquidacionPDF(params: {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function LiquidacionesPage() {
+  const estadoGuardModulo = useModuleGuard('liquidaciones')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <LiquidacionesPageContent />
+}
+
+function LiquidacionesPageContent() {
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [selectedMotoId, setSelectedMotoId] = useState<string>('')
   const [selectedSemana, setSelectedSemana] = useState<string>(getSemanaKey(new Date()))

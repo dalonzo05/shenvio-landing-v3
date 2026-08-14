@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { auth } from '@/fb/config'
+import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { onZonasSnapshot, crearZona, actualizarZona, toggleZonaActiva, eliminarZona } from '@/fb/zonas'
 import { clasificarPuntoEnZona } from '@/lib/zonas'
@@ -76,6 +77,18 @@ function crearIconoEtiqueta(
 // ── Componente ────────────────────────────────────────────────────────────────
 
 export default function ZonasPage() {
+  const estadoGuardModulo = useModuleGuard('zonas')
+  if (estadoGuardModulo !== 'autorizado') {
+    return (
+      <div className="w-full px-6 py-6 text-sm text-gray-600">
+        {estadoGuardModulo === 'redirigiendo' ? 'Redirigiendo a tu panel...' : 'Validando permisos...'}
+      </div>
+    )
+  }
+  return <ZonasPageContent />
+}
+
+function ZonasPageContent() {
 
   const [tab, setTab] = useState<'zonas' | 'puntos'>('zonas')
 
