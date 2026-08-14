@@ -1,10 +1,11 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { auth, db } from '@/fb/config'
 import { collection, doc, getDoc, onSnapshot, query, where, orderBy } from 'firebase/firestore'
+import { useUser } from '@/app/Components/UserProvider'
 import { useRoleGuard, type Rol } from '../_hooks/useRoleGuard'
 import {
   LayoutDashboard,
@@ -28,6 +29,7 @@ import {
   FileText,
   BadgeDollarSign,
   ShieldCheck,
+  LogOut,
 } from 'lucide-react'
 import { ToastNuevaOrden, type ToastData } from './_components/ToastNuevaOrden'
 import { MODULOS_PANEL, modulosVisiblesParaRol, type ModuleId } from '@/lib/permissions'
@@ -83,6 +85,7 @@ const ROLES_GESTOR: readonly Rol[] = ['admin', 'gestor', 'digitador']
 
 export default function GestorLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
+  const router = useRouter()
   // Interruptor único del panel: hasta que no diga 'autorizado' no se abre
   // ningún listener. Sustituye al antiguo estado `loading`, que se quedaba
   // en true para siempre cuando el rol no correspondía.
@@ -90,6 +93,11 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
   const autorizado = estadoGuard === 'autorizado'
   const [rolPropio, setRolPropio] = useState<Rol>(null)
   const esDigitador = rolPropio === 'digitador'
+  // LOGOUT PANEL INTERNO V1: mismo helper que ya usan comercio/motorizado
+  // (UserProvider.signOut → fbSignOut + limpieza de localStorage). No se
+  // duplica lógica de Firebase Auth acá.
+  const { profile, signOut } = useUser()
+  const [cerrandoSesion, setCerrandoSesion] = useState(false)
 
   // Rol propio — solo para filtrar la navegación visible (UX). El guard de
   // arriba ya resolvió si puede estar acá; esto NO es una segunda capa de
@@ -132,6 +140,26 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
+
+  // ── Cerrar sesión ──────────────────────────────────────────────────────────
+  // Guard de doble clic simple (sin spinner: el resto del panel tampoco
+  // muestra loading al hacer signOut, ver comercio/motorizado layout). Si
+  // signOut() falla, se revierte el flag para no dejar el botón bloqueado
+  // simulando una salida que no ocurrió.
+  const handleCerrarSesion = useCallback(async () => {
+    if (cerrandoSesion) return
+    setCerrandoSesion(true)
+    try {
+      await signOut()
+      // useRoleGuard ya redirige a /login en cuanto onAuthStateChanged
+      // emite null (ver su handler `if (!user) irA('/login')`) — este push
+      // es un respaldo explícito, no la única vía de salida.
+      router.push('/login')
+    } catch (err) {
+      console.error('[gestor] error al cerrar sesión:', err)
+      setCerrandoSesion(false)
+    }
+  }, [cerrandoSesion, signOut, router])
 
   // ── Badge: cobros pendientes en tiempo real ───────────────────────────────
   // Este era el listener que rompía la app: arrancaba sin esperar la
@@ -329,6 +357,27 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
               panel) + useModuleGuard por página (admite al módulo) +,
               debajo de ambas, Firestore Rules — que es quien de verdad
               decide qué datos se leen o escriben. */}
+
+          {/* LOGOUT PANEL INTERNO V1: visible para admin/gestor/digitador
+              por igual — no depende de la matriz de módulos, cerrar sesión
+              siempre está disponible para cualquier usuario autenticado.
+              Mismo patrón visual que comercio/motorizado layout. */}
+          <div className="border-t border-gray-200 p-3 shrink-0">
+            {!collapsed && profile?.name && (
+              <p className="mb-2 truncate px-3 text-xs font-semibold text-gray-500" title={profile.name}>
+                {profile.name}
+              </p>
+            )}
+            <button
+              onClick={handleCerrarSesion}
+              disabled={cerrandoSesion}
+              title="Cerrar sesión"
+              className={`flex w-full items-center rounded-xl px-3 py-2.5 text-sm font-medium text-red-600 hover:bg-red-50 transition disabled:opacity-50 disabled:cursor-not-allowed ${collapsed ? 'justify-center' : 'gap-3'}`}
+            >
+              <LogOut size={17} className="shrink-0" />
+              {!collapsed && <span>Cerrar sesión</span>}
+            </button>
+          </div>
         </div>
       </aside>
 
