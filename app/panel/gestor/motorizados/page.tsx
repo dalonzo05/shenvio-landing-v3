@@ -17,7 +17,7 @@ import {
   serverTimestamp,
   Timestamp,
 } from 'firebase/firestore'
-import { db } from '@/fb/config'
+import { auth, db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { compressImage, uploadFotoMotorizado } from '@/fb/storage'
 import { getMapsLoader } from '@/lib/googleMaps'
@@ -355,7 +355,35 @@ function MotorizadosPageContent() {
       })
       setSelected((prev) => prev ? { ...prev, authUid } : prev)
       setEAuthUid(authUid)
-      setCaMsg('✅ Acceso creado')
+
+      // MOTORIZADO EMAIL VERIFIED V1: el alta de arriba usa el SDK cliente
+      // (createAuthUser → app secundaria, para no pisar la sesión del
+      // Gestor), que deja emailVerified=false — y el guard global de
+      // /panel/** lo mandaría a /login?reason=verify. Este paso lo confirma
+      // server-side con el token del auth PRINCIPAL (el del Gestor, no el
+      // secundario). Va después de que Auth + usuarios/{uid} +
+      // motorizado.authUid ya existen, porque el endpoint valida esa cadena
+      // de evidencia completa antes de marcar nada.
+      //
+      // Fallo parcial a propósito NO silencioso: si esto falla, el acceso YA
+      // quedó creado y no se revierte nada — se avisa explícitamente para
+      // que el Gestor sepa que falta reintentar la activación, en vez de
+      // mostrar un "✅ Acceso creado" que ocultaría que el motorizado todavía
+      // no puede entrar. El endpoint es idempotente: reintentar es seguro.
+      try {
+        const idToken = await auth.currentUser?.getIdToken()
+        if (!idToken) throw new Error('sesión del gestor no disponible')
+        const resp = await fetch('/api/motorizado/confirmar-acceso', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+          body: JSON.stringify({ motorizadoId: selected.id }),
+        })
+        if (!resp.ok) throw new Error(`confirmación rechazada (${resp.status})`)
+        setCaMsg('✅ Acceso creado')
+      } catch (errConfirm) {
+        console.error('[motorizados] no se pudo confirmar el acceso:', errConfirm)
+        setCaMsg('⚠️ Acceso creado, pero no se pudo activar el ingreso. El motorizado TODAVÍA no puede iniciar sesión — avisá a un admin para completar la activación. No vuelvas a crear el acceso: la cuenta ya existe.')
+      }
       setCaEmail(''); setCaPassword('')
     } catch (e: any) {
       const code = e?.code
