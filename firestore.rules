@@ -649,8 +649,74 @@ service cloud.firestore {
         || (isComercioRole() && resource.data.comercioUid == comercioIdDelUsuario())
         || isDigitador();
 
-      // Gestor/admin: acceso completo
-      allow update: if isAdminOrGestor();
+      // ── A-FIX1: integridad de estados terminales ────────────────────────
+      // Gestor/admin conservan acceso amplio (siguen siendo actores de
+      // confianza, Decisión 2 de P1-S2), pero eso es un permiso sobre DATOS
+      // — nunca una licencia para romper la máquina de estados. Una orden
+      // ya cerrada podía volver a 'confirmada'/'asignada' con
+      // asignacion=null desde acciones ordinarias ("No asignar todavía"),
+      // dejando cobros, evidencias, depósitos y movimientos colgando sobre
+      // una orden operativamente reiniciada — y al perderse
+      // asignacion.motorizadoAuthUid el propio motorizado quedaba sin poder
+      // tocarla (isAssignedMotorizado y esMotorizadoAsignado de
+      // storage.rules dependen de ese campo).
+      //
+      // NO es un congelamiento del documento: después de entregar siguen
+      // siendo legítimas —y quedan permitidas— las escrituras de
+      // registro.deposito.*, cobroDelivery.*, cobroPendiente y
+      // acumulacionCobroSemanal (ver lib/financial-writes.ts, que solo
+      // escribe por dot-path sobre registro.deposito y nunca toca estado ni
+      // asignacion). Lo único que se congela son esos dos campos.
+      //
+      // Revertir una entrega será una operación explícita y auditada
+      // (REVERTIR ENTREGA), fuera del alcance de este bloque.
+      //
+      // Dos categorías de cierre, con reglas DISTINTAS a propósito:
+      //   · 'entregado' es TERMINAL DEFINITIVO — el único cierre con rastro
+      //     financiero. Solo admite updates que no muevan estado ni
+      //     asignacion.
+      //   · 'rechazada'/'cancelada' son REACTIVABLES — nunca generaron
+      //     obligación financiera. Además de los updates administrativos,
+      //     admiten la reactivación explícita que ya existe en el producto
+      //     (reactivarOrden), y SOLO hacia 'pendiente_confirmacion': nunca
+      //     un salto directo a confirmada/asignada/en_camino_*/entregado.
+      //
+      // Presupuesto: cero get()/exists() nuevos y cero diff() — solo
+      // comparación directa resource.data vs request.resource.data.
+      function esEstadoCerradoSolicitud(estadoOrden) {
+        return estadoOrden in ['entregado', 'rechazada', 'cancelada'];
+      }
+
+      // Update administrativo/financiero: no toca la máquina de estados.
+      // Es lo que mantiene vivas las escrituras posteriores a la entrega
+      // (registro.deposito.*, cobroDelivery.*, cobroPendiente,
+      // acumulacionCobroSemanal) — ver lib/financial-writes.ts, que escribe
+      // por dot-path y nunca toca estado ni asignacion.
+      function conservaEstadoYAsignacion() {
+        return request.resource.data.get('estado', '') == resource.data.get('estado', '')
+          && request.resource.data.get('asignacion', null) == resource.data.get('asignacion', null);
+      }
+
+      // Reactivación explícita: exclusiva de los cierres reactivables y con
+      // un único destino. Exige además limpiar asignacion y rechazo, igual
+      // que hace el handler existente — así ninguna orden reactivada arrastra
+      // un motorizado ni un motivo de rechazo viejos.
+      function esReactivacionValida() {
+        return resource.data.get('estado', '') in ['rechazada', 'cancelada']
+          && request.resource.data.get('estado', '') == 'pendiente_confirmacion'
+          && request.resource.data.get('asignacion', null) == null
+          && request.resource.data.get('rechazo', null) == null;
+      }
+
+      function transicionDesdeCerradoValida() {
+        return !esEstadoCerradoSolicitud(resource.data.get('estado', ''))
+          || conservaEstadoYAsignacion()
+          || esReactivacionValida();
+      }
+
+      // Gestor/admin: acceso completo salvo reabrir una orden cerrada por
+      // una vía que no sea la reactivación explícita.
+      allow update: if isAdminOrGestor() && transicionDesdeCerradoValida();
 
       // acumulacionCobroSemanal es el marcador de conciliación del cobro
       // semanal (P1). El motorizado solo puede DEJARLO PEDIDO: pone

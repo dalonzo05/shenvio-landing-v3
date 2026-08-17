@@ -16,6 +16,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore'
 import { db, auth } from '@/fb/config'
+import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { useRoleGuard, type Rol } from '../../_hooks/useRoleGuard'
 import {
@@ -374,6 +375,9 @@ function SolicitudDrawer({
     const user = auth.currentUser
     if (!user) return setErr('Sin sesión.')
     if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio válido.')
+    // A-FIX1: guard defensivo — la UI ya oculta el botón para una orden
+    // cerrada, pero el handler no debe depender del render.
+    if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
     const m = motorizadoSel ? motorizados.find((x) => x.id === motorizadoSel) : null
     try {
       const aceptarAntesDe = new Date(Date.now() + 10 * 60 * 1000)
@@ -389,6 +393,7 @@ function SolicitudDrawer({
 
   const cambiarEstado = async (nuevo: EstadoSolicitud) => {
     if (!solicitud) return
+    if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
     try {
       await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: nuevo,
@@ -400,6 +405,7 @@ function SolicitudDrawer({
 
   const rebotarAsignacion = async () => {
     if (!solicitud) return
+    if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
     try {
       await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() } as any)
     } catch { setErr('No se pudo rebotar.') }
@@ -635,9 +641,15 @@ function SolicitudDrawer({
                   </div>
 
                   <div className="space-y-2 pt-1">
-                    <button onClick={confirmarYAsignar} className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#004aad] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003d94]">
-                      <CheckCircle2 size={15} /> Guardar confirmación / asignación
-                    </button>
+                    {/* A-FIX1: una orden cerrada (entregado/rechazada/cancelada) no
+                        se re-confirma ni se reasigna desde el flujo ordinario —
+                        era justamente este botón, sin gate de estado, el que
+                        permitía devolver una orden entregada al principio. */}
+                    {!esEstadoCerrado(estado) && (
+                      <button onClick={confirmarYAsignar} className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#004aad] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003d94]">
+                        <CheckCircle2 size={15} /> Guardar confirmación / asignación
+                      </button>
+                    )}
 
                     {estado === 'pendiente_confirmacion' && (
                       <button onClick={() => cambiarEstado('rechazada')} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-700">

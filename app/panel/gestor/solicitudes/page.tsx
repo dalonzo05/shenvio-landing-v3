@@ -25,6 +25,7 @@ import {
   where,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import {
   Search,
   ExternalLink,
@@ -1060,6 +1061,14 @@ function GestorSolicitudesPageContent() {
 
   const rebotarAsignacion = async (id: string, motorizadoId?: string) => {
     setErr(null)
+    // A-FIX1: guard defensivo. cambiarEstado() ya consulta
+    // TRANSICIONES_VALIDAS, pero este handler y los de asignación la evaden
+    // escribiendo estado/asignacion directamente — que es por donde una
+    // orden entregada podía volver al principio.
+    if (esEstadoCerrado(allItems.find((x) => x.id === id)?.estado)) {
+      setToast({ type: 'error', message: MSG_ORDEN_CERRADA })
+      return
+    }
     try {
       const b = writeBatch(db)
       b.update(doc(db, 'solicitudes_envio', id), {
@@ -1082,6 +1091,10 @@ function GestorSolicitudesPageContent() {
   const asignarSugerido = async (solicitudId: string, m: MotorizadoConRanking) => {
     const user = auth.currentUser
     if (!user) return
+    if (esEstadoCerrado(allItems.find((x) => x.id === solicitudId)?.estado)) {
+      setToast({ type: 'error', message: MSG_ORDEN_CERRADA })
+      return
+    }
     setAsignandoId(solicitudId)
     try {
       const now = new Date()
@@ -1140,6 +1153,11 @@ function GestorSolicitudesPageContent() {
     const user = auth.currentUser
     if (!user) return setErr('No hay sesión iniciada.')
     if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio final válido.')
+    if (esEstadoCerrado(allItems.find((x) => x.id === id)?.estado)) {
+      setErr(MSG_ORDEN_CERRADA)
+      setToast({ type: 'error', message: MSG_ORDEN_CERRADA })
+      return
+    }
 
     const m = motorizadoSel ? motorizados.find((x) => x.id === motorizadoSel) : null
 
@@ -1191,6 +1209,11 @@ function GestorSolicitudesPageContent() {
 
     const m = motorizados.find((x) => x.id === motorizadoSel)
     if (!m) return setErr('Motorizado inválido.')
+    if (esEstadoCerrado(allItems.find((x) => x.id === id)?.estado)) {
+      setErr(MSG_ORDEN_CERRADA)
+      setToast({ type: 'error', message: MSG_ORDEN_CERRADA })
+      return
+    }
 
     try {
       const now = new Date()
