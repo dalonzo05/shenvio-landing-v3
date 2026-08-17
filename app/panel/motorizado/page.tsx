@@ -1390,18 +1390,24 @@ export default function PanelMotorizadoPage() {
                                   disabled={bloqueado}
                                   onClick={() => {
                                     setPendingConfirm(null);
-                                    const deducirPcConfirm = !!pc.order.pagoDelivery?.deducirDelCobroContraEntrega;
-                                    // Cuando el delivery está deducido del CE, no se pregunta por separado.
-                                    // Al confirmar el producto se registra el delivery implícitamente
-                                    // con el mismo resultado (recibido o no) que el producto.
-                                    // monto ya NO se envía: nunca lo edita el usuario acá (ver
+                                    // El cliente manda ÚNICAMENTE respuestas genuinas del
+                                    // motorizado: si no se le preguntó por el delivery
+                                    // (showDelivery=false), no hay nada suyo que enviar.
+                                    //
+                                    // Cuando el delivery va deducido del cobro contra entrega
+                                    // va implícito en el producto, y es el SERVIDOR quien lo
+                                    // deriva (confirmarTransicionConCobro:
+                                    // deliveryAnswer = productoAnswer). Mandarlo espejado desde
+                                    // acá era redundante y la Function lo rechaza a propósito
+                                    // — aceptarlo permitiría enviar un producto/delivery
+                                    // incoherentes para una modalidad donde son el mismo cobro.
+                                    //
+                                    // monto tampoco se envía: nunca lo edita el usuario acá (ver
                                     // calcDeposito()) — el servidor lo recalcula desde el
                                     // documento, no confía en lo que mande el cliente.
                                     const deliveryCobro = pc.showDelivery
                                       ? { recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? pc.justDelivery : undefined }
-                                      : (deducirPcConfirm && pc.showProducto && pc.montoDelivery > 0)
-                                        ? { recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? pc.justProducto : undefined }
-                                        : undefined;
+                                      : undefined;
                                     executeConfirmarConCobro(
                                       pc.order,
                                       pc.nuevo as 'retirado' | 'entregado',
