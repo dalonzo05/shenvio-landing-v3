@@ -13,6 +13,7 @@ import {
   serverTimestamp,
   where,
 } from 'firebase/firestore'
+import { onAuthStateChanged } from 'firebase/auth'
 import { db, auth } from '@/fb/config'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto, ZonaGeografica } from '@/lib/zonas'
@@ -119,6 +120,10 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
   const [loading, setLoading] = useState(false)
   const [locating, setLocating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // CALC-ERR-1: aviso SECUNDARIO y discreto — el precio ya se calculó
+  // correctamente, pero la cotización no pudo guardarse en el historial.
+  // Nunca debe compartir mensaje ni severidad con `error` (fallo de cálculo).
+  const [avisoPersistencia, setAvisoPersistencia] = useState<string | null>(null)
   const [uid, setUid] = useState<string | null>(null)
 
   const [recOrigen, setRecOrigen] = useState<PlaceLite[]>([])
@@ -143,9 +148,21 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
   const [loadingPuntosComercio, setLoadingPuntosComercio] = useState(false)
   const [selectedBuscadorComercio, setSelectedBuscadorComercio] = useState<{ uid: string; direccion: string; zonaRetiro: string | null; puntoNombre: string } | null>(null)
 
+  // CALC-ERR-1: `uid` sigue siendo state — lo consumen el historial en
+  // tiempo real y los favoritos del comercio (efectos más abajo) — pero ya
+  // no se captura una sola vez al montar. Se mantiene sincronizado con la
+  // sesión real vía onAuthStateChanged, con cleanup del listener.
+  //
+  // Este `uid` de estado es SOLO para lectura/render. La propiedad
+  // (`userId`) de una escritura nueva en `cotizaciones` nunca sale de este
+  // state — se resuelve de `auth.currentUser` en el momento exacto del
+  // guardado (ver intentarGuardarCotizacion más abajo), para que un uid de
+  // React potencialmente desactualizado nunca pueda mandar un `userId` que
+  // ya no coincide con `request.auth.uid` real y dispare
+  // PERMISSION_DENIED.
   useEffect(() => {
-    const u = auth.currentUser
-    if (u) setUid(u.uid)
+    const unsub = onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null))
+    return () => unsub()
   }, [])
 
   useEffect(() => {
@@ -301,7 +318,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
 
   useEffect(() => {
     setDistancia(null); setPrecio(null); setPrecioBase(null); setRecargoZonaInfo(null)
-    setError(null); setZonasResult(null)
+    setError(null); setAvisoPersistencia(null); setZonasResult(null)
   }, [origenCoord, destinoCoord])
 
   // My location
@@ -349,8 +366,47 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
       Date.now() - cot.createdAt.getTime() < DUPLICATE_WINDOW_MS
     )
 
+  // CALC-ERR-1: persistencia SECUNDARIA, aislada del cálculo crítico.
+  // El precio ya fue calculado y mostrado antes de que esto se ejecute — un
+  // fallo acá NUNCA debe borrar distancia/precio ni disparar el error de
+  // cálculo (ver `error` más arriba). Resuelve el UID de la escritura desde
+  // `auth.currentUser` en el momento exacto del guardado — nunca del `uid`
+  // de estado, que puede haber quedado desactualizado — para que el
+  // `userId` del documento siempre coincida con `request.auth.uid` real y
+  // no dispare PERMISSION_DENIED (ver CALC-ERR-1A).
+  const intentarGuardarCotizacion = async (payload: {
+    origen: string
+    destino: string
+    km: number
+    precio: number
+    precioBase: number
+    origenCoord: google.maps.LatLngLiteral
+    destinoCoord: google.maps.LatLngLiteral
+    fuente: string
+    zonaOrigen?: string | null
+    zonaDestino?: string | null
+    recargoZona?: RecargoZona
+  }) => {
+    const currentUser = auth.currentUser
+    if (!currentUser) {
+      // Sesión no disponible en el instante del guardado: no se inventa un
+      // UID ni se intenta el addDoc — se trata igual que cualquier otro
+      // fallo de persistencia (el precio ya calculado sigue siendo válido).
+      console.warn('[calculadora] no se pudo guardar la cotización: sin sesión activa al momento de guardar')
+      setAvisoPersistencia('El precio fue calculado, pero no pudimos guardar esta cotización en tu historial.')
+      return
+    }
+    try {
+      await guardarCotizacion(currentUser.uid, payload)
+      setAvisoPersistencia(null)
+    } catch (e) {
+      console.error('[calculadora] no se pudo guardar la cotización:', e)
+      setAvisoPersistencia('El precio fue calculado, pero no pudimos guardar esta cotización en tu historial.')
+    }
+  }
+
   const calcular = async () => {
-    setError(null); setDistancia(null); setPrecio(null)
+    setError(null); setAvisoPersistencia(null); setDistancia(null); setPrecio(null)
     if (!origenCoord) { setError('Indicá el punto de retiro.'); return }
     if (!destinoCoord) { setError('Indicá el punto de entrega.'); return }
     if (!uid) { setError('No hay sesión activa.'); return }
@@ -374,6 +430,12 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
       return { p, zonaRetiro, zonaEntrega, recargo, precioTotal }
     }
 
+    // ── Rama caché: bloque crítico (lectura/parseo de sessionStorage) ──────
+    // Un fallo acá (JSON corrupto, etc.) es del CÁLCULO — cae al camino de
+    // API de abajo, comportamiento sin cambios. La persistencia ya no vive
+    // dentro de este try: intentarGuardarCotizacion nunca lanza, así que un
+    // fallo de guardado no puede colarse en este catch ni forzar un
+    // refetch por API silencioso.
     try {
       const raw = sessionStorage.getItem(cacheKey)
       if (raw) {
@@ -385,7 +447,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
           if (p === -1) {
             setError('La distancia supera el rango tarifario. Consultá por WhatsApp.')
           } else if (!isDuplicate(origenText, destinoText)) {
-            await guardarCotizacion(uid, { origen: origenText, destino: destinoText, km: cached.km, precio: precioTotal, precioBase: p, origenCoord, destinoCoord, fuente: 'cache', zonaOrigen: zonaRetiro, zonaDestino: zonaEntrega, recargoZona: recargo })
+            await intentarGuardarCotizacion({ origen: origenText, destino: destinoText, km: cached.km, precio: precioTotal, precioBase: p, origenCoord, destinoCoord, fuente: 'cache', zonaOrigen: zonaRetiro, zonaDestino: zonaEntrega, recargoZona: recargo })
           }
           return
         }
@@ -393,6 +455,9 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
       }
     } catch (e) { console.warn('[calculadora] error leyendo cache:', e) }
 
+    // ── Rama API: bloque crítico (distancia + clasificación + tarifa) ──────
+    // Mismo criterio: la persistencia quedó afuera, así que este catch solo
+    // puede dispararse por un fallo real del cálculo.
     setLoading(true)
     try {
       const metros = await obtenerDistanciaMetros(o, d)
@@ -405,7 +470,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
       if (p === -1) {
         setError('La distancia supera el rango tarifario. Consultá por WhatsApp.')
       } else if (!isDuplicate(origenText, destinoText)) {
-        await guardarCotizacion(uid, { origen: origenText, destino: destinoText, km, precio: precioTotal, precioBase: p, origenCoord, destinoCoord, fuente: 'api', zonaOrigen: zonaRetiro, zonaDestino: zonaEntrega, recargoZona: recargo })
+        await intentarGuardarCotizacion({ origen: origenText, destino: destinoText, km, precio: precioTotal, precioBase: p, origenCoord, destinoCoord, fuente: 'api', zonaOrigen: zonaRetiro, zonaDestino: zonaEntrega, recargoZona: recargo })
       }
     } catch (e) {
       console.error('[calculadora] error al calcular:', e)
@@ -418,7 +483,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
   const limpiar = () => {
     setOrigenCoord(null); setDestinoCoord(null); setDistancia(null); setPrecio(null)
     setPrecioBase(null); setRecargoZonaInfo(null)
-    setError(null); setZonasResult(null); setOrigenFavData(null); setSelectedBuscadorComercio(null)
+    setError(null); setAvisoPersistencia(null); setZonasResult(null); setOrigenFavData(null); setSelectedBuscadorComercio(null)
     if (origenInputRef.current) origenInputRef.current.value = ''
     if (destinoInputRef.current) destinoInputRef.current.value = ''
     setShowSug({ o: false, d: false })
@@ -550,10 +615,20 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
         </div>
       )}
 
-      {/* Error */}
+      {/* Error crítico — el cálculo en sí falló */}
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-red-600 text-[13px] font-semibold">
           ⚠️ {error}
+        </div>
+      )}
+
+      {/* CALC-ERR-1: aviso secundario y discreto — el precio ya es válido y
+          sigue mostrándose; solo falló guardar esta cotización en el
+          historial. Deliberadamente distinto (ámbar, no rojo) del error
+          crítico de arriba, y nunca bloquea "Solicitar este envío". */}
+      {avisoPersistencia && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-amber-700 text-[13px] font-medium">
+          ℹ️ {avisoPersistencia}
         </div>
       )}
 
