@@ -19,7 +19,8 @@ import { auth, db } from '@/fb/config'
 import { useUser } from '@/app/Components/UserProvider'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
-import { clasificarOrdenCompleto } from '@/lib/zonas'
+import { clasificarOrdenCompleto, type ZonaGeografica } from '@/lib/zonas'
+import { useResolucionPunto, pareceEntradaDirecta, MSG_ENTRADA_NO_RESUELTA } from '@/lib/useResolucionPunto'
 import { obtenerDistanciaMetros } from '@/lib/distancia'
 import { calcularRecargoZona, RECARGO_TERMINAL_BUS, type TipoServicio, type MetodoFueraManagua } from '@/lib/recargoZona'
 import { getPuntosActivos } from '@/fb/puntosLogisticos'
@@ -249,6 +250,9 @@ function MiniMap({
   color = '#004aad',
   label = 'R',
   locked = false,
+  etiquetarPuntoManual,
+  resolverEntradaTexto,
+  onEntradaNoResuelta,
 }: {
   coord: LatLng | null
   onSelect: (c: LatLng) => void
@@ -256,9 +260,25 @@ function MiniMap({
   color?: string
   label?: string
   locked?: boolean
+  // MAP-UX-2: etiqueta SHView para un punto marcado a mano. Alimenta SOLO el
+  // buscador del mapa (presentación) — nunca direccionEscrita ni geocodeGoogle.
+  etiquetarPuntoManual?: (c: LatLng) => string
+  // MAP-UX-2: resuelve Plus Code o "lat,lng" escritos en el buscador. Devuelve
+  // null si no es una entrada directa, y ahí Google Places sigue su curso.
+  resolverEntradaTexto?: (texto: string) => { coord: LatLng; labelVisible: string } | null
+  onEntradaNoResuelta?: (msg: string | null) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  // Mismo motivo que en MapaSeleccion (CALC-UX-1): los listeners del mapa se
+  // registran con useEffect([]), así que estas callbacks se leen por ref para
+  // no quedar congeladas antes de que carguen las zonas.
+  const etiquetarRef = useRef(etiquetarPuntoManual)
+  etiquetarRef.current = etiquetarPuntoManual
+  const resolverTextoRef = useRef(resolverEntradaTexto)
+  resolverTextoRef.current = resolverEntradaTexto
+  const entradaNoResueltaRef = useRef(onEntradaNoResuelta)
+  entradaNoResueltaRef.current = onEntradaNoResuelta
   const mapRef = useRef<google.maps.Map | null>(null)
   const markerRef = useRef<google.maps.Marker | null>(null)
   const geocoderRef = useRef<google.maps.Geocoder | null>(null)
@@ -361,6 +381,11 @@ function MiniMap({
         if (lockedRef.current || !e.latLng) return
         const c = { lat: e.latLng.lat(), lng: e.latLng.lng() }
         placeMarker(c, google)
+        // MAP-UX-2: contexto inmediato de la zona propia, sin esperar (ni
+        // depender de) el reverse geocoding de Google.
+        const etiquetar = etiquetarRef.current
+        if (etiquetar && searchRef.current) searchRef.current.value = etiquetar(c)
+        entradaNoResueltaRef.current?.(null)
       })
     })
     return () => { mounted = false }
@@ -398,7 +423,34 @@ function MiniMap({
         <input
           ref={searchRef}
           type="text"
-          placeholder="🔍 Buscar dirección en Google Maps..."
+          placeholder="🔍 Buscar lugar, Plus Code o lat,lng..."
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter') return
+            const texto = searchRef.current?.value?.trim() || ''
+            if (!texto) return
+            // MAP-UX-2: Plus Code y coordenadas se resuelven localmente —
+            // Google Places no los interpreta y la Geocoding API está
+            // deshabilitada. Si no es una entrada directa, se deja pasar el
+            // Enter para que Places resuelva la búsqueda normalmente.
+            const resolver = resolverTextoRef.current
+            const punto = resolver?.(texto)
+            if (!punto) {
+              // Solo avisamos si el texto pretendía ser Plus Code o lat,lng:
+              // un nombre de lugar normal lo resuelve Places sin ruido.
+              entradaNoResueltaRef.current?.(
+                pareceEntradaDirecta(texto) ? MSG_ENTRADA_NO_RESUELTA : null,
+              )
+              return
+            }
+            e.preventDefault()
+            const goog = window.google
+            if (!goog || !mapRef.current) return
+            mapRef.current.panTo(punto.coord)
+            mapRef.current.setZoom(16)
+            placeMarker(punto.coord, goog)
+            if (searchRef.current) searchRef.current.value = punto.labelVisible
+            entradaNoResueltaRef.current?.(null)
+          }}
           style={{ ...S.input, marginBottom: 8 }}
         />
       )}
@@ -718,6 +770,14 @@ export default function SolicitarEnvioPage() {
   // cotizaciones (historial de sesión, no de negocio — ver Bloque A).
   const { profile } = useUser()
   const comercioId = profile?.comercioId ?? null
+
+  // MAP-UX-2: las zonas ya se pedían on-demand para clasificar la orden; acá
+  // se cargan una vez para poder etiquetar puntos en vivo. No cambia lo que se
+  // persiste — la clasificación del payload sigue usando su propia llamada.
+  const [zonasSHView, setZonasSHView] = useState<ZonaGeografica[]>([])
+  useEffect(() => { getZonasActivas().then(setZonasSHView).catch(() => setZonasSHView([])) }, [])
+  const { etiquetarManual, resolverTexto } = useResolucionPunto(zonasSHView)
+  const [entradaNoResuelta, setEntradaNoResuelta] = useState<string | null>(null)
 
   const [ownerCompanyName, setOwnerCompanyName] = useState('')
   const [comercioRequiereBolso, setComercioRequiereBolso] = useState(false)
@@ -1447,12 +1507,20 @@ export default function SolicitarEnvioPage() {
                   </p>
                 )}
                 <MiniMap
+                  etiquetarPuntoManual={etiquetarManual}
+                  resolverEntradaTexto={resolverTexto}
+                  onEntradaNoResuelta={setEntradaNoResuelta}
                   coord={retiro.coord}
                   color="#004aad"
                   label="R"
                   onSelect={(c) => setRetiro(prev => ({ ...prev, coord: c }))}
                   onGeocode={(addr) => setGeoRetiro(addr)}
                 />
+                {entradaNoResuelta && (
+                  <p style={{ fontSize: 11, color: '#b45309', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '5px 10px', margin: '6px 0 0', lineHeight: 1.4 }}>
+                    ℹ️ {entradaNoResuelta}
+                  </p>
+                )}
               </div>
             )}
 
@@ -1640,6 +1708,9 @@ export default function SolicitarEnvioPage() {
                 )}
               </div>
               <MiniMap
+                etiquetarPuntoManual={etiquetarManual}
+                resolverEntradaTexto={resolverTexto}
+                onEntradaNoResuelta={setEntradaNoResuelta}
                 coord={entrega.coord}
                 color="#16a34a"
                 label="E"

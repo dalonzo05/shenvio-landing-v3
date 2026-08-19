@@ -17,7 +17,8 @@ import { auth, db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { getMapsLoader } from '@/lib/googleMaps'
 import { getZonasActivas } from '@/fb/zonas'
-import { clasificarOrdenCompleto } from '@/lib/zonas'
+import { clasificarOrdenCompleto, type ZonaGeografica } from '@/lib/zonas'
+import { useResolucionPunto, pareceEntradaDirecta, MSG_ENTRADA_NO_RESUELTA } from '@/lib/useResolucionPunto'
 import { obtenerDistanciaMetros } from '@/lib/distancia'
 import { calcularRecargoZona, RECARGO_TERMINAL_BUS, type TipoServicio, type MetodoFueraManagua } from '@/lib/recargoZona'
 import { getPuntosActivos } from '@/fb/puntosLogisticos'
@@ -382,6 +383,9 @@ function MiniMap({
   label = 'R',
   locked = false,
   onUnlock,
+  etiquetarPuntoManual,
+  resolverEntradaTexto,
+  onEntradaNoResuelta,
 }: {
   coord: LatLng | null
   onSelect: (c: LatLng) => void
@@ -390,9 +394,21 @@ function MiniMap({
   label?: string
   locked?: boolean
   onUnlock?: () => void
+  // MAP-UX-2: solo presentación. Nunca escriben direccionEscrita ni geocodeGoogle.
+  etiquetarPuntoManual?: (c: LatLng) => string
+  resolverEntradaTexto?: (texto: string) => { coord: LatLng; labelVisible: string } | null
+  onEntradaNoResuelta?: (msg: string | null) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  // Los listeners del mapa se registran con useEffect([]) — estas callbacks se
+  // leen por ref para no congelarse antes de que carguen las zonas.
+  const etiquetarRef = useRef(etiquetarPuntoManual)
+  etiquetarRef.current = etiquetarPuntoManual
+  const resolverTextoRef = useRef(resolverEntradaTexto)
+  resolverTextoRef.current = resolverEntradaTexto
+  const entradaNoResueltaRef = useRef(onEntradaNoResuelta)
+  entradaNoResueltaRef.current = onEntradaNoResuelta
   const mapRef = useRef<google.maps.Map | null>(null)
   const markerRef = useRef<google.maps.Marker | null>(null)
   const geocoderRef = useRef<google.maps.Geocoder | null>(null)
@@ -493,7 +509,12 @@ function MiniMap({
 
       mapRef.current.addListener('click', (e: google.maps.MapMouseEvent) => {
         if (!e.latLng || lockedRef.current) return
-        placeMarker({ lat: e.latLng.lat(), lng: e.latLng.lng() }, google)
+        const c = { lat: e.latLng.lat(), lng: e.latLng.lng() }
+        placeMarker(c, google)
+        // MAP-UX-2: contexto de zona propia sin depender del reverse geocoding.
+        const etiquetar = etiquetarRef.current
+        if (etiquetar && searchRef.current) searchRef.current.value = etiquetar(c)
+        entradaNoResueltaRef.current?.(null)
       })
     })
     return () => { mounted = false }
@@ -529,7 +550,31 @@ function MiniMap({
       <input
         ref={searchRef}
         type="text"
-        placeholder="🔍 Buscar dirección en Google Maps..."
+        placeholder="🔍 Buscar lugar, Plus Code o lat,lng..."
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' || locked) return
+          const texto = searchRef.current?.value?.trim() || ''
+          if (!texto) return
+          // Plus Code y coordenadas se resuelven localmente; si no es una
+          // entrada directa, se deja pasar para que Places la resuelva.
+          const punto = resolverTextoRef.current?.(texto)
+          if (!punto) {
+            // Solo avisamos si el texto pretendía ser Plus Code o lat,lng:
+            // un nombre de lugar normal lo resuelve Places sin ruido.
+            entradaNoResueltaRef.current?.(
+              pareceEntradaDirecta(texto) ? MSG_ENTRADA_NO_RESUELTA : null,
+            )
+            return
+          }
+          e.preventDefault()
+          const goog = window.google
+          if (!goog || !mapRef.current) return
+          mapRef.current.panTo(punto.coord)
+          mapRef.current.setZoom(16)
+          placeMarker(punto.coord, goog)
+          if (searchRef.current) searchRef.current.value = punto.labelVisible
+          entradaNoResueltaRef.current?.(null)
+        }}
         style={{ ...S.input, marginBottom: 8 }}
         disabled={locked}
       />
@@ -1147,6 +1192,14 @@ export default function GestorIngresarOrdenPage() {
 }
 
 function GestorIngresarOrdenPageContent() {
+  // ── MAP-UX-2: zonas para etiquetar puntos en vivo ──
+  // La clasificación que se PERSISTE en la orden sigue con su propia llamada
+  // (ver clasificarOrdenCompleto más abajo). Esto es solo para presentación.
+  const [zonasSHView, setZonasSHView] = useState<ZonaGeografica[]>([])
+  useEffect(() => { getZonasActivas().then(setZonasSHView).catch(() => setZonasSHView([])) }, [])
+  const { etiquetarManual, resolverTexto } = useResolucionPunto(zonasSHView)
+  const [entradaNoResuelta, setEntradaNoResuelta] = useState<string | null>(null)
+
   // ── Comercios ──
   const [comercios, setComercios] = useState<ComercioOption[]>([])
   const [loadingComercios, setLoadingComercios] = useState(true)
@@ -2336,7 +2389,15 @@ function GestorIngresarOrdenPageContent() {
               </div>
             )}
 
+            {entradaNoResuelta && (
+              <p style={{ fontSize: 11, color: '#b45309', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '5px 10px', margin: '0 0 8px', lineHeight: 1.4 }}>
+                ℹ️ {entradaNoResuelta}
+              </p>
+            )}
             <MiniMap
+              etiquetarPuntoManual={etiquetarManual}
+              resolverEntradaTexto={resolverTexto}
+              onEntradaNoResuelta={setEntradaNoResuelta}
               coord={retiro.coord}
               color="#004aad"
               label="R"
@@ -2545,6 +2606,9 @@ function GestorIngresarOrdenPageContent() {
           )}
 
           <MiniMap
+            etiquetarPuntoManual={etiquetarManual}
+            resolverEntradaTexto={resolverTexto}
+            onEntradaNoResuelta={setEntradaNoResuelta}
             coord={entrega.coord}
             color="#16a34a"
             label="E"
