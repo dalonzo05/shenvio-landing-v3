@@ -13,6 +13,13 @@ interface MapaSeleccionProps {
   destino: google.maps.LatLngLiteral | null
   onSetOrigen: (coord: google.maps.LatLngLiteral | null) => void
   onSetDestino: (coord: google.maps.LatLngLiteral | null) => void
+  /** CALC-UX-1: etiqueta para un punto marcado a mano. Cuando el consumidor
+   *  la provee (la Calculadora, que es quien tiene las zonas SHView cargadas),
+   *  se usa TAL CUAL y no se consulta reverse geocoding: la zona propia es más
+   *  reconocible que una dirección de Google —o que un Plus Code/coordenadas
+   *  cuando la Geocoding API no responde—. Sin esta prop se conserva el
+   *  comportamiento anterior (geocoding + fallback de coordenadas). */
+  etiquetarPuntoManual?: (coord: google.maps.LatLngLiteral) => string
   onSetOrigenInput?: (direccion: string) => void
   onSetDestinoInput?: (direccion: string) => void
   size?: 'compact' | 'normal' | 'tall'
@@ -43,11 +50,17 @@ export default function MapaSeleccion({
   onSetDestino,
   onSetOrigenInput,
   onSetDestinoInput,
+  etiquetarPuntoManual,
   size = 'compact',
   favoritos = [],
   onSelectFavorito,
 }: MapaSeleccionProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  // CALC-UX-1: el listener de click se registra una sola vez (useEffect []),
+  // así que la prop se lee desde un ref para no quedar congelada en el valor
+  // que tenía antes de que la Calculadora cargara las zonas SHView.
+  const etiquetarRef = useRef(etiquetarPuntoManual)
+  etiquetarRef.current = etiquetarPuntoManual
   const mapRef = useRef<google.maps.Map | null>(null)
   const geocoderRef = useRef<google.maps.Geocoder | null>(null)
   const markerOrigenRef = useRef<google.maps.Marker | null>(null)
@@ -95,6 +108,11 @@ export default function MapaSeleccion({
         ) => {
           setter(coord)
           if (!inputSetter) return
+          // Prioridad SHView: si el consumidor sabe etiquetar el punto, se usa
+          // eso y no se llama a Google. Evita mostrar Plus Codes/coordenadas
+          // crudas como label principal de un punto marcado a mano.
+          const etiquetar = etiquetarRef.current
+          if (etiquetar) { inputSetter(etiquetar(coord)); return }
           // CALC-ERR-1A: cuando hay coordenada, el input SIEMPRE recibe texto.
           // Antes solo se escribía si el geocoding respondía OK — con la
           // Geocoding API caída el input quedaba vacío, CalculadoraPrecio

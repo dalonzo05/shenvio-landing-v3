@@ -9,21 +9,16 @@ const CalculadoraPrecio = dynamic(
 
 export default function CalculadoraPanel() {
   return (
-    <div className="space-y-6">
-      {/* Cabecera de la sección */}
-      <div className="rounded-2xl bg-white border shadow-sm p-6">
-        <h1 className="text-2xl font-bold">Calculadora</h1>
-        <p className="text-gray-600 mt-1">
+    <div className="w-full max-w-5xl mx-auto space-y-4">
+      {/* B1: cabecera compacta — sin caja propia, para no anidar marcos. */}
+      <div className="px-1">
+        <h1 className="text-xl font-bold text-gray-900">Calculadora</h1>
+        <p className="text-[13px] text-gray-500">
           Estimá el precio entre dos puntos dentro de Managua y municipios aledaños.
         </p>
       </div>
 
-      {/* Marco único de la calculadora */}
-      <section className="rounded-2xl bg-white border shadow-sm">
-        <div className="w-full max-w-5xl mx-auto p-4 md:p-6">
-          <CalculadoraPrecio solicitudBase="/panel/comercio/solicitar" />
-        </div>
-      </section>
+      <CalculadoraPrecio solicitudBase="/panel/comercio/solicitar" />
     </div>
   )
 }

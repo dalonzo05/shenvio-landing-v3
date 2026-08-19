@@ -26,6 +26,12 @@ import { HistorialCotizaciones } from './calculadora/HistorialCotizaciones'
 import { BuscadorComercio } from './calculadora/BuscadorComercio'
 import type { PlaceLite, Cotizacion, PuntoFavorito, PuntoComercio } from './calculadora/types'
 import { calcularRecargoZona, type RecargoZona } from '@/lib/recargoZona'
+import { clasificarPuntoEnZona } from '@/lib/zonas'
+import {
+  interpretarEntrada,
+  etiquetaPuntoManual,
+  etiquetaMiUbicacion,
+} from '@/lib/puntoUbicacion'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -124,6 +130,9 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
   // correctamente, pero la cotización no pudo guardarse en el historial.
   // Nunca debe compartir mensaje ni severidad con `error` (fallo de cálculo).
   const [avisoPersistencia, setAvisoPersistencia] = useState<string | null>(null)
+  // CALC-UX-1: aviso puntual cuando lo escrito no es una dirección, ni un
+  // Plus Code, ni coordenadas. No es un error de cálculo ni bloquea nada.
+  const [entradaInvalida, setEntradaInvalida] = useState<string | null>(null)
   const [uid, setUid] = useState<string | null>(null)
 
   const [recOrigen, setRecOrigen] = useState<PlaceLite[]>([])
@@ -140,6 +149,25 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
     macroZonaRetiroNombre: string | null
     macroZonaEntregaNombre: string | null
   } | null>(null)
+
+  // CALC-UX-1: nombre de zona SHView de un punto. Usa el clasificador único
+  // de lib/zonas.ts (zona pequeña primero, macrozona como respaldo) — acá no
+  // se reimplementa ninguna lógica territorial.
+  const nombreZonaDe = useCallback((coord: google.maps.LatLngLiteral): string | null => {
+    if (zonas.length === 0) return null
+    const zona = clasificarPuntoEnZona(coord, zonas, 'zona')
+    if (zona?.nombre) return zona.nombre
+    const macro = clasificarPuntoEnZona(coord, zonas, 'macrozona')
+    return macro?.nombre ?? null
+  }, [zonas])
+
+  // Etiqueta visible de un punto marcado a mano (mapa, Plus Code o
+  // coordenadas). Las coordenadas exactas se conservan aparte, en
+  // origenCoord/destinoCoord — esto es solo presentación.
+  const etiquetarManual = useCallback(
+    (coord: google.maps.LatLngLiteral) => etiquetaPuntoManual(coord, nombreZonaDe(coord)),
+    [nombreZonaDe],
+  )
 
   const [puntosFavoritos, setPuntosFavoritos] = useState<PuntoFavorito[]>([])
   const [origenFavData, setOrigenFavData] = useState<PuntoFavorito | null>(null)
@@ -318,7 +346,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
 
   useEffect(() => {
     setDistancia(null); setPrecio(null); setPrecioBase(null); setRecargoZonaInfo(null)
-    setError(null); setAvisoPersistencia(null); setZonasResult(null)
+    setError(null); setAvisoPersistencia(null); setEntradaInvalida(null); setZonasResult(null)
   }, [origenCoord, destinoCoord])
 
   // My location
@@ -331,19 +359,20 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
         setOrigenCoord({ lat, lng })
         setOrigenFavData(null)
         setSelectedBuscadorComercio(null)
-        const google = await getMapsLoader().load()
-        new google.maps.Geocoder().geocode({ location: { lat, lng } }, (results, status) => {
-          const label = status === 'OK' && results?.[0] ? results[0].formatted_address : 'Tu ubicación'
-          if (origenInputRef.current) origenInputRef.current.value = label
-          saveRecent('origen', { label, lat, lng })
-          setRecOrigen(loadRecents('origen'))
-        })
+        // CALC-UX-1: la zona SHView es más reconocible que una dirección de
+        // Google, y no depende de la Geocoding API (hoy sin activar). Si el
+        // punto no cae en ningún polígono, etiquetaMiUbicacion() cae a
+        // coordenadas legibles — nunca a un texto vacío.
+        const label = etiquetaMiUbicacion({ lat, lng }, nombreZonaDe({ lat, lng }))
+        if (origenInputRef.current) origenInputRef.current.value = label
+        saveRecent('origen', { label, lat, lng })
+        setRecOrigen(loadRecents('origen'))
         setLocating(false)
       },
       (err) => { setLocating(false); setError(err.code === 1 ? 'Permiso de ubicación denegado.' : 'No se pudo obtener tu ubicación.') },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     )
-  }, [])
+  }, [nombreZonaDe])
 
   const swap = () => {
     const [oc, dc] = [origenCoord, destinoCoord]
@@ -358,10 +387,30 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
   }
 
   // Devuelve true si ya existe una cotización idéntica guardada recientemente
-  const isDuplicate = (origenText: string, destinoText: string): boolean =>
+  // CALC-UX-1: la deduplicación pasa a comparar COORDENADAS, no el texto.
+  // Con el etiquetado SHView, dos puntos distintos de un mismo barrio
+  // comparten label ("Bolonia"), así que comparar por texto los trataría como
+  // la misma cotización y perdería la segunda. Las coordenadas son la
+  // identidad real del punto; el label es solo presentación.
+  //
+  // Tolerancia ~1e-5° (≈1 m): absorbe el redondeo de ida y vuelta por
+  // Firestore sin llegar a fusionar dos ubicaciones distintas.
+  const TOLERANCIA_COORD = 1e-5
+  const mismaCoord = (
+    a: google.maps.LatLngLiteral | null | undefined,
+    b: google.maps.LatLngLiteral | null | undefined,
+  ): boolean =>
+    !!a && !!b &&
+    Math.abs(a.lat - b.lat) < TOLERANCIA_COORD &&
+    Math.abs(a.lng - b.lng) < TOLERANCIA_COORD
+
+  const isDuplicate = (
+    origenCoordActual: google.maps.LatLngLiteral,
+    destinoCoordActual: google.maps.LatLngLiteral,
+  ): boolean =>
     cotizaciones.some(cot =>
-      cot.origen === origenText &&
-      cot.destino === destinoText &&
+      mismaCoord(cot.origenCoord, origenCoordActual) &&
+      mismaCoord(cot.destinoCoord, destinoCoordActual) &&
       cot.createdAt != null &&
       Date.now() - cot.createdAt.getTime() < DUPLICATE_WINDOW_MS
     )
@@ -458,7 +507,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
           const { p, zonaRetiro, zonaEntrega, recargo, precioTotal } = aplicarPrecio(cached.km, zr)
           if (p === -1) {
             setError('La distancia supera el rango tarifario. Consultá por WhatsApp.')
-          } else if (!isDuplicate(origenText, destinoText)) {
+          } else if (!isDuplicate(origenCoord, destinoCoord)) {
             await intentarGuardarCotizacion({ origen: origenText, destino: destinoText, km: cached.km, precio: precioTotal, precioBase: p, origenCoord, destinoCoord, fuente: 'cache', zonaOrigen: zonaRetiro, zonaDestino: zonaEntrega, recargoZona: recargo })
           }
           return
@@ -481,7 +530,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
       sessionStorage.setItem(cacheKey, JSON.stringify({ km, ts: Date.now() }))
       if (p === -1) {
         setError('La distancia supera el rango tarifario. Consultá por WhatsApp.')
-      } else if (!isDuplicate(origenText, destinoText)) {
+      } else if (!isDuplicate(origenCoord, destinoCoord)) {
         await intentarGuardarCotizacion({ origen: origenText, destino: destinoText, km, precio: precioTotal, precioBase: p, origenCoord, destinoCoord, fuente: 'api', zonaOrigen: zonaRetiro, zonaDestino: zonaEntrega, recargoZona: recargo })
       }
     } catch (e) {
@@ -495,7 +544,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
   const limpiar = () => {
     setOrigenCoord(null); setDestinoCoord(null); setDistancia(null); setPrecio(null)
     setPrecioBase(null); setRecargoZonaInfo(null)
-    setError(null); setAvisoPersistencia(null); setZonasResult(null); setOrigenFavData(null); setSelectedBuscadorComercio(null)
+    setError(null); setAvisoPersistencia(null); setEntradaInvalida(null); setZonasResult(null); setOrigenFavData(null); setSelectedBuscadorComercio(null)
     if (origenInputRef.current) origenInputRef.current.value = ''
     if (destinoInputRef.current) destinoInputRef.current.value = ''
     setShowSug({ o: false, d: false })
@@ -586,8 +635,47 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
     setShowSug((val || '').trim() === '' ? (which === 'o' ? { o: true, d: false } : { o: false, d: true }) : { o: false, d: false })
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Escape') setShowSug({ o: false, d: false })
+  // CALC-UX-1: entradas directas. Google Places Autocomplete (con
+  // strictBounds + country 'ni') no resuelve ni Plus Codes ni coordenadas
+  // escritas a mano, y la Geocoding API no está activada — así que se
+  // interpretan localmente. El punto exacto queda en origenCoord/destinoCoord;
+  // el texto visible pasa a ser la zona SHView correspondiente.
+  const resolverEntradaDirecta = (which: 'o' | 'd'): boolean => {
+    const ref = which === 'o' ? origenInputRef : destinoInputRef
+    const texto = ref.current?.value?.trim() || ''
+    if (!texto) return false
+    const entrada = interpretarEntrada(texto)
+    if (entrada.tipo === 'texto') return false
+
+    const coord = entrada.coord
+    if (which === 'o') {
+      setOrigenCoord(coord)
+      setOrigenFavData(null)
+      setSelectedBuscadorComercio(null)
+    } else {
+      setDestinoCoord(coord)
+    }
+    const label = etiquetarManual(coord)
+    if (ref.current) ref.current.value = label
+    saveRecent(which === 'o' ? 'origen' : 'destino', { label, ...coord })
+    if (which === 'o') setRecOrigen(loadRecents('origen'))
+    else setRecDestino(loadRecents('destino'))
+    setShowSug({ o: false, d: false })
+    setEntradaInvalida(null)
+    return true
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, which?: 'o' | 'd') => {
+    if (e.key === 'Escape') { setShowSug({ o: false, d: false }); return }
+    if (e.key !== 'Enter' || !which) return
+    const texto = (which === 'o' ? origenInputRef : destinoInputRef).current?.value?.trim() || ''
+    if (!texto) return
+    if (resolverEntradaDirecta(which)) { e.preventDefault(); return }
+    // Texto que parece una entrada directa pero no resuelve: se avisa sin
+    // romper nada. Si es una búsqueda normal, Autocomplete sigue su curso.
+    if (/^[0-9+-., ]+$/.test(texto) || texto.includes('+')) {
+      setEntradaInvalida('No pudimos interpretar eso. Probá una dirección, un Plus Code (4QQV+QHM) o coordenadas (12.14009, -86.28753).')
+    }
   }
 
   const puedeCalcular = !!origenCoord && !!destinoCoord && !loading
@@ -644,17 +732,28 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
         </div>
       )}
 
+      {/* CALC-UX-1: entrada escrita que no es dirección, Plus Code ni
+          coordenadas. Informativo, no bloquea el resto de la Calculadora. */}
+      {entradaInvalida && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-amber-700 text-[13px] font-medium">
+          ℹ️ {entradaInvalida}
+        </div>
+      )}
+
       {/* Inputs + Favoritos */}
       <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm">
         <div className="flex gap-2.5 items-stretch">
           <div className="flex-1 flex flex-col gap-2">
             <div ref={origenWrapRef} className="relative">
+              <label className="block text-[11px] font-bold uppercase tracking-wide text-[#004aad] mb-1">
+                Retiro
+              </label>
               <SearchInput
                 inputRef={origenInputRef}
-                placeholder="Punto de retiro..."
+                placeholder="Dirección, Plus Code o coordenadas..."
                 onFocusEmpty={() => handleFocus('o')}
                 onInputChange={() => handleInput('o')}
-                onKeyDown={handleKeyDown}
+                onKeyDown={(e) => handleKeyDown(e, 'o')}
                 icon="📦"
                 variant="blue"
                 onClear={() => {
@@ -681,12 +780,15 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
             </div>
 
             <div ref={destinoWrapRef} className="relative">
+              <label className="block text-[11px] font-bold uppercase tracking-wide text-green-700 mb-1">
+                Entrega
+              </label>
               <SearchInput
                 inputRef={destinoInputRef}
-                placeholder="Punto de entrega..."
+                placeholder="Dirección, Plus Code o coordenadas..."
                 onFocusEmpty={() => handleFocus('d')}
                 onInputChange={() => handleInput('d')}
-                onKeyDown={handleKeyDown}
+                onKeyDown={(e) => handleKeyDown(e, 'd')}
                 icon="🏠"
                 variant="green"
                 onClear={() => {
@@ -713,7 +815,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
             type="button"
             onClick={swap}
             title="Intercambiar"
-            className="px-3 rounded-xl border border-gray-200 bg-white cursor-pointer text-lg text-gray-500 flex items-center hover:bg-gray-50 transition-colors"
+            className="self-center shrink-0 h-9 w-9 rounded-lg border border-gray-200 bg-white cursor-pointer text-base text-gray-500 flex items-center justify-center hover:bg-gray-50 transition-colors"
           >
             ⇅
           </button>
@@ -756,6 +858,7 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
               setRecDestino(loadRecents('destino'))
             }
           }}
+          etiquetarPuntoManual={etiquetarManual}
           onSetOrigenInput={(d) => { if (origenInputRef.current) origenInputRef.current.value = d }}
           onSetDestinoInput={(d) => { if (destinoInputRef.current) destinoInputRef.current.value = d }}
           size="compact"
@@ -776,26 +879,37 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
         />
       )}
 
-      {/* Hint */}
-      {origenCoord && destinoCoord && distancia === null && !loading && !error && (
-        <div className="bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3 text-[13px] text-amber-700 font-semibold">
-          ✓ Tenés los dos puntos listos. Tocá <strong>Calcular precio</strong>.
-        </div>
+      {/* B4: ayuda discreta mientras falte un punto — no es un error. */}
+      {(!origenCoord || !destinoCoord) && !error && (
+        <p className="text-[13px] text-gray-500 px-1">
+          Seleccioná retiro y entrega para calcular.
+        </p>
       )}
 
-      {/* Acciones */}
+      {origenCoord && destinoCoord && distancia === null && !loading && !error && (
+        <p className="text-[13px] text-gray-600 px-1">
+          Listo: tocá <strong className="font-semibold text-gray-800">Calcular precio</strong>.
+        </p>
+      )}
+
+      {/* B5: con precio ya calculado, la acción primaria es "Solicitar este
+          envío" (dentro del resumen) y el cálculo pasa a secundario, para no
+          tener dos botones azules compitiendo. Si los puntos cambian, el
+          efecto de reset deja distancia=null y vuelve a ser primario. */}
       <div className="flex gap-2.5">
         <button
           type="button"
           onClick={calcular}
           disabled={!puedeCalcular}
-          className={`flex-1 rounded-xl py-3.5 px-5 text-[15px] font-extrabold transition-all ${
-            puedeCalcular
-              ? 'bg-[#004aad] text-white cursor-pointer hover:bg-[#003d91]'
-              : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+          className={`flex-1 rounded-xl py-3.5 px-5 text-[15px] transition-all ${
+            !puedeCalcular
+              ? 'bg-gray-100 text-gray-400 cursor-not-allowed font-extrabold'
+              : distancia !== null
+                ? 'border border-gray-300 bg-white text-gray-700 font-semibold cursor-pointer hover:bg-gray-50'
+                : 'bg-[#004aad] text-white font-extrabold cursor-pointer hover:bg-[#003d91]'
           }`}
         >
-          {loading ? 'Calculando...' : '📏 Calcular precio'}
+          {loading ? 'Calculando...' : distancia !== null ? 'Recalcular' : '📏 Calcular precio'}
         </button>
         <button
           type="button"
