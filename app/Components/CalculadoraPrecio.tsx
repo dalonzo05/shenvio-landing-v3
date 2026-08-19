@@ -387,6 +387,18 @@ const CalculadoraPrecio: React.FC<{ showBuscadorComercio?: boolean; solicitudBas
     zonaDestino?: string | null
     recargoZona?: RecargoZona
   }) => {
+    // CALC-ERR-1A, defensa adicional: firestore.rules exige que origen y
+    // destino tengan contenido (size() > 0), así que un texto vacío se
+    // rechazaría con permission-denied. El camino normal ya no produce
+    // vacíos —MapaSeleccion siempre escribe un fallback de coordenadas—,
+    // pero el historial no debe volver a depender de que ningún origen de
+    // texto falle: si igualmente llega vacío, no se intenta el addDoc y se
+    // informa como fallo de persistencia, nunca como error de cálculo.
+    if (!payload.origen.trim() || !payload.destino.trim()) {
+      console.warn('[calculadora] cotización no persistida: origen/destino vacío')
+      setAvisoPersistencia('El precio fue calculado, pero no pudimos guardar esta cotización en tu historial.')
+      return
+    }
     const currentUser = auth.currentUser
     if (!currentUser) {
       // Sesión no disponible en el instante del guardado: no se inventa un

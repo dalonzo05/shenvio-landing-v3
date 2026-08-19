@@ -94,11 +94,23 @@ export default function MapaSeleccion({
           inputSetter?: (s: string) => void
         ) => {
           setter(coord)
-          if (geocoderRef.current && inputSetter) {
-            geocoderRef.current.geocode({ location: coord }, (results, status) => {
-              if (status === 'OK' && results?.[0]) inputSetter(results[0].formatted_address)
-            })
-          }
+          if (!inputSetter) return
+          // CALC-ERR-1A: cuando hay coordenada, el input SIEMPRE recibe texto.
+          // Antes solo se escribía si el geocoding respondía OK — con la
+          // Geocoding API caída el input quedaba vacío, CalculadoraPrecio
+          // propagaba origen/destino = '' al guardar la cotización y Firestore
+          // lo denegaba por regla (origen.size() > 0), rompiendo el historial
+          // sin que el cálculo tuviera nada malo.
+          //
+          // El fallback usa las coordenadas reales y no un literal fijo: dos
+          // puntos distintos del mapa deben seguir produciendo textos
+          // distintos, o isDuplicate() los trataría como el mismo y el
+          // historial perdería trazabilidad.
+          const fallbackCoord = `${coord.lat.toFixed(5)}, ${coord.lng.toFixed(5)}`
+          if (!geocoderRef.current) { inputSetter(fallbackCoord); return }
+          geocoderRef.current.geocode({ location: coord }, (results, status) => {
+            inputSetter(status === 'OK' && results?.[0] ? results[0].formatted_address : fallbackCoord)
+          })
         }
 
         if (!markerOrigenRef.current) {
