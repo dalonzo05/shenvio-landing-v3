@@ -76,6 +76,8 @@ type Solicitud = {
 type DepositoCalc = {
   totalAlComercio: number
   totalAStorkhub: number
+  /** B1.2 — parte del delivery que el CE no alcanzó a cubrir. Informativa acá. */
+  faltanteDelivery: number
 }
 
 type GrupoStorkhub = {
@@ -2248,6 +2250,15 @@ function DepositoGrupo({
                     </td>
                     <td className="px-4 py-2.5 text-xs text-right font-semibold text-gray-900">
                       {`C$ ${monto.toLocaleString('es-NI')}`}
+                      {/* B1.2: informativo. El faltante NO se le exige al
+                          motorizado —ya está fuera de `monto`— pero conviene
+                          que el gestor lo vea: es una obligación a cobrar
+                          aparte, no dinero que este motorizado deba. */}
+                      {tipoDeposito === 'storkhub' && dep.faltanteDelivery > 0 && (
+                        <p className="text-[10px] font-medium text-amber-600 mt-0.5">
+                          + C$ {dep.faltanteDelivery.toLocaleString('es-NI')} pendiente externo
+                        </p>
+                      )}
                     </td>
                   </tr>
                 )

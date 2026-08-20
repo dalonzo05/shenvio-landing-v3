@@ -163,21 +163,23 @@ test('I · delivery 0 no genera obligación con StorkHub', () => {
 })
 
 // ── J. Producto < delivery, con deducción ───────────────────────────────────
-// PENDIENTE B1.2 — NO es el comportamiento correcto, es el actual.
-// El cliente entregó 100, pero el sistema exige depositar 130: los 30 de
-// diferencia no los absorbe ninguna cuenta y caen sobre el motorizado.
-// Este test existe para que la corrección de B1.2 falle acá y sea visible.
-test('J · PENDIENTE B1.2 — producto < delivery deja un faltante sin dueño', () => {
+// B1.2 — CORREGIDO. El cliente entregó 100; solo se le exigen 100 al
+// motorizado. Los 30 restantes del delivery quedan como faltante a cobrar
+// aparte, no como deuda suya.
+test('J/D1 · producto < delivery: solo se exige lo recibido', () => {
   const r = calcularDeposito(orden({
     cobroContraEntrega: { aplica: true, monto: 100 },
     confirmacion: { precioFinalCordobas: 130 },
     pagoDelivery: { quienPaga: 'entrega', deducirDelCobroContraEntrega: true },
   }))
   assert.equal(r.totalAlComercio, 0)
-  assert.equal(r.totalAStorkhub, 130)
-  // El cliente entregó 100 y el sistema exige 130. Diferencia sin cuenta: 30.
-  assert.equal(r.montoTotal, 130)
-  assert.equal(r.montoTotal - r.montoProducto, 30)
+  assert.equal(r.totalAStorkhub, 100)
+  assert.equal(r.montoTotal, 100)
+  assert.equal(r.montoRecibidoReal, 100)
+  assert.equal(r.faltanteDelivery, 30)
+  assert.equal(r.requiereCobroPosterior, true)
+  // El faltante más lo cubierto reconstruyen el delivery completo.
+  assert.equal(r.totalAStorkhub + r.faltanteDelivery, 130)
 })
 
 // ── K. Producto = delivery ──────────────────────────────────────────────────
@@ -250,13 +252,176 @@ test('M5 · el fallback NO aplica dentro de Managua', () => {
   assert.equal(r.totalAStorkhub, 0)
 })
 
-// ── producto.recibio: comportamiento actual, no corregido ───────────────────
-test('PENDIENTE · producto.recibio=false no libera el depósito al comercio', () => {
+// ── B1.2 · Caso A — producto no recibido ────────────────────────────────────
+test('P1 · producto.recibio=false libera el depósito al comercio', () => {
   const r = calcularDeposito(orden({
     cobroContraEntrega: { aplica: true, monto: 500 },
     cobrosMotorizado: { producto: { recibio: false } },
   }))
   assert.equal(r.tieneProducto, false)
-  // Aun así se le sigue exigiendo depositar los 500 que declaró no haber cobrado.
+  // No se le exige un producto que declaró no haber cobrado.
+  assert.equal(r.totalAlComercio, 0)
+  assert.equal(r.montoRecibidoReal, 0)
+  assert.equal(r.requiereCobroPosterior, true)
+  // El monto declarado se conserva para la incidencia.
+  assert.equal(r.montoProducto, 500)
+})
+
+test('P2 · producto.recibio=true se exige normalmente', () => {
+  const r = calcularDeposito(orden({
+    cobroContraEntrega: { aplica: true, monto: 500 },
+    cobrosMotorizado: { producto: { recibio: true } },
+  }))
+  assert.equal(r.tieneProducto, true)
   assert.equal(r.totalAlComercio, 500)
+  assert.equal(r.requiereCobroPosterior, false)
+})
+
+test('P3 · sin campo producto se exige normalmente', () => {
+  const r = calcularDeposito(orden({
+    cobroContraEntrega: { aplica: true, monto: 500 },
+    cobrosMotorizado: null,
+  }))
+  assert.equal(r.totalAlComercio, 500)
+  assert.equal(r.requiereCobroPosterior, false)
+})
+
+// ── B1.2 · Caso B — matriz producto vs delivery con deducción ───────────────
+const conDeduccion = (prod: number, del: number) => calcularDeposito(orden({
+  cobroContraEntrega: { aplica: prod > 0, monto: prod },
+  confirmacion: { precioFinalCordobas: del },
+  pagoDelivery: { quienPaga: 'entrega', deducirDelCobroContraEntrega: true },
+}))
+
+test('D2 · producto = delivery: cubre exacto, sin faltante', () => {
+  const r = conDeduccion(130, 130)
+  assert.equal(r.totalAlComercio, 0)
+  assert.equal(r.totalAStorkhub, 130)
+  assert.equal(r.faltanteDelivery, 0)
+})
+
+test('D3 · producto > delivery: el remanente va al comercio', () => {
+  const r = conDeduccion(200, 130)
+  assert.equal(r.totalAlComercio, 70)
+  assert.equal(r.totalAStorkhub, 130)
+  assert.equal(r.faltanteDelivery, 0)
+  assert.equal(r.montoTotal, 200)
+})
+
+test('D4 · producto 0 / delivery 130: no se exige nada al motorizado', () => {
+  const r = conDeduccion(0, 130)
+  assert.equal(r.totalAlComercio, 0)
+  assert.equal(r.totalAStorkhub, 0)
+  assert.equal(r.faltanteDelivery, 130)
+  assert.equal(r.montoRecibidoReal, 0)
+})
+
+test('D5 · producto 100 / delivery 0: todo al comercio', () => {
+  const r = conDeduccion(100, 0)
+  assert.equal(r.totalAlComercio, 100)
+  assert.equal(r.totalAStorkhub, 0)
+  assert.equal(r.faltanteDelivery, 0)
+})
+
+// ── B1.2 · combinaciones de incidencias ─────────────────────────────────────
+test('D6 · delivery no recibido + producto recibido', () => {
+  const r = calcularDeposito(orden({
+    cobroContraEntrega: { aplica: true, monto: 500 },
+    confirmacion: { precioFinalCordobas: 100 },
+    cobrosMotorizado: {
+      delivery: { recibio: false, justificacion: 'El cliente no tenía efectivo' },
+      producto: { recibio: true },
+    },
+  }))
+  assert.equal(r.totalAlComercio, 500)
+  assert.equal(r.totalAStorkhub, 0)
+})
+
+test('D7 · producto no recibido + delivery recibido', () => {
+  const r = calcularDeposito(orden({
+    cobroContraEntrega: { aplica: true, monto: 500 },
+    confirmacion: { precioFinalCordobas: 100 },
+    cobrosMotorizado: {
+      delivery: { recibio: true },
+      producto: { recibio: false, justificacion: 'El cliente rechazó el producto' },
+    },
+  }))
+  assert.equal(r.totalAlComercio, 0)
+  assert.equal(r.totalAStorkhub, 100)
+  assert.equal(r.montoRecibidoReal, 100)
+})
+
+test('D8 · ambos no recibidos: no se exige nada', () => {
+  const r = calcularDeposito(orden({
+    cobroContraEntrega: { aplica: true, monto: 500 },
+    confirmacion: { precioFinalCordobas: 100 },
+    cobrosMotorizado: {
+      delivery: { recibio: false, justificacion: 'El cliente no estaba / no atendió' },
+      producto: { recibio: false, justificacion: 'El cliente no estaba / no atendió' },
+    },
+  }))
+  assert.equal(r.montoTotal, 0)
+  assert.equal(r.montoRecibidoReal, 0)
+})
+
+// Estado legacy: no alcanzable por el flujo actual (con deducción no se le
+// pregunta al motorizado por el delivery), pero sí posible en documentos
+// viejos o por edición manual del gestor. Antes descontaba al comercio un
+// delivery que nadie cobró; ahora la deducción usa el monto real.
+test('D9 · legacy: deducir + delivery.recibio=false no descuenta al comercio', () => {
+  const r = calcularDeposito(orden({
+    cobroContraEntrega: { aplica: true, monto: 1000 },
+    confirmacion: { precioFinalCordobas: 100 },
+    pagoDelivery: { quienPaga: 'entrega', deducirDelCobroContraEntrega: true },
+    cobrosMotorizado: { delivery: { recibio: false, justificacion: 'El cliente no tenía efectivo' } },
+  }))
+  // El comercio recibe su producto completo: el delivery nunca entró en caja.
+  assert.equal(r.totalAlComercio, 1000)
+  assert.equal(r.totalAStorkhub, 0)
+  assert.equal(r.montoTotal, r.montoRecibidoReal)
+})
+
+// ── B1.2 · INVARIANTE CENTRAL ───────────────────────────────────────────────
+// El principio del bloque, verificado sobre toda la matriz representativa.
+test('INV · nunca se exige más de lo recibido, y el faltante nunca es negativo', () => {
+  const montos = [0, 50, 100, 130, 200]
+  const incidencias = [
+    null,
+    { producto: { recibio: false as const, justificacion: 'x' } },
+    { delivery: { recibio: false as const, justificacion: 'x' } },
+    { delivery: { recibio: false as const, justificacion: 'x' }, producto: { recibio: false as const, justificacion: 'x' } },
+  ]
+  let combinaciones = 0
+  for (const prod of montos) {
+    for (const del of montos) {
+      for (const deducir of [true, false]) {
+        for (const cobros of incidencias) {
+          const r = calcularDeposito({
+            cobroContraEntrega: { aplica: prod > 0, monto: prod },
+            confirmacion: { precioFinalCordobas: del },
+            pagoDelivery: { quienPaga: 'entrega', deducirDelCobroContraEntrega: deducir },
+            tipoServicio: 'managua',
+            tipoCliente: 'contado',
+            cobrosMotorizado: cobros,
+          })
+          const ctx = `prod=${prod} del=${del} deducir=${deducir} cobros=${JSON.stringify(cobros)}`
+          assert.ok(
+            r.totalAlComercio + r.totalAStorkhub <= r.montoRecibidoReal,
+            `se exige más de lo recibido — ${ctx}`,
+          )
+          assert.ok(r.faltanteDelivery >= 0, `faltante negativo — ${ctx}`)
+          assert.ok(r.totalAlComercio >= 0 && r.totalAStorkhub >= 0, `negativo — ${ctx}`)
+          // Con deducción, lo cubierto más lo faltante reconstruyen el delivery cobrable.
+          if (deducir) {
+            assert.equal(
+              r.totalAStorkhub + r.faltanteDelivery, r.montoDelivery,
+              `cubierto + faltante != delivery — ${ctx}`,
+            )
+          }
+          combinaciones++
+        }
+      }
+    }
+  }
+  assert.equal(combinaciones, 200)
 })

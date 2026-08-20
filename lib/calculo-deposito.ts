@@ -45,7 +45,14 @@ export interface EntradaCalculoDeposito {
   tipoCliente?: string | null
   cobrosMotorizado?: {
     delivery?: { recibio?: boolean | null; justificacion?: string | null } | null
-    producto?: { recibio?: boolean | null } | null
+    // `justificacion` y `estado` los persiste confirmarTransicionConCobro;
+    // este cálculo no los usa, pero el tipo los reconoce porque vienen en el
+    // dato real y los consumidores pasan la orden entera.
+    producto?: {
+      recibio?: boolean | null
+      justificacion?: string | null
+      estado?: string | null
+    } | null
   } | null
 }
 
@@ -68,6 +75,22 @@ export interface ResultadoCalculoDeposito {
   montoTotal: number
   /** Texto legible para la UI del motorizado. */
   descripcion: string
+
+  // ── B1.2 ──────────────────────────────────────────────────────────────
+  /**
+   * Efectivo que el motorizado realmente tiene por esta orden. Es el techo
+   * de lo que se le puede exigir: `totalAlComercio + totalAStorkhub` nunca
+   * puede superarlo.
+   */
+  montoRecibidoReal: number
+  /**
+   * Parte del delivery que el cobro contra entrega NO alcanzó a cubrir.
+   * No se le exige al motorizado — queda como obligación a cobrar aparte
+   * (`cobroDelivery.monto`). Siempre 0 si no hay deducción.
+   */
+  faltanteDelivery: number
+  /** Hay dinero que deberá cobrarse después: faltante o producto no recibido. */
+  requiereCobroPosterior: boolean
 }
 
 export function calcularDeposito(orden: EntradaCalculoDeposito): ResultadoCalculoDeposito {
@@ -98,22 +121,48 @@ export function calcularDeposito(orden: EntradaCalculoDeposito): ResultadoCalcul
   const tieneDelivery = !esPorTransferencia && !esCredito && precioDelivery > 0 && !deliveryNoRecibido
   const montoDelivery = tieneDelivery ? precioDelivery : 0
 
-  // Deducción del delivery sobre el cobro contra entrega. Usa precioDelivery,
-  // no montoDelivery: así estaba en las cuatro copias y se preserva.
+  // ── B1.2: todo el reparto parte del dinero REALMENTE recibido ────────────
   //
-  // PENDIENTE B1.2: cuando el delivery supera al producto, este Math.max
-  // recorta a 0 el lado del comercio pero deja intacto lo que se le exige a
-  // StorkHub. La diferencia no la absorbe ninguna cuenta y termina cayendo
-  // sobre el motorizado. Se conserva el comportamiento actual a propósito —
-  // corregirlo es B1.2, no este bloque.
-  const productoNeto = deducir ? Math.max(0, montoProducto - precioDelivery) : montoProducto
+  // Antes se repartía sobre `montoProducto` (lo que la orden dice que vale el
+  // cobro contra entrega) y sobre `precioDelivery` (el precio de lista). Esas
+  // dos cifras son expectativas, no caja. Cuando no coincidían con la
+  // realidad, la diferencia caía sobre el motorizado.
+  //
+  // A partir de acá se usa `productoDisponible`: el efectivo del cobro contra
+  // entrega que el motorizado sí tiene en la mano. Si declaró no haberlo
+  // recibido, es 0 — y no hay nada que repartir.
+  const productoDisponible = productoNoRecibido ? 0 : montoProducto
 
-  // PENDIENTE (B1-FIN-0): productoNoRecibido solo afecta a tieneProducto,
-  // nunca a totalAlComercio — o sea que al motorizado se le sigue exigiendo
-  // depositar un producto que declaró no haber cobrado. Las cuatro copias se
-  // comportaban así; no se cambia acá para no mezclar dos correcciones.
-  const totalAlComercio = productoNeto
-  const totalAStorkhub = esPorTransferencia || esCredito ? 0 : montoDelivery
+  // Cuánto del delivery se cubre con ese efectivo. `montoDelivery` (no
+  // `precioDelivery`): si el delivery no entró en caja, no hay nada que
+  // deducirle al comercio. Ese era el caso legacy `deducir=true` +
+  // `delivery.recibio=false`, que descontaba al comercio un delivery que
+  // nadie cobró.
+  const cubiertoDelivery = deducir ? Math.min(productoDisponible, montoDelivery) : 0
+
+  // Lo que falta del delivery, y que por tanto NO se le puede exigir al
+  // motorizado: no lo tiene. Queda como obligación externa a cobrar (ver
+  // cobroDelivery.monto, que la Function persiste al entregar).
+  const faltanteDelivery = deducir ? Math.max(0, montoDelivery - productoDisponible) : 0
+
+  // Al comercio va el remanente del producto después de cubrir el delivery.
+  const totalAlComercio = deducir
+    ? Math.max(0, productoDisponible - montoDelivery)
+    : productoDisponible
+
+  // A StorkHub, solo lo que efectivamente entró en caja: si hubo deducción,
+  // la parte del delivery que el producto alcanzó a cubrir; si no, el
+  // delivery cobrado aparte.
+  const totalAStorkhub = esPorTransferencia || esCredito
+    ? 0
+    : (deducir ? cubiertoDelivery : montoDelivery)
+
+  // Efectivo total en manos del motorizado por esta orden. Es el techo
+  // de lo que se le puede exigir; los tests verifican la invariante
+  // totalAlComercio + totalAStorkhub <= montoRecibidoReal.
+  const montoRecibidoReal = deducir
+    ? productoDisponible
+    : productoDisponible + montoDelivery
 
   const partes: string[] = []
   if (ceAplica) partes.push(`Cobró producto C$${montoProducto}`)
@@ -132,6 +181,9 @@ export function calcularDeposito(orden: EntradaCalculoDeposito): ResultadoCalcul
     totalAlComercio,
     totalAStorkhub,
     montoTotal: totalAlComercio + totalAStorkhub,
+    montoRecibidoReal,
+    faltanteDelivery,
+    requiereCobroPosterior: faltanteDelivery > 0 || productoNoRecibido,
     descripcion: partes.join(' · '),
   }
 }

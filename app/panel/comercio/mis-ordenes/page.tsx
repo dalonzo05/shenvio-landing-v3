@@ -553,7 +553,14 @@ export default function MisOrdenesPage() {
                       ) : debe === null ? (
                         <span className="text-gray-400 text-xs">—</span>
                       ) : debe ? (
-                        <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-red-50 text-red-600">Debe</span>
+                        // B1.2: mostrar el pendiente REAL. Antes decía solo
+                        // "Debe", sin cifra, así que un faltante parcial de 30
+                        // era indistinguible de un delivery completo de 130.
+                        // cobroDelivery.monto es el pendiente; el fallback
+                        // cubre órdenes previas a B1.2.
+                        <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-red-50 text-red-600">
+                          Debe {fmt(o.cobroDelivery?.monto ?? o.confirmacion?.precioFinalCordobas)}
+                        </span>
                       ) : (
                         <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700">Pagado</span>
                       )}

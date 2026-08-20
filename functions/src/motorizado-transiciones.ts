@@ -335,6 +335,7 @@ function calcularShowFlags(
 function construirCobroDelivery(
   orden: FirebaseFirestore.DocumentData,
   deliveryAnswer: RespuestaCobro | null,
+  productoAnswer: RespuestaCobro | null,
 ): Record<string, unknown> {
   const precioDelivery = orden.confirmacion?.precioFinalCordobas ?? 0;
   const quienPaga = orden.pagoDelivery?.quienPaga ?? '';
@@ -344,13 +345,55 @@ function construirCobroDelivery(
     deliveryAnswer?.recibio === true ||
     (esRecoleccion && orden.cobrosMotorizado?.delivery?.recibio === true);
 
+  // ── B1.2: faltante parcial del delivery ──────────────────────────────────
+  //
+  // Cuando el delivery se deduce del cobro contra entrega, el motorizado no
+  // recauda el delivery aparte: sale del mismo efectivo del producto. Si ese
+  // efectivo no alcanza —o si declaró no haberlo recibido— el delivery queda
+  // cubierto solo en parte, y la diferencia NO puede exigírsele: no la tiene.
+  //
+  // Este es el único momento en que el faltante es factualmente cierto y hay
+  // una transacción abierta que ya escribe cobroDelivery. Se calcula acá para
+  // que nazca atómico con la confirmación del dinero recibido, sin agregar un
+  // segundo write ni un documento aparte (ver B1.2B, secciones 7-10).
+  const deducir = orden.pagoDelivery?.deducirDelCobroContraEntrega === true;
+  const ceAplica = orden.cobroContraEntrega?.aplica === true;
+  const montoProducto = ceAplica ? (orden.cobroContraEntrega?.monto || 0) : 0;
+  // Efectivo del CE realmente en manos del motorizado.
+  const productoNoRecibido = productoAnswer
+    ? productoAnswer.recibio === false
+    : orden.cobrosMotorizado?.producto?.recibio === false;
+  const productoDisponible = productoNoRecibido ? 0 : montoProducto;
+
+  const aplicaFaltante = deducir && !esCredito && precioDelivery > 0;
+  const cubiertoPorDeposito = aplicaFaltante
+    ? Math.min(productoDisponible, precioDelivery)
+    : 0;
+  const faltanteDelivery = aplicaFaltante
+    ? Math.max(0, precioDelivery - productoDisponible)
+    : 0;
+
   const patch: Record<string, unknown> = {
-    monto: precioDelivery,
+    // `monto` es el PENDIENTE real de cobro, no el precio de lista: es lo que
+    // leen Cobros y la vista del comercio. Sin deducción no cambia nada.
+    monto: aplicaFaltante ? faltanteDelivery : precioDelivery,
     tipoCliente: esCredito ? 'credito' : 'contado',
     quienPaga,
     estado: precioDelivery === 0 ? 'no_cobrar' : esCredito ? 'pendiente' : motorizadoYaCobro ? 'pagado' : 'pendiente',
     registradoAt: FieldValue.serverTimestamp(),
   };
+
+  if (aplicaFaltante) {
+    // Trazabilidad: sin estos dos campos no habría forma de distinguir un
+    // delivery de 30 de uno de 130 con 100 ya cubiertos.
+    // Invariante: monto + cubiertoPorDeposito === montoDelivery.
+    patch.montoDelivery = precioDelivery;
+    patch.cubiertoPorDeposito = cubiertoPorDeposito;
+    // Con deducción el motorizado nunca recauda el delivery aparte, así que
+    // 'pagado' no aplica: o quedó cubierto por el CE (nada que cobrar) o
+    // falta una parte. No se inventa una deuda de 0.
+    patch.estado = faltanteDelivery > 0 ? 'pendiente' : 'pagado';
+  }
   // semanaKey: se usa la fecha/hora del servidor en el momento de esta
   // llamada, igual que el cliente usaba `new Date()` — pero anclado a
   // America/Managua (semanaKeyDeFecha, ya usado por
@@ -522,6 +565,11 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
         recibio: productoAnswer.recibio,
         at: FieldValue.serverTimestamp(),
         ...(productoAnswer.justificacion ? { justificacion: productoAnswer.justificacion } : {}),
+        // B1.2: mismo vocabulario que cobroDelivery.estado. Si lo cobró, el
+        // producto queda saldado ('pagado'); si no, se debe ('pendiente') y
+        // el gestor lo clasificará después con `resolucion`. No se crea una
+        // incidencia ficticia cuando sí lo recibió.
+        estado: productoAnswer.recibio ? 'pagado' : 'pendiente',
       };
       if (!productoAnswer.recibio) hayPendiente = true;
     }
@@ -545,7 +593,7 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
 
     // ── Al entregar: cobroDelivery + marcador de crédito semanal ──────
     if (nuevo === 'entregado') {
-      patch.cobroDelivery = construirCobroDelivery(orden, deliveryAnswer);
+      patch.cobroDelivery = construirCobroDelivery(orden, deliveryAnswer, productoAnswer);
       const precioDelivery = orden.confirmacion?.precioFinalCordobas ?? 0;
       const quienPagaOrig = orden.pagoDelivery?.quienPaga ?? '';
       const esCredito = orden.tipoCliente === 'credito' || quienPagaOrig === 'credito_semanal';

@@ -40,6 +40,12 @@ type CobroItem = {
   recibio: boolean
   at?: Timestamp
   justificacion?: string
+  // B1.2: mismo vocabulario que cobroDelivery.estado. 'pendiente' = se debe;
+  // 'no_cobrar' = se dio por perdido. Ausente en órdenes previas a B1.2.
+  estado?: 'pendiente' | 'pagado' | 'no_cobrar'
+  // Clasificación del gestor. Su presencia —no el estado— es lo que saca la
+  // incidencia de la cola: 'cliente_pagara' deja el dinero pendiente igual.
+  resolucion?: Resolucion
 }
 
 type Resolucion = {
@@ -211,6 +217,21 @@ function getClienteUid(s: Solicitud) {
   return (s.ownerSnapshot as any)?.uid || s.userId || '__sin'
 }
 
+// ── B1.2: "sin clasificar" = el motorizado declaró que no lo recibió y el
+// gestor todavía no dijo qué pasa con ese dinero. Es lo que cuenta para
+// cobroPendiente — no "hay deuda", sino "hay algo que nadie clasificó".
+function deliverySinClasificar(s: Solicitud): boolean {
+  const d = s.cobrosMotorizado?.delivery
+  return !!d && d.recibio === false && !s.cobrosMotorizado?.resolucion
+}
+
+function productoSinClasificar(s: Solicitud): boolean {
+  const p = s.cobrosMotorizado?.producto
+  // Legacy: documentos anteriores a B1.2 no tienen `resolucion` propia. Si el
+  // producto no se recibió y no hay resolución específica, está sin clasificar.
+  return !!p && p.recibio === false && !p.resolucion
+}
+
 function getTipoCobro(s: Solicitud): string {
   const d = s.cobrosMotorizado?.delivery
   const p = s.cobrosMotorizado?.producto
@@ -263,31 +284,60 @@ function ResolveModal({
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
+  // B1.2: una orden puede traer las dos incidencias a la vez. Antes se
+  // resolvían con un solo clic que escribía siempre cobroDelivery.estado —
+  // de modo que resolver un problema de PRODUCTO alteraba el estado de cobro
+  // del DELIVERY, que no tenía nada que ver. Ahora se elige el ítem.
+  const deliveryAbierta = deliverySinClasificar(solicitud)
+  const productoAbierta = productoSinClasificar(solicitud)
+  const [item, setItem] = useState<'delivery' | 'producto'>(
+    deliveryAbierta ? 'delivery' : 'producto',
+  )
+
   async function handleResolver() {
     if (!tipo) return
     setSaving(true); setErr(null)
     try {
       const uid = auth.currentUser?.uid || 'desconocido'
-      const updates: any = {
-        cobroPendiente: false,
-        'cobrosMotorizado.resolucion': {
-          resueltoPor: uid,
-          at: serverTimestamp(),
-          nota: nota.trim() || null,
-          tipo,
-        },
+      const resolucion = {
+        resueltoPor: uid,
+        at: serverTimestamp(),
+        nota: nota.trim() || null,
+        tipo,
       }
-      if (tipo === 'cliente_pagara') {
-        // Asegurar que cobroDelivery quede en estado pendiente
-        if (!solicitud.cobroDelivery) {
-          updates['cobroDelivery.estado'] = 'pendiente'
-          updates['cobroDelivery.registradoAt'] = serverTimestamp()
-        } else if (solicitud.cobroDelivery.estado === 'no_cobrar') {
-          updates['cobroDelivery.estado'] = 'pendiente'
+      const updates: any = {}
+
+      if (item === 'delivery') {
+        // Se conserva la resolución a nivel de orden por compatibilidad con
+        // el tab "Resueltas", que filtra por cobrosMotorizado.resolucion.
+        updates['cobrosMotorizado.resolucion'] = resolucion
+        if (tipo === 'cliente_pagara') {
+          // 'cliente_pagara' NO significa cobrado: el delivery sigue
+          // pendiente de cobro, solo que ya está clasificado.
+          if (!solicitud.cobroDelivery) {
+            updates['cobroDelivery.estado'] = 'pendiente'
+            updates['cobroDelivery.registradoAt'] = serverTimestamp()
+          } else if (solicitud.cobroDelivery.estado === 'no_cobrar') {
+            updates['cobroDelivery.estado'] = 'pendiente'
+          }
+        } else {
+          updates['cobroDelivery.estado'] = 'no_cobrar'
         }
       } else {
-        updates['cobroDelivery.estado'] = 'no_cobrar'
+        // PRODUCTO: se escribe únicamente dentro de su propio submapa.
+        // cobroDelivery no se toca. `justificacion` y `monto` se preservan
+        // porque solo se tocan estas dos claves por dot-path.
+        updates['cobrosMotorizado.producto.resolucion'] = resolucion
+        updates['cobrosMotorizado.producto.estado'] =
+          tipo === 'cliente_pagara' ? 'pendiente' : 'no_cobrar'
       }
+
+      // cobroPendiente = queda alguna incidencia SIN CLASIFICAR. No se escribe
+      // false a ciegas: si la orden tiene las dos y solo se resolvió una, la
+      // otra debe seguir apareciendo en Incidencias, en el KPI y en el badge.
+      const quedaOtra = item === 'delivery' ? productoAbierta : deliveryAbierta
+      updates.cobroPendiente = quedaOtra
+
       await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), updates)
       onClose()
     } catch (e: any) {
@@ -306,7 +356,36 @@ function ResolveModal({
             <X className="h-4 w-4 text-gray-500" />
           </button>
         </div>
-        <p className="text-sm text-gray-500 mb-4">¿Cómo se resuelve este cobro pendiente?</p>
+        {/* B1.2: con las dos incidencias abiertas hay que elegir cuál se
+            resuelve. Cada una se clasifica por separado y la otra sigue
+            pendiente. */}
+        {deliveryAbierta && productoAbierta && (
+          <div className="mb-4">
+            <p className="text-xs font-semibold text-gray-500 mb-2">
+              Esta orden tiene dos incidencias. ¿Cuál estás resolviendo?
+            </p>
+            <div className="flex gap-2">
+              {(['delivery', 'producto'] as const).map((k) => (
+                <button
+                  key={k}
+                  onClick={() => setItem(k)}
+                  className={`flex-1 rounded-lg border-2 px-3 py-2 text-sm font-semibold capitalize transition ${
+                    item === k ? 'border-[#004aad] bg-blue-50 text-[#004aad]' : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                  }`}
+                >
+                  {k}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-gray-400 mt-2">
+              La otra quedará pendiente de resolver.
+            </p>
+          </div>
+        )}
+
+        <p className="text-sm text-gray-500 mb-4">
+          ¿Cómo se resuelve el cobro pendiente de <span className="font-semibold">{item}</span>?
+        </p>
 
         {/* Opción A */}
         <button
@@ -1370,7 +1449,11 @@ function CobrosPageContent() {
           at: serverTimestamp(),
         },
         'cobroDelivery.boucherVigente': 'gestor',
-        'cobroDelivery.monto': (orden as any)?.confirmacion?.precioFinalCordobas ?? 0,
+        // B1.2: preservar el pendiente ya calculado. Antes se pisaba con el
+        // precio de lista, lo que devolvía un faltante de 30 a 130 y habilitaba
+        // un doble cobro. El fallback solo cubre documentos legacy sin monto.
+        'cobroDelivery.monto':
+          (orden as any)?.cobroDelivery?.monto ?? (orden as any)?.confirmacion?.precioFinalCordobas ?? 0,
         'cobroDelivery.tipoCliente': 'contado',
         'cobroDelivery.quienPaga': 'transferencia',
         'cobroDelivery.registradoAt': serverTimestamp(),
@@ -1530,7 +1613,11 @@ function CobrosPageContent() {
                       <td className="px-4 py-3 font-mono text-xs">{s.id.slice(0, 10)}</td>
                       <td className="px-4 py-3">{getClienteNombre(s, comercioNames)}</td>
                       <td className="px-4 py-3 text-gray-500">{fmtFecha(s.entregadoAt)}</td>
-                      <td className="px-4 py-3 font-semibold">{fmt((s as any).confirmacion?.precioFinalCordobas)}</td>
+                      {/* B1.2: el pendiente real, no el precio de lista. Con un
+                          faltante parcial acá debe verse 30, no 130. */}
+                      <td className="px-4 py-3 font-semibold">
+                        {fmt(s.cobroDelivery?.monto ?? (s as any).confirmacion?.precioFinalCordobas)}
+                      </td>
                       <td className="px-4 py-3">
                         <span className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full border ${
                           requiereRevision
