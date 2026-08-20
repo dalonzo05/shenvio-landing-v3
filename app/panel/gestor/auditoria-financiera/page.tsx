@@ -32,6 +32,7 @@ import {
   movimientosConCoberturaPendiente,
   calcularTodosLosBalances,
 } from '@/lib/financial-ledger'
+import { calcularDeposito } from '@/lib/calculo-deposito'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -122,20 +123,11 @@ function diasTranscurridos(val: unknown): number | undefined {
 const UMBRAL_DIFERENCIA = 0.01 // diferencia mínima para marcar como discrepancia
 
 /** Calcula montos pendientes de depósito de una solicitud entregada (misma lógica que panel de depósitos) */
+// B1.3 — misma unificación que en gestor/depositos: esta pantalla compara el
+// ledger contra lo que "debería" haberse depositado, así que tenía que dejar
+// de usar una fórmula distinta a la del motorizado.
 function calcDeposito(s: OrdenEntregada): { totalAlComercio: number; totalAStorkhub: number } {
-  const ceAplica = !!s.cobroContraEntrega?.aplica
-  const montoProducto = ceAplica ? (s.cobroContraEntrega?.monto || 0) : 0
-  const precioDelivery = s.confirmacion?.precioFinalCordobas || 0
-  const quienPaga = s.pagoDelivery?.quienPaga || ''
-  const deducir = !!s.pagoDelivery?.deducirDelCobroContraEntrega
-  const esPorTransferencia = quienPaga === 'transferencia'
-  const esCredito = s.tipoCliente === 'credito' || quienPaga === 'credito_semanal'
-  const motorizadoRecaudeDelivery = !esPorTransferencia && !esCredito && precioDelivery > 0
-  const productoNeto = deducir ? Math.max(0, montoProducto - precioDelivery) : montoProducto
-  return {
-    totalAlComercio: productoNeto,
-    totalAStorkhub: esPorTransferencia || esCredito ? 0 : (motorizadoRecaudeDelivery ? precioDelivery : 0),
-  }
+  return calcularDeposito(s)
 }
 
 // ─── Componentes menores ──────────────────────────────────────────────────────

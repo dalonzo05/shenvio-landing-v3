@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "tsc lib/calculo-deposito.ts lib/calculo-deposito.test.ts --outDir .test-build --module commonjs --moduleResolution node --target es2022 --strict --esModuleInterop --skipLibCheck --types node && node --test .test-build"
   },
   "dependencies": {
     "@googlemaps/js-api-loader": "^1.16.10",

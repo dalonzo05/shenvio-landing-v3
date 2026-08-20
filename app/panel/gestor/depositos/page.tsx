@@ -21,6 +21,7 @@ import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { compressImage, uploadDepositoBoucher } from '@/fb/storage'
 import { registrarMovimiento, convertirDepositoEnDeuda } from '@/lib/financial-writes'
 import { getDepositoEstado, cuentas } from '@/lib/financial-types'
+import { calcularDeposito } from '@/lib/calculo-deposito'
 import {
   Wallet,
   CheckCircle2,
@@ -164,20 +165,12 @@ type SolicitudDetail = {
 
 // ─── calcDeposito ─────────────────────────────────────────────────────────────
 
+// B1.3 — antes esta copia divergía de la del motorizado en dos puntos:
+// ignoraba cobrosMotorizado.delivery.recibio === false (le exigía depositar un
+// delivery que él había declarado no haber cobrado) y no tenía el fallback a
+// montoSugerido de fuera_managua. Ahora ambas leen lib/calculo-deposito.ts.
 function calcDeposito(s: Solicitud): DepositoCalc {
-  const ceAplica = !!s.cobroContraEntrega?.aplica
-  const montoProducto = ceAplica ? (s.cobroContraEntrega?.monto || 0) : 0
-  const precioDelivery = s.confirmacion?.precioFinalCordobas || 0
-  const quienPaga = s.pagoDelivery?.quienPaga || ''
-  const deducir = !!s.pagoDelivery?.deducirDelCobroContraEntrega
-  const esPorTransferencia = quienPaga === 'transferencia'
-  const esCredito = s.tipoCliente === 'credito' || quienPaga === 'credito_semanal'
-  const motorizadoRecaudeDelivery = !esPorTransferencia && !esCredito && precioDelivery > 0
-  const productoNeto = deducir ? Math.max(0, montoProducto - precioDelivery) : montoProducto
-  return {
-    totalAlComercio: productoNeto,
-    totalAStorkhub: esPorTransferencia || esCredito ? 0 : (motorizadoRecaudeDelivery ? precioDelivery : 0),
-  }
+  return calcularDeposito(s)
 }
 
 function tieneDepositoPendiente(s: Solicitud): boolean {

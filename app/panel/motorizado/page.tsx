@@ -11,6 +11,7 @@ import { auth, db, functions } from '@/fb/config';
 import { httpsCallable } from 'firebase/functions';
 import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBoucher, type TipoEvidencia } from '@/fb/storage'
 import { registrarMovimiento } from '@/lib/financial-writes';
+import { calcularDeposito } from '@/lib/calculo-deposito';
 import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -361,56 +362,12 @@ type DepositoInfo = {
   descripcion: string;
 };
 
+// B1.3 — la fórmula vive en lib/calculo-deposito.ts. Esta copia era la
+// referencia correcta (honraba delivery.recibio y el fallback de
+// fuera_managua); el módulo compartido la preserva tal cual y la extiende al
+// gestor, que había divergido. Ver lib/calculo-deposito.test.ts.
 function calcDeposito(s: Solicitud): DepositoInfo {
-  const ceAplica = !!s.cobroContraEntrega?.aplica;
-  const montoProducto = ceAplica ? (s.cobroContraEntrega?.monto || 0) : 0;
-  // Para fuera_managua: fallback a montoSugerido si aún no hay precioFinalCordobas confirmado
-  const precioDelivery =
-    s.confirmacion?.precioFinalCordobas ||
-    (s.tipoServicio === 'fuera_managua' ? (s.pagoDelivery?.montoSugerido || 0) : 0);
-  const quienPaga = s.pagoDelivery?.quienPaga || '';
-  const deducir = !!s.pagoDelivery?.deducirDelCobroContraEntrega;
-  const esPorTransferencia = quienPaga === 'transferencia';
-  const esCredito = s.tipoCliente === 'credito' || quienPaga === 'credito_semanal';
-
-  // Si el motorizado declaró no haber recibido (y no es un defer), excluir del depósito
-  const deliveryNoRecibido =
-    s.cobrosMotorizado?.delivery?.recibio === false &&
-    s.cobrosMotorizado?.delivery?.justificacion !== 'Se acordó cobrar en la entrega';
-  const productoNoRecibido = s.cobrosMotorizado?.producto?.recibio === false;
-
-  // Delivery: el motorizado lo recauda en efectivo solo si quienPaga es recoleccion o entrega
-  const motorizadoRecaudeDelivery = !esPorTransferencia && !esCredito && precioDelivery > 0 && !deliveryNoRecibido;
-  const montoDelivery = motorizadoRecaudeDelivery ? precioDelivery : 0;
-
-  // Si el delivery se deduce del cobro CE: el motorizado entrega al comercio (producto - delivery)
-  const productoNeto = deducir ? Math.max(0, montoProducto - precioDelivery) : montoProducto;
-
-  // Total al comercio = producto neto (cobro CE)
-  // Si delivery fue por transferencia, el motorizado solo deposita el producto al comercio
-  const totalAlComercio = productoNeto;
-  // Total a Storkhub = delivery en efectivo (si aplica)
-  const totalAStorkhub = esPorTransferencia ? 0 : (esCredito ? 0 : montoDelivery);
-
-  // Descripción legible
-  let partes: string[] = [];
-  if (ceAplica) partes.push(`Cobró producto C$${montoProducto}`);
-  if (motorizadoRecaudeDelivery) partes.push(`Cobró delivery C$${precioDelivery}`);
-  if (deducir) partes.push(`Dedujo delivery del CE`);
-  if (esPorTransferencia) partes.push(`Delivery ya pagado por transferencia`);
-  if (esCredito) partes.push(`Delivery en crédito semanal`);
-  if (!ceAplica && !motorizadoRecaudeDelivery) partes.push(`No recaudó efectivo`);
-
-  return {
-    tieneProducto: ceAplica && !productoNoRecibido,
-    montoProducto,
-    tieneDelivery: motorizadoRecaudeDelivery,
-    montoDelivery,
-    deliveryPorTransferencia: esPorTransferencia,
-    totalAlComercio,
-    totalAStorkhub,
-    descripcion: partes.join(' · '),
-  };
+  return calcularDeposito(s);
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
