@@ -11,6 +11,11 @@ import {
   Clock, CheckCircle2, XCircle, Camera,
   Navigation, User, Phone, FileText, Calendar, X, Share2,
 } from 'lucide-react'
+import {
+  estadoDeliveryComercio,
+  type EstadoDeliveryComercio,
+  type EntradaEstadoComercio,
+} from '@/lib/estado-cobro-comercio'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -158,17 +163,39 @@ function fmt(n?: number | null) {
   return `C$ ${n.toLocaleString('es-NI')}`
 }
 
-function debeDelivery(s: Solicitud): { debe: boolean | null; label: string } {
+// B1.2D: el estado del delivery lo interpreta lib/estado-cobro-comercio.ts.
+// Antes se leía cobrosMotorizado.delivery.recibio, que responde "¿el motorizado
+// recibió efectivo?" — con un faltante parcial esa respuesta es `true` y aun
+// así quedan C$50 sin cobrar, así que la vista afirmaba "Pagado" sobre una
+// deuda viva.
+function debeDelivery(s: Solicitud): { debe: boolean | null; label: string; estado: EstadoDeliveryComercio } {
   const qp = s.pagoDelivery?.quienPaga || ''
+  const estado = estadoDeliveryComercio(s as EntradaEstadoComercio)
   if (s.tipoCliente === 'credito' || qp === 'credito_semanal')
-    return { debe: true, label: 'Crédito semanal — pendiente de cobro' }
+    return { debe: true, label: 'Crédito semanal — pendiente de cobro', estado }
   if (qp === 'transferencia')
-    return { debe: false, label: 'Pagado por transferencia' }
-  if (s.cobrosMotorizado?.delivery !== undefined) {
-    const r = s.cobrosMotorizado.delivery.recibio
-    return { debe: !r, label: r ? 'Cobrado al momento de la entrega' : 'No cobrado aún' }
+    return { debe: estado.clave !== 'pagado', label: estado.clave === 'pagado' ? 'Pagado por transferencia' : 'Pago por transferencia pendiente', estado }
+
+  switch (estado.clave) {
+    case 'pendiente':
+      return {
+        debe: true,
+        estado,
+        label: estado.esParcial
+          ? `Cubierto ${fmt(estado.cubiertoPorDeposito)} del cobro · faltan ${fmt(estado.montoPendiente)}`
+          : 'No cobrado aún',
+      }
+    case 'en_revision':
+      return { debe: true, label: `${fmt(estado.montoPendiente)} en revisión por el gestor`, estado }
+    case 'pagado':
+      return { debe: false, label: 'Cobrado al momento de la entrega', estado }
+    case 'no_cobrar':
+      return { debe: false, label: 'Se dio por no cobrable', estado }
+    case 'revertido':
+      return { debe: false, label: 'Pago revertido', estado }
+    default:
+      return { debe: null, label: 'Pendiente de entrega', estado }
   }
-  return { debe: null, label: 'Pendiente de entrega' }
 }
 
 // ─── Lightbox ────────────────────────────────────────────────────────────────
@@ -571,13 +598,23 @@ export default function OrdenDetallePage() {
               ) : (
                 <p className="text-sm text-gray-300">—</p>
               )}
+              {/* B1.2D: con un faltante parcial el precio de arriba es el
+                  total del delivery, no lo que se debe. Se desglosa para que
+                  no se lea como si estuviera todo pendiente ni todo saldado. */}
+              {delivery.estado.esParcial && (
+                <p className="text-[10px] text-gray-400">
+                  {fmt(delivery.estado.cubiertoPorDeposito)} cubiertos · {fmt(delivery.estado.montoPendiente)} pendientes
+                </p>
+              )}
               {delivery.debe !== null && (
                 <span className={`inline-flex text-[11px] font-bold px-2 py-0.5 rounded-full ${
                   delivery.debe
                     ? 'bg-orange-50 text-orange-600'
                     : 'bg-green-50 text-green-700'
                 }`}>
-                  {delivery.debe ? 'Pendiente' : 'Pagado'}
+                  {delivery.debe
+                    ? (delivery.estado.montoPendiente > 0 ? `Pendiente ${fmt(delivery.estado.montoPendiente)}` : 'Pendiente')
+                    : 'Pagado'}
                 </span>
               )}
             </div>

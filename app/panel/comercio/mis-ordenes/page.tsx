@@ -16,6 +16,12 @@ import { db } from '@/fb/config'
 import { compressImage, uploadDeliveryBoucher } from '@/fb/storage'
 import { useUser } from '@/app/Components/UserProvider'
 import { Package, Upload, X } from 'lucide-react'
+import {
+  estadoDeliveryComercio,
+  estadoDepositoProductoComercio,
+  type ClaveDepositoProducto,
+  type EntradaEstadoComercio,
+} from '@/lib/estado-cobro-comercio'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -110,24 +116,24 @@ function fmtDate(v: any) {
   return d.toLocaleDateString('es-NI', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
-type DepositoEstado = 'na' | 'pendiente' | 'en_revision' | 'depositado'
-
-function estadoDeposito(s: Solicitud): DepositoEstado {
-  if (!s.cobroContraEntrega?.aplica) return 'na'
-  const dep = s.registro?.deposito
-  if (dep?.confirmadoComercio) return 'depositado'
-  if (dep?.comercioDepositoId) return 'en_revision'
-  return 'pendiente'
+// B1.2D: ambos estados los interpreta lib/estado-cobro-comercio.ts.
+//
+// `estadoDeposito` decidía "Pendiente" con solo mirar cobroContraEntrega.aplica,
+// sin calcular cuánto le corresponde realmente al comercio. Si el CE se consumió
+// entero cubriendo el delivery (producto 100, delivery 150 deducido), al comercio
+// no le toca nada y no hay depósito pendiente que mostrar.
+//
+// `debeDelivery` derivaba el estado de cobrosMotorizado.delivery.recibio, que
+// responde "¿el motorizado recibió efectivo?" y no "¿el delivery está saldado?".
+// Con un faltante parcial esas dos preguntas dejan de coincidir.
+function estadoDeposito(s: Solicitud): ClaveDepositoProducto {
+  return estadoDepositoProductoComercio(s as EntradaEstadoComercio).clave
 }
 
-function debeDelivery(s: Solicitud): boolean | null {
+/** Delivery en crédito semanal: no lo cubre cobroDelivery, se cobra aparte. */
+function esCreditoSemanal(s: Solicitud): boolean {
   const qp = s.pagoDelivery?.quienPaga || ''
-  if (s.tipoCliente === 'credito' || qp === 'credito_semanal') return true
-  // transferencia: handled separately in the column
-  if (qp === 'transferencia') return null
-  // efectivo — depende de si motorizado confirmó recibo
-  if (s.cobrosMotorizado?.delivery !== undefined) return !s.cobrosMotorizado.delivery.recibio
-  return null
+  return s.tipoCliente === 'credito' || qp === 'credito_semanal'
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -359,7 +365,7 @@ export default function MisOrdenesPage() {
             <tbody className="divide-y divide-gray-100">
               {filtered.map((o, idx) => {
                 const estadoCl = estadoCls[o.estado || ''] || 'bg-gray-100 text-gray-600 border-gray-200'
-                const debe = debeDelivery(o)
+                const entregaEstado = estadoDeliveryComercio(o as EntradaEstadoComercio)
                 const cobrado = o.cobrosMotorizado?.producto
                 const esTransferencia = o.pagoDelivery?.quienPaga === 'transferencia'
                 const cdEstado = o.cobroDelivery?.estado
@@ -550,19 +556,43 @@ export default function MisOrdenesPage() {
                             {cdEstado === 'no_cobrar' ? 'No se cobra' : 'Revertido'}
                           </span>
                         )
-                      ) : debe === null ? (
-                        <span className="text-gray-400 text-xs">—</span>
-                      ) : debe ? (
-                        // B1.2: mostrar el pendiente REAL. Antes decía solo
-                        // "Debe", sin cifra, así que un faltante parcial de 30
-                        // era indistinguible de un delivery completo de 130.
-                        // cobroDelivery.monto es el pendiente; el fallback
-                        // cubre órdenes previas a B1.2.
-                        <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-red-50 text-red-600">
-                          Debe {fmt(o.cobroDelivery?.monto ?? o.confirmacion?.precioFinalCordobas)}
+                      ) : esCreditoSemanal(o) ? (
+                        <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">
+                          Crédito semanal
                         </span>
-                      ) : (
+                      ) : entregaEstado.clave === 'na' ? (
+                        <span className="text-gray-400 text-xs">—</span>
+                      ) : entregaEstado.clave === 'pendiente' ? (
+                        // B1.2D: el pendiente REAL, no el precio de lista. Con
+                        // delivery 150 cubierto en 100, acá va "Debe C$50".
+                        <div className="flex flex-col gap-1.5">
+                          <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-red-50 text-red-600">
+                            Debe {fmt(entregaEstado.montoPendiente)}
+                          </span>
+                          {entregaEstado.esParcial && (
+                            <span className="text-[10px] text-gray-400">
+                              de {fmt(entregaEstado.montoDelivery)} · {fmt(entregaEstado.cubiertoPorDeposito)} ya cubiertos
+                            </span>
+                          )}
+                          <button
+                            onClick={() => triggerUpload(o.id)}
+                            disabled={isUploading}
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-lg bg-[#004aad] text-white hover:bg-[#003a8c] transition disabled:opacity-50"
+                          >
+                            <Upload size={10} />
+                            {isUploading ? 'Subiendo…' : 'Subir boucher'}
+                          </button>
+                        </div>
+                      ) : entregaEstado.clave === 'en_revision' ? (
+                        <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                          🔍 {fmt(entregaEstado.montoPendiente)} en revisión
+                        </span>
+                      ) : entregaEstado.clave === 'pagado' ? (
                         <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700">Pagado</span>
+                      ) : (
+                        <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">
+                          {entregaEstado.clave === 'no_cobrar' ? 'No se cobra' : 'Revertido'}
+                        </span>
                       )}
                     </td>
 
