@@ -153,6 +153,71 @@ export function etiquetaResolucion(r: ResolucionIncidencia | null | undefined): 
   return '—'
 }
 
+/** Un ítem de incidencia listo para renderizar, sin lógica en el JSX. */
+export interface ItemIncidenciaDetalle {
+  item: ItemIncidencia
+  /** Cómo nombrarlo en pantalla. */
+  etiqueta: string
+  monto: number
+  /** Estado operativo. Para el producto NUNCA es "pendiente": no se cobra. */
+  estado: string
+  justificacion: string | null
+  resolucion: ResolucionIncidencia | null
+  /** Texto de la clasificación del gestor, o null si aún no la hay. */
+  textoResolucion: string | null
+  /**
+   * El delivery SÍ es una cuenta por cobrar de ShEnvíos: el servicio se
+   * prestó. El producto no — ese dinero es de la relación comercio ↔ cliente.
+   */
+  esCuentaPorCobrarShenvios: boolean
+}
+
+/**
+ * Incidencias de una orden, listas para la ficha autoritativa.
+ *
+ * Con el delivery deducido del CE hubo UN solo evento de cobro, así que
+ * devuelve un único ítem por el CE completo — nunca dos que se sumen (ver
+ * B1.2E: eso mostraba C$650 sobre un CE de C$500).
+ */
+export function detalleIncidencia(orden: EntradaIncidencia): ItemIncidenciaDetalle[] {
+  const out: ItemIncidenciaDetalle[] = []
+  const deducido = esDeliveryDeducido(orden)
+  const p = orden.cobrosMotorizado?.producto
+  const d = orden.cobrosMotorizado?.delivery
+
+  if (productoNoRecibido(orden)) {
+    const res = p?.resolucion ?? null
+    out.push({
+      item: 'producto',
+      etiqueta: deducido ? 'Cobro contra entrega' : 'Producto / cobro contra entrega',
+      monto: num(p?.monto),
+      estado: 'No cobrado en la entrega',
+      justificacion: p?.justificacion || null,
+      resolucion: res,
+      textoResolucion: res ? etiquetaResolucion(res) : null,
+      esCuentaPorCobrarShenvios: false,
+    })
+  }
+
+  // Con deducción, el `recibio` del delivery es un espejo del producto, no una
+  // respuesta propia: no se lista aparte.
+  if (!deducido && deliveryNoRecibido(orden)) {
+    const res = orden.cobrosMotorizado?.resolucion ?? null
+    out.push({
+      item: 'delivery',
+      etiqueta: 'Delivery',
+      monto: num(d?.monto),
+      estado: 'No cobrado en la entrega',
+      justificacion: d?.justificacion || null,
+      resolucion: res,
+      textoResolucion: res ? etiquetaResolucion(res) : null,
+      esCuentaPorCobrarShenvios: true,
+    })
+  }
+
+  return out
+}
+
 export function resumirIncidencia(orden: EntradaIncidencia): ResumenIncidencia {
   const deducido = esDeliveryDeducido(orden)
   const montoProducto = num(orden.cobrosMotorizado?.producto?.monto)

@@ -21,6 +21,7 @@ import {
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
+import { BloqueCobros, BloqueIncidencia } from './_components/BloquesCobros'
 import {
   rankearMotorizados,
   type MotorizadoConRanking,
@@ -1388,6 +1389,13 @@ function GestorSolicitudDetallePageContent() {
               </div>
             )}
           </div>
+
+          {/* B2.1 — Cobros e incidencias. Hasta ahora estos datos existían en
+              el documento pero solo se veían desde Gestor → Cobros, así que la
+              ficha "autoritativa" no alcanzaba para entender una orden.
+              Ambos bloques leen del documento ya cargado: cero queries nuevas. */}
+          <BloqueCobros orden={solicitud as never} />
+          <BloqueIncidencia orden={solicitud as never} />
         </section>
 
         <aside className="space-y-5">

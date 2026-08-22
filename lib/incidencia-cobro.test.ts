@@ -15,6 +15,7 @@ import {
   tieneResolucion,
   resolucionPrincipal,
   etiquetaResolucion,
+  detalleIncidencia,
   type EntradaIncidencia,
 } from './incidencia-cobro'
 
@@ -256,6 +257,81 @@ test('R6 · sin deducir con ambas resueltas', () => {
   // Con ambas, se prefiere la del producto por ser la del monto principal.
   assert.equal(resolucionPrincipal(o)?.tipo, 'se_pierde')
   assert.equal(resumirIncidencia(o).monto, 650)
+})
+
+// ══ B2.1 · detalle para la ficha autoritativa ═══════════════════════════════
+
+test('D1f · deducido: un solo ítem por el CE, nunca dos que se sumen', () => {
+  const items = detalleIncidencia(ordenResuelta())
+  assert.equal(items.length, 1)
+  assert.equal(items[0].item, 'producto')
+  assert.equal(items[0].etiqueta, 'Cobro contra entrega')
+  assert.equal(items[0].monto, 500)
+  assert.equal(items[0].estado, 'No cobrado en la entrega')
+  // El producto no es cartera de ShEnvíos.
+  assert.equal(items[0].esCuentaPorCobrarShenvios, false)
+})
+
+test('D2f · la justificación llega completa, sin truncar', () => {
+  const texto = 'Otro: Cliente indico que realizara transferencia solo pago delivery'
+  const items = detalleIncidencia(ordenDeducida({
+    cobrosMotorizado: {
+      producto: { monto: 1000, recibio: false, justificacion: texto },
+      delivery: { monto: 80, recibio: false, justificacion: texto },
+    },
+  }))
+  assert.equal(items[0].justificacion, texto)
+})
+
+test('D3f · resolución y su etiqueta', () => {
+  const items = detalleIncidencia(ordenResuelta('cliente_pagara'))
+  assert.equal(items[0].textoResolucion, 'Cliente/comercio lo resolverá')
+  assert.equal(items[0].resolucion?.resueltoPor, 'gestor-1')
+  const perdido = detalleIncidencia(ordenResuelta('se_pierde'))
+  assert.equal(perdido[0].textoResolucion, 'Se dio por perdido')
+})
+
+test('D4f · sin resolución, textoResolucion es null', () => {
+  const items = detalleIncidencia(ordenDeducida())
+  assert.equal(items[0].textoResolucion, null)
+  assert.equal(items[0].resolucion, null)
+})
+
+test('D5f · sin deducir: el delivery es ítem propio y SÍ es cuenta de ShEnvíos', () => {
+  const items = detalleIncidencia(ordenSinDeducir())
+  assert.equal(items.length, 2)
+  const del = items.find((i) => i.item === 'delivery')!
+  const prod = items.find((i) => i.item === 'producto')!
+  assert.equal(del.etiqueta, 'Delivery')
+  assert.equal(del.monto, 150)
+  assert.equal(del.esCuentaPorCobrarShenvios, true)
+  assert.equal(prod.esCuentaPorCobrarShenvios, false)
+})
+
+test('D6f · producto cobrado no genera incidencia', () => {
+  const items = detalleIncidencia({
+    pagoDelivery: { deducirDelCobroContraEntrega: true },
+    cobrosMotorizado: { producto: { monto: 500, recibio: true }, delivery: { monto: 150, recibio: true } },
+  })
+  assert.deepEqual(items, [])
+})
+
+test('D7f · orden sin cobros no revienta', () => {
+  assert.deepEqual(detalleIncidencia({}), [])
+})
+
+test('D8f · legacy: resolución a nivel de orden alimenta el ítem de delivery', () => {
+  const items = detalleIncidencia(ordenSinDeducir({
+    cobrosMotorizado: {
+      producto: { monto: 500, recibio: false, justificacion: 'x' },
+      delivery: { monto: 150, recibio: false, justificacion: 'y' },
+      resolucion: { tipo: 'cliente_pagara', resueltoPor: 'g1' },
+    },
+  }))
+  const del = items.find((i) => i.item === 'delivery')!
+  assert.equal(del.textoResolucion, 'Cliente/comercio lo resolverá')
+  // El producto sigue sin clasificar.
+  assert.equal(items.find((i) => i.item === 'producto')!.textoResolucion, null)
 })
 
 // ── Invariante ──────────────────────────────────────────────────────────────
