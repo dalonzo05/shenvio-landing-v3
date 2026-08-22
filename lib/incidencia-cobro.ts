@@ -21,13 +21,27 @@
 //
 // PURO: sin Firestore, sin React, sin efectos, sin fecha actual.
 
+export interface ResolucionIncidencia {
+  tipo?: 'cliente_pagara' | 'se_pierde' | string | null
+  resueltoPor?: string | null
+  at?: unknown
+  nota?: string | null
+}
+
 export interface EntradaIncidencia {
   pagoDelivery?: { deducirDelCobroContraEntrega?: boolean | null } | null
   confirmacion?: { precioFinalCordobas?: number | null } | null
   cobrosMotorizado?: {
     delivery?: { monto?: number | null; recibio?: boolean | null; justificacion?: string | null } | null
-    producto?: { monto?: number | null; recibio?: boolean | null; justificacion?: string | null; resolucion?: unknown } | null
-    resolucion?: unknown
+    producto?: {
+      monto?: number | null
+      recibio?: boolean | null
+      justificacion?: string | null
+      estado?: string | null
+      resolucion?: ResolucionIncidencia | null
+    } | null
+    /** Resolución a nivel de orden: la del DELIVERY, y la de documentos legacy. */
+    resolucion?: ResolucionIncidencia | null
   } | null
 }
 
@@ -100,6 +114,43 @@ export function productoSinClasificar(orden: EntradaIncidencia): boolean {
  */
 export function hayIncidenciaSinClasificar(orden: EntradaIncidencia): boolean {
   return productoSinClasificar(orden) || deliverySinClasificar(orden)
+}
+
+/**
+ * ¿El gestor ya clasificó algo en esta orden?
+ *
+ * B1.2F pasó a escribir la resolución del CE/producto dentro de su propio
+ * submapa (`cobrosMotorizado.producto.resolucion`), pero el tab "Resueltos"
+ * seguía buscándola solo en `cobrosMotorizado.resolucion` — donde escribe el
+ * delivery. Una incidencia de producto resuelta desaparecía de Pendientes y
+ * no aparecía en Resueltos: quedaba invisible.
+ *
+ * Se miran los dos lugares. El de la orden cubre el delivery y los documentos
+ * anteriores a B1.2.
+ */
+export function tieneResolucion(orden: EntradaIncidencia): boolean {
+  return !!orden.cobrosMotorizado?.resolucion || !!orden.cobrosMotorizado?.producto?.resolucion
+}
+
+/**
+ * Resolución a mostrar en Resueltos.
+ *
+ * Con el delivery deducido solo puede existir la del producto. Sin deducción
+ * puede haber una de cada una; se prefiere la del producto por ser la del
+ * monto principal, y el llamador puede leer ambas si necesita detallarlas.
+ */
+export function resolucionPrincipal(orden: EntradaIncidencia): ResolucionIncidencia | null {
+  return orden.cobrosMotorizado?.producto?.resolucion
+    ?? orden.cobrosMotorizado?.resolucion
+    ?? null
+}
+
+/** Etiqueta legible de una clasificación. */
+export function etiquetaResolucion(r: ResolucionIncidencia | null | undefined): string {
+  if (!r) return '—'
+  if (r.tipo === 'cliente_pagara') return 'Cliente/comercio lo resolverá'
+  if (r.tipo === 'se_pierde') return 'Se dio por perdido'
+  return '—'
 }
 
 export function resumirIncidencia(orden: EntradaIncidencia): ResumenIncidencia {

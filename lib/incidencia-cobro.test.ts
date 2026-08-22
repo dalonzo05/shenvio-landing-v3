@@ -12,6 +12,9 @@ import {
   deliverySinClasificar,
   productoSinClasificar,
   hayIncidenciaSinClasificar,
+  tieneResolucion,
+  resolucionPrincipal,
+  etiquetaResolucion,
   type EntradaIncidencia,
 } from './incidencia-cobro'
 
@@ -173,6 +176,86 @@ test('T8c · documento vacío no revienta', () => {
   const r = resumirIncidencia({})
   assert.equal(r.monto, 0)
   assert.equal(r.tipo, '—')
+})
+
+// ══ B1.2H · incidencias resueltas ═══════════════════════════════════════════
+// Réplica del documento real tras el E2E de resolución: la clasificación quedó
+// en producto.resolucion, y cobrosMotorizado.resolucion NUNCA se escribió.
+function ordenResuelta(tipo: 'cliente_pagara' | 'se_pierde' = 'cliente_pagara'): EntradaIncidencia {
+  return ordenDeducida({
+    cobrosMotorizado: {
+      producto: {
+        monto: 500, recibio: false, justificacion: 'D', estado: 'pendiente',
+        resolucion: { tipo, resueltoPor: 'gestor-1', nota: null },
+      },
+      delivery: { monto: 150, recibio: false, justificacion: 'D' },
+    },
+  })
+}
+
+test('R1 · producto.resolucion presente → cuenta como resuelta', () => {
+  const o = ordenResuelta()
+  assert.equal(tieneResolucion(o), true)
+  assert.equal(hayIncidenciaSinClasificar(o), false)
+  assert.equal(resolucionPrincipal(o)?.tipo, 'cliente_pagara')
+})
+
+test('R1b · sin ninguna resolución no cuenta como resuelta', () => {
+  assert.equal(tieneResolucion(ordenDeducida()), false)
+  assert.equal(resolucionPrincipal(ordenDeducida()), null)
+})
+
+test('R2 · Resueltos muestra 500, no 650', () => {
+  const r = resumirIncidencia(ordenResuelta())
+  assert.equal(r.monto, 500)
+  assert.notEqual(r.monto, 650)
+  assert.equal(r.tipo, 'Cobro contra entrega')
+  assert.match(r.detalle ?? '', /Incluye delivery/)
+})
+
+test('R3 · resolver el producto no altera el delivery', () => {
+  // El resumen no toca cobroDelivery: la cuenta del comercio vive aparte y
+  // sigue su curso en el tab Contado.
+  const r = resumirIncidencia(ordenResuelta())
+  assert.equal(r.componenteDelivery, 150)
+  assert.equal(r.componenteComercio, 350)
+})
+
+test('R4 · el producto no genera una cuenta propia de ShEnvíos', () => {
+  // Lo único que ShEnvíos cobra es el delivery. El CE queda registrado, no
+  // perseguido: por eso la clasificación de "cliente_pagara" no dice "Pasa a
+  // Cobros" sino que remite a la relación comercio ↔ cliente.
+  assert.equal(etiquetaResolucion(resolucionPrincipal(ordenResuelta())), 'Cliente/comercio lo resolverá')
+  assert.equal(etiquetaResolucion(resolucionPrincipal(ordenResuelta('se_pierde'))), 'Se dio por perdido')
+  assert.equal(etiquetaResolucion(null), '—')
+})
+
+test('R5 · sin deducir: resolución de delivery a nivel de orden sigue contando', () => {
+  const o = ordenSinDeducir({
+    cobrosMotorizado: {
+      producto: { monto: 500, recibio: false, justificacion: 'x' },
+      delivery: { monto: 150, recibio: false, justificacion: 'y' },
+      resolucion: { tipo: 'cliente_pagara', resueltoPor: 'gestor-1' },
+    },
+  })
+  assert.equal(tieneResolucion(o), true)
+  // El producto sigue sin clasificar, así que la incidencia no está cerrada.
+  assert.equal(hayIncidenciaSinClasificar(o), true)
+})
+
+test('R6 · sin deducir con ambas resueltas', () => {
+  const o = ordenSinDeducir({
+    cobrosMotorizado: {
+      producto: { monto: 500, recibio: false, justificacion: 'x', resolucion: { tipo: 'se_pierde' } },
+      delivery: { monto: 150, recibio: false, justificacion: 'y' },
+      resolucion: { tipo: 'cliente_pagara' },
+    },
+  })
+  assert.equal(tieneResolucion(o), true)
+  assert.equal(hayIncidenciaSinClasificar(o), false)
+  // Con ambas, se prefiere la del producto por ser la del monto principal.
+  assert.equal(resolucionPrincipal(o)?.tipo, 'se_pierde')
+  assert.equal(resumirIncidencia(o).monto, 650)
 })
 
 // ── Invariante ──────────────────────────────────────────────────────────────

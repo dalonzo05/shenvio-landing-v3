@@ -37,6 +37,9 @@ import {
   esDeliveryDeducido,
   deliverySinClasificar as deliverySinClasificarLib,
   productoSinClasificar as productoSinClasificarLib,
+  tieneResolucion,
+  resolucionPrincipal,
+  etiquetaResolucion,
   type EntradaIncidencia,
 } from '@/lib/incidencia-cobro'
 
@@ -243,6 +246,12 @@ function getTipoCobro(s: Solicitud): string {
   return resumirIncidencia(s as EntradaIncidencia).tipo
 }
 
+/** Momento de la clasificación, mire donde mire la resolución. */
+function fechaResolucion(s: Solicitud): number {
+  const r = resolucionPrincipal(s as EntradaIncidencia) as { at?: { toMillis?: () => number } } | null
+  return r?.at?.toMillis?.() || 0
+}
+
 /** Desglose interno del CE cuando el delivery va deducido. null si no aplica. */
 function getDetalleCobro(s: Solicitud): string | null {
   return resumirIncidencia(s as EntradaIncidencia).detalle
@@ -431,12 +440,16 @@ function ResolveModal({
             tipo === 'cliente_pagara' ? 'border-[#004aad] bg-blue-50' : 'border-gray-200 hover:border-gray-300'
           }`}
         >
+          {/* B1.2H: los C$500 del producto NO son una cuenta por cobrar de
+              ShEnvíos — son de la relación cliente ↔ comercio. El copy anterior
+              ("Cliente pagará después" / "Pasa al módulo de Cobros") insinuaba
+              que ShEnvíos iba a perseguirlos. */}
           <p className={`text-sm font-semibold ${tipo === 'cliente_pagara' ? 'text-[#004aad]' : 'text-gray-800'}`}>
-            Cliente pagará después
+            {deducido ? 'Cliente/comercio lo resolverá' : 'Cliente pagará después'}
           </p>
           <p className="text-xs text-gray-500 mt-0.5">
             {deducido
-              ? `El cobro contra entrega de ${fmt(resumen.monto)} quedará pendiente de seguimiento.`
+              ? `El cobro del producto queda registrado para seguimiento entre el comercio y su cliente. El delivery de ${fmt(resumen.componenteDelivery)} seguirá pendiente al comercio.`
               : 'Pasa al módulo de Cobros para seguimiento'}
           </p>
         </button>
@@ -453,7 +466,7 @@ function ResolveModal({
           </p>
           <p className="text-xs text-gray-500 mt-0.5">
             {deducido
-              ? `Los ${fmt(resumen.monto)} no se cobrarán. El delivery de ${fmt(resumen.componenteDelivery)} seguirá pendiente al comercio.`
+              ? `El producto queda registrado como no cobrado. El delivery de ${fmt(resumen.componenteDelivery)} seguirá pendiente al comercio.`
               : 'No se cobrará este monto'}
           </p>
         </button>
@@ -1203,7 +1216,11 @@ function CobrosPageContent() {
     const unsubR = onSnapshot(qResolved, (snap) => {
       snap.docs.forEach((d) => {
         const data = d.data() as any
-        if (data?.cobrosMotorizado?.resolucion) map.set(d.id, { id: d.id, ...data })
+        // B1.2H: la resolución del CE/producto vive en su propio submapa
+        // (producto.resolucion) desde B1.2F. Mirar solo el nivel de orden
+        // dejaba esas incidencias fuera del cargador, así que ni siquiera
+        // llegaban a evaluarse para el tab Resueltos.
+        if (tieneResolucion(data as EntradaIncidencia)) map.set(d.id, { id: d.id, ...data })
       })
       setIncidencias([...map.values()])
       setLoadingIncidencias(false)
@@ -1283,8 +1300,9 @@ function CobrosPageContent() {
 
   const incidenciasResueltas = useMemo(() =>
     incidencias
-      .filter((s) => s.cobroPendiente === false && s.cobrosMotorizado?.resolucion)
-      .sort((a, b) => (b.cobrosMotorizado?.resolucion?.at?.toMillis?.() || 0) - (a.cobrosMotorizado?.resolucion?.at?.toMillis?.() || 0)),
+      // B1.2H: se acepta la resolución de cualquiera de los dos ítems.
+      .filter((s) => s.cobroPendiente === false && tieneResolucion(s as EntradaIncidencia))
+      .sort((a, b) => (fechaResolucion(b) || 0) - (fechaResolucion(a) || 0)),
     [incidencias]
   )
 
@@ -2129,12 +2147,14 @@ function CobrosPageContent() {
                     const tipo = getTipoCobro(s)
                     const monto = getMontoPendiente(s)
                     const justs = getJustificaciones(s)
-                    const resolucion = s.cobrosMotorizado?.resolucion
+                    // B1.2H: la resolución puede estar en el submapa del
+                    // producto (CE) o a nivel de orden (delivery/legacy).
+                    const resolucion = resolucionPrincipal(s as EntradaIncidencia)
                     return (
                       <tr key={s.id} className="hover:bg-gray-50 transition-colors">
                         <td className={tdCls}>
                           {incidenciasTab === 'resueltos'
-                            ? fmtDate(s.cobrosMotorizado?.resolucion?.at)
+                            ? fmtDate(resolucion?.at)
                             : fmtDate(s.createdAt)}
                         </td>
                         <td className={`${tdCls} font-mono text-xs text-gray-400`}>{s.id.slice(0, 8)}</td>
@@ -2185,10 +2205,14 @@ function CobrosPageContent() {
                         )}
                         {incidenciasTab === 'resueltos' && (
                           <td className={`${tdCls} max-w-[180px]`}>
+                            {/* B1.2H: "Pasa a Cobros" sugería que ShEnvíos iba
+                                a perseguir el producto. Ese dinero es de la
+                                relación cliente ↔ comercio; ShEnvíos solo lo
+                                deja registrado. */}
                             {resolucion?.tipo === 'cliente_pagara' ? (
-                              <p className="text-xs text-blue-700 font-semibold">→ Pasa a Cobros</p>
+                              <p className="text-xs text-blue-700 font-semibold">{etiquetaResolucion(resolucion)}</p>
                             ) : resolucion?.tipo === 'se_pierde' ? (
-                              <p className="text-xs text-red-600 font-semibold">✗ Se perdió</p>
+                              <p className="text-xs text-red-600 font-semibold">✗ {etiquetaResolucion(resolucion)}</p>
                             ) : (
                               <p className="text-xs text-green-700 font-semibold">✓ Resuelto</p>
                             )}
