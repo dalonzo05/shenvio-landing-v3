@@ -23,6 +23,8 @@ import { auth, db } from '@/fb/config'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import { BloqueCobros, BloqueIncidencia } from './_components/BloquesCobros'
 import { BloqueDepositos } from './_components/BloqueDepositos'
+import { BloqueTimeline } from './_components/BloqueTimeline'
+import { construirTimeline, uidsDeTimeline } from '@/lib/timeline-orden'
 import { ImageLightbox } from '../../../_components/ImageLightbox'
 import { nombreDeUsuario } from '@/lib/actor-resolucion'
 import { idsDepositoDeOrden, type DepositoRegistrado, type DestinoDeposito } from '@/lib/deposito-orden'
@@ -585,40 +587,6 @@ function MapaOrden({ retiro, entrega }: { retiro: LatLng | null; entrega: LatLng
   )
 }
 
-function TimelineStep({
-  title,
-  done,
-  current,
-  subtitle,
-}: {
-  title: string
-  done?: boolean
-  current?: boolean
-  subtitle?: string
-}) {
-  return (
-    <div className="flex items-start gap-3">
-      <div
-        className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-bold ${
-          current
-            ? 'border-blue-300 bg-blue-50 text-blue-700'
-            : done
-            ? 'border-green-300 bg-green-50 text-green-700'
-            : 'border-gray-200 bg-white text-gray-400'
-        }`}
-      >
-        {done ? '✓' : '•'}
-      </div>
-      <div>
-        <div className={`text-sm font-medium ${current || done ? 'text-gray-900' : 'text-gray-500'}`}>
-          {title}
-        </div>
-        {subtitle ? <div className="text-xs text-gray-500 mt-0.5">{subtitle}</div> : null}
-      </div>
-    </div>
-  )
-}
-
 export default function GestorSolicitudDetallePage() {
   // Mismo módulo que el listado ('solicitudes'): esta es su ruta de detalle,
   // no un módulo aparte — ver lib/permissions.ts.
@@ -779,6 +747,13 @@ function GestorSolicitudDetallePageContent() {
   // el UID crudo porque B2.1 no agregaba queries; acá se resuelve con una
   // única lectura por UID —no un listener— y se cachea en estado, así que un
   // mismo actor en varias incidencias se lee una sola vez.
+  // B2.4 — historial autoritativo. Se deriva de lo ya cargado (la orden y los
+  // depósitos de B2.3): no agrega ninguna query.
+  const eventosTimeline = useMemo(
+    () => (solicitud ? construirTimeline(solicitud as never, depositosOrden) : []),
+    [solicitud, depositosOrden]
+  )
+
   const uidsActores = useMemo(() => {
     const cm = solicitud?.cobrosMotorizado as
       | { producto?: { resolucion?: { resueltoPor?: string } }; resolucion?: { resueltoPor?: string } }
@@ -789,9 +764,13 @@ function GestorSolicitudDetallePageContent() {
       // B2.3 — quien confirmó cada depósito, por el mismo camino.
       depositosOrden.storkhub?.confirmadoPorUid,
       depositosOrden.comercio?.confirmadoPorUid,
+      // B2.4 — actores de la timeline (creación, confirmación, asignación,
+      // rechazo, pago del delivery). Se juntan acá para que el efecto haga UNA
+      // lectura por UID distinto, no una por evento.
+      ...uidsDeTimeline(eventosTimeline),
     ]
     return [...new Set(uids.filter((u): u is string => typeof u === 'string' && u.length > 0))]
-  }, [solicitud?.cobrosMotorizado, depositosOrden])
+  }, [solicitud?.cobrosMotorizado, depositosOrden, eventosTimeline])
 
   useEffect(() => {
     const faltantes = uidsActores.filter((uid) => !(uid in nombresActores))
@@ -1063,58 +1042,11 @@ function GestorSolicitudDetallePageContent() {
   const entregaMaps = getBestMapsUrl(solicitud, 'entrega')
 
   const estado = solicitud.estado
-  const estadoAceptacion = solicitud.asignacion?.estadoAceptacion
 
-  const timeline = [
-    {
-      title: 'Creada',
-      done: true,
-      current: false,
-      subtitle: formatDateTime(solicitud.createdAt),
-    },
-    {
-      title: 'Confirmada',
-      done: ['confirmada', 'asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado'].includes(estado),
-      current: estado === 'pendiente_confirmacion',
-      subtitle: solicitud.confirmacion?.confirmadoAt ? formatDateTime(solicitud.confirmacion.confirmadoAt) : undefined,
-    },
-    {
-      title: 'Asignada',
-      done: ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado'].includes(estado),
-      current: estado === 'confirmada',
-      subtitle: solicitud.asignacion?.asignadoAt ? formatDateTime(solicitud.asignacion.asignadoAt) : undefined,
-    },
-    {
-      title: 'Aceptada por motorizado',
-      done: ['en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado'].includes(estado) || estadoAceptacion === 'aceptada',
-      current: estado === 'asignada',
-      subtitle: solicitud.asignacion?.aceptadoAt ? formatDateTime(solicitud.asignacion.aceptadoAt) : aceptacionLabel(estadoAceptacion),
-    },
-    {
-      title: 'Retiro en proceso',
-      done: ['retirado', 'en_camino_entrega', 'entregado'].includes(estado),
-      current: estado === 'en_camino_retiro',
-      subtitle: solicitud.historial?.en_camino_retiroAt ? formatDateTime(solicitud.historial.en_camino_retiroAt) : undefined,
-    },
-    {
-      title: 'Paquete retirado',
-      done: ['retirado', 'en_camino_entrega', 'entregado'].includes(estado),
-      current: estado === 'retirado',
-      subtitle: solicitud.historial?.retiradoAt ? formatDateTime(solicitud.historial.retiradoAt) : undefined,
-    },
-    {
-      title: 'En camino a entrega',
-      done: ['entregado'].includes(estado),
-      current: estado === 'en_camino_entrega',
-      subtitle: solicitud.historial?.en_camino_entregaAt ? formatDateTime(solicitud.historial.en_camino_entregaAt) : undefined,
-    },
-    {
-      title: 'Entregado',
-      done: estado === 'entregado',
-      current: false,
-      subtitle: solicitud.historial?.entregadoAt ? formatDateTime(solicitud.historial.entregadoAt) : (solicitud as any).entregadoAt ? formatDateTime((solicitud as any).entregadoAt) : undefined,
-    },
-  ]
+  // B2.4: la barra de 8 pasos vivía acá y marcaba etapas como cumplidas por
+  // pertenencia de estado (`['retirado','entregado'].includes(estado)`), lo
+  // que afirmaba que algo pasó sin saber cuándo. La reemplaza `eventosTimeline`,
+  // derivada solo de timestamps persistidos.
 
   return (
     <>
@@ -1177,24 +1109,7 @@ function GestorSolicitudDetallePageContent() {
 
       <div className="grid grid-cols-1 2xl:grid-cols-[1.35fr_0.95fr] gap-5">
         <section className="space-y-5">
-          <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-            <div className="flex items-center gap-2 mb-4">
-              <Package className="h-4 w-4 text-gray-500" />
-              <h2 className="font-semibold text-gray-900">Timeline operativo</h2>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-              {timeline.map((item) => (
-                <TimelineStep
-                  key={item.title}
-                  title={item.title}
-                  done={item.done}
-                  current={item.current}
-                  subtitle={item.subtitle}
-                />
-              ))}
-            </div>
-          </div>
+          <BloqueTimeline eventos={eventosTimeline} nombresActores={nombresActores} />
 
           <MapaOrden
             retiro={solicitud.cotizacion?.origenCoord ?? (solicitud.recoleccion as any)?.coord ?? null}
