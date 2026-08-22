@@ -159,8 +159,19 @@ type PendingConfirm = {
   recibioProducto: boolean;
   justDelivery: string;
   justProducto: string;
+  // MOT-COBRO-UX-1: el texto de "Otro" vive aparte de la razón elegida. Antes
+  // el textarea escribía sobre el mismo campo que lo hacía visible, así que al
+  // teclear la primera letra la razón dejaba de ser 'Otro' y el campo se
+  // desmontaba — quedaba guardada esa única letra como justificación.
+  justDeliveryTexto: string;
+  justProductoTexto: string;
   montoCargotrans: string;
 };
+
+/** Razón final a persistir: con "Otro", la razón es el texto que escribió. */
+function justificacionFinal(razon: string, texto: string): string {
+  return razon === 'Otro' ? `Otro: ${texto.trim()}` : razon;
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -774,6 +785,8 @@ export default function PanelMotorizadoPage() {
       recibioProducto: true,
       justDelivery: '',
       justProducto: '',
+      justDeliveryTexto: '',
+      justProductoTexto: '',
       montoCargotrans: '',
     });
   }
@@ -1225,8 +1238,13 @@ export default function PanelMotorizadoPage() {
                           const razonesList = pc.esRetiro
                             ? (esPcFueraManagua ? RAZONES_DELIVERY_RETIRO_FUERA : RAZONES_DELIVERY_RETIRO)
                             : RAZONES_DELIVERY_ENTREGA;
-                          const bloqueadoDelivery = pc.showDelivery && !pc.recibioDelivery && !pc.justDelivery.trim();
-                          const bloqueadoProducto = pc.showProducto && !pc.recibioProducto && !pc.justProducto.trim();
+                          // MOT-COBRO-UX-1: con "Otro" hay que describir la
+                          // situación — la razón sola no dice nada al gestor.
+                          const faltaTexto = (razon: string, texto: string) => razon === 'Otro' && !texto.trim();
+                          const bloqueadoDelivery = pc.showDelivery && !pc.recibioDelivery
+                            && (!pc.justDelivery.trim() || faltaTexto(pc.justDelivery, pc.justDeliveryTexto));
+                          const bloqueadoProducto = pc.showProducto && !pc.recibioProducto
+                            && (!pc.justProducto.trim() || faltaTexto(pc.justProducto, pc.justProductoTexto));
                           const bloqueadoCargotrans = pc.showCargotransCobro && !pc.montoCargotrans.trim();
                           const bloqueado = !!actionId || bloqueadoDelivery || bloqueadoProducto || bloqueadoCargotrans;
                           return (
@@ -1259,8 +1277,8 @@ export default function PanelMotorizadoPage() {
                                         {razonesList.map((r) => <option key={r} value={r}>{r}</option>)}
                                       </select>
                                       {pc.justDelivery === 'Otro' && (
-                                        <textarea placeholder="Describe la situación…" value={pc.justDelivery === 'Otro' ? '' : pc.justDelivery}
-                                          onChange={(e) => setPendingConfirm((p) => p ? { ...p, justDelivery: e.target.value || 'Otro' } : p)}
+                                        <textarea placeholder="Describe la situación…" value={pc.justDeliveryTexto}
+                                          onChange={(e) => setPendingConfirm((p) => p ? { ...p, justDeliveryTexto: e.target.value } : p)}
                                           style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid #fed7aa', fontSize: 13, resize: 'none' as const, height: 64, outline: 'none', boxSizing: 'border-box' as const }} />
                                       )}
                                     </div>
@@ -1307,8 +1325,8 @@ export default function PanelMotorizadoPage() {
                                         {RAZONES_PRODUCTO.map((r) => <option key={r} value={r}>{r}</option>)}
                                       </select>
                                       {pc.justProducto === 'Otro' && (
-                                        <textarea placeholder="Describe la situación…"
-                                          onChange={(e) => setPendingConfirm((p) => p ? { ...p, justProducto: e.target.value || 'Otro' } : p)}
+                                        <textarea placeholder="Describe la situación…" value={pc.justProductoTexto}
+                                          onChange={(e) => setPendingConfirm((p) => p ? { ...p, justProductoTexto: e.target.value } : p)}
                                           style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid #fed7aa', fontSize: 13, resize: 'none' as const, height: 64, outline: 'none', boxSizing: 'border-box' as const }} />
                                       )}
                                     </div>
@@ -1363,14 +1381,14 @@ export default function PanelMotorizadoPage() {
                                     // calcDeposito()) — el servidor lo recalcula desde el
                                     // documento, no confía en lo que mande el cliente.
                                     const deliveryCobro = pc.showDelivery
-                                      ? { recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? pc.justDelivery : undefined }
+                                      ? { recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? justificacionFinal(pc.justDelivery, pc.justDeliveryTexto) : undefined }
                                       : undefined;
                                     executeConfirmarConCobro(
                                       pc.order,
                                       pc.nuevo as 'retirado' | 'entregado',
                                       {
                                         delivery: deliveryCobro,
-                                        producto: pc.showProducto ? { recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? pc.justProducto : undefined } : undefined,
+                                        producto: pc.showProducto ? { recibio: pc.recibioProducto, justificacion: !pc.recibioProducto ? justificacionFinal(pc.justProducto, pc.justProductoTexto) : undefined } : undefined,
                                       },
                                       pc.showCargotransCobro ? { monto: Number(pc.montoCargotrans) } : undefined,
                                     );

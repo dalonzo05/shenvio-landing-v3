@@ -32,6 +32,13 @@ import {
   Upload,
 } from 'lucide-react'
 import { compressImage, uploadDeliveryBoucher } from '@/fb/storage'
+import {
+  resumirIncidencia,
+  esDeliveryDeducido,
+  deliverySinClasificar as deliverySinClasificarLib,
+  productoSinClasificar as productoSinClasificarLib,
+  type EntradaIncidencia,
+} from '@/lib/incidencia-cobro'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -217,37 +224,32 @@ function getClienteUid(s: Solicitud) {
   return (s.ownerSnapshot as any)?.uid || s.userId || '__sin'
 }
 
-// ── B1.2: "sin clasificar" = el motorizado declaró que no lo recibió y el
-// gestor todavía no dijo qué pasa con ese dinero. Es lo que cuenta para
-// cobroPendiente — no "hay deuda", sino "hay algo que nadie clasificó".
+// ── B1.2F: la interpretación vive en lib/incidencia-cobro.ts.
+//
+// Con `deducirDelCobroContraEntrega = true` el destinatario paga un solo monto
+// —el cobro contra entrega— y el delivery sale por dentro. La Function espeja
+// la respuesta del producto sobre el delivery (espejo intencional), y acá se
+// leía como un segundo cobro: un CE de 500 con delivery de 150 mostraba 650.
+// Los 150 ya estaban dentro de los 500.
 function deliverySinClasificar(s: Solicitud): boolean {
-  const d = s.cobrosMotorizado?.delivery
-  return !!d && d.recibio === false && !s.cobrosMotorizado?.resolucion
+  return deliverySinClasificarLib(s as EntradaIncidencia)
 }
 
 function productoSinClasificar(s: Solicitud): boolean {
-  const p = s.cobrosMotorizado?.producto
-  // Legacy: documentos anteriores a B1.2 no tienen `resolucion` propia. Si el
-  // producto no se recibió y no hay resolución específica, está sin clasificar.
-  return !!p && p.recibio === false && !p.resolucion
+  return productoSinClasificarLib(s as EntradaIncidencia)
 }
 
 function getTipoCobro(s: Solicitud): string {
-  const d = s.cobrosMotorizado?.delivery
-  const p = s.cobrosMotorizado?.producto
-  const parts: string[] = []
-  if (d && !d.recibio) parts.push('Delivery')
-  if (p && !p.recibio) parts.push('Producto')
-  return parts.join(' + ') || '—'
+  return resumirIncidencia(s as EntradaIncidencia).tipo
+}
+
+/** Desglose interno del CE cuando el delivery va deducido. null si no aplica. */
+function getDetalleCobro(s: Solicitud): string | null {
+  return resumirIncidencia(s as EntradaIncidencia).detalle
 }
 
 function getMontoPendiente(s: Solicitud): number {
-  let total = 0
-  const d = s.cobrosMotorizado?.delivery
-  const p = s.cobrosMotorizado?.producto
-  if (d && !d.recibio) total += d.monto
-  if (p && !p.recibio) total += p.monto
-  return total
+  return resumirIncidencia(s as EntradaIncidencia).monto
 }
 
 function getJustificaciones(s: Solicitud): string[] {
@@ -288,6 +290,11 @@ function ResolveModal({
   // resolvían con un solo clic que escribía siempre cobroDelivery.estado —
   // de modo que resolver un problema de PRODUCTO alteraba el estado de cobro
   // del DELIVERY, que no tenía nada que ver. Ahora se elige el ítem.
+  // B1.2F: con el delivery deducido del CE hubo UN solo evento de cobro, así
+  // que no hay nada que elegir — `deliverySinClasificar` ya devuelve false y
+  // la única clasificación posible es la del CE/producto.
+  const deducido = esDeliveryDeducido(solicitud as EntradaIncidencia)
+  const resumen = resumirIncidencia(solicitud as EntradaIncidencia)
   const deliveryAbierta = deliverySinClasificar(solicitud)
   const productoAbierta = productoSinClasificar(solicitud)
   const [item, setItem] = useState<'delivery' | 'producto'>(
@@ -324,9 +331,15 @@ function ResolveModal({
           updates['cobroDelivery.estado'] = 'no_cobrar'
         }
       } else {
-        // PRODUCTO: se escribe únicamente dentro de su propio submapa.
-        // cobroDelivery no se toca. `justificacion` y `monto` se preservan
-        // porque solo se tocan estas dos claves por dot-path.
+        // PRODUCTO / CE: se escribe únicamente dentro de su propio submapa.
+        // `justificacion` y `monto` se preservan porque solo se tocan estas
+        // dos claves por dot-path.
+        //
+        // cobroDelivery NO se toca, ni siquiera con 'se_pierde'. Que el
+        // destinatario no haya pagado no borra el delivery: ShEnvíos ya prestó
+        // el servicio y el comercio lo sigue debiendo. Condonarlo es una
+        // decisión aparte y explícita, no un efecto colateral de clasificar
+        // la incidencia del cobro contra entrega.
         updates['cobrosMotorizado.producto.resolucion'] = resolucion
         updates['cobrosMotorizado.producto.estado'] =
           tipo === 'cliente_pagara' ? 'pendiente' : 'no_cobrar'
@@ -359,6 +372,24 @@ function ResolveModal({
         {/* B1.2: con las dos incidencias abiertas hay que elegir cuál se
             resuelve. Cada una se clasifica por separado y la otra sigue
             pendiente. */}
+        {/* B1.2F: un solo evento de cobro. Se muestra el desglose interno
+            para que quede claro que los C$150 del delivery están DENTRO del
+            CE y no son un cargo adicional. */}
+        {deducido && resumen.monto > 0 && (
+          <div className="mb-4 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
+            <p className="text-xs font-semibold text-gray-500">Cobro contra entrega no recibido</p>
+            <p className="text-xl font-black text-gray-900 mt-0.5">{fmt(resumen.monto)}</p>
+            {resumen.componenteDelivery > 0 && (
+              <p className="text-[11px] text-gray-500 mt-1">
+                Incluye delivery ShEnvíos {fmt(resumen.componenteDelivery)} · neto comercio {fmt(resumen.componenteComercio)}
+              </p>
+            )}
+            <p className="text-[11px] text-gray-400 mt-1.5">
+              El delivery ya prestado sigue como cuenta por cobrar al comercio y no se altera acá.
+            </p>
+          </div>
+        )}
+
         {deliveryAbierta && productoAbierta && (
           <div className="mb-4">
             <p className="text-xs font-semibold text-gray-500 mb-2">
@@ -2108,6 +2139,11 @@ function CobrosPageContent() {
                           <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full bg-orange-50 text-orange-700 border border-orange-200">
                             {tipo}
                           </span>
+                          {/* B1.2F: con el delivery deducido hay UN solo cobro.
+                              El desglose evita que se lea como dos cargos. */}
+                          {getDetalleCobro(s) && (
+                            <p className="text-[10px] text-gray-400 mt-1">{getDetalleCobro(s)}</p>
+                          )}
                         </td>
                         <td className={`${tdCls} text-right font-semibold text-red-600`}>
                           {monto > 0 ? fmt(monto) : '—'}
