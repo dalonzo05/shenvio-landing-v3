@@ -414,8 +414,14 @@ function ResolveModal({
           </div>
         )}
 
+        {/* B1.2G — copy. Con el CE deducido, "producto" era ambiguo: el
+            operador no distinguía si estaba clasificando el cobro contra
+            entrega (C$500) o el delivery (C$150). Se nombra el monto y el
+            concepto exactos. Sin deducción el texto no cambia. */}
         <p className="text-sm text-gray-500 mb-4">
-          ¿Cómo se resuelve el cobro pendiente de <span className="font-semibold">{item}</span>?
+          {deducido
+            ? <>¿Qué pasará con el cobro contra entrega de <span className="font-semibold">{fmt(resumen.monto)}</span>?</>
+            : <>¿Cómo se resuelve el cobro pendiente de <span className="font-semibold">{item}</span>?</>}
         </p>
 
         {/* Opción A */}
@@ -428,7 +434,11 @@ function ResolveModal({
           <p className={`text-sm font-semibold ${tipo === 'cliente_pagara' ? 'text-[#004aad]' : 'text-gray-800'}`}>
             Cliente pagará después
           </p>
-          <p className="text-xs text-gray-500 mt-0.5">Pasa al módulo de Cobros para seguimiento</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {deducido
+              ? `El cobro contra entrega de ${fmt(resumen.monto)} quedará pendiente de seguimiento.`
+              : 'Pasa al módulo de Cobros para seguimiento'}
+          </p>
         </button>
 
         {/* Opción B */}
@@ -439,9 +449,13 @@ function ResolveModal({
           }`}
         >
           <p className={`text-sm font-semibold ${tipo === 'se_pierde' ? 'text-red-600' : 'text-gray-800'}`}>
-            Se pierde
+            {deducido ? 'Se da por perdido' : 'Se pierde'}
           </p>
-          <p className="text-xs text-gray-500 mt-0.5">No se cobrará este monto</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {deducido
+              ? `Los ${fmt(resumen.monto)} no se cobrarán. El delivery de ${fmt(resumen.componenteDelivery)} seguirá pendiente al comercio.`
+              : 'No se cobrará este monto'}
+          </p>
         </button>
 
         <textarea
