@@ -22,8 +22,10 @@ import {
 import { auth, db } from '@/fb/config'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import { BloqueCobros, BloqueIncidencia } from './_components/BloquesCobros'
+import { BloqueDepositos } from './_components/BloqueDepositos'
 import { ImageLightbox } from '../../../_components/ImageLightbox'
 import { nombreDeUsuario } from '@/lib/actor-resolucion'
+import { idsDepositoDeOrden, type DepositoRegistrado, type DestinoDeposito } from '@/lib/deposito-orden'
 
 /** Etiqueta sin emoji para el visor ampliado y los textos accesibles. */
 const LABEL_LIMPIO: Record<'retiro' | 'entrega' | 'deposito', string> = {
@@ -651,6 +653,11 @@ function GestorSolicitudDetallePageContent() {
   // B2.2 — nombres legibles de actores internos (uid → nombre), resueltos una
   // sola vez por UID. Mismo patrón que comercioNames en Gestor → Cobros.
   const [nombresActores, setNombresActores] = useState<Record<string, string>>({})
+  // B2.3 — depósitos reales de ESTA orden, leídos por ID. Nunca la colección
+  // completa: los punteros viven en registro.deposito, así que son ≤ 2 getDoc.
+  const [depositosOrden, setDepositosOrden] = useState<
+    Partial<Record<DestinoDeposito, DepositoRegistrado | null>>
+  >({})
   const [showRechazarModal, setShowRechazarModal] = useState(false)
   const [motivoCodigo, setMotivoCodigo] = useState('')
   const [motivoTexto, setMotivoTexto] = useState('')
@@ -726,6 +733,48 @@ function GestorSolicitudDetallePageContent() {
       .catch(() => setComercioRequiereBolso(false))
   }, [solicitud?.userId])
 
+  // B2.3 — depósitos reales asociados a la orden.
+  //
+  // La relación es determinista: registro.deposito.storkhubDepositoId y
+  // .comercioDepositoId apuntan al documento. Se leen por ID —máximo dos
+  // getDoc, sin listener y sin recorrer ordenes_deposito— y la clave de
+  // dependencia son los IDs, no el objeto solicitud, para que el onSnapshot
+  // de la orden no dispare relecturas en cada actualización.
+  const idsDeposito = useMemo(
+    () => idsDepositoDeOrden((solicitud ?? {}) as never),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [solicitud?.registro?.deposito?.storkhubDepositoId, solicitud?.registro?.deposito?.comercioDepositoId]
+  )
+  const claveDepositos = idsDeposito.map((d) => `${d.destino}:${d.id}`).join('|')
+
+  useEffect(() => {
+    if (idsDeposito.length === 0) {
+      setDepositosOrden({})
+      return
+    }
+    let vivo = true
+    Promise.all(
+      idsDeposito.map(({ destino, id: depId }) =>
+        getDoc(doc(db, 'ordenes_deposito', depId))
+          .then((snap) => ({
+            destino,
+            // Si el puntero quedó colgando —depósito eliminado— se deja en
+            // null: la ficha vuelve a decir "pendiente", no inventa un
+            // depósito que ya no existe.
+            dep: snap.exists() ? ({ id: snap.id, ...(snap.data() as object) } as DepositoRegistrado) : null,
+          }))
+          .catch(() => ({ destino, dep: null }))
+      )
+    ).then((res) => {
+      if (!vivo) return
+      const mapa: Partial<Record<DestinoDeposito, DepositoRegistrado | null>> = {}
+      res.forEach(({ destino, dep }) => { mapa[destino] = dep })
+      setDepositosOrden(mapa)
+    })
+    return () => { vivo = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [claveDepositos])
+
   // B2.2 — nombre legible de quien resolvió una incidencia. La ficha mostraba
   // el UID crudo porque B2.1 no agregaba queries; acá se resuelve con una
   // única lectura por UID —no un listener— y se cachea en estado, así que un
@@ -734,9 +783,15 @@ function GestorSolicitudDetallePageContent() {
     const cm = solicitud?.cobrosMotorizado as
       | { producto?: { resolucion?: { resueltoPor?: string } }; resolucion?: { resueltoPor?: string } }
       | undefined
-    const uids = [cm?.producto?.resolucion?.resueltoPor, cm?.resolucion?.resueltoPor]
+    const uids = [
+      cm?.producto?.resolucion?.resueltoPor,
+      cm?.resolucion?.resueltoPor,
+      // B2.3 — quien confirmó cada depósito, por el mismo camino.
+      depositosOrden.storkhub?.confirmadoPorUid,
+      depositosOrden.comercio?.confirmadoPorUid,
+    ]
     return [...new Set(uids.filter((u): u is string => typeof u === 'string' && u.length > 0))]
-  }, [solicitud?.cobrosMotorizado])
+  }, [solicitud?.cobrosMotorizado, depositosOrden])
 
   useEffect(() => {
     const faltantes = uidsActores.filter((uid) => !(uid in nombresActores))
@@ -1771,58 +1826,16 @@ function GestorSolicitudDetallePageContent() {
             </div>
           )}
 
-          {/* Depósito */}
-          {(() => {
-            const dep = solicitud.registro?.deposito
-            if (!dep) return null
-            // Fuente de verdad: storkhubDepositoId / comercioDepositoId + confirmadoStorkhub / confirmadoComercio.
-            const tieneInfo = dep.confirmadoComercio || dep.confirmadoStorkhub
-              || dep.storkhubDepositoId || dep.comercioDepositoId
-            if (!tieneInfo) return null
-            return (
-              <div className="rounded-2xl border border-teal-200 bg-white p-5 shadow-sm">
-                <h2 className="font-semibold text-teal-700 mb-4">Depósito</h2>
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  {dep.confirmadoStorkhub && (
-                    <>
-                      <div>
-                        <div className="text-gray-500">Storkhub</div>
-                        <div className="font-medium text-green-700">✓ Confirmado</div>
-                      </div>
-                      <div>
-                        <div className="text-gray-500">Fecha</div>
-                        <div className="font-medium text-gray-900">{formatDateTime(dep.confirmadoStorkhubAt)}</div>
-                      </div>
-                    </>
-                  )}
-                  {!dep.confirmadoStorkhub && dep.storkhubDepositoId && (
-                    <div>
-                      <div className="text-gray-500">Storkhub</div>
-                      <div className="font-medium text-blue-600">⏳ En revisión</div>
-                    </div>
-                  )}
-                  {dep.confirmadoComercio && (
-                    <>
-                      <div>
-                        <div className="text-gray-500">Comercio</div>
-                        <div className="font-medium text-green-700">✓ Confirmado</div>
-                      </div>
-                      <div>
-                        <div className="text-gray-500">Fecha</div>
-                        <div className="font-medium text-gray-900">{formatDateTime(dep.confirmadoComercioAt)}</div>
-                      </div>
-                    </>
-                  )}
-                  {!dep.confirmadoComercio && dep.comercioDepositoId && (
-                    <div>
-                      <div className="text-gray-500">Comercio</div>
-                      <div className="font-medium text-blue-600">⏳ En revisión</div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )
-          })()}
+          {/* B2.3 — Depósitos. Sustituye al bloque que solo mostraba los flags
+              confirmadoStorkhub / confirmadoComercio: ahora separa la
+              obligación derivada de la orden del depósito real registrado. */}
+          <BloqueDepositos
+            orden={solicitud as never}
+            depositos={depositosOrden}
+            nombresActores={nombresActores}
+            formatearFecha={formatDateTime}
+            onVerBoucher={(url, label) => setEvidenciaAmpliada({ url, label })}
+          />
 
           {/* Evidencias fotográficas */}
           {solicitud.evidencias && (['retiro', 'entrega', 'deposito'] as const).some((k) => solicitud.evidencias?.[k]) && (
