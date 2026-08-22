@@ -20,6 +20,7 @@ import {
   esDeliveryDeducido,
   type EntradaIncidencia,
 } from '@/lib/incidencia-cobro'
+import { presentarActor } from '@/lib/actor-resolucion'
 
 type OrdenFicha = EntradaEstadoComercio & EntradaIncidencia
 
@@ -146,7 +147,14 @@ export function BloqueCobros({ orden }: { orden: OrdenFicha }) {
 
 // ─── Incidencia ─────────────────────────────────────────────────────────────
 
-export function BloqueIncidencia({ orden }: { orden: OrdenFicha }) {
+export function BloqueIncidencia({
+  orden,
+  nombresActores = {},
+}: {
+  orden: OrdenFicha
+  /** uid → nombre legible. Vacío mientras la lectura no resolvió. */
+  nombresActores?: Record<string, string>
+}) {
   const items = detalleIncidencia(orden)
   if (items.length === 0) return null
 
@@ -190,16 +198,25 @@ export function BloqueIncidencia({ orden }: { orden: OrdenFicha }) {
                     <p className="text-sm text-gray-900 whitespace-pre-wrap break-words">{it.resolucion.nota}</p>
                   </div>
                 )}
-                <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-gray-400 pt-0.5">
-                  <span>{fecha(it.resolucion.at)}</span>
-                  {/* UID en secundario: resolverlo a nombre exigiría una query
-                      nueva y B2.1 no agrega ninguna (ver B2-ACTOR-NOMBRE). */}
-                  {it.resolucion.resueltoPor && (
-                    <span className="font-mono" title="UID de quien resolvió">
-                      {it.resolucion.resueltoPor.slice(0, 10)}…
-                    </span>
-                  )}
-                </div>
+                {/* B2.2 — el actor con nombre legible al frente; el UID queda
+                    debajo, en gris y monoespaciado, como rastro de auditoría. */}
+                {(() => {
+                  const actor = presentarActor(it.resolucion?.resueltoPor, nombresActores[it.resolucion?.resueltoPor ?? ''])
+                  return (
+                    <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-1 pt-1">
+                      {actor && (
+                        <div>
+                          <p className="text-xs text-gray-500">Resuelto por</p>
+                          <p className="text-sm font-medium text-gray-900">{actor.nombre}</p>
+                          <p className="text-[10px] font-mono text-gray-400" title="UID del usuario">
+                            ID: {actor.uid.slice(0, 10)}…
+                          </p>
+                        </div>
+                      )}
+                      <p className="text-[11px] text-gray-400">{fecha(it.resolucion.at)}</p>
+                    </div>
+                  )
+                })()}
               </div>
             ) : (
               <p className="text-xs font-semibold text-amber-700">Sin clasificar por el gestor</p>

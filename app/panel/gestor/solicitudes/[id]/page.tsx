@@ -22,6 +22,15 @@ import {
 import { auth, db } from '@/fb/config'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import { BloqueCobros, BloqueIncidencia } from './_components/BloquesCobros'
+import { ImageLightbox } from '../../../_components/ImageLightbox'
+import { nombreDeUsuario } from '@/lib/actor-resolucion'
+
+/** Etiqueta sin emoji para el visor ampliado y los textos accesibles. */
+const LABEL_LIMPIO: Record<'retiro' | 'entrega' | 'deposito', string> = {
+  retiro: 'Retiro',
+  entrega: 'Entrega',
+  deposito: 'Boucher',
+}
 import {
   rankearMotorizados,
   type MotorizadoConRanking,
@@ -182,6 +191,21 @@ type Solicitud = {
     rechazadoPorUid?: string | null
     rechazadoAt?: any
     visibleParaComercio?: boolean
+  }
+  // B2.2: el documento ya traía esto (lo escribe confirmarTransicionConCobro);
+  // el tipo local no lo declaraba, así que la ficha no podía leer al actor de
+  // una resolución sin castear.
+  cobrosMotorizado?: {
+    delivery?: { monto?: number; recibio?: boolean; justificacion?: string; at?: unknown } | null
+    producto?: {
+      monto?: number
+      recibio?: boolean
+      justificacion?: string
+      estado?: string
+      at?: unknown
+      resolucion?: { tipo?: string; resueltoPor?: string; at?: unknown; nota?: string | null } | null
+    } | null
+    resolucion?: { tipo?: string; resueltoPor?: string; at?: unknown; nota?: string | null } | null
   }
   registro?: {
     deposito?: {
@@ -622,6 +646,11 @@ function GestorSolicitudDetallePageContent() {
   const [ordenesActivas, setOrdenesActivas] = useState<OrdenActivaRanking[]>([])
   const [loadingOrdenes, setLoadingOrdenes] = useState(false)
   const [comercioRequiereBolso, setComercioRequiereBolso] = useState<boolean | null>(null)
+  // B2.2 — evidencia abierta en el visor. null = cerrado.
+  const [evidenciaAmpliada, setEvidenciaAmpliada] = useState<{ url: string; label: string } | null>(null)
+  // B2.2 — nombres legibles de actores internos (uid → nombre), resueltos una
+  // sola vez por UID. Mismo patrón que comercioNames en Gestor → Cobros.
+  const [nombresActores, setNombresActores] = useState<Record<string, string>>({})
   const [showRechazarModal, setShowRechazarModal] = useState(false)
   const [motivoCodigo, setMotivoCodigo] = useState('')
   const [motivoTexto, setMotivoTexto] = useState('')
@@ -696,6 +725,37 @@ function GestorSolicitudDetallePageContent() {
       .then((snap) => setComercioRequiereBolso(snap.exists() ? (snap.data()?.requiereBolso ?? false) : false))
       .catch(() => setComercioRequiereBolso(false))
   }, [solicitud?.userId])
+
+  // B2.2 — nombre legible de quien resolvió una incidencia. La ficha mostraba
+  // el UID crudo porque B2.1 no agregaba queries; acá se resuelve con una
+  // única lectura por UID —no un listener— y se cachea en estado, así que un
+  // mismo actor en varias incidencias se lee una sola vez.
+  const uidsActores = useMemo(() => {
+    const cm = solicitud?.cobrosMotorizado as
+      | { producto?: { resolucion?: { resueltoPor?: string } }; resolucion?: { resueltoPor?: string } }
+      | undefined
+    const uids = [cm?.producto?.resolucion?.resueltoPor, cm?.resolucion?.resueltoPor]
+    return [...new Set(uids.filter((u): u is string => typeof u === 'string' && u.length > 0))]
+  }, [solicitud?.cobrosMotorizado])
+
+  useEffect(() => {
+    const faltantes = uidsActores.filter((uid) => !(uid in nombresActores))
+    if (faltantes.length === 0) return
+    let vivo = true
+    Promise.all(faltantes.map((uid) => getDoc(doc(db, 'usuarios', uid)).catch(() => null)))
+      .then((snaps) => {
+        if (!vivo) return
+        const nuevos: Record<string, string> = {}
+        snaps.forEach((snap, i) => {
+          const data = snap?.exists() ? (snap.data() as { name?: string; nombre?: string }) : null
+          // Cadena de fallback idéntica a la de Gestor → Cobros. Si no hay
+          // nombre se guarda '' y la UI cae a "Usuario interno": no se inventa.
+          nuevos[faltantes[i]] = nombreDeUsuario(data)
+        })
+        setNombresActores((prev) => ({ ...prev, ...nuevos }))
+      })
+    return () => { vivo = false }
+  }, [uidsActores, nombresActores])
 
   const tiempoRestante = useMemo(() => {
     if (!solicitud) return null
@@ -1395,7 +1455,7 @@ function GestorSolicitudDetallePageContent() {
               ficha "autoritativa" no alcanzaba para entender una orden.
               Ambos bloques leen del documento ya cargado: cero queries nuevas. */}
           <BloqueCobros orden={solicitud as never} />
-          <BloqueIncidencia orden={solicitud as never} />
+          <BloqueIncidencia orden={solicitud as never} nombresActores={nombresActores} />
         </section>
 
         <aside className="space-y-5">
@@ -1779,8 +1839,11 @@ function GestorSolicitudDetallePageContent() {
                   return (
                     <button
                       key={key}
-                      onClick={() => window.open(ev.url, '_blank')}
-                      className="flex flex-col items-center gap-1.5 rounded-xl border border-gray-200 bg-gray-50 p-2 hover:bg-gray-100 hover:border-gray-300 transition cursor-pointer"
+                      // B2.2: antes window.open() sacaba al operador del panel
+                      // y le hacía perder el contexto de la orden.
+                      onClick={() => setEvidenciaAmpliada({ url: ev.url, label: LABEL_LIMPIO[key] })}
+                      title={`Ampliar ${LABEL_LIMPIO[key].toLowerCase()}`}
+                      className="flex flex-col items-center gap-1.5 rounded-xl border border-gray-200 bg-gray-50 p-2 hover:bg-gray-100 hover:border-gray-300 transition cursor-zoom-in"
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
@@ -1877,6 +1940,15 @@ function GestorSolicitudDetallePageContent() {
         </aside>
       </div>
     </div>
+
+    {/* B2.2 — visor de evidencias, dentro de la app */}
+    {evidenciaAmpliada && (
+      <ImageLightbox
+        url={evidenciaAmpliada.url}
+        label={evidenciaAmpliada.label}
+        onClose={() => setEvidenciaAmpliada(null)}
+      />
+    )}
 
     {/* Modal de rechazo */}
     {showRechazarModal && (
