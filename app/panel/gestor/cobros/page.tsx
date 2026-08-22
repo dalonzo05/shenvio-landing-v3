@@ -309,6 +309,12 @@ function ResolveModal({
   const [item, setItem] = useState<'delivery' | 'producto'>(
     deliveryAbierta ? 'delivery' : 'producto',
   )
+  // B1.2I: el copy del producto y el del delivery no pueden ser el mismo. El
+  // delivery SÍ es una cuenta por cobrar de ShEnvíos ("pendiente", "pasa a
+  // Cobros"); el producto es de la relación comercio ↔ cliente y solo se deja
+  // registrado como no cobrado.
+  const esProducto = deducido || item === 'producto'
+  const montoProducto = solicitud.cobrosMotorizado?.producto?.monto ?? 0
 
   async function handleResolver() {
     if (!tipo) return
@@ -430,7 +436,11 @@ function ResolveModal({
         <p className="text-sm text-gray-500 mb-4">
           {deducido
             ? <>¿Qué pasará con el cobro contra entrega de <span className="font-semibold">{fmt(resumen.monto)}</span>?</>
-            : <>¿Cómo se resuelve el cobro pendiente de <span className="font-semibold">{item}</span>?</>}
+            : esProducto
+              // B1.2I: el producto no es cartera de ShEnvíos — se pregunta qué
+              // PASÓ, no cómo se resuelve un cobro pendiente propio.
+              ? <>¿Qué pasó con el cobro del producto de <span className="font-semibold">{fmt(montoProducto)}</span>?</>
+              : <>¿Cómo se resuelve el cobro pendiente de <span className="font-semibold">delivery</span>?</>}
         </p>
 
         {/* Opción A */}
@@ -445,12 +455,14 @@ function ResolveModal({
               ("Cliente pagará después" / "Pasa al módulo de Cobros") insinuaba
               que ShEnvíos iba a perseguirlos. */}
           <p className={`text-sm font-semibold ${tipo === 'cliente_pagara' ? 'text-[#004aad]' : 'text-gray-800'}`}>
-            {deducido ? 'Cliente/comercio lo resolverá' : 'Cliente pagará después'}
+            {esProducto ? 'Cliente/comercio lo resolverá' : 'Cliente pagará después'}
           </p>
           <p className="text-xs text-gray-500 mt-0.5">
             {deducido
-              ? `El cobro del producto queda registrado para seguimiento entre el comercio y su cliente. El delivery de ${fmt(resumen.componenteDelivery)} seguirá pendiente al comercio.`
-              : 'Pasa al módulo de Cobros para seguimiento'}
+              ? `El producto queda registrado como no cobrado. El delivery de ${fmt(resumen.componenteDelivery)} seguirá pendiente al comercio.`
+              : esProducto
+                ? 'El producto quedará registrado como no cobrado. El comercio y su cliente resolverán el pago por su cuenta.'
+                : 'Pasa al módulo de Cobros para seguimiento'}
           </p>
         </button>
 
@@ -462,12 +474,14 @@ function ResolveModal({
           }`}
         >
           <p className={`text-sm font-semibold ${tipo === 'se_pierde' ? 'text-red-600' : 'text-gray-800'}`}>
-            {deducido ? 'Se da por perdido' : 'Se pierde'}
+            {esProducto ? 'Se da por perdido' : 'Se pierde'}
           </p>
           <p className="text-xs text-gray-500 mt-0.5">
             {deducido
               ? `El producto queda registrado como no cobrado. El delivery de ${fmt(resumen.componenteDelivery)} seguirá pendiente al comercio.`
-              : 'No se cobrará este monto'}
+              : esProducto
+                ? 'El producto quedará registrado como no cobrado.'
+                : 'No se cobrará este monto'}
           </p>
         </button>
 

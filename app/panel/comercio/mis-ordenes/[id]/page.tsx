@@ -16,6 +16,7 @@ import {
   type EstadoDeliveryComercio,
   type EntradaEstadoComercio,
 } from '@/lib/estado-cobro-comercio'
+import { etiquetaResolucion, type ResolucionIncidencia } from '@/lib/incidencia-cobro'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -55,7 +56,9 @@ type Solicitud = {
   }
   cobrosMotorizado?: {
     delivery?: { monto: number; recibio: boolean; at?: any }
-    producto?: { monto: number; recibio: boolean; at?: any }
+    // B1.2I: la resolución del gestor se muestra como historial del incidente,
+    // nunca como estado financiero del comercio.
+    producto?: { monto: number; recibio: boolean; at?: any; resolucion?: ResolucionIncidencia | null }
   }
   detalle?: string
   evidencias?: {
@@ -703,12 +706,22 @@ export default function OrdenDetallePage() {
             <div className="flex items-center justify-between py-3">
               <div>
                 <p className="text-sm font-semibold text-gray-900">Cobro del producto</p>
+                {/* B1.2I: "no cobró aún" sugería un cobro en curso a cargo de
+                    ShEnvíos. Este dinero es de la relación comercio ↔ cliente:
+                    el hecho operativo es simplemente que no se cobró. */}
                 {orden.cobrosMotorizado?.producto ? (
-                  <p className={`text-xs mt-0.5 ${orden.cobrosMotorizado.producto.recibio ? 'text-green-600' : 'text-red-500'}`}>
-                    {orden.cobrosMotorizado.producto.recibio
-                      ? '✓ El motorizado cobró al cliente'
-                      : '✗ El motorizado no cobró aún'}
-                  </p>
+                  <>
+                    <p className={`text-xs mt-0.5 ${orden.cobrosMotorizado.producto.recibio ? 'text-green-600' : 'text-red-500'}`}>
+                      {orden.cobrosMotorizado.producto.recibio
+                        ? '✓ El motorizado cobró al cliente'
+                        : '✗ No cobrado en la entrega'}
+                    </p>
+                    {orden.cobrosMotorizado.producto.resolucion && (
+                      <p className="text-[11px] text-gray-400 mt-0.5">
+                        Resolución: {etiquetaResolucion(orden.cobrosMotorizado.producto.resolucion)}
+                      </p>
+                    )}
+                  </>
                 ) : (
                   <p className="text-xs text-gray-400 mt-0.5">Pendiente de entrega</p>
                 )}
