@@ -1429,7 +1429,7 @@ function GestorSolicitudDetallePageContent() {
               el documento pero solo se veían desde Gestor → Cobros, así que la
               ficha "autoritativa" no alcanzaba para entender una orden.
               Ambos bloques leen del documento ya cargado: cero queries nuevas. */}
-          <BloqueCobros orden={solicitud as never} />
+          <BloqueCobros orden={solicitud as never} depositos={depositosOrden} />
           <BloqueIncidencia orden={solicitud as never} nombresActores={nombresActores} />
         </section>
 

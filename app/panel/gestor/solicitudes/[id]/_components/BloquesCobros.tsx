@@ -21,6 +21,8 @@ import {
   type EntradaIncidencia,
 } from '@/lib/incidencia-cobro'
 import { presentarActor } from '@/lib/actor-resolucion'
+import { trazabilidadPago, type EntradaTrazabilidad } from '@/lib/trazabilidad-pago'
+import type { DepositoRegistrado, DestinoDeposito } from '@/lib/deposito-orden'
 
 type OrdenFicha = EntradaEstadoComercio & EntradaIncidencia
 
@@ -46,24 +48,35 @@ const Dato = ({ label, children }: { label: string; children: React.ReactNode })
 
 // ─── Cobros ─────────────────────────────────────────────────────────────────
 
-export function BloqueCobros({ orden }: { orden: OrdenFicha }) {
+export function BloqueCobros({
+  orden,
+  depositos = {},
+}: {
+  orden: OrdenFicha
+  /** Depósitos que la ficha ya cargó en B2.3. No se consulta nada nuevo. */
+  depositos?: Partial<Record<DestinoDeposito, DepositoRegistrado | null>>
+}) {
   const entrega = estadoDeliveryComercio(orden)
   const resumen = resumirIncidencia(orden)
   const deducido = esDeliveryDeducido(orden)
+  // B2.3B — recorrido del dinero: quién paga → quién recibió → a dónde va.
+  const traza = trazabilidadPago(orden as EntradaTrazabilidad, depositos)
 
   const precio = orden.confirmacion?.precioFinalCordobas ?? null
-  const quienPaga = orden.pagoDelivery?.quienPaga || '—'
   const ceAplica = !!orden.cobroContraEntrega?.aplica
   const ceMonto = ceAplica ? (orden.cobroContraEntrega?.monto ?? 0) : null
   const prod = orden.cobrosMotorizado?.producto
   const productoCobrado = prod ? prod.recibio !== false : null
 
   const etiquetaDelivery: Record<string, string> = {
-    pagado: 'Pagado',
-    pendiente: `Debe ${money(entrega.montoPendiente)}`,
+    // B2.3B: era "Pagado". El campo dice que el cobro se hizo en origen, no
+    // que ShEnvíos haya recibido el dinero — llamarlo "Pagado" al lado de un
+    // depósito pendiente es lo que hacía parecer incoherente la ficha.
+    pagado: 'Cobrado',
+    pendiente: `Por cobrar ${money(entrega.montoPendiente)}`,
     en_revision: `${money(entrega.montoPendiente)} en revisión`,
     no_cobrar: 'No se cobra',
-    revertido: 'Revertido',
+    revertido: 'Cobro revertido',
     na: 'Sin registrar',
   }
   const colorDelivery: Record<string, string> = {
@@ -90,7 +103,12 @@ export function BloqueCobros({ orden }: { orden: OrdenFicha }) {
           </div>
           <div className="space-y-2 text-sm">
             <Dato label="Precio">{money(precio)}</Dato>
-            <Dato label="Quién paga">{quienPaga}</Dato>
+            {traza.quienPaga && <Dato label="Quién paga">{traza.quienPaga}</Dato>}
+            {/* Cada renglón siguiente aparece solo si hay un campo que lo
+                respalde. Un dato ausente se omite; no se rellena con
+                "Desconocido" ni se deduce del resto. */}
+            {traza.receptor && <Dato label="Recibió el dinero">{traza.receptor.etiqueta}</Dato>}
+            {traza.medioPago && <Dato label="Forma de pago">{traza.medioPago}</Dato>}
             <Dato label="Deducido del cobro contra entrega">{deducido ? 'Sí' : 'No'}</Dato>
             {entrega.esParcial && (
               <>
@@ -139,6 +157,47 @@ export function BloqueCobros({ orden }: { orden: OrdenFicha }) {
             <Dato label="Delivery ShEnvíos">{money(resumen.componenteDelivery)}</Dato>
             <Dato label="Neto comercio">{money(resumen.componenteComercio)}</Dato>
           </div>
+        </div>
+      )}
+
+      {/* ── B2.3B · Destino del dinero recaudado ──────────────────────────
+          Cierra el recorrido: el motorizado tiene efectivo en la mano y este
+          renglón dice de quién es y si ya llegó. El detalle del depósito
+          —ID, boucher, actor— sigue siendo autoridad de #depositos. */}
+      {traza.destinos.length > 0 && (
+        <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50/40 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <p className="text-xs font-bold uppercase tracking-wide text-gray-400">
+              Destino del dinero recaudado
+            </p>
+            <a href="#depositos" className="text-[11px] font-semibold text-teal-700 hover:underline">
+              Ver depósitos ↓
+            </a>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {traza.destinos.map((d) => (
+              <div key={d.destino} className="flex items-baseline justify-between gap-2 text-sm">
+                <span className="text-gray-600">{d.etiqueta}</span>
+                <span className="flex items-baseline gap-2">
+                  <span className="font-semibold text-gray-900">{money(d.monto)}</span>
+                  <span className={`text-[11px] font-bold ${d.tieneDeposito ? 'text-teal-700' : 'text-amber-600'}`}>
+                    {d.situacion}
+                  </span>
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {/* La frase solo se imprime cuando los datos la sostienen: hay
+              obligación viva hacia StorkHub, no hay depósito todavía y consta
+              que el motorizado recibió el dinero. */}
+          {traza.cobradoPeroNoDepositado && (
+            <p className="text-[11px] text-gray-500 mt-2.5">
+              El delivery ya fue cobrado, pero ese dinero todavía está en manos del motorizado
+              y debe depositarse a StorkHub. Por eso «{traza.estadoCliente.etiqueta}» y
+              «Pendiente de depósito» no se contradicen.
+            </p>
+          )}
         </div>
       )}
     </section>
