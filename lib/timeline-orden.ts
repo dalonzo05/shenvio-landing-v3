@@ -20,9 +20,23 @@ import { lineasDeposito, type EntradaDepositoOrden, type DepositoRegistrado, typ
 
 export type TipoEvento = 'operativo' | 'cobro' | 'deposito' | 'administrativo'
 
+/**
+ * B2.4B — separación de presentación, no de verdad.
+ *
+ *   recorrido — el ciclo logístico del envío, de creada a entregada
+ *   cambio    — lo que le pasó a la orden después: cobros, incidencias,
+ *               depósitos y actos administrativos
+ *
+ * `tipo` no sirve para esto: 'administrativo' contiene tanto la creación
+ * (recorrido) como el rechazo (cambio). Por eso el grupo es un campo propio,
+ * asignado por id, y no algo que se deduzca del título visible.
+ */
+export type GrupoEvento = 'recorrido' | 'cambio'
+
 export interface TimelineEvento {
   id: string
   tipo: TipoEvento
+  grupo: GrupoEvento
   titulo: string
   at: Date
   /** UID a resolver con el mecanismo de B2.2. Ausente = no hay actor persistido. */
@@ -156,6 +170,31 @@ const RANGO: Record<string, number> = {
 const rangoDe = (id: string) => RANGO[id.split(':')[0]] ?? 500
 
 /**
+ * Grupo de presentación por id. Un evento nuevo que no esté acá cae en
+ * 'cambio': es el lado seguro — aparece en el historial en vez de
+ * desaparecer o de colarse en el recorrido logístico.
+ */
+const GRUPO: Record<string, GrupoEvento> = {
+  creada: 'recorrido',
+  confirmada: 'recorrido',
+  asignada: 'recorrido',
+  aceptada: 'recorrido',
+  en_camino_retiro: 'recorrido',
+  retirado: 'recorrido',
+  en_camino_entrega: 'recorrido',
+  entregado: 'recorrido',
+  // Rechazar la orden es un acto administrativo, no una etapa del envío.
+  rechazada: 'cambio',
+  incidencia: 'cambio',
+  incidencia_resuelta: 'cambio',
+  delivery_pagado: 'cambio',
+  deposito_registrado: 'cambio',
+  deposito_confirmado: 'cambio',
+}
+
+const grupoDe = (id: string): GrupoEvento => GRUPO[id.split(':')[0]] ?? 'cambio'
+
+/**
  * Eventos de la orden, en orden cronológico ascendente.
  *
  * @param orden      documento de solicitudes_envio
@@ -173,6 +212,7 @@ export function construirTimeline(
     ev.push({
       id,
       tipo,
+      grupo: grupoDe(id),
       titulo,
       at,
       ...(extra.actorUid ? { actorUid: extra.actorUid } : {}),
@@ -311,4 +351,67 @@ export function construirTimeline(
  */
 export function uidsDeTimeline(eventos: TimelineEvento[]): string[] {
   return [...new Set(eventos.map((e) => e.actorUid).filter((u): u is string => typeof u === 'string' && u.length > 0))]
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// B2.4B — presentación
+//
+// Nada de acá cambia qué eventos existen ni cuándo ocurrieron: solo los
+// reparte en dos secciones y resume el recorrido. La verdad histórica sigue
+// saliendo entera de construirTimeline().
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface TimelineSeparada {
+  /** Ciclo logístico, de creada a entregada. */
+  recorrido: TimelineEvento[]
+  /** Todo lo demás: cobros, incidencias, depósitos, actos administrativos. */
+  cambios: TimelineEvento[]
+}
+
+/**
+ * Reparte los eventos en las dos secciones de la ficha.
+ *
+ * Es una partición: cada evento cae en exactamente una: `recorrido.length +
+ * cambios.length === eventos.length`, sin duplicados y conservando el orden
+ * cronológico de entrada.
+ */
+export function separarTimeline(eventos: TimelineEvento[]): TimelineSeparada {
+  return {
+    recorrido: eventos.filter((e) => e.grupo === 'recorrido'),
+    cambios: eventos.filter((e) => e.grupo === 'cambio'),
+  }
+}
+
+export interface HitoRecorrido {
+  clave: string
+  etiqueta: string
+  /** Ocurrió de verdad: existe un evento con timestamp persistido. */
+  alcanzado: boolean
+  at: Date | null
+}
+
+/**
+ * Los seis hitos del resumen compacto.
+ *
+ * "Motorizado aceptó" y "En camino al retiro" existen y se conservan, pero no
+ * son hitos principales: alargan la barra sin agregar información que el
+ * gestor necesite de un vistazo. Quedan dentro del recorrido completo.
+ *
+ * `alcanzado` sale de que exista el evento —es decir, de un timestamp real—,
+ * nunca de que el estado actual "implique" que ya pasó. Esa inferencia era
+ * justo lo que B2.4 eliminó.
+ */
+export function hitosRecorrido(eventos: TimelineEvento[]): HitoRecorrido[] {
+  const porId = new Map(eventos.map((e) => [e.id, e]))
+  return ([
+    ['creada', 'Creada'],
+    ['confirmada', 'Confirmada'],
+    ['asignada', 'Asignada'],
+    ['retirado', 'Retirada'],
+    ['en_camino_entrega', 'En entrega'],
+    ['entregado', 'Entregada'],
+  ] as const).map(([clave, etiqueta]) => {
+    const e = porId.get(clave)
+    return { clave, etiqueta, alcanzado: !!e, at: e ? e.at : null }
+  })
 }

@@ -1109,7 +1109,12 @@ function GestorSolicitudDetallePageContent() {
 
       <div className="grid grid-cols-1 2xl:grid-cols-[1.35fr_0.95fr] gap-5">
         <section className="space-y-5">
-          <BloqueTimeline eventos={eventosTimeline} nombresActores={nombresActores} />
+          <BloqueTimeline
+            eventos={eventosTimeline}
+            estadoActual={statusLabel(solicitud.estado)}
+            estadoClase={estadoClass(solicitud.estado)}
+            nombresActores={nombresActores}
+          />
 
           <MapaOrden
             retiro={solicitud.cotizacion?.origenCoord ?? (solicitud.recoleccion as any)?.coord ?? null}

@@ -14,7 +14,10 @@ import {
   construirTimeline,
   normalizarFecha,
   uidsDeTimeline,
+  separarTimeline,
+  hitosRecorrido,
   type EntradaTimeline,
+  type TimelineEvento,
 } from './timeline-orden'
 import type { DepositoRegistrado } from './deposito-orden'
 
@@ -409,4 +412,163 @@ test('RECHAZO · orden rechazada usa rechazo.rechazadoAt y su actor', () => {
 test('RECHAZO · motivo sin timestamp no crea evento cronológico falso', () => {
   const o = ordenCompleta({ rechazo: { motivoTexto: 'Fuera de cobertura', rechazadoPorUid: ADMIN } })
   assert.equal(ids(o).includes('rechazada'), false)
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// B2.4B — clasificación de presentación
+// ═══════════════════════════════════════════════════════════════════════════
+
+const sep = (o: EntradaTimeline, d = {}) => separarTimeline(construirTimeline(o, d))
+
+// ── UX1 ─────────────────────────────────────────────────────────────────────
+test('UX1 · los ocho eventos logísticos van al recorrido', () => {
+  const { recorrido } = sep(ordenCompleta())
+  assert.deepEqual(recorrido.map((e) => e.id), [
+    'creada', 'confirmada', 'asignada', 'aceptada',
+    'en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado',
+  ])
+  assert.equal(recorrido.every((e) => e.grupo === 'recorrido'), true)
+})
+
+// ── UX2 / UX3 / UX4 ─────────────────────────────────────────────────────────
+test('UX2 · la incidencia de cobro es un cambio, no un estado del envío', () => {
+  const { recorrido, cambios } = sep(ordenCompleta())
+  assert.equal(cambios.some((e) => e.id === 'incidencia:producto'), true)
+  assert.equal(recorrido.some((e) => e.id.startsWith('incidencia')), false)
+})
+
+test('UX3 · la resolución de incidencia es un cambio', () => {
+  const { recorrido, cambios } = sep(ordenCompleta())
+  assert.equal(cambios.some((e) => e.id === 'incidencia_resuelta'), true)
+  assert.equal(recorrido.some((e) => e.id === 'incidencia_resuelta'), false)
+})
+
+test('UX4 · el delivery cobrado es un cambio financiero, no logístico', () => {
+  const { recorrido, cambios } = sep(ordenCompleta())
+  assert.equal(cambios.some((e) => e.id === 'delivery_pagado'), true)
+  assert.equal(recorrido.some((e) => e.id === 'delivery_pagado'), false)
+})
+
+// ── UX5 ─────────────────────────────────────────────────────────────────────
+test('UX5 · los eventos de depósito son cambios', () => {
+  const { recorrido, cambios } = sep(ordenSinIncidencia(), { storkhub: depStorkhub })
+  const dep = cambios.filter((e) => e.id.startsWith('deposito'))
+  assert.equal(dep.length, 3) // registrado storkhub + confirmado x2
+  assert.equal(recorrido.some((e) => e.id.startsWith('deposito')), false)
+})
+
+test('UX5b · el rechazo de la orden es un cambio, no una etapa del envío', () => {
+  const o = ordenCompleta({
+    historial: null,
+    rechazo: { rechazadoAt: '2026-08-22T04:00:00.000Z', rechazadoPorUid: ADMIN, motivoTexto: 'Fuera de cobertura' },
+  })
+  const { recorrido, cambios } = sep(o)
+  assert.equal(cambios.some((e) => e.id === 'rechazada'), true)
+  assert.equal(recorrido.some((e) => e.id === 'rechazada'), false)
+})
+
+// ── UX6 ─────────────────────────────────────────────────────────────────────
+test('UX6 · la separación es una partición: sin duplicados ni pérdidas', () => {
+  for (const [o, d] of [
+    [ordenCompleta(), {}],
+    [ordenSinIncidencia(), { storkhub: depStorkhub }],
+    [{}, {}],
+  ] as const) {
+    const t = construirTimeline(o, d)
+    const { recorrido, cambios } = separarTimeline(t)
+    assert.equal(recorrido.length + cambios.length, t.length)
+    const juntos = [...recorrido, ...cambios].map((e) => e.id)
+    assert.equal(new Set(juntos).size, juntos.length, 'hay un evento duplicado')
+    assert.deepEqual([...juntos].sort(), [...t.map((e) => e.id)].sort())
+    // Cada sección conserva el orden cronológico de entrada.
+    for (const lista of [recorrido, cambios]) {
+      for (let i = 1; i < lista.length; i++) {
+        assert.ok(lista[i].at.getTime() >= lista[i - 1].at.getTime())
+      }
+    }
+  }
+})
+
+// ── UX7 ─────────────────────────────────────────────────────────────────────
+test('UX7 · orden solo con recorrido no produce cambios', () => {
+  const o = ordenCompleta({ cobrosMotorizado: undefined, cobroDelivery: undefined })
+  const { recorrido, cambios } = sep(o)
+  assert.equal(cambios.length, 0)
+  assert.equal(recorrido.length, 8)
+})
+
+// ── UX8 ─────────────────────────────────────────────────────────────────────
+test('UX8 · k5Ve09HM: 8 eventos de recorrido y 3 cambios', () => {
+  const { recorrido, cambios } = sep(ordenCompleta())
+  assert.equal(recorrido.length, 8)
+  assert.equal(cambios.length, 3)
+  assert.deepEqual(cambios.map((e) => e.id), ['incidencia:producto', 'delivery_pagado', 'incidencia_resuelta'])
+})
+
+// ── UX9 ─────────────────────────────────────────────────────────────────────
+test('UX9 · CE500/delivery150: la incidencia sigue siendo una y de C$500', () => {
+  const o: EntradaTimeline = {
+    createdAt: '2026-08-21T23:28:38.106Z',
+    confirmacion: { confirmadoAt: '2026-08-21T23:29:05.259Z', confirmadoPorUid: ADMIN, precioFinalCordobas: 150 },
+    historial: { entregadoAt: '2026-08-21T23:32:52.772Z' },
+    cobroContraEntrega: { aplica: true, monto: 500 },
+    pagoDelivery: { quienPaga: 'entrega', deducirDelCobroContraEntrega: true },
+    cobrosMotorizado: {
+      delivery: { monto: 150, recibio: false, justificacion: 'D', at: '2026-08-21T23:32:52.772Z' },
+      producto: { monto: 500, recibio: false, estado: 'pendiente', justificacion: 'D', at: '2026-08-21T23:32:52.772Z' },
+    },
+    cobroDelivery: { estado: 'pendiente', monto: 150, registradoAt: '2026-08-21T23:32:52.772Z' },
+  }
+  const { cambios } = sep(o)
+  const inc = cambios.filter((e) => e.id.startsWith('incidencia:'))
+  assert.equal(inc.length, 1)
+  assert.match(inc[0].detalle!, /500/)
+  assert.equal(cambios.some((e) => e.detalle?.includes('650')), false)
+})
+
+// ── UX10 ────────────────────────────────────────────────────────────────────
+test('UX10 · un evento sin grupo declarado cae en cambios, no desaparece', () => {
+  const desconocido: TimelineEvento = {
+    id: 'evento_futuro',
+    tipo: 'administrativo',
+    grupo: 'cambio',
+    titulo: 'Algo nuevo',
+    at: new Date('2026-08-22T06:00:00.000Z'),
+  }
+  const { recorrido, cambios } = separarTimeline([desconocido])
+  assert.equal(cambios.length, 1)
+  assert.equal(recorrido.length, 0)
+})
+
+// ── Hitos ───────────────────────────────────────────────────────────────────
+test('HITOS · los seis del resumen, alcanzados por timestamp real', () => {
+  const h = hitosRecorrido(construirTimeline(ordenCompleta()))
+  assert.deepEqual(h.map((x) => x.etiqueta), ['Creada', 'Confirmada', 'Asignada', 'Retirada', 'En entrega', 'Entregada'])
+  assert.equal(h.every((x) => x.alcanzado && x.at instanceof Date), true)
+})
+
+test('HITOS · sin evento no se marca alcanzado aunque el estado lo sugiera', () => {
+  // Orden cancelada real: solo creada y confirmada tienen timestamp.
+  const cancelada: EntradaTimeline = {
+    createdAt: '2026-08-20T03:12:28.179Z',
+    confirmacion: { confirmadoAt: '2026-08-20T03:15:23.772Z', confirmadoPorUid: ADMIN, precioFinalCordobas: 150 },
+    historial: null,
+    asignacion: null,
+  }
+  const t = construirTimeline(cancelada)
+  const h = hitosRecorrido(t)
+  assert.deepEqual(h.filter((x) => x.alcanzado).map((x) => x.clave), ['creada', 'confirmada'])
+  assert.equal(h.filter((x) => !x.alcanzado).every((x) => x.at === null), true)
+  // Y la timeline no inventa un evento de cancelación para llenar la sección.
+  assert.equal(separarTimeline(t).cambios.length, 0)
+})
+
+test('HITOS · "aceptó" y "en camino al retiro" no son hitos principales', () => {
+  const claves = hitosRecorrido(construirTimeline(ordenCompleta())).map((h) => h.clave)
+  assert.equal(claves.includes('aceptada' as never), false)
+  assert.equal(claves.includes('en_camino_retiro' as never), false)
+  // Pero siguen existiendo dentro del recorrido completo.
+  const { recorrido } = sep(ordenCompleta())
+  assert.equal(recorrido.some((e) => e.id === 'aceptada'), true)
+  assert.equal(recorrido.some((e) => e.id === 'en_camino_retiro'), true)
 })
