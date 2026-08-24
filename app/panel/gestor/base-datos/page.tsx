@@ -444,8 +444,13 @@ function SolicitudDrawer({
           </div>
           <Link
             // B2.5 — misma ruta de siempre, ahora construida por el helper común.
+            //
+            // B2.5B — sin target="_blank", por la misma causa que "Ver página"
+            // del drawer compartido (B2.5A): una pestaña nueva no hereda el
+            // sessionStorage donde Firebase guarda la sesión cuando se entró
+            // sin marcar "recordarme", así que arrancaba sin usuario y el
+            // guard mandaba a /login. Es navegación interna del panel.
             href={rutaOrden(solicitudId) ?? '#'}
-            target="_blank"
             className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
           >
             <ExternalLink size={13} />
