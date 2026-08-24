@@ -22,6 +22,8 @@ import {
   Minus,
   Info,
 } from 'lucide-react'
+import Link from 'next/link'
+import { rutaOrden } from '@/lib/ruta-orden'
 import type { MovimientoFinanciero } from '@/lib/financial-types'
 import {
   calcularDeudaOperativaMotorizado,
@@ -1401,7 +1403,25 @@ function AuditoriaFinancieraPageContent() {
                                     <div><span className="text-gray-400">Creado por:</span> <code className="font-mono text-gray-700">{m.creadoPorUid ?? '—'}</code></div>
                                     <div><span className="text-gray-400">Rol:</span> <span className="text-gray-700">{m.creadoPorRol ?? '—'}</span></div>
                                     {m.descripcion && <div className="col-span-2"><span className="text-gray-400">Descripción:</span> <span className="text-gray-700">{m.descripcion}</span></div>}
-                                    {m.solicitudId && <div><span className="text-gray-400">Solicitud:</span> <code className="font-mono text-gray-700">{m.solicitudId}</code></div>}
+                                    {/* B2.5 — el ID era texto plano: para auditar un movimiento
+                                        había que copiarlo y buscar la orden a mano. El destino es
+                                        #historial, que es la pregunta que se hace desde acá. */}
+                                    {m.solicitudId && (
+                                      <div>
+                                        <span className="text-gray-400">Solicitud:</span>{' '}
+                                        {rutaOrden(m.solicitudId, 'historial') ? (
+                                          <Link
+                                            href={rutaOrden(m.solicitudId, 'historial')!}
+                                            title={`Ver historial de la orden · ${m.solicitudId}`}
+                                            className="font-mono text-blue-600 hover:text-blue-800 hover:underline transition"
+                                          >
+                                            {m.solicitudId}
+                                          </Link>
+                                        ) : (
+                                          <code className="font-mono text-gray-700">{m.solicitudId}</code>
+                                        )}
+                                      </div>
+                                    )}
                                     {m.depositoId && <div><span className="text-gray-400">Depósito:</span> <code className="font-mono text-gray-700">{m.depositoId}</code></div>}
                                     {m.motorizadoId && <div><span className="text-gray-400">Motorizado:</span> <code className="font-mono text-gray-700">{m.motorizadoId}</code></div>}
                                     {m.comercioId && <div><span className="text-gray-400">Comercio:</span> <code className="font-mono text-gray-700">{m.comercioId}</code></div>}

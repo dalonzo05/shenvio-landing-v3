@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { rutaOrden } from '@/lib/ruta-orden'
 import {
   collection,
   onSnapshot,
@@ -798,7 +799,8 @@ export function SolicitudDrawer({
           <div className="flex shrink-0 items-center gap-1.5">
             <LinkComercioTemporalButton solicitudId={solicitudId} />
             <Link
-              href={`/panel/gestor/solicitudes/${solicitudId}`}
+              // B2.5 — misma ruta de siempre, ahora construida por el helper común.
+              href={rutaOrden(solicitudId) ?? '#'}
               target="_blank"
               className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition"
             >

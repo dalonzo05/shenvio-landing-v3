@@ -1,6 +1,7 @@
 'use client'
 
 import Link from 'next/link'
+import { rutaOrden } from '@/lib/ruta-orden'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   collection,
@@ -257,7 +258,8 @@ function getTipoCobro(s: Solicitud): string {
 function LinkOrden({ id, ancla }: { id: string; ancla: 'cobros' | 'incidencia' }) {
   return (
     <Link
-      href={`/panel/gestor/solicitudes/${id}#${ancla}`}
+      // B2.5 — misma ruta de siempre, ahora construida por el helper común.
+      href={rutaOrden(id, ancla) ?? '#'}
       className="font-mono text-blue-600 hover:text-blue-800 hover:underline transition"
       title={`Ver ficha completa · ${id}`}
     >

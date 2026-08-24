@@ -13,6 +13,7 @@ import {
 import { db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
+import { IrAFicha } from '../_components/IrAFicha'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -665,12 +666,17 @@ function ReportesPageContent() {
                                       .map((s) => (
                                         <tr key={s.id} className="hover:bg-white transition-colors">
                                           <td className="px-4 py-2">
-                                            <button
-                                              onClick={(e) => { e.stopPropagation(); setDrawerSolicitudId(s.id) }}
-                                              className="font-mono text-[#004aad] font-semibold hover:underline"
-                                            >
-                                              {s.id.slice(0, 8)}
-                                            </button>
+                                            {/* B2.5 — drawer para mirar rápido, flecha para la ficha. */}
+                                            <span className="inline-flex items-center">
+                                              <button
+                                                onClick={(e) => { e.stopPropagation(); setDrawerSolicitudId(s.id) }}
+                                                title={`Vista rápida · ${s.id}`}
+                                                className="font-mono text-[#004aad] font-semibold hover:underline"
+                                              >
+                                                {s.id.slice(0, 8)}
+                                              </button>
+                                              <IrAFicha id={s.id} className="ml-0.5" />
+                                            </span>
                                           </td>
                                           <td className="px-4 py-2 text-gray-600">{fmtDate(s.createdAt)}</td>
                                           <td className="px-4 py-2">

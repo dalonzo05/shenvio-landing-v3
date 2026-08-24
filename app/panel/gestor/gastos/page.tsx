@@ -20,6 +20,8 @@ import {
   type OrdenSnapshot,
 } from '@/lib/financial-types'
 import { Receipt, PlusCircle, XCircle, Search, X, ChevronDown, ChevronUp } from 'lucide-react'
+import Link from 'next/link'
+import { rutaOrden } from '@/lib/ruta-orden'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -671,9 +673,22 @@ function GastosPageContent() {
                     </span>
                   </td>
                   <td className="px-4 py-2.5 text-xs">
+                    {/* B2.5 — un gasto atado a una orden concreta ahora lleva a
+                        su ficha. Los gastos generales no tienen ordenId y siguen
+                        mostrando "—": no se inventa un destino. */}
                     {g.ordenSnapshot ? (
                       <div>
-                        <p className="font-mono text-[#004aad]">#{g.ordenSnapshot.ordenId.slice(0, 10)}</p>
+                        {rutaOrden(g.ordenSnapshot.ordenId) ? (
+                          <Link
+                            href={rutaOrden(g.ordenSnapshot.ordenId)!}
+                            title={`Ver ficha completa · ${g.ordenSnapshot.ordenId}`}
+                            className="font-mono text-[#004aad] hover:underline"
+                          >
+                            #{g.ordenSnapshot.ordenId.slice(0, 10)}
+                          </Link>
+                        ) : (
+                          <p className="font-mono text-[#004aad]">#{g.ordenSnapshot.ordenId.slice(0, 10)}</p>
+                        )}
                         {g.ordenSnapshot.comercioNombre && (
                           <p className="text-gray-500 text-[11px]">{g.ordenSnapshot.comercioNombre}</p>
                         )}
@@ -682,7 +697,17 @@ function GastosPageContent() {
                         )}
                       </div>
                     ) : g.ordenId ? (
-                      <span className="font-mono text-[11px] text-gray-500">#{g.ordenId.slice(0, 10)}</span>
+                      rutaOrden(g.ordenId) ? (
+                        <Link
+                          href={rutaOrden(g.ordenId)!}
+                          title={`Ver ficha completa · ${g.ordenId}`}
+                          className="font-mono text-[11px] text-blue-600 hover:underline"
+                        >
+                          #{g.ordenId.slice(0, 10)}
+                        </Link>
+                      ) : (
+                        <span className="font-mono text-[11px] text-gray-500">#{g.ordenId.slice(0, 10)}</span>
+                      )
                     ) : (
                       <span className="text-[11px] text-gray-300">—</span>
                     )}

@@ -19,6 +19,8 @@ import {
 import { auth, db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { uploadLiquidacionPDF } from '@/fb/storage'
+import Link from 'next/link'
+import { rutaOrden } from '@/lib/ruta-orden'
 import { registrarMovimiento, crearSaldoCargo } from '@/lib/financial-writes'
 import {
   Receipt,
@@ -1308,7 +1310,18 @@ function LiquidacionesPageContent() {
                           : (o.confirmacion?.precioFinalCordobas || 0)) * 0.8
                         return (
                           <tr key={o.id}>
-                            <td className="px-3 py-2 font-mono text-gray-400">{o.id.slice(0, 10)}</td>
+                            {/* B2.5 — cada fila es una orden concreta de la
+                                liquidación. Sin anchor: la tabla habla de la
+                                ganancia del viaje, no de un cobro ni de un
+                                depósito, así que se abre la ficha completa. */}
+                            <td className="px-3 py-2 font-mono text-gray-400">
+                              {rutaOrden(o.id) ? (
+                                <Link href={rutaOrden(o.id)!} title={`Ver ficha completa · ${o.id}`}
+                                  className="text-blue-600 hover:underline">
+                                  {o.id.slice(0, 10)}
+                                </Link>
+                              ) : o.id.slice(0, 10)}
+                            </td>
                             <td className="px-3 py-2 text-gray-600">{fmtDate(o.entregadoAt)}</td>
                             <td className="px-3 py-2 text-right font-semibold text-gray-800">
                               {fmt(o.confirmacion?.precioFinalCordobas)}

@@ -20,6 +20,7 @@ import {
 import { collection, onSnapshot, query, where, limit, Timestamp } from 'firebase/firestore'
 import { db } from '@/fb/config'
 import { SolicitudDrawer } from './_components/SolicitudDrawer'
+import { IrAFicha } from './_components/IrAFicha'
 import { useModuleGuard } from '../_hooks/useModuleGuard'
 
 type OrdenActiva = {
@@ -443,9 +444,15 @@ function PanelGestorPageContent() {
                   return (
                     <tr key={o.id} className="hover:bg-gray-50 transition-colors">
                       <td className="px-4 py-2.5">
-                        <button onClick={() => setSelectedOrdenId(o.id)} className="font-mono text-blue-600 hover:underline">
-                          {o.id.slice(0, 8)}
-                        </button>
+                        {/* B2.5 — el botón sigue abriendo el drawer; la flecha
+                            lleva a la ficha autoritativa. */}
+                        <span className="inline-flex items-center">
+                          <button onClick={() => setSelectedOrdenId(o.id)} title={`Vista rápida · ${o.id}`}
+                            className="font-mono text-blue-600 hover:underline">
+                            {o.id.slice(0, 8)}
+                          </button>
+                          <IrAFicha id={o.id} className="ml-0.5" />
+                        </span>
                       </td>
                       <td className="px-4 py-2.5 font-medium text-gray-800">{comercio}</td>
                       <td className="px-4 py-2.5">

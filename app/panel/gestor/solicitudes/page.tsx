@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
+import { rutaOrden } from '@/lib/ruta-orden'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
   rankearMotorizados,
@@ -2127,7 +2128,7 @@ function GestorSolicitudesPageContent() {
                               </button>
 
                               <Link
-                                href={`/panel/gestor/solicitudes/${s.id}`}
+                                href={rutaOrden(s.id) ?? '#'}
                                 title="Abrir página completa"
                                 className="rounded-md p-1.5 text-gray-500 bg-gray-100 hover:bg-gray-200 transition"
                               >

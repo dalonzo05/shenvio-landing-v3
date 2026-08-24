@@ -37,6 +37,7 @@ import {
   Eye,
 } from 'lucide-react'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
+import { IrAFicha } from '../_components/IrAFicha'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -236,6 +237,35 @@ function fmtNombreMotorizado(raw: string, names?: Record<string, string>, uid?: 
 
 const thCls = 'px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500'
 const tdCls = 'px-3 py-2.5 text-xs text-gray-700'
+
+/**
+ * B2.5 — chip de orden dentro de un depósito.
+ *
+ * El chip abría solo el drawer, que es un resumen: para ver por qué esta orden
+ * aporta lo que aporta había que buscarla a mano. Ahora el chip sigue abriendo
+ * el drawer —consulta rápida— y la flecha lleva a la ficha autoritativa,
+ * directo al bloque de depósitos. Se cierra B2-DEPOSITOS-LINK-FICHA.
+ */
+function ChipOrdenDeposito({
+  id,
+  corte,
+  onVerRapido,
+  className,
+}: {
+  id: string
+  corte: number
+  onVerRapido: (id: string) => void
+  className: string
+}) {
+  return (
+    <span className="inline-flex items-center">
+      <button type="button" onClick={() => onVerRapido(id)} className={className} title={`Vista rápida · ${id}`}>
+        {id.slice(0, corte)}…
+      </button>
+      <IrAFicha id={id} anchor="depositos" className="ml-0.5" />
+    </span>
+  )
+}
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
@@ -1763,10 +1793,8 @@ function DepositosPageContent() {
                                     <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Órdenes incluidas</p>
                                     <div className="flex flex-wrap gap-1.5">
                                       {dep.solicitudIds.map((sid) => (
-                                        <button key={sid} onClick={() => setSelectedOrdenId(sid)}
-                                          className="rounded bg-white border border-gray-200 px-2 py-0.5 font-mono text-xs text-blue-600 hover:bg-blue-50 transition">
-                                          {sid.slice(0, 8)}…
-                                        </button>
+                                        <ChipOrdenDeposito key={sid} id={sid} corte={8} onVerRapido={setSelectedOrdenId}
+                                          className="rounded bg-white border border-gray-200 px-2 py-0.5 font-mono text-xs text-blue-600 hover:bg-blue-50 transition" />
                                       ))}
                                     </div>
                                   </div>
@@ -2032,10 +2060,8 @@ function DepositosPageContent() {
                         <td className={tdCls}>
                           <div className="flex flex-wrap gap-1">
                             {(dep.solicitudIds ?? []).map((sid) => (
-                              <button key={sid} onClick={() => setSelectedOrdenId(sid)}
-                                className="font-mono text-[11px] text-blue-600 bg-blue-50 hover:bg-blue-100 px-1.5 py-0.5 rounded transition" title={sid}>
-                                {sid.slice(0, 6)}…
-                              </button>
+                              <ChipOrdenDeposito key={sid} id={sid} corte={6} onVerRapido={setSelectedOrdenId}
+                                className="font-mono text-[11px] text-blue-600 bg-blue-50 hover:bg-blue-100 px-1.5 py-0.5 rounded transition" />
                             ))}
                           </div>
                         </td>
