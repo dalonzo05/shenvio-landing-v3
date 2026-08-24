@@ -800,8 +800,16 @@ export function SolicitudDrawer({
             <LinkComercioTemporalButton solicitudId={solicitudId} />
             <Link
               // B2.5 — misma ruta de siempre, ahora construida por el helper común.
+              //
+              // B2.5A — sin target="_blank". Este link es navegación INTERNA del
+              // panel, y abrirlo en pestaña nueva mandaba al usuario a login:
+              // quien inicia sesión sin marcar "recordarme" queda con
+              // browserSessionPersistence, que vive en sessionStorage y NO se
+              // hereda en una pestaña nueva. La pestaña arrancaba sin sesión,
+              // onAuthStateChanged devolvía null y useModuleGuard redirigía.
+              // Los demás accesos a la ficha (IrAFicha, LinkOrden, Solicitudes)
+              // ya navegaban en la misma pestaña y por eso sí funcionaban.
               href={rutaOrden(solicitudId) ?? '#'}
-              target="_blank"
               className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition"
             >
               <ExternalLink size={12} />
