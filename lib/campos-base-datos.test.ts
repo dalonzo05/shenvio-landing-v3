@@ -12,6 +12,8 @@ import {
   zonaEntrega,
   telefonoRetiro,
   telefonoEntrega,
+  etiquetaFormaPago,
+  FORMA_PAGO_AUSENTE,
   type EntradaCamposBaseDatos,
 } from './campos-base-datos'
 
@@ -98,4 +100,33 @@ test('PUNTOS · entrega sin celular (XbMyvCxL) devuelve null', () => {
   assert.equal(telefonoEntrega({ entrega: { celular: '' } }), null)
   assert.equal(telefonoEntrega({}), null)
   assert.equal(telefonoRetiro({}), null)
+})
+
+// ── Forma de pago ───────────────────────────────────────────────────────────
+test('FP1 · medio persistido se muestra tal cual', () => {
+  assert.equal(etiquetaFormaPago('efectivo'), 'Efectivo')
+  assert.equal(etiquetaFormaPago('transferencia'), 'Transferencia')
+  // Un valor futuro no se oculta ni se traduce a la fuerza.
+  assert.equal(etiquetaFormaPago('pos'), 'pos')
+})
+
+test('FP2 · sin medio persistido se dice que no está registrado', () => {
+  assert.equal(etiquetaFormaPago(undefined), FORMA_PAGO_AUSENTE)
+  assert.equal(etiquetaFormaPago(null), FORMA_PAGO_AUSENTE)
+  assert.equal(etiquetaFormaPago(''), FORMA_PAGO_AUSENTE)
+  assert.equal(etiquetaFormaPago('   '), FORMA_PAGO_AUSENTE)
+  assert.equal(FORMA_PAGO_AUSENTE, 'No registrado')
+})
+
+test('FP3 · quienPaga NUNCA se convierte en medio de pago', () => {
+  // Estos son los valores de pagoDelivery.quienPaga. Ninguno describe con qué
+  // se pagó: 'entrega' dice cuándo. Traducirlos fue el bug "Ef. entrega".
+  for (const qp of ['entrega', 'recoleccion', 'transferencia', 'credito_semanal']) {
+    // El helper solo recibe formaPago; si alguien le pasara quienPaga por
+    // error, jamás produciría "Efectivo" a partir de 'entrega'.
+    assert.notEqual(etiquetaFormaPago(qp), 'Efectivo')
+  }
+  assert.equal(etiquetaFormaPago('entrega'), 'entrega')
+  // Y el ausente no inventa nada.
+  assert.equal(etiquetaFormaPago(undefined), FORMA_PAGO_AUSENTE)
 })

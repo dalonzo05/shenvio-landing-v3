@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { rutaOrden } from '@/lib/ruta-orden'
 import { ResumenRapido } from '../_components/ResumenRapido'
 import { Section, InfoRow } from '../_components/SolicitudDrawer'
-import { telefonoComercio, telefonoRetiro, telefonoEntrega, zonaRetiro, zonaEntrega } from '@/lib/campos-base-datos'
+import { telefonoComercio, telefonoRetiro, telefonoEntrega, zonaRetiro, zonaEntrega, etiquetaFormaPago, FORMA_PAGO_AUSENTE } from '@/lib/campos-base-datos'
 import { trazabilidadPago } from '@/lib/trazabilidad-pago'
 import {
   collection,
@@ -282,10 +282,11 @@ function getColValue(s: Solicitud, colKey: string, comercioNames: Record<string,
       // Cobros (`cobroDelivery.formaPago`), y ni siquiera siempre: la
       // reversión lo borra. Sin ese campo se muestra "—", no una suposición.
       // Ver deuda B2-PAGO-MEDIO-NO-PERSISTIDO.
-      const cd = s.cobroDelivery
-      if (!cd?.formaPago) return null
-      const m: Record<string, string> = { efectivo: 'Efectivo', transferencia: 'Transferencia' }
-      return m[cd.formaPago] ?? cd.formaPago
+      //
+      // B2-BASE-PAGO-DETALLE-UX-FINAL: el ausente se enuncia como
+      // "No registrado" —no "—"— y con el mismo helper que la celda y el CSV,
+      // para que el filtro por columna coincida con lo que se ve.
+      return etiquetaFormaPago(s.cobroDelivery?.formaPago)
     }
     case 'distancia': return s.cotizacion?.distanciaKm ?? null
     default: return null
@@ -909,15 +910,16 @@ function BaseDatosPageContent() {
 
   function exportCSV() {
     const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`
-    const headers = ['Orden','Fecha','Motorizado','Comercio','Teléfono','Retiro','Entrega','Zona retiro','Zona entrega','C/E Producto','Delivery','Pagó','F.Cobro','Forma Pago']
+    // B2-BASE-PAGO-DETALLE-UX-FINAL: mismo orden que la tabla.
+    const headers = ['Orden','Fecha','Motorizado','Comercio','Teléfono','Retiro','Zona retiro','Entrega','Zona entrega','C/E Producto','Delivery','Pagó','F.Cobro','Forma Pago']
     const rows = filtered.map((s) => {
       const comercio = s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : '') || ''
       const cd = s.cobroDelivery
       const pagó = cd?.estado === 'pagado' ? `Sí (${cd.formaPago || ''})` : s.pagoDelivery?.quienPaga === 'transferencia' ? 'Trans. pend.' : s.cobrosMotorizado?.delivery?.recibio === true ? 'Sí' : s.cobrosMotorizado?.delivery?.recibio === false ? 'No' : '—'
       const fCobro = cd?.pagadoAt ? formatDate(cd.pagadoAt) : s.cobrosMotorizado?.delivery?.at ? formatDate(s.cobrosMotorizado.delivery.at as any) : ''
       // B2-BASE-PAGO-DETALLE: sin formaPago persistido no se cae a quienPaga,
-      // que responde otra pregunta. Mismo criterio que la columna.
-      const formaPago = cd?.formaPago || ''
+      // que responde otra pregunta. Mismo criterio y mismo texto que la columna.
+      const formaPago = etiquetaFormaPago(cd?.formaPago)
       return [
         s.id.slice(0, 8),
         formatDate(s.createdAt),
@@ -925,8 +927,8 @@ function BaseDatosPageContent() {
         comercio,
         telefonoComercio(s) || '',
         s.recoleccion?.direccionEscrita || '',
-        s.entrega?.direccionEscrita || '',
         zonaRetiro(s) || '',
+        s.entrega?.direccionEscrita || '',
         zonaEntrega(s) || '',
         s.cobroContraEntrega?.monto ?? 0,
         getPrecio(s) ?? 0,
@@ -1035,11 +1037,13 @@ function BaseDatosPageContent() {
                 <Th config={{ colKey: 'retiro', label: 'Retiro', filterType: 'text' }}
                     filter={colFilters['retiro']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
-                <Th config={{ colKey: 'entrega_dir', label: 'Entrega', filterType: 'text' }}
-                    filter={colFilters['entrega_dir']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
-                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                {/* B2-BASE-PAGO-DETALLE-UX-FINAL — cada ubicación seguida de
+                    su zona: Retiro · Zona retiro · Entrega · Zona entrega. */}
                 <Th config={{ colKey: 'zonaRetiro', label: 'Zona retiro', filterType: 'text' }}
                     filter={colFilters['zonaRetiro']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'entrega_dir', label: 'Entrega', filterType: 'text' }}
+                    filter={colFilters['entrega_dir']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
                 <Th config={{ colKey: 'zonaEntrega', label: 'Zona entrega', filterType: 'text' }}
                     filter={colFilters['zonaEntrega']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
@@ -1062,7 +1066,10 @@ function BaseDatosPageContent() {
                 <Th config={{ colKey: 'fCobro', label: 'F. Cobro', filterType: 'date' }}
                     filter={colFilters['fCobro']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
-                <Th config={{ colKey: 'formaPago', label: 'Forma Pago', filterType: 'select', selectOptions: ['Efectivo', 'Transferencia', 'Crédito'] }}
+                {/* B2-BASE-PAGO-DETALLE-UX-FINAL: las opciones son lo que la
+                    columna puede mostrar. 'Crédito' salía del fallback de
+                    quienPaga, ya retirado, y nunca vuelve a producirse. */}
+                <Th config={{ colKey: 'formaPago', label: 'Forma Pago', filterType: 'select', selectOptions: ['Efectivo', 'Transferencia', FORMA_PAGO_AUSENTE] }}
                     filter={colFilters['formaPago']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
                 <Th config={{ colKey: 'distancia', label: 'Dist.', filterType: 'number' }}
@@ -1106,19 +1113,21 @@ function BaseDatosPageContent() {
                     {/* B2-BASE-PAGO-DETALLE — el teléfono de cada punto va con
                         su dirección, no en la columna Teléfono, que es la del
                         comercio. Son tres números distintos. */}
+                    {/* B2-BASE-PAGO-DETALLE — antes una sola columna editable
+                        sobre registro.zona, vacía en todas las órdenes: lo que
+                        se leía era el placeholder del input. La clasificación
+                        real ya está persistida y son dos, no una.
+                        B2-BASE-PAGO-DETALLE-UX-FINAL: cada zona va pegada a su
+                        ubicación, en el mismo orden que las cabeceras. */}
                     <Td>
                       <span className="max-w-[160px] truncate block text-gray-500" title={s.recoleccion?.direccionEscrita}>{s.recoleccion?.direccionEscrita || '—'}</span>
                       {telefonoRetiro(s) && <span className="block text-[11px] text-gray-400">{telefonoRetiro(s)}</span>}
                     </Td>
+                    <Td><span className="text-gray-500">{zonaRetiro(s) || '—'}</span></Td>
                     <Td>
                       <span className="max-w-[160px] truncate block text-gray-500" title={s.entrega?.direccionEscrita}>{s.entrega?.direccionEscrita || '—'}</span>
                       {telefonoEntrega(s) && <span className="block text-[11px] text-gray-400">{telefonoEntrega(s)}</span>}
                     </Td>
-                    {/* B2-BASE-PAGO-DETALLE — antes una sola columna editable
-                        sobre registro.zona, vacía en todas las órdenes: lo que
-                        se leía era el placeholder del input. La clasificación
-                        real ya está persistida y son dos, no una. */}
-                    <Td><span className="text-gray-500">{zonaRetiro(s) || '—'}</span></Td>
                     <Td><span className="text-gray-500">{zonaEntrega(s) || '—'}</span></Td>
 
                     {/* C/E Producto | F. Depósito (producto) | Depositado */}
@@ -1210,14 +1219,9 @@ function BaseDatosPageContent() {
                         se cobra, no con qué. Sin dato persistido va "—", y el
                         acuerdo se lee en "Pagó" y en el drawer. */}
                     <Td>
-                      {(() => {
-                        const cd = s.cobroDelivery
-                        if (cd?.formaPago) {
-                          const labels: Record<string, string> = { efectivo: 'Efectivo', transferencia: 'Transferencia' }
-                          return <span className="text-gray-900 text-xs font-medium">{labels[cd.formaPago] ?? cd.formaPago}</span>
-                        }
-                        return <span className="text-gray-300 text-xs">—</span>
-                      })()}
+                      {s.cobroDelivery?.formaPago
+                        ? <span className="text-gray-900 text-xs font-medium">{etiquetaFormaPago(s.cobroDelivery.formaPago)}</span>
+                        : <span className="text-gray-400 text-xs italic">{FORMA_PAGO_AUSENTE}</span>}
                     </Td>
                     <Td>{s.cotizacion?.distanciaKm != null ? `${Number(s.cotizacion.distanciaKm).toFixed(1)} km` : <span className="text-gray-300">—</span>}</Td>
                   </tr>

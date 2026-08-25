@@ -71,3 +71,28 @@ export function telefonoRetiro(s: EntradaCamposBaseDatos): string | null {
 export function telefonoEntrega(s: EntradaCamposBaseDatos): string | null {
   return texto(s.entrega?.celular)
 }
+
+/** Lo que se muestra cuando el medio de pago no consta. */
+export const FORMA_PAGO_AUSENTE = 'No registrado'
+
+/**
+ * Medio real de pago del delivery, para la columna Forma pago.
+ *
+ * Responde CON QUÉ se pagó. No con quién paga ni cuándo: `quienPaga` contesta
+ * otra pregunta y traducirlo aquí fue el origen del "Ef. entrega" que la tabla
+ * mostraba sin fuente.
+ *
+ * El único origen es `cobroDelivery.formaPago`, que solo existe cuando un
+ * gestor confirma el cobro desde el módulo Cobros — en el flujo normal del
+ * motorizado nadie lo registra. Por eso el ausente se enuncia como
+ * "No registrado" y no como "—": el dato no falta por error, es que el sistema
+ * todavía no lo captura. Ver deuda B2-PAGO-MEDIO-NO-PERSISTIDO.
+ *
+ * Se centraliza para que la celda, el filtro y el CSV digan lo mismo.
+ */
+export function etiquetaFormaPago(formaPago: unknown): string {
+  const f = texto(formaPago)
+  if (!f) return FORMA_PAGO_AUSENTE
+  const conocidas: Record<string, string> = { efectivo: 'Efectivo', transferencia: 'Transferencia' }
+  return conocidas[f] ?? f
+}
