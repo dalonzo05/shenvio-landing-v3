@@ -28,13 +28,11 @@ import {
   type NuevaOrdenRanking,
   type MotorizadoRankeado,
 } from '@/lib/motorizado-ranking'
-import {
-  LABELS_TIPO_GASTO,
-  type GastoMotorizado,
-} from '@/lib/financial-types'
+import { ResumenRapido } from './ResumenRapido'
 import {
   X,
   ExternalLink,
+  ArrowRight,
   Copy,
   Phone,
   MapPin,
@@ -460,7 +458,6 @@ export function SolicitudDrawer({
   const [ctransFactura, setCtransFactura] = useState<File | null>(null)
   const [ctransUploading, setCtransUploading] = useState(false)
   const [ctransErr, setCtransErr] = useState<string | null>(null)
-  const [gastosOperativos, setGastosOperativos] = useState<(GastoMotorizado & { id: string })[]>([])
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
 
   useEffect(() => {
@@ -468,21 +465,9 @@ export function SolicitudDrawer({
     return () => clearInterval(t)
   }, [])
 
-  useEffect(() => {
-    const q = query(
-      collection(db, 'gastos_motorizado'),
-      where('ordenId', '==', solicitudId),
-    )
-    return onSnapshot(q, (snap) => {
-      const docs = snap.docs.map((d) => ({ id: d.id, ...(d.data() as GastoMotorizado) }))
-      docs.sort((a, b) => {
-        const ta = typeof (a.createdAt as any)?.toMillis === 'function' ? (a.createdAt as any).toMillis() : 0
-        const tb = typeof (b.createdAt as any)?.toMillis === 'function' ? (b.createdAt as any).toMillis() : 0
-        return tb - ta
-      })
-      setGastosOperativos(docs)
-    }, (e) => console.error('[SolicitudDrawer] gastos_motorizado:', e))
-  }, [solicitudId])
+  // B2-DRAWER-SLIM: acá había un onSnapshot sobre gastos_motorizado que solo
+  // alimentaba la sección "Gastos operativos", ahora retirada. Sin consumidor,
+  // el listener quedaba abierto en cada apertura de drawer sin pintar nada.
 
   useEffect(() => {
     getDocs(query(collection(db, 'motorizado'))).then((snap) => {
@@ -742,6 +727,9 @@ export function SolicitudDrawer({
   const entregaMaps = solicitud ? getBestMapsUrl(solicitud, 'entrega') : null
   const estado = solicitud?.estado
   const minLeft = tiempoRestante !== null ? Math.floor(tiempoRestante / 60000) : null
+  // B2-DRAWER-SLIM: solo para decidir si ofrecer el enlace a #evidencias.
+  const hayEvidenciasOrden = !!solicitud?.evidencias
+    && (['retiro', 'entrega', 'deposito'] as const).some((k) => solicitud.evidencias?.[k])
 
   return (
     <>
@@ -809,11 +797,16 @@ export function SolicitudDrawer({
               // onAuthStateChanged devolvía null y useModuleGuard redirigía.
               // Los demás accesos a la ficha (IrAFicha, LinkOrden, Solicitudes)
               // ya navegaban en la misma pestaña y por eso sí funcionaban.
+              //
+              // B2-DRAWER-SLIM — copy e icono. "Ver página" y ExternalLink
+              // prometían una pestaña nueva que ya no se abre; y con el drawer
+              // reducido a resumen, el destino es la ficha completa, no "otra
+              // página".
               href={rutaOrden(solicitudId) ?? '#'}
               className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition"
             >
-              <ExternalLink size={12} />
-              Ver página
+              Ver ficha completa
+              <ArrowRight size={12} />
             </Link>
           </div>
         </div>
@@ -834,83 +827,11 @@ export function SolicitudDrawer({
           {solicitud && (
             <div className="p-4 space-y-3">
 
-              {/* Timeline operativo */}
-              {(() => {
-                const est = solicitud.estado
-                const estadoAceptacion = solicitud.asignacion?.estadoAceptacion
-                const timeline = [
-                  { title: 'Creada',       done: true,  current: false, subtitle: formatDateTime(solicitud.createdAt) },
-                  {
-                    title: 'Confirmada',
-                    done: ['confirmada','asignada','en_camino_retiro','retirado','en_camino_entrega','entregado'].includes(est || ''),
-                    current: est === 'pendiente_confirmacion',
-                    subtitle: solicitud.confirmacion?.confirmadoAt ? formatDateTime(solicitud.confirmacion.confirmadoAt) : undefined,
-                  },
-                  {
-                    title: 'Asignada',
-                    done: ['asignada','en_camino_retiro','retirado','en_camino_entrega','entregado'].includes(est || ''),
-                    current: est === 'confirmada',
-                    subtitle: solicitud.asignacion?.asignadoAt ? formatDateTime(solicitud.asignacion.asignadoAt) : undefined,
-                  },
-                  {
-                    title: 'Aceptada motorizado',
-                    done: ['en_camino_retiro','retirado','en_camino_entrega','entregado'].includes(est || '') || estadoAceptacion === 'aceptada',
-                    current: est === 'asignada',
-                    subtitle: solicitud.asignacion?.aceptadoAt ? formatDateTime(solicitud.asignacion.aceptadoAt) : estadoAceptacion || undefined,
-                  },
-                  {
-                    title: 'Retiro en proceso',
-                    done: ['retirado','en_camino_entrega','entregado'].includes(est || ''),
-                    current: est === 'en_camino_retiro',
-                    subtitle: solicitud.historial?.en_camino_retiroAt ? formatDateTime(solicitud.historial.en_camino_retiroAt) : undefined,
-                  },
-                  {
-                    title: 'Paquete retirado',
-                    done: ['retirado','en_camino_entrega','entregado'].includes(est || ''),
-                    current: est === 'retirado',
-                    subtitle: solicitud.historial?.retiradoAt ? formatDateTime(solicitud.historial.retiradoAt) : undefined,
-                  },
-                  {
-                    title: 'En camino entrega',
-                    done: est === 'entregado',
-                    current: est === 'en_camino_entrega',
-                    subtitle: solicitud.historial?.en_camino_entregaAt ? formatDateTime(solicitud.historial.en_camino_entregaAt) : undefined,
-                  },
-                  {
-                    title: 'Entregado',
-                    done: est === 'entregado',
-                    current: false,
-                    subtitle: solicitud.historial?.entregadoAt ? formatDateTime(solicitud.historial.entregadoAt) : (solicitud as any).entregadoAt ? formatDateTime((solicitud as any).entregadoAt) : undefined,
-                  },
-                ]
-                return (
-                  <Section title="Timeline operativo" accent="blue">
-                    <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-                      {timeline.map((step, i) => (
-                        <div key={step.title} className="flex items-start gap-2.5">
-                          <div className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ring-2 ${
-                            step.current
-                              ? 'ring-blue-300 bg-blue-100 text-blue-700'
-                              : step.done
-                              ? 'ring-green-300 bg-green-100 text-green-700'
-                              : 'ring-gray-200 bg-white text-gray-300'
-                          }`}>
-                            {step.done ? '✓' : i + 1}
-                          </div>
-                          <div className="min-w-0">
-                            <div className={`text-xs font-medium leading-tight ${step.current ? 'text-blue-700' : step.done ? 'text-gray-800' : 'text-gray-400'}`}>
-                              {step.title}
-                            </div>
-                            {step.subtitle && (
-                              <div className="text-[10px] text-gray-400 mt-0.5 leading-tight">{step.subtitle}</div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </Section>
-                )
-              })()}
+              {/* B2-DRAWER-SLIM — acá vivía una barra de 8 pasos que repetía
+                  el recorrido que la ficha ya cuenta con timestamps y actores
+                  en #historial. La reemplaza una conclusión: qué requiere
+                  atención, con lo que la propia orden puede demostrar. */}
+              <ResumenRapido solicitudId={solicitudId} orden={solicitud as never} />
 
               {/* Tiempo restante */}
               {tiempoRestante !== null && (
@@ -1380,40 +1301,10 @@ export function SolicitudDrawer({
                 </Section>
               )}
 
-              {/* Gastos operativos vinculados */}
-              {gastosOperativos.length > 0 && (
-                <Section title="Gastos operativos" accent="red">
-                  <div className="space-y-2">
-                    {gastosOperativos.map((g) => {
-                      const tipoLabel = LABELS_TIPO_GASTO[g.tipo] ?? g.tipo
-                      const fecha = typeof (g.fecha as any)?.toDate === 'function'
-                        ? (g.fecha as any).toDate()
-                        : g.fecha instanceof Date ? g.fecha : null
-                      return (
-                        <div key={g.id} className="rounded-lg border border-red-100 bg-red-50 px-3 py-2.5 space-y-1">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm font-bold text-red-800">{tipoLabel}</span>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span className="text-sm font-black text-red-700">C$ {g.monto}</span>
-                              <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${g.estado === 'aprobado' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
-                                {g.estado === 'aprobado' ? 'Aprobado' : 'Anulado'}
-                              </span>
-                            </div>
-                          </div>
-                          {g.nota && (
-                            <p className="text-xs text-red-700 italic">{g.nota}</p>
-                          )}
-                          {fecha && (
-                            <p className="text-[11px] text-gray-400">
-                              {fecha.toLocaleDateString('es-NI', { day: '2-digit', month: 'short', year: 'numeric' })}
-                            </p>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                </Section>
-              )}
+              {/* B2-DRAWER-SLIM — los gastos operativos vinculados eran solo
+                  lectura y costaban un listener sobre gastos_motorizado en
+                  cada apertura. Se consultan desde el módulo Gastos, que desde
+                  B2.5 enlaza a la ficha de la orden. */}
 
               {/* Motorizado actual */}
               {solicitud.asignacion?.motorizadoNombre && (
@@ -1452,64 +1343,24 @@ export function SolicitudDrawer({
                 </Section>
               )}
 
-              {/* Depósito */}
-              {(() => {
-                const dep = solicitud.registro?.deposito
-                if (!dep) return null
-                const tieneInfo = dep.confirmadoComercio || dep.confirmadoStorkhub
-                  || dep.storkhubDepositoId || dep.comercioDepositoId
-                if (!tieneInfo) return null
-                return (
-                  <Section title="Depósito" accent="teal">
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-3">
-                      {dep.confirmadoStorkhub && (
-                        <>
-                          <InfoRow label="Storkhub" value="✓ Confirmado" />
-                          <InfoRow label="Fecha Storkhub" value={formatDateTime(dep.confirmadoStorkhubAt)} />
-                        </>
-                      )}
-                      {!dep.confirmadoStorkhub && dep.storkhubDepositoId && (
-                        <InfoRow label="Storkhub" value="⏳ En revisión" />
-                      )}
-                      {dep.confirmadoComercio && (
-                        <>
-                          <InfoRow label="Comercio" value="✓ Confirmado" />
-                          <InfoRow label="Fecha Comercio" value={formatDateTime(dep.confirmadoComercioAt)} />
-                        </>
-                      )}
-                      {!dep.confirmadoComercio && dep.comercioDepositoId && (
-                        <InfoRow label="Comercio" value="⏳ En revisión" />
-                      )}
-                    </div>
-                  </Section>
-                )
-              })()}
-
-              {/* Evidencias fotográficas */}
-              {solicitud.evidencias && (['retiro', 'entrega', 'deposito'] as const).some((k) => solicitud.evidencias?.[k]) && (
-                <Section title="Evidencias fotográficas" accent="purple">
-                  <div className="grid grid-cols-3 gap-2">
-                    {([
-                      { key: 'retiro',  label: 'Retiro' },
-                      { key: 'entrega', label: 'Entrega' },
-                      { key: 'deposito', label: 'Boucher' },
-                    ] as const).map(({ key, label }) => {
-                      const ev = solicitud.evidencias?.[key]
-                      if (!ev) return null
-                      return (
-                        <button
-                          key={key}
-                          onClick={() => setLightboxUrl(ev.url)}
-                          className="flex flex-col items-center gap-1.5 rounded-xl border border-gray-200 bg-gray-50 p-1.5 hover:bg-gray-100 hover:border-gray-300 transition cursor-pointer"
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={ev.url} alt={label} className="w-full aspect-square object-cover rounded-lg" loading="lazy" />
-                          <span className="text-[10px] font-medium text-gray-500 uppercase tracking-wide">{label}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </Section>
+              {/* B2-DRAWER-SLIM — el depósito y la galería de evidencias
+                  vivían acá con menos información de la que la ficha ya da:
+                  el drawer no lee ordenes_deposito, así que solo podía mostrar
+                  los flags "confirmado / en revisión" sin ID, monto ni boucher.
+                  Se remiten a #depositos y #evidencias, que sí los tienen. */}
+              {(solicitud.registro?.deposito || hayEvidenciasOrden) && (
+                <div className="flex flex-wrap gap-x-4 gap-y-1 px-1">
+                  {solicitud.registro?.deposito && rutaOrden(solicitudId, 'depositos') && (
+                    <Link href={rutaOrden(solicitudId, 'depositos')!} className="text-xs font-semibold text-teal-700 hover:underline">
+                      Ver depósitos →
+                    </Link>
+                  )}
+                  {hayEvidenciasOrden && rutaOrden(solicitudId) && (
+                    <Link href={rutaOrden(solicitudId)!} className="text-xs font-semibold text-purple-700 hover:underline">
+                      Ver evidencias →
+                    </Link>
+                  )}
+                </div>
               )}
 
               {/* Motorizado sugerido */}
