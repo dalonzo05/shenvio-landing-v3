@@ -166,24 +166,28 @@ export function BloqueCobros({
           —ID, boucher, actor— sigue siendo autoridad de #depositos. */}
       {traza.destinos.length > 0 && (
         <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50/40 px-4 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+            {/* B2.6 — era "Destino del dinero recaudado". El nombre largo
+                describía el mecanismo; este dice de qué se está hablando. */}
             <p className="text-xs font-bold uppercase tracking-wide text-gray-400">
-              Destino del dinero recaudado
+              Dinero recaudado
             </p>
             <a href="#depositos" className="text-[11px] font-semibold text-teal-700 hover:underline">
               Ver depósitos ↓
             </a>
           </div>
+          {/* B2.6 — una tarjeta por destino en vez de la fila horizontal
+              monto/estado, que apretaba tres datos en un renglón. El monto va
+              al frente porque es lo que se lee primero. Contenido idéntico:
+              destinos separados, nunca sumados. */}
           <div className="grid gap-2 sm:grid-cols-2">
             {traza.destinos.map((d) => (
-              <div key={d.destino} className="flex items-baseline justify-between gap-2 text-sm">
-                <span className="text-gray-600">{d.etiqueta}</span>
-                <span className="flex items-baseline gap-2">
-                  <span className="font-semibold text-gray-900">{money(d.monto)}</span>
-                  <span className={`text-[11px] font-bold ${d.tieneDeposito ? 'text-teal-700' : 'text-amber-600'}`}>
-                    {d.situacion}
-                  </span>
-                </span>
+              <div key={d.destino} className="rounded-lg border border-teal-200/70 bg-white px-3 py-2">
+                <p className="text-base font-black leading-tight text-gray-900">{money(d.monto)}</p>
+                <p className="text-xs text-gray-500">→ {d.etiqueta}</p>
+                <p className={`text-[11px] font-bold mt-0.5 ${d.tieneDeposito ? 'text-teal-700' : 'text-amber-600'}`}>
+                  {d.situacion}
+                </p>
               </div>
             ))}
           </div>

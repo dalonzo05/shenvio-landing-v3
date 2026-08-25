@@ -111,7 +111,9 @@ export function BloqueTimeline({
   estadoClase?: string
   nombresActores?: Record<string, string>
 }) {
+  // Dos desplegables independientes: el recorrido y el historial de cambios.
   const [abierto, setAbierto] = useState(false)
+  const [cambiosAbierto, setCambiosAbierto] = useState(false)
   const { recorrido, cambios } = separarTimeline(eventos)
   const hitos = hitosRecorrido(eventos)
 
@@ -178,10 +180,33 @@ export function BloqueTimeline({
           estados del envío. */}
       {cambios.length > 0 && (
         <div className="mt-5 border-t border-gray-100 pt-4">
-          <h3 className="text-xs font-bold uppercase tracking-wide text-gray-400 mb-3">
-            Historial de cambios
-          </h3>
-          <ol className="relative">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <h3 className="text-xs font-bold uppercase tracking-wide text-gray-400">
+              Historial de cambios ({cambios.length})
+            </h3>
+            {/* B2.6 — colapsado por defecto, e independiente del recorrido:
+                abrir uno no abre el otro. */}
+            <button
+              type="button"
+              onClick={() => setCambiosAbierto((v) => !v)}
+              aria-expanded={cambiosAbierto}
+              aria-controls="historial-cambios"
+              className="rounded-lg px-2 py-1 -mr-2 text-xs font-semibold text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition"
+            >
+              {cambiosAbierto ? 'Ocultar historial' : 'Ver historial completo'}
+            </button>
+          </div>
+
+          {/* Resumen: el último cambio es lo que casi siempre se busca. */}
+          {!cambiosAbierto && (
+            <p className="text-sm text-gray-600">
+              Último: <span className="font-semibold text-gray-900">{cambios[cambios.length - 1].titulo}</span>
+              {' · '}
+              <span className="text-gray-500">{fechaHora(cambios[cambios.length - 1].at)}</span>
+            </p>
+          )}
+
+          <ol id="historial-cambios" className="relative" hidden={!cambiosAbierto}>
             {cambios.map((e, i) => (
               <Evento key={e.id} evento={e} nombresActores={nombresActores} ultimo={i === cambios.length - 1} />
             ))}

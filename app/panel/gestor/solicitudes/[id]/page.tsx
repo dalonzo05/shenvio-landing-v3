@@ -24,6 +24,8 @@ import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import { BloqueCobros, BloqueIncidencia } from './_components/BloquesCobros'
 import { BloqueDepositos } from './_components/BloqueDepositos'
 import { BloqueTimeline } from './_components/BloqueTimeline'
+import { ResumenOrden, IndiceFicha } from './_components/ResumenOrden'
+import { detalleIncidencia } from '@/lib/incidencia-cobro'
 import { construirTimeline, uidsDeTimeline } from '@/lib/timeline-orden'
 import { ImageLightbox } from '../../../_components/ImageLightbox'
 import { nombreDeUsuario } from '@/lib/actor-resolucion'
@@ -1042,6 +1044,9 @@ function GestorSolicitudDetallePageContent() {
   const entregaMaps = getBestMapsUrl(solicitud, 'entrega')
 
   const estado = solicitud.estado
+  // B2.6 — condición única: la usa el índice y la propia sección.
+  const hayEvidencias = !!solicitud.evidencias
+    && (['retiro', 'entrega', 'deposito'] as const).some((k) => solicitud.evidencias?.[k])
 
   // B2.4: la barra de 8 pasos vivía acá y marcaba etapas como cumplidas por
   // pertenencia de estado (`['retirado','entregado'].includes(estado)`), lo
@@ -1106,6 +1111,15 @@ function GestorSolicitudDetallePageContent() {
           {err}
         </div>
       )}
+
+      {/* B2.6 — lo primero que se ve: qué falta para cerrar la orden, y un
+          índice para saltar al bloque que lo resuelve. Ambos derivados: no
+          consultan nada ni persisten nada. */}
+      <ResumenOrden orden={solicitud as never} depositos={depositosOrden} />
+      <IndiceFicha
+        hayIncidencia={detalleIncidencia(solicitud as never).length > 0}
+        hayEvidencias={hayEvidencias}
+      />
 
       <div className="grid grid-cols-1 2xl:grid-cols-[1.35fr_0.95fr] gap-5">
         <section className="space-y-5">
@@ -1757,9 +1771,9 @@ function GestorSolicitudDetallePageContent() {
             onVerBoucher={(url, label) => setEvidenciaAmpliada({ url, label })}
           />
 
-          {/* Evidencias fotográficas */}
-          {solicitud.evidencias && (['retiro', 'entrega', 'deposito'] as const).some((k) => solicitud.evidencias?.[k]) && (
-            <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+          {/* Evidencias fotográficas — B2.6 añade solo el anchor del índice. */}
+          {hayEvidencias && (
+            <div id="evidencias" className="scroll-mt-24 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
               <h2 className="font-semibold text-gray-900 mb-4">Evidencias fotográficas</h2>
               <div className="grid grid-cols-3 gap-3">
                 {([

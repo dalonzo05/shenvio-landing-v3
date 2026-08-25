@@ -11,6 +11,7 @@
 //
 // Solo lectura: no hay ninguna acción sobre depósitos.
 
+import { useState } from 'react'
 import {
   lineasDeposito,
   tieneObligacionDeposito,
@@ -55,9 +56,11 @@ export function BloqueDepositos({
   formatearFecha: (v: unknown) => string
   onVerBoucher: (url: string, label: string) => void
 }) {
+  const [detalleAbierto, setDetalleAbierto] = useState(false)
   const lineas = lineasDeposito(orden, depositos)
   const hayObligacion = tieneObligacionDeposito(orden)
-  const hayRegistro = lineas.some((l) => l.deposito)
+  const registrados = lineas.filter((l) => l.deposito)
+  const hayRegistro = registrados.length > 0
 
   return (
     <div id="depositos" className="scroll-mt-24 rounded-2xl border border-teal-200 bg-white p-5 shadow-sm">
@@ -92,14 +95,39 @@ export function BloqueDepositos({
         </div>
       )}
 
-      {/* ── Depósitos reales registrados ── */}
+      {/* ── Depósitos reales registrados ──
+          B2.6: colapsados por defecto. La obligación de arriba es lo
+          decisional; el ID, el boucher y el actor son auditoría, y ocupaban
+          media pantalla antes de llegar a Evidencias e Historial. */}
       {hayRegistro && (
         <>
-          <p className="text-xs font-bold uppercase tracking-wide text-gray-400 mb-2 pt-1">
-            Depósito registrado
-          </p>
-          <div className="space-y-3">
-            {lineas.filter((l) => l.deposito).map((l) => {
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 mb-2">
+            <p className="text-xs font-bold uppercase tracking-wide text-gray-400">
+              Depósitos registrados ({registrados.length})
+            </p>
+            <button
+              type="button"
+              onClick={() => setDetalleAbierto((v) => !v)}
+              aria-expanded={detalleAbierto}
+              aria-controls="depositos-detalle"
+              className="rounded-lg px-2 py-1 -mr-2 text-xs font-semibold text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition"
+            >
+              {detalleAbierto ? 'Ocultar detalle de depósitos' : 'Ver detalle de depósitos'}
+            </button>
+          </div>
+
+          {/* Resumen: cuántos y en qué estado, por destino. Nunca un total
+              sumado — son destinos distintos y pueden ser agrupados. */}
+          {!detalleAbierto && (
+            <p className="text-sm text-gray-600">
+              {registrados
+                .map((l) => `${l.etiqueta.toLowerCase()}: ${l.texto.toLowerCase()}`)
+                .join(' · ')}
+            </p>
+          )}
+
+          <div id="depositos-detalle" className="space-y-3" hidden={!detalleAbierto}>
+            {registrados.map((l) => {
               const d = l.deposito!
               const actor = presentarActor(d.confirmadoPorUid, nombresActores[d.confirmadoPorUid ?? ''])
               return (
