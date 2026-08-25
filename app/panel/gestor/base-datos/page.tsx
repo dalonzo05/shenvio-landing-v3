@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { rutaOrden } from '@/lib/ruta-orden'
+import { ResumenRapido } from '../_components/ResumenRapido'
 import {
   collection,
   onSnapshot,
@@ -23,6 +24,7 @@ import { useRoleGuard, type Rol } from '../../_hooks/useRoleGuard'
 import {
   X,
   ExternalLink,
+  ArrowRight,
   Copy,
   Phone,
   MapPin,
@@ -453,8 +455,11 @@ function SolicitudDrawer({
             href={rutaOrden(solicitudId) ?? '#'}
             className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
           >
-            <ExternalLink size={13} />
-            Pantalla completa
+            {/* B2-DRAWER-SLIM-BASE-DATOS — mismo copy e icono que el drawer
+                compartido. "Pantalla completa" y ExternalLink prometían una
+                pestaña nueva que B2.5B ya había eliminado. */}
+            Ver ficha completa
+            <ArrowRight size={13} />
           </Link>
         </div>
 
@@ -465,83 +470,12 @@ function SolicitudDrawer({
 
           {solicitud && (
             <div className="p-5 space-y-5">
-              {/* Timeline operativo */}
-              {(() => {
-                const est = solicitud.estado
-                const estadoAceptacion = solicitud.asignacion?.estadoAceptacion
-                const timeline = [
-                  { title: 'Creada', done: true, current: false, subtitle: formatDateTime(solicitud.createdAt) },
-                  {
-                    title: 'Confirmada',
-                    done: ['confirmada','asignada','en_camino_retiro','retirado','en_camino_entrega','entregado'].includes(est || ''),
-                    current: est === 'pendiente_confirmacion',
-                    subtitle: solicitud.confirmacion?.confirmadoAt ? formatDateTime(solicitud.confirmacion.confirmadoAt) : undefined,
-                  },
-                  {
-                    title: 'Asignada',
-                    done: ['asignada','en_camino_retiro','retirado','en_camino_entrega','entregado'].includes(est || ''),
-                    current: est === 'confirmada',
-                    subtitle: solicitud.asignacion?.asignadoAt ? formatDateTime(solicitud.asignacion.asignadoAt) : undefined,
-                  },
-                  {
-                    title: 'Aceptada por motorizado',
-                    done: ['en_camino_retiro','retirado','en_camino_entrega','entregado'].includes(est || '') || estadoAceptacion === 'aceptada',
-                    current: est === 'asignada',
-                    subtitle: solicitud.asignacion?.aceptadoAt ? formatDateTime(solicitud.asignacion.aceptadoAt) : estadoAceptacion || undefined,
-                  },
-                  {
-                    title: 'Retiro en proceso',
-                    done: ['retirado','en_camino_entrega','entregado'].includes(est || ''),
-                    current: est === 'en_camino_retiro',
-                    subtitle: solicitud.historial?.en_camino_retiroAt ? formatDateTime(solicitud.historial.en_camino_retiroAt) : undefined,
-                  },
-                  {
-                    title: 'Paquete retirado',
-                    done: ['retirado','en_camino_entrega','entregado'].includes(est || ''),
-                    current: est === 'retirado',
-                    subtitle: solicitud.historial?.retiradoAt ? formatDateTime(solicitud.historial.retiradoAt) : undefined,
-                  },
-                  {
-                    title: 'En camino a entrega',
-                    done: est === 'entregado',
-                    current: est === 'en_camino_entrega',
-                    subtitle: solicitud.historial?.en_camino_entregaAt ? formatDateTime(solicitud.historial.en_camino_entregaAt) : undefined,
-                  },
-                  {
-                    title: 'Entregado',
-                    done: est === 'entregado',
-                    current: false,
-                    subtitle: solicitud.historial?.entregadoAt ? formatDateTime(solicitud.historial.entregadoAt) : (solicitud as any).entregadoAt ? formatDateTime((solicitud as any).entregadoAt) : undefined,
-                  },
-                ]
-                return (
-                  <Section title="🗂 Timeline operativo">
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-3 pt-1">
-                      {timeline.map((step) => (
-                        <div key={step.title} className="flex items-start gap-2">
-                          <div className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-bold ${
-                            step.current
-                              ? 'border-blue-300 bg-blue-50 text-blue-700'
-                              : step.done
-                              ? 'border-green-300 bg-green-50 text-green-700'
-                              : 'border-gray-200 bg-white text-gray-400'
-                          }`}>
-                            {step.done ? '✓' : '•'}
-                          </div>
-                          <div>
-                            <div className={`text-xs font-medium ${step.current || step.done ? 'text-gray-900' : 'text-gray-400'}`}>
-                              {step.title}
-                            </div>
-                            {step.subtitle && (
-                              <div className="text-[11px] text-gray-500 mt-0.5">{step.subtitle}</div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </Section>
-                )
-              })()}
+              {/* B2-DRAWER-SLIM-BASE-DATOS — acá vivía una barra de 8 pasos,
+                  copia de la que B2-DRAWER-SLIM ya retiró del drawer
+                  compartido. Repetía el recorrido que la ficha cuenta con
+                  timestamps y actores en #historial. La reemplaza la misma
+                  conclusión que usa el resto del panel. */}
+              <ResumenRapido solicitudId={solicitudId} orden={solicitud as never} />
 
               {/* Tiempo restante */}
               {tiempoRestante !== null && (
