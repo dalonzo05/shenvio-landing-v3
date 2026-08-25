@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { rutaOrden } from '@/lib/ruta-orden'
 import { ResumenRapido } from '../_components/ResumenRapido'
+import { Section, InfoRow } from '../_components/SolicitudDrawer'
 import {
   collection,
   onSnapshot,
@@ -486,7 +487,7 @@ function SolicitudDrawer({
               )}
 
               {/* Retiro */}
-              <Section title="📍 Retiro">
+              <Section title="Retiro" accent="orange">
                 <InfoRow label="Nombre" value={solicitud.recoleccion?.nombreApellido} />
                 <InfoRow label="Teléfono" value={solicitud.recoleccion?.celular} icon={<Phone size={13} />} />
                 <InfoRow label="Dirección" value={solicitud.recoleccion?.direccionEscrita} icon={<MapPin size={13} />} />
@@ -504,7 +505,7 @@ function SolicitudDrawer({
               </Section>
 
               {/* Entrega */}
-              <Section title="📦 Entrega">
+              <Section title="Entrega" accent="emerald">
                 <InfoRow label="Nombre" value={solicitud.entrega?.nombreApellido} />
                 <InfoRow label="Teléfono" value={solicitud.entrega?.celular} icon={<Phone size={13} />} />
                 <InfoRow label="Dirección" value={solicitud.entrega?.direccionEscrita} icon={<MapPin size={13} />} />
@@ -522,7 +523,7 @@ function SolicitudDrawer({
               </Section>
 
               {/* Resumen comercial */}
-              <Section title="💰 Resumen comercial">
+              <Section title="Resumen comercial" accent="amber">
                 <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                   <InfoRow label="Comercio" value={solicitud.ownerSnapshot?.companyName || solicitud.ownerSnapshot?.nombre || (solicitud.userId ? comercioNames[solicitud.userId] : undefined)} />
                   <InfoRow label="Tipo" value={solicitud.tipoCliente} />
@@ -540,7 +541,7 @@ function SolicitudDrawer({
 
               {/* Motorizado actual */}
               {solicitud.asignacion?.motorizadoNombre && (
-                <Section title="🛵 Motorizado asignado">
+                <Section title="Motorizado asignado" accent="indigo">
                   <InfoRow label="Nombre" value={solicitud.asignacion.motorizadoNombre} icon={<Bike size={13} />} />
                   <InfoRow label="Teléfono" value={solicitud.asignacion.motorizadoTelefono} />
                   <InfoRow label="Asignado" value={formatDateTime(solicitud.asignacion.asignadoAt)} />
@@ -549,8 +550,14 @@ function SolicitudDrawer({
                 </Section>
               )}
 
-              {/* Decisión rápida */}
-              <Section title="⚡ Decisión rápida">
+              {/* Decisión rápida — oculta para estados terminales.
+                  B2-DRAWER-BASE-HOMOLOGACION: el drawer compartido ya la
+                  ocultaba para los tres cierres; acá seguía ofreciendo cambiar
+                  precio, reasignar y avanzar el estado sobre una orden ya
+                  entregada, que es un cierre del que no se vuelve. Se usa el
+                  predicado autoritativo en vez de repetir tres comparaciones. */}
+              {!esEstadoCerrado(estado) && (
+              <Section title="Decisión rápida" accent="blue">
                 <div className="space-y-3">
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">Precio final (C$)</label>
@@ -625,6 +632,7 @@ function SolicitudDrawer({
                   </div>
                 </div>
               </Section>
+              )}
             </div>
           )}
         </div>
@@ -633,25 +641,13 @@ function SolicitudDrawer({
   )
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-      <h3 className="text-sm font-semibold text-gray-900 mb-3">{title}</h3>
-      <div className="space-y-2">{children}</div>
-    </div>
-  )
-}
-
-function InfoRow({ label, value, icon }: { label: string; value?: string | null; icon?: React.ReactNode }) {
-  return (
-    <div>
-      <div className="text-xs text-gray-400">{label}</div>
-      <div className="text-sm font-medium text-gray-900 flex items-center gap-1.5">
-        {icon}{value || <span className="text-gray-300">—</span>}
-      </div>
-    </div>
-  )
-}
+// B2-DRAWER-BASE-HOMOLOGACION — Section e InfoRow ahora vienen del drawer
+// compartido en vez de tener copias locales con otro estilo. Son puramente
+// presentacionales —sin queries, sin estado, sin writers— así que importarlos
+// no arrastra las dos lecturas extra que tiene aquel componente: el drawer de
+// Base de datos sigue en 2. Eso es lo que hacía que los dos drawers no
+// parecieran del mismo producto: la copia local no tenía borde de acento,
+// cabecera ni tipografía en versalitas.
 
 // ─── Inline editable cell ─────────────────────────────────────────────────────
 
