@@ -5,6 +5,8 @@ import Link from 'next/link'
 import { rutaOrden } from '@/lib/ruta-orden'
 import { ResumenRapido } from '../_components/ResumenRapido'
 import { Section, InfoRow } from '../_components/SolicitudDrawer'
+import { telefonoComercio, telefonoRetiro, telefonoEntrega, zonaRetiro, zonaEntrega } from '@/lib/campos-base-datos'
+import { trazabilidadPago } from '@/lib/trazabilidad-pago'
 import {
   collection,
   onSnapshot,
@@ -235,10 +237,11 @@ function getColValue(s: Solicitud, colKey: string, comercioNames: Record<string,
     case 'motorizado': return s.asignacion?.motorizadoNombre ?? null
     case 'fecha': return s.createdAt?.toDate().toISOString().split('T')[0] ?? null
     case 'comercio': return s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : null) || null
-    case 'telefono': return s.ownerSnapshot?.phone ?? null
+    case 'telefono': return telefonoComercio(s)
     case 'retiro': return s.recoleccion?.direccionEscrita ?? null
     case 'entrega_dir': return s.entrega?.direccionEscrita ?? null
-    case 'zona': return s.registro?.zona ?? null
+    case 'zonaRetiro': return zonaRetiro(s)
+    case 'zonaEntrega': return zonaEntrega(s)
     case 'ceProducto': return s.cobroContraEntrega?.monto ?? null
     case 'fDeposito': {
       const ts = s.registro?.deposito?.confirmadoComercioAt || s.registro?.deposito?.confirmadoStorkhubAt
@@ -270,13 +273,19 @@ function getColValue(s: Solicitud, colKey: string, comercioNames: Record<string,
       return typeof (at as any).toDate === 'function' ? (at as any).toDate().toISOString().split('T')[0] : null
     }
     case 'formaPago': {
+      // B2-BASE-PAGO-DETALLE — acá se traducía `quienPaga` a un medio de pago
+      // que nadie registró: 'entrega' salía como "Efectivo". Pero `entrega`
+      // dice CUÁNDO se cobra —al entregar—, no CON QUÉ. Es el origen del
+      // "Ef. entrega" que se veía en la tabla.
+      //
+      // El medio real solo existe cuando un gestor confirma el cobro desde
+      // Cobros (`cobroDelivery.formaPago`), y ni siquiera siempre: la
+      // reversión lo borra. Sin ese campo se muestra "—", no una suposición.
+      // Ver deuda B2-PAGO-MEDIO-NO-PERSISTIDO.
       const cd = s.cobroDelivery
-      if (cd?.formaPago) {
-        const m: Record<string, string> = { efectivo: 'Efectivo', transferencia: 'Transferencia' }
-        return m[cd.formaPago] ?? cd.formaPago
-      }
-      const map: Record<string, string> = { recoleccion: 'Efectivo', entrega: 'Efectivo', transferencia: 'Transferencia', credito_semanal: 'Crédito' }
-      return s.pagoDelivery?.quienPaga ? (map[s.pagoDelivery.quienPaga] ?? null) : null
+      if (!cd?.formaPago) return null
+      const m: Record<string, string> = { efectivo: 'Efectivo', transferencia: 'Transferencia' }
+      return m[cd.formaPago] ?? cd.formaPago
     }
     case 'distancia': return s.cotizacion?.distanciaKm ?? null
     default: return null
@@ -477,6 +486,66 @@ function SolicitudDrawer({
                   timestamps y actores en #historial. La reemplaza la misma
                   conclusión que usa el resto del panel. */}
               <ResumenRapido solicitudId={solicitudId} orden={solicitud as never} />
+
+              {/* B2-BASE-PAGO-DETALLE — Pagos y cobros.
+                  El drawer quedaba entre una tabla muy resumida y la ficha
+                  completa, sin decir qué pasó con el dinero. Todo esto sale de
+                  la propia solicitud vía trazabilidadPago(): monto, estado
+                  frente al cliente, quién paga, quién recibió y forma de pago.
+                  Se usan solo esos campos — NO `destinos`, que sin leer
+                  ordenes_deposito daría "Pendiente de depósito" sobre un
+                  depósito ya confirmado. El estado real del depósito vive en la
+                  ficha, y hacia allá se remite. */}
+              {(() => {
+                const t = trazabilidadPago(solicitud as never)
+                const ceAplica = !!solicitud.cobroContraEntrega?.aplica
+                const prod = solicitud.cobrosMotorizado?.producto
+                const productoCobrado = prod ? prod.recibio !== false : null
+                const pendiente = t.estadoCliente.montoPendiente > 0
+                return (
+                  <Section title="Pagos y cobros" accent={pendiente ? 'amber' : 'emerald'}>
+                    <div className="grid grid-cols-2 gap-3">
+                      {/* ── Delivery ── */}
+                      <div className="rounded-lg border border-gray-200 p-2.5">
+                        <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">Delivery</p>
+                        <p className="text-base font-black leading-tight text-gray-900">{money(t.montoDelivery)}</p>
+                        <p className={`text-[11px] font-bold ${pendiente ? 'text-amber-600' : 'text-emerald-600'}`}>
+                          {t.estadoCliente.etiqueta}
+                        </p>
+                      </div>
+
+                      {/* ── Producto / CE ── */}
+                      <div className="rounded-lg border border-gray-200 p-2.5">
+                        <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">Producto · CE</p>
+                        {!ceAplica ? (
+                          <p className="text-sm text-gray-400 mt-1">No aplica</p>
+                        ) : (
+                          <>
+                            <p className="text-base font-black leading-tight text-gray-900">{money(solicitud.cobroContraEntrega?.monto ?? 0)}</p>
+                            {/* Nunca "deuda": este dinero es del comercio y su
+                                cliente, no cartera de ShEnvíos (B1.2). */}
+                            <p className={`text-[11px] font-bold ${
+                              productoCobrado === null ? 'text-gray-400' : productoCobrado ? 'text-emerald-600' : 'text-red-500'
+                            }`}>
+                              {productoCobrado === null ? 'Pendiente de entrega' : productoCobrado ? 'Cobrado al cliente' : 'No cobrado'}
+                            </p>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-3 pt-1">
+                      {t.quienPaga && <InfoRow label="Quién paga" value={t.quienPaga} />}
+                      {/* Cada renglón solo si un campo lo respalda. */}
+                      {t.receptor && <InfoRow label="Recibió el dinero" value={t.receptor.etiqueta} />}
+                      {t.medioPago && <InfoRow label="Forma de pago" value={t.medioPago} />}
+                      {solicitud.cobrosMotorizado?.delivery?.at && (
+                        <InfoRow label="Fecha de cobro" value={formatDateTime(solicitud.cobrosMotorizado.delivery.at)} />
+                      )}
+                    </div>
+                  </Section>
+                )
+              })()}
 
               {/* Tiempo restante */}
               {tiempoRestante !== null && (
@@ -806,8 +875,10 @@ function BaseDatosPageContent() {
         const q = search.toLowerCase()
         const comercio = (s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : '') || '').toLowerCase()
         const entrega = (s.entrega?.nombreApellido || '').toLowerCase()
-        const zona = (s.registro?.zona || '').toLowerCase()
-        if (!comercio.includes(q) && !entrega.includes(q) && !zona.includes(q)) return false
+        // B2-BASE-PAGO-DETALLE: buscaba sobre registro.zona, vacío en todas
+        // las órdenes. Ahora sobre la clasificación real, retiro y entrega.
+        const zonas = `${zonaRetiro(s) || ''} ${zonaEntrega(s) || ''}`.toLowerCase()
+        if (!comercio.includes(q) && !entrega.includes(q) && !zonas.includes(q)) return false
       }
       for (const [colKey, f] of Object.entries(colFilters)) {
         if (!f) continue
@@ -838,22 +909,25 @@ function BaseDatosPageContent() {
 
   function exportCSV() {
     const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`
-    const headers = ['Orden','Fecha','Motorizado','Comercio','Teléfono','Retiro','Entrega','Zona','C/E Producto','Delivery','Pagó','F.Cobro','Forma Pago']
+    const headers = ['Orden','Fecha','Motorizado','Comercio','Teléfono','Retiro','Entrega','Zona retiro','Zona entrega','C/E Producto','Delivery','Pagó','F.Cobro','Forma Pago']
     const rows = filtered.map((s) => {
       const comercio = s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : '') || ''
       const cd = s.cobroDelivery
       const pagó = cd?.estado === 'pagado' ? `Sí (${cd.formaPago || ''})` : s.pagoDelivery?.quienPaga === 'transferencia' ? 'Trans. pend.' : s.cobrosMotorizado?.delivery?.recibio === true ? 'Sí' : s.cobrosMotorizado?.delivery?.recibio === false ? 'No' : '—'
       const fCobro = cd?.pagadoAt ? formatDate(cd.pagadoAt) : s.cobrosMotorizado?.delivery?.at ? formatDate(s.cobrosMotorizado.delivery.at as any) : ''
-      const formaPago = cd?.formaPago || s.pagoDelivery?.quienPaga || ''
+      // B2-BASE-PAGO-DETALLE: sin formaPago persistido no se cae a quienPaga,
+      // que responde otra pregunta. Mismo criterio que la columna.
+      const formaPago = cd?.formaPago || ''
       return [
         s.id.slice(0, 8),
         formatDate(s.createdAt),
         s.asignacion?.motorizadoNombre || '',
         comercio,
-        s.ownerSnapshot?.phone || '',
+        telefonoComercio(s) || '',
         s.recoleccion?.direccionEscrita || '',
         s.entrega?.direccionEscrita || '',
-        s.registro?.zona || '',
+        zonaRetiro(s) || '',
+        zonaEntrega(s) || '',
         s.cobroContraEntrega?.monto ?? 0,
         getPrecio(s) ?? 0,
         pagó,
@@ -964,8 +1038,11 @@ function BaseDatosPageContent() {
                 <Th config={{ colKey: 'entrega_dir', label: 'Entrega', filterType: 'text' }}
                     filter={colFilters['entrega_dir']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
-                <Th config={{ colKey: 'zona', label: 'Zona', filterType: 'text' }}
-                    filter={colFilters['zona']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                <Th config={{ colKey: 'zonaRetiro', label: 'Zona retiro', filterType: 'text' }}
+                    filter={colFilters['zonaRetiro']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                <Th config={{ colKey: 'zonaEntrega', label: 'Zona entrega', filterType: 'text' }}
+                    filter={colFilters['zonaEntrega']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
                 <Th config={{ colKey: 'ceProducto', label: 'C/E Producto', filterType: 'number' }}
                     filter={colFilters['ceProducto']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
@@ -1023,12 +1100,26 @@ function BaseDatosPageContent() {
                     <Td><span className="text-gray-700">{s.asignacion?.motorizadoNombre || <span className="text-gray-300">—</span>}</span></Td>
                     <Td>{formatDate(s.createdAt)}</Td>
 
-                    {/* Comercio, teléfono, retiro, entrega, zona */}
+                    {/* Comercio, teléfono, retiro, entrega, zonas */}
                     <Td><span className="font-medium text-gray-800">{s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : undefined) || '—'}</span></Td>
-                    <Td><span className="text-gray-600">{s.ownerSnapshot?.phone || '—'}</span></Td>
-                    <Td><span className="max-w-[160px] truncate block text-gray-500" title={s.recoleccion?.direccionEscrita}>{s.recoleccion?.direccionEscrita || '—'}</span></Td>
-                    <Td><span className="max-w-[160px] truncate block text-gray-500" title={s.entrega?.direccionEscrita}>{s.entrega?.direccionEscrita || '—'}</span></Td>
-                    <Td><EditableCell value={s.registro?.zona} placeholder="zona" onSave={(v) => updateRegistro(s.id, { zona: v || undefined })} /></Td>
+                    <Td><span className="text-gray-600">{telefonoComercio(s) || '—'}</span></Td>
+                    {/* B2-BASE-PAGO-DETALLE — el teléfono de cada punto va con
+                        su dirección, no en la columna Teléfono, que es la del
+                        comercio. Son tres números distintos. */}
+                    <Td>
+                      <span className="max-w-[160px] truncate block text-gray-500" title={s.recoleccion?.direccionEscrita}>{s.recoleccion?.direccionEscrita || '—'}</span>
+                      {telefonoRetiro(s) && <span className="block text-[11px] text-gray-400">{telefonoRetiro(s)}</span>}
+                    </Td>
+                    <Td>
+                      <span className="max-w-[160px] truncate block text-gray-500" title={s.entrega?.direccionEscrita}>{s.entrega?.direccionEscrita || '—'}</span>
+                      {telefonoEntrega(s) && <span className="block text-[11px] text-gray-400">{telefonoEntrega(s)}</span>}
+                    </Td>
+                    {/* B2-BASE-PAGO-DETALLE — antes una sola columna editable
+                        sobre registro.zona, vacía en todas las órdenes: lo que
+                        se leía era el placeholder del input. La clasificación
+                        real ya está persistida y son dos, no una. */}
+                    <Td><span className="text-gray-500">{zonaRetiro(s) || '—'}</span></Td>
+                    <Td><span className="text-gray-500">{zonaEntrega(s) || '—'}</span></Td>
 
                     {/* C/E Producto | F. Depósito (producto) | Depositado */}
                     <Td>{s.cobroContraEntrega?.aplica && s.cobroContraEntrega.monto ? <span className="font-medium text-green-700">C${s.cobroContraEntrega.monto}</span> : <span className="text-gray-300">C$0</span>}</Td>
@@ -1112,26 +1203,20 @@ function BaseDatosPageContent() {
                         return <span className="text-gray-300 text-xs">—</span>
                       })()}
                     </Td>
-                    {/* Forma Pago — muestra el método REAL si fue confirmado desde Cobros, si no el acordado */}
+                    {/* Forma Pago — solo el método REAL confirmado desde Cobros.
+                        B2-BASE-PAGO-DETALLE: el fallback traducía `quienPaga` a
+                        "Ef. retiro" / "Ef. entrega", afirmando efectivo sobre
+                        un cobro cuyo medio nadie registró. `entrega` dice cuándo
+                        se cobra, no con qué. Sin dato persistido va "—", y el
+                        acuerdo se lee en "Pagó" y en el drawer. */}
                     <Td>
                       {(() => {
                         const cd = s.cobroDelivery
-                        // Prioridad: forma confirmada en Cobros
                         if (cd?.formaPago) {
                           const labels: Record<string, string> = { efectivo: 'Efectivo', transferencia: 'Transferencia' }
                           return <span className="text-gray-900 text-xs font-medium">{labels[cd.formaPago] ?? cd.formaPago}</span>
                         }
-                        // Fallback: forma acordada originalmente
-                        const map: Record<string, string> = {
-                          recoleccion: 'Ef. retiro',
-                          entrega: 'Ef. entrega',
-                          transferencia: 'Transferencia',
-                          credito_semanal: 'Crédito',
-                        }
-                        const label = s.pagoDelivery?.quienPaga ? map[s.pagoDelivery.quienPaga] : null
-                        return label
-                          ? <span className="text-gray-500 text-xs">{label}</span>
-                          : <span className="text-gray-300 text-xs">—</span>
+                        return <span className="text-gray-300 text-xs">—</span>
                       })()}
                     </Td>
                     <Td>{s.cotizacion?.distanciaKm != null ? `${Number(s.cotizacion.distanciaKm).toFixed(1)} km` : <span className="text-gray-300">—</span>}</Td>
