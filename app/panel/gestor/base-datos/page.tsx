@@ -7,6 +7,7 @@ import { ResumenRapido } from '../_components/ResumenRapido'
 import { Section, InfoRow } from '../_components/SolicitudDrawer'
 import { telefonoComercio, telefonoRetiro, telefonoEntrega, zonaRetiro, zonaEntrega, etiquetaFormaPago, FORMA_PAGO_AUSENTE } from '@/lib/campos-base-datos'
 import { trazabilidadPago } from '@/lib/trazabilidad-pago'
+import { estadoContable, type EntradaEstadoContable, type ClaveEstadoContable } from '@/lib/estado-contable-base'
 import {
   collection,
   onSnapshot,
@@ -124,6 +125,11 @@ type Solicitud = {
     entregadoAt?: any
   }
   userId?: string
+  // B2-BASE-DECISIONAL — zona fina y macrozona son dos datos distintos.
+  zonaRetiroNombre?: string | null
+  macroZonaRetiroNombre?: string | null
+  zonaEntregaNombre?: string | null
+  macroZonaEntregaNombre?: string | null
   ownerSnapshot?: { companyName?: string; phone?: string; nombre?: string; uid?: string }
   cobrosMotorizado?: {
     delivery?: { monto: number; recibio: boolean; at?: any; justificacion?: string }
@@ -230,14 +236,16 @@ function estadoClass(e?: EstadoSolicitud): string {
 
 function roundTo10(n: any): number { return Math.round(Number(n) / 10) * 10 }
 
-function getColValue(s: Solicitud, colKey: string, comercioNames: Record<string, string>): string | number | null {
+function getColValue(s: Solicitud, colKey: string, comercioNames: Record<string, string>, comercioTelefonos: Record<string, string> = {}): string | number | null {
   switch (colKey) {
     case 'estado': return s.estado ?? null
     case 'semana': return s.registro?.semana ?? (s.createdAt ? getWeekNumber(s.createdAt.toDate()) : null)
     case 'motorizado': return s.asignacion?.motorizadoNombre ?? null
     case 'fecha': return s.createdAt?.toDate().toISOString().split('T')[0] ?? null
     case 'comercio': return s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : null) || null
-    case 'telefono': return telefonoComercio(s)
+    case 'estadoContable': return estadoContable(s as EntradaEstadoContable).etiqueta
+    // B2-BASE-DECISIONAL: snapshot primero; si no lo trae, la caché de comercios.
+    case 'telefono': return telefonoComercio(s) || (s.userId ? comercioTelefonos[s.userId] || null : null)
     case 'retiro': return s.recoleccion?.direccionEscrita ?? null
     case 'entrega_dir': return s.entrega?.direccionEscrita ?? null
     case 'zonaRetiro': return zonaRetiro(s)
@@ -561,6 +569,10 @@ function SolicitudDrawer({
                 <InfoRow label="Nombre" value={solicitud.recoleccion?.nombreApellido} />
                 <InfoRow label="Teléfono" value={solicitud.recoleccion?.celular} icon={<Phone size={13} />} />
                 <InfoRow label="Dirección" value={solicitud.recoleccion?.direccionEscrita} icon={<MapPin size={13} />} />
+                {/* B2-BASE-DECISIONAL — sin fallback: la zona fina no se repite
+                    como macrozona, así se ve cuál de las dos falta. */}
+                {solicitud.zonaRetiroNombre && <InfoRow label="Zona" value={solicitud.zonaRetiroNombre} />}
+                <InfoRow label="Macrozona" value={solicitud.macroZonaRetiroNombre} />
                 {solicitud.recoleccion?.nota && <InfoRow label="Nota" value={solicitud.recoleccion.nota} />}
                 {retiroMaps && (
                   <div className="flex gap-2 pt-1">
@@ -579,6 +591,8 @@ function SolicitudDrawer({
                 <InfoRow label="Nombre" value={solicitud.entrega?.nombreApellido} />
                 <InfoRow label="Teléfono" value={solicitud.entrega?.celular} icon={<Phone size={13} />} />
                 <InfoRow label="Dirección" value={solicitud.entrega?.direccionEscrita} icon={<MapPin size={13} />} />
+                {solicitud.zonaEntregaNombre && <InfoRow label="Zona" value={solicitud.zonaEntregaNombre} />}
+                <InfoRow label="Macrozona" value={solicitud.macroZonaEntregaNombre} />
                 {solicitud.entrega?.nota && <InfoRow label="Nota" value={solicitud.entrega.nota} />}
                 {entregaMaps && (
                   <div className="flex gap-2 pt-1">
@@ -801,6 +815,8 @@ function BaseDatosPageContent() {
 
   // Names for orders that don't have ownerSnapshot (self-created by comercio)
   const [comercioNames, setComercioNames] = useState<Record<string, string>>({})
+  // B2-BASE-DECISIONAL — uid → teléfono. '' significa "consultado, no tiene".
+  const [comercioTelefonos, setComercioTelefonos] = useState<Record<string, string>>({})
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'motorizado'), (snap) => {
@@ -819,20 +835,44 @@ function BaseDatosPageContent() {
 
   // Fetch comercio names for orders without ownerSnapshot (self-created by comercio)
   useEffect(() => {
+    // B2-BASE-DECISIONAL — el mismo documento resuelve nombre y teléfono.
+    //
+    // `ownerSnapshot` nunca guardó el teléfono del comercio, así que la
+    // columna estaba condenada a "—" en toda orden histórica. Se resuelve
+    // desde `comercios/{uid}`, que ya se leía para el nombre: se amplía el
+    // criterio de "falta algo" para incluir el teléfono y se aprovecha el
+    // mismo getDoc. Deduplicado por UID y cacheado — tres comercios con seis
+    // órdenes son tres lecturas, no seis, y no se relee lo ya resuelto.
+    // getDoc puntual, no onSnapshot: un teléfono no necesita realtime.
     const missing = [...new Set(
       solicitudes
-        .filter((s) => !s.ownerSnapshot?.companyName && !s.ownerSnapshot?.nombre && s.userId)
+        .filter((s) => {
+          if (!s.userId) return false
+          const faltaNombre = !s.ownerSnapshot?.companyName && !s.ownerSnapshot?.nombre
+          const faltaTelefono = !telefonoComercio(s)
+          return faltaNombre || faltaTelefono
+        })
         .map((s) => s.userId!)
-    )].filter((uid) => !comercioNames[uid])
+    )].filter((uid) => !(uid in comercioTelefonos))
     if (missing.length === 0) return
     Promise.all(missing.map((uid) => getDoc(doc(db, 'comercios', uid)))).then((snaps) => {
-      const updates: Record<string, string> = {}
+      const nombres: Record<string, string> = {}
+      const telefonos: Record<string, string> = {}
       snaps.forEach((snap, i) => {
-        const data = snap.exists() ? (snap.data() as any) : null
-        updates[missing[i]] = data?.name || data?.companyName || missing[i].slice(0, 8)
+        const data = snap.exists() ? (snap.data() as Record<string, unknown> | undefined) : null
+        const uid = missing[i]
+        nombres[uid] = String(data?.name || data?.companyName || uid.slice(0, 8))
+        // Cadena vacía = comercio consultado y sin teléfono. Sirve de marca
+        // de "ya resuelto" para no volver a leerlo, y la UI cae a "—".
+        const tel = data?.phone ?? data?.telefono ?? data?.celular
+        telefonos[uid] = typeof tel === 'string' ? tel.trim() : ''
       })
-      setComercioNames((prev) => ({ ...prev, ...updates }))
+      setComercioNames((prev) => ({ ...prev, ...nombres }))
+      setComercioTelefonos((prev) => ({ ...prev, ...telefonos }))
     })
+    // comercioTelefonos fuera de deps a propósito: es la caché que este mismo
+    // efecto escribe, y volver a entrar por ella lo dispararía en bucle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [solicitudes])
 
   const updateRegistro = async (id: string, patch: Partial<Registro>) => {
@@ -883,15 +923,15 @@ function BaseDatosPageContent() {
       }
       for (const [colKey, f] of Object.entries(colFilters)) {
         if (!f) continue
-        if (!applyFilter(f, getColValue(s, colKey, comercioNames))) return false
+        if (!applyFilter(f, getColValue(s, colKey, comercioNames, comercioTelefonos))) return false
       }
       return true
     })
 
     if (sortCol) {
       result = [...result].sort((a, b) => {
-        const va = getColValue(a, sortCol, comercioNames)
-        const vb = getColValue(b, sortCol, comercioNames)
+        const va = getColValue(a, sortCol, comercioNames, comercioTelefonos)
+        const vb = getColValue(b, sortCol, comercioNames, comercioTelefonos)
         const sa = va === null ? '' : String(va)
         const sb = vb === null ? '' : String(vb)
         const na = Number(va), nb = Number(vb)
@@ -901,7 +941,7 @@ function BaseDatosPageContent() {
     }
 
     return result
-  }, [solicitudes, search, colFilters, sortCol, sortDir, comercioNames])
+  }, [solicitudes, search, colFilters, sortCol, sortDir, comercioNames, comercioTelefonos])
 
   const totales = filtered.reduce(
     (acc, s) => { acc.precio += getPrecio(s) || 0; acc.totalDelivery += s.cobroContraEntrega?.monto || 0; acc.depositado += s.registro?.deposito?.monto || 0; acc.cs += s.registro?.csRecaudado || 0; acc.usd += s.registro?.usdRecaudado || 0; return acc },
@@ -911,7 +951,7 @@ function BaseDatosPageContent() {
   function exportCSV() {
     const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`
     // B2-BASE-PAGO-DETALLE-UX-FINAL: mismo orden que la tabla.
-    const headers = ['Orden','Fecha','Motorizado','Comercio','Teléfono','Retiro','Zona retiro','Entrega','Zona entrega','C/E Producto','Delivery','Pagó','F.Cobro','Forma Pago']
+    const headers = ['Orden','Fecha','Motorizado','Comercio','Tel. comercio','Retiro','Zona retiro','Entrega','Zona entrega','C/E Producto','Delivery','Pagó','F.Cobro','Medio de pago','Estado contable','Motivos']
     const rows = filtered.map((s) => {
       const comercio = s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : '') || ''
       const cd = s.cobroDelivery
@@ -920,12 +960,13 @@ function BaseDatosPageContent() {
       // B2-BASE-PAGO-DETALLE: sin formaPago persistido no se cae a quienPaga,
       // que responde otra pregunta. Mismo criterio y mismo texto que la columna.
       const formaPago = etiquetaFormaPago(cd?.formaPago)
+      const ec = estadoContable(s as EntradaEstadoContable)
       return [
         s.id.slice(0, 8),
         formatDate(s.createdAt),
         s.asignacion?.motorizadoNombre || '',
         comercio,
-        telefonoComercio(s) || '',
+        telefonoComercio(s) || (s.userId ? comercioTelefonos[s.userId] : '') || '',
         s.recoleccion?.direccionEscrita || '',
         zonaRetiro(s) || '',
         s.entrega?.direccionEscrita || '',
@@ -935,6 +976,9 @@ function BaseDatosPageContent() {
         pagó,
         fCobro,
         formaPago,
+        ec.etiqueta,
+        // Los motivos se listan separados por ' · '; nunca se suman.
+        ec.motivos.map((m) => m.texto).join(' · '),
       ].map(esc).join(',')
     })
     const csv = [headers.map(esc).join(','), ...rows].join('\n')
@@ -1031,7 +1075,7 @@ function BaseDatosPageContent() {
                 <Th config={{ colKey: 'comercio', label: 'Comercio', filterType: 'text' }}
                     filter={colFilters['comercio']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
-                <Th config={{ colKey: 'telefono', label: 'Teléfono', filterType: 'text' }}
+                <Th config={{ colKey: 'telefono', label: 'Tel. comercio', filterType: 'text' }}
                     filter={colFilters['telefono']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
                 <Th config={{ colKey: 'retiro', label: 'Retiro', filterType: 'text' }}
@@ -1069,11 +1113,15 @@ function BaseDatosPageContent() {
                 {/* B2-BASE-PAGO-DETALLE-UX-FINAL: las opciones son lo que la
                     columna puede mostrar. 'Crédito' salía del fallback de
                     quienPaga, ya retirado, y nunca vuelve a producirse. */}
-                <Th config={{ colKey: 'formaPago', label: 'Forma Pago', filterType: 'select', selectOptions: ['Efectivo', 'Transferencia', FORMA_PAGO_AUSENTE] }}
+                <Th config={{ colKey: 'formaPago', label: 'Medio de pago', filterType: 'select', selectOptions: ['Efectivo', 'Transferencia', FORMA_PAGO_AUSENTE] }}
                     filter={colFilters['formaPago']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
                 <Th config={{ colKey: 'distancia', label: 'Dist.', filterType: 'number' }}
                     filter={colFilters['distancia']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
+                    onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
+                {/* B2-BASE-DECISIONAL — al final, derivada, nunca persistida. */}
+                <Th config={{ colKey: 'estadoContable', label: 'Estado contable', filterType: 'select', selectOptions: ['Requiere atención', 'En revisión', 'Sin alertas'] }}
+                    filter={colFilters['estadoContable']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
               </tr>
             </thead>
@@ -1109,7 +1157,7 @@ function BaseDatosPageContent() {
 
                     {/* Comercio, teléfono, retiro, entrega, zonas */}
                     <Td><span className="font-medium text-gray-800">{s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : undefined) || '—'}</span></Td>
-                    <Td><span className="text-gray-600">{telefonoComercio(s) || '—'}</span></Td>
+                    <Td><span className="text-gray-600">{telefonoComercio(s) || (s.userId ? comercioTelefonos[s.userId] : '') || '—'}</span></Td>
                     {/* B2-BASE-PAGO-DETALLE — el teléfono de cada punto va con
                         su dirección, no en la columna Teléfono, que es la del
                         comercio. Son tres números distintos. */}
@@ -1224,6 +1272,8 @@ function BaseDatosPageContent() {
                         : <span className="text-gray-400 text-xs italic">{FORMA_PAGO_AUSENTE}</span>}
                     </Td>
                     <Td>{s.cotizacion?.distanciaKm != null ? `${Number(s.cotizacion.distanciaKm).toFixed(1)} km` : <span className="text-gray-300">—</span>}</Td>
+                    {/* B2-BASE-DECISIONAL — derivada en render, nunca persistida. */}
+                    <Td><EstadoContableCell solicitud={s} /></Td>
                   </tr>
                 )
               })}
@@ -1238,8 +1288,8 @@ function BaseDatosPageContent() {
                 <Td /><Td />
                 {/* col 14: Delivery */}
                 <Td><span className="text-[#004aad]">C${totales.precio.toFixed(0)}</span></Td>
-                {/* cols 15-18: Pagó, F.Cobro, Forma Pago, Dist */}
-                <Td /><Td /><Td /><Td />
+                {/* cols 15-19: Pagó, F.Cobro, Medio de pago, Dist, Estado contable */}
+                <Td /><Td /><Td /><Td /><Td />
               </tr>
             </tfoot>
           </table>
@@ -1249,6 +1299,32 @@ function BaseDatosPageContent() {
       {/* Drawer de detalle */}
       {selectedId && (
         <SolicitudDrawer solicitudId={selectedId} onClose={() => setSelectedId(null)} comercioNames={comercioNames} />
+      )}
+    </div>
+  )
+}
+
+// ─── Estado contable (derivado, nunca persistido) ─────────────────────────────
+
+const ESTILO_CONTABLE: Record<ClaveEstadoContable, string> = {
+  requiere_atencion: 'bg-red-50 text-red-700 ring-red-200',
+  en_revision: 'bg-amber-50 text-amber-700 ring-amber-200',
+  sin_alertas: 'bg-gray-50 text-gray-600 ring-gray-200',
+}
+
+function EstadoContableCell({ solicitud }: { solicitud: Solicitud }) {
+  // Se calcula en render a partir de la orden: no se lee ni se escribe nada.
+  const ec = estadoContable(solicitud as EntradaEstadoContable)
+  return (
+    <div className="flex max-w-[13rem] flex-col gap-0.5 whitespace-normal">
+      <span className={`w-fit rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${ESTILO_CONTABLE[ec.estado]}`}>
+        {ec.etiqueta}
+      </span>
+      {ec.motivos.length > 0 && (
+        // Los motivos se listan; no se suman ni se resumen en una sola cifra.
+        <span className="line-clamp-2 text-[11px] leading-tight text-gray-500" title={ec.motivos.map((m) => m.texto).join(' · ')}>
+          {ec.motivos.map((m) => m.texto).join(' · ')}
+        </span>
       )}
     </div>
   )
