@@ -1,8 +1,10 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState, Fragment } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, Fragment } from 'react'
 import {
   collection,
+  doc,
+  getDoc,
   getDocs,
   query,
   where,
@@ -23,7 +25,6 @@ import {
   Info,
 } from 'lucide-react'
 import Link from 'next/link'
-import { rutaOrden } from '@/lib/ruta-orden'
 import type { MovimientoFinanciero } from '@/lib/financial-types'
 import {
   calcularDeudaOperativaMotorizado,
@@ -35,6 +36,18 @@ import {
   calcularTodosLosBalances,
 } from '@/lib/financial-ledger'
 import { calcularDeposito } from '@/lib/calculo-deposito'
+import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
+import {
+  tituloMovimiento,
+  etiquetaRolRegistrado,
+  estaAnulado,
+  detalleAnulacion,
+  refsMovimiento,
+  resolverMotorizado,
+  LABEL_ROL_REGISTRADO,
+  type EntradaEventoAuditoria,
+  type DepositoRelacionado,
+} from '@/lib/evento-auditoria'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -187,6 +200,44 @@ function AuditoriaFinancieraPageContent() {
   // solicitudes_envio entregadas: fuente de verdad para pendienteComercio / pendienteStorkhub
   const [ordenesEntregadas, setOrdenesEntregadas] = useState<OrdenEntregada[]>([])
 
+  // B2-AUDITORIA-UX — cachés de resolución para la tabla de Movimientos.
+  //
+  // `nombresActores`: usuarios/{uid} deduplicado por UID. Una cadena vacía
+  // significa "consultado y sin nombre legible", y sirve de marca para no
+  // volver a leerlo. getDoc puntual, nunca listener: un nombre no cambia
+  // mientras se audita.
+  //
+  // `depositosRef`: documentos de ordenes_deposito leídos SOLO al expandir una
+  // fila que trae depositoId. `null` = leído y sin documento. Nunca se
+  // precargan todos: la tabla no necesita saber de depósitos hasta que
+  // alguien pregunta por uno.
+  const [nombresActores, setNombresActores] = useState<Record<string, string>>({})
+  const [depositosRef, setDepositosRef] = useState<Record<string, DepositoRelacionado | null>>({})
+
+  /**
+   * Lee el documento del depósito de UNA fila, la que se acaba de expandir.
+   * Sin esto no hay forma de saber a qué orden pertenece: el movimiento de
+   * depósito guarda depositoId y motorizadoId, pero no solicitudId.
+   */
+  const depositosPedidos = useRef<Set<string>>(new Set())
+  const cargarDeposito = useCallback((depositoId: string | null | undefined) => {
+    const id = typeof depositoId === 'string' ? depositoId.trim() : ''
+    // El Set de pedidos vive en un ref, no en el state: marcar "ya pedido"
+    // dentro de un updater lo volvería impuro y StrictMode dispararía la
+    // lectura dos veces.
+    if (!id || depositosPedidos.current.has(id)) return
+    depositosPedidos.current.add(id)
+    getDoc(doc(db, 'ordenes_deposito', id))
+      .then((snap) => {
+        const data = snap.exists() ? (snap.data() as { solicitudIds?: string[] } | undefined) : null
+        setDepositosRef((p) => ({
+          ...p,
+          [id]: data ? { id, solicitudIds: data.solicitudIds ?? [] } : null,
+        }))
+      })
+      .catch(() => setDepositosRef((p) => ({ ...p, [id]: null })))
+  }, [])
+
   // ── Filtros ───────────────────────────────────────────────────────────────
   const [filtroMotorizado, setFiltroMotorizado] = useState<string>('todos')
   const [soloDiferencias, setSoloDiferencias] = useState(false)
@@ -282,6 +333,38 @@ function AuditoriaFinancieraPageContent() {
   }, [])
 
   useEffect(() => { cargarDatos() }, [cargarDatos])
+
+  // ─── Nombres de los actores ────────────────────────────────────────────────
+  //
+  // B2-AUDITORIA-UX — el ledger guarda `creadoPorUid`, nunca el nombre, así que
+  // la columna "Quién" estaba condenada al UID crudo. Se resuelve contra
+  // `usuarios/{uid}` con el mismo patrón ya probado en Gestor → Cobros y en la
+  // ficha: deduplicado por UID, cacheado, un getDoc por UID nuevo y ninguno
+  // repetido. Los actores de un ledger son el personal interno, un puñado de
+  // UIDs distintos aunque haya miles de movimientos.
+  //
+  // Se incluye `anuladoPorUid` en el mismo lote: es otro actor, de la misma
+  // colección, y así el detalle de una anulación no vuelve a mostrar un UID.
+  useEffect(() => {
+    const uids = [...new Set(
+      movimientos.flatMap((m) => [m.creadoPorUid, m.anuladoPorUid])
+        .map((u) => (typeof u === 'string' ? u.trim() : ''))
+        .filter((u) => u !== ''),
+    )].filter((uid) => !(uid in nombresActores))
+    if (uids.length === 0) return
+    Promise.all(uids.map((uid) => getDoc(doc(db, 'usuarios', uid)))).then((snaps) => {
+      const nuevos: Record<string, string> = {}
+      snaps.forEach((snap, i) => {
+        // '' = consultado y sin nombre legible. Marca de "ya resuelto" para no
+        // releerlo, y presentarActor() se encarga de que la UI no caiga al UID.
+        nuevos[uids[i]] = snap.exists() ? nombreDeUsuario(snap.data() as never) : ''
+      })
+      setNombresActores((prev) => ({ ...prev, ...nuevos }))
+    })
+    // nombresActores fuera de deps a propósito: es la caché que este mismo
+    // efecto escribe, y volver a entrar por ella lo dispararía en bucle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [movimientos])
 
   // ─── Resumen de cobertura ─────────────────────────────────────────────────
 
@@ -524,9 +607,18 @@ function AuditoriaFinancieraPageContent() {
         if (mot && m.motorizadoId !== mot.id && m.motorizadoId !== mot.authUid) return false
       }
 
-      // Búsqueda libre
+      // Búsqueda libre. B2-AUDITORIA-UX: se suman los nombres YA resueltos —
+      // actor y motorizado — para poder buscar "Juan" y no solo un UID. No se
+      // dispara ninguna lectura para buscar: si un nombre todavía no está en
+      // caché, esa fila simplemente no matchea por nombre.
       if (busq) {
-        const texto = [m.tipo, m.descripcion, m.cuentaOrigen, m.cuentaDestino, m.solicitudId, m.depositoId].join(' ').toLowerCase()
+        const nombreActor = nombresActores[(m.creadoPorUid ?? '').trim()] ?? ''
+        const mot = resolverMotorizado(m.motorizadoId, motorizados)
+        const texto = [
+          m.tipo, m.descripcion, m.cuentaOrigen, m.cuentaDestino,
+          m.solicitudId, m.depositoId, m.creadoPorUid,
+          nombreActor, mot?.nombre ?? '',
+        ].join(' ').toLowerCase()
         if (!texto.includes(busq)) return false
       }
 
@@ -536,7 +628,7 @@ function AuditoriaFinancieraPageContent() {
       const tb = (b.at as any)?.toMillis?.() ?? 0
       return tb - ta
     })
-  }, [movimientos, desde, hasta, soloHuerfanos, soloSinCuentas, filtroMotorizado, motorizados, busquedaMov])
+  }, [movimientos, desde, hasta, soloHuerfanos, soloSinCuentas, filtroMotorizado, motorizados, busquedaMov, nombresActores])
 
   // ─── Issues ───────────────────────────────────────────────────────────────
 
@@ -1335,11 +1427,14 @@ function AuditoriaFinancieraPageContent() {
                   <table className="w-full text-sm">
                     <thead className="bg-gray-50 border-b border-gray-200">
                       <tr>
+                        {/* B2-AUDITORIA-UX — la fila responde qué / cuándo /
+                            cuánto / quién / con qué se relaciona / si sigue
+                            vigente. Las cuentas técnicas bajan al detalle. */}
                         <th className={thCls}>Fecha</th>
-                        <th className={thCls}>Tipo</th>
+                        <th className={thCls}>Qué ocurrió</th>
                         <th className={`${thCls} text-right`}>Monto</th>
-                        <th className={thCls}>Origen</th>
-                        <th className={thCls}>Destino</th>
+                        <th className={thCls}>Quién</th>
+                        <th className={thCls}>Relacionado</th>
                         <th className={thCls}>Estado</th>
                         <th className={thCls}></th>
                       </tr>
@@ -1356,38 +1451,100 @@ function AuditoriaFinancieraPageContent() {
                         const sinCuentas = !m.cuentaOrigen && !m.cuentaDestino
                         const esHuerfano = !m.solicitudId && !m.depositoId && !m.motorizadoId && !m.comercioId && !m.saldoId && !m.gastoId && !m.liquidacionId
                         const isExpanded = movsExpandidos.has(m.id)
+                        // B2-AUDITORIA-UX — todo lo que se pinta abajo sale del
+                        // helper puro; acá solo se decide el layout.
+                        const evento = m as EntradaEventoAuditoria
+                        const { titulo, tipoCrudo } = tituloMovimiento(evento)
+                        const anulado = estaAnulado(evento)
+                        const anulacion = detalleAnulacion(evento)
+                        const actor = presentarActor(m.creadoPorUid, nombresActores[(m.creadoPorUid ?? '').trim()])
+                        const mot = resolverMotorizado(m.motorizadoId, motorizados)
+                        const refs = refsMovimiento(evento, m.depositoId ? depositosRef[m.depositoId] : null)
+                        const refSolicitud = refs.find((r) => r.clave === 'solicitud')
+                        const refDeposito = refs.find((r) => r.clave === 'deposito')
                         return (
                           <Fragment key={m.id}>
                             <tr
                               className={`hover:bg-gray-50 cursor-pointer ${sinCuentas ? 'bg-amber-50/40' : ''} ${esHuerfano ? 'bg-red-50/30' : ''}`}
-                              onClick={() => toggleMovExpand(m.id)}
+                              onClick={() => { toggleMovExpand(m.id); cargarDeposito(m.depositoId) }}
                             >
                               <td className={`${tdCls} whitespace-nowrap`}>{fmtFechaCorta(m.at)}</td>
+                              {/* Qué ocurrió: manda la descripción persistida; el
+                                  tipo crudo queda como chip técnico secundario. */}
                               <td className={tdCls}>
-                                <span className="inline-flex items-center gap-1">
-                                  <code className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-700">{m.tipo}</code>
-                                  {sinCuentas && <span title="Sin cuentas" className="text-amber-500"><AlertTriangle size={11} /></span>}
-                                  {esHuerfano && <span title="Sin referencias" className="text-red-500"><XCircle size={11} /></span>}
-                                </span>
+                                <div className="flex max-w-[22rem] flex-col gap-0.5 whitespace-normal">
+                                  <span className={`text-sm leading-tight ${anulado ? 'text-gray-400 line-through' : 'text-gray-800'}`}>
+                                    {titulo}
+                                  </span>
+                                  <span className="inline-flex items-center gap-1">
+                                    {tipoCrudo && (
+                                      <code className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">{tipoCrudo}</code>
+                                    )}
+                                    {sinCuentas && <span title="Sin cuentas" className="text-amber-500"><AlertTriangle size={11} /></span>}
+                                    {esHuerfano && <span title="Sin referencias" className="text-red-500"><XCircle size={11} /></span>}
+                                  </span>
+                                </div>
                               </td>
                               <td className={`${tdCls} text-right font-semibold font-mono`}>
-                                <span className="text-green-700">{fmt(m.monto)}</span>
+                                <span className={anulado ? 'text-gray-400 line-through' : 'text-green-700'}>{fmt(m.monto)}</span>
                               </td>
-                              <td className={`${tdCls} font-mono text-[11px]`}>
-                                {m.cuentaOrigen
-                                  ? <span className="text-gray-600">{m.cuentaOrigen}</span>
-                                  : <span className="text-gray-300">—</span>}
+                              {/* Quién: nombre al frente, UID al title. Si el
+                                  movimiento apunta a un motorizado, su nombre
+                                  sale gratis de la colección ya cargada. */}
+                              <td className={tdCls}>
+                                {actor || mot ? (
+                                  <div className="flex flex-col gap-0.5">
+                                    {actor && (
+                                      <span className="text-gray-700" title={actor.uid}>{actor.nombre}</span>
+                                    )}
+                                    {mot && (
+                                      <span className="text-[11px] text-gray-400" title={mot.id}>
+                                        Motorizado: {mot.tieneNombre ? mot.nombre : mot.id}
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : <span className="text-gray-300">—</span>}
                               </td>
-                              <td className={`${tdCls} font-mono text-[11px]`}>
-                                {m.cuentaDestino
-                                  ? <span className="text-gray-600">{m.cuentaDestino}</span>
-                                  : <span className="text-gray-300">—</span>}
+                              {/* Relacionado: solo destinos demostrables. Sin
+                                  ruta se muestra el dato, nunca un link falso. */}
+                              <td className={tdCls}>
+                                <div className="flex flex-col items-start gap-0.5">
+                                  {refSolicitud && (
+                                    refSolicitud.ruta ? (
+                                      <Link
+                                        href={refSolicitud.ruta}
+                                        onClick={(e) => e.stopPropagation()}
+                                        title={`Ver historial de la orden · ${refSolicitud.id}`}
+                                        className="text-[12px] text-blue-600 hover:text-blue-800 hover:underline transition"
+                                      >
+                                        Solicitud →
+                                      </Link>
+                                    ) : <span className="text-[12px] text-gray-500">Solicitud</span>
+                                  )}
+                                  {refDeposito && (
+                                    refDeposito.ruta ? (
+                                      <Link
+                                        href={refDeposito.ruta}
+                                        onClick={(e) => e.stopPropagation()}
+                                        title={`Ver depósitos de la orden · ${refDeposito.id}`}
+                                        className="text-[12px] text-blue-600 hover:text-blue-800 hover:underline transition"
+                                      >
+                                        Depósito →
+                                      </Link>
+                                    ) : (
+                                      <span className="text-[12px] text-gray-500">
+                                        Depósito{refDeposito.nota ? ` · ${refDeposito.nota}` : ''}
+                                      </span>
+                                    )
+                                  )}
+                                  {!refSolicitud && !refDeposito && <span className="text-gray-300">—</span>}
+                                </div>
                               </td>
                               <td className={tdCls}>
                                 <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                                  m.estado === 'anulado' ? 'bg-gray-100 text-gray-500' : 'bg-green-100 text-green-700'
+                                  anulado ? 'bg-gray-100 text-gray-500' : 'bg-green-100 text-green-700'
                                 }`}>
-                                  {m.estado}
+                                  {anulado ? 'Anulado' : 'Activo'}
                                 </span>
                               </td>
                               <td className={tdCls}>
@@ -1400,36 +1557,103 @@ function AuditoriaFinancieraPageContent() {
                                   <div className="grid grid-cols-2 gap-x-8 gap-y-1.5 text-xs sm:grid-cols-4">
                                     <div><span className="text-gray-400">ID:</span> <code className="font-mono text-gray-700">{m.id}</code></div>
                                     <div><span className="text-gray-400">Fecha:</span> <span className="text-gray-700">{fmtFecha(m.at)}</span></div>
-                                    <div><span className="text-gray-400">Creado por:</span> <code className="font-mono text-gray-700">{m.creadoPorUid ?? '—'}</code></div>
-                                    <div><span className="text-gray-400">Rol:</span> <span className="text-gray-700">{m.creadoPorRol ?? '—'}</span></div>
+                                    {/* B2-AUDITORIA-UX — nombre al frente, UID
+                                        detrás. El UID se conserva: sigue siendo
+                                        la trazabilidad dura del movimiento. */}
+                                    <div>
+                                      <span className="text-gray-400">Creado por:</span>{' '}
+                                      {actor
+                                        ? <span className="text-gray-700">{actor.nombre}</span>
+                                        : <span className="text-gray-400">—</span>}
+                                    </div>
+                                    {actor && (
+                                      <div><span className="text-gray-400">UID:</span> <code className="font-mono text-[11px] text-gray-500">{actor.uid}</code></div>
+                                    )}
+                                    {/* "Rol registrado", nunca "Rol": el writer
+                                        escribe 'gestor' por defecto aunque haya
+                                        actuado un Admin, así que este campo
+                                        describe el registro, no la identidad.
+                                        Deuda: AUD-ROL-NO-DISCRIMINA-ADMIN. */}
+                                    <div>
+                                      <span className="text-gray-400">{LABEL_ROL_REGISTRADO}:</span>{' '}
+                                      <span className="text-gray-700">{etiquetaRolRegistrado(m.creadoPorRol)}</span>
+                                    </div>
+                                    {m.cuentaOrigen && <div><span className="text-gray-400">Origen:</span> <code className="font-mono text-[11px] text-gray-600">{m.cuentaOrigen}</code></div>}
+                                    {m.cuentaDestino && <div><span className="text-gray-400">Destino:</span> <code className="font-mono text-[11px] text-gray-600">{m.cuentaDestino}</code></div>}
                                     {m.descripcion && <div className="col-span-2"><span className="text-gray-400">Descripción:</span> <span className="text-gray-700">{m.descripcion}</span></div>}
-                                    {/* B2.5 — el ID era texto plano: para auditar un movimiento
-                                        había que copiarlo y buscar la orden a mano. El destino es
-                                        #historial, que es la pregunta que se hace desde acá. */}
-                                    {m.solicitudId && (
-                                      <div>
-                                        <span className="text-gray-400">Solicitud:</span>{' '}
-                                        {rutaOrden(m.solicitudId, 'historial') ? (
+                                    {/* B2.5 + B2-AUDITORIA-UX — el ID era texto plano: para
+                                        auditar un movimiento había que copiarlo y buscar la orden
+                                        a mano. Ahora cada referencia declara su propio destino, y
+                                        las que no tienen superficie propia quedan como texto: un
+                                        link a una pantalla equivocada es peor que ninguno. */}
+                                    {refs.map((r) => (
+                                      <div key={`${r.clave}-${r.id}`}>
+                                        <span className="text-gray-400">{r.etiqueta}:</span>{' '}
+                                        {r.ruta ? (
                                           <Link
-                                            href={rutaOrden(m.solicitudId, 'historial')!}
-                                            title={`Ver historial de la orden · ${m.solicitudId}`}
+                                            href={r.ruta}
+                                            title={`Abrir la orden · ${r.id}`}
                                             className="font-mono text-blue-600 hover:text-blue-800 hover:underline transition"
                                           >
-                                            {m.solicitudId}
+                                            {r.id}
                                           </Link>
+                                        ) : r.clave === 'motorizado' && mot?.tieneNombre ? (
+                                          <span className="text-gray-700">
+                                            {mot.nombre} <code className="font-mono text-[11px] text-gray-400">{r.id}</code>
+                                          </span>
                                         ) : (
-                                          <code className="font-mono text-gray-700">{m.solicitudId}</code>
+                                          <code className="font-mono text-gray-700">{r.id}</code>
+                                        )}
+                                        {r.nota && <span className="text-gray-400"> · {r.nota}</span>}
+                                        {/* Depósito agrupado: se ofrecen TODAS las órdenes.
+                                            Elegir una sola sería atribuirle el depósito. */}
+                                        {r.ordenes && (
+                                          <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5">
+                                            {r.ordenes.map((o) => (
+                                              <Link
+                                                key={o.id}
+                                                href={o.ruta}
+                                                title={`Ver depósitos de la orden · ${o.id}`}
+                                                className="font-mono text-[11px] text-blue-600 hover:text-blue-800 hover:underline transition"
+                                              >
+                                                {o.id.slice(0, 8)}…
+                                              </Link>
+                                            ))}
+                                          </div>
                                         )}
                                       </div>
-                                    )}
-                                    {m.depositoId && <div><span className="text-gray-400">Depósito:</span> <code className="font-mono text-gray-700">{m.depositoId}</code></div>}
-                                    {m.motorizadoId && <div><span className="text-gray-400">Motorizado:</span> <code className="font-mono text-gray-700">{m.motorizadoId}</code></div>}
-                                    {m.comercioId && <div><span className="text-gray-400">Comercio:</span> <code className="font-mono text-gray-700">{m.comercioId}</code></div>}
-                                    {m.saldoId && <div><span className="text-gray-400">Saldo:</span> <code className="font-mono text-gray-700">{m.saldoId}</code></div>}
-                                    {m.gastoId && <div><span className="text-gray-400">Gasto:</span> <code className="font-mono text-gray-700">{m.gastoId}</code></div>}
-                                    {m.liquidacionId && <div><span className="text-gray-400">Liquidación:</span> <code className="font-mono text-gray-700">{m.liquidacionId}</code></div>}
+                                    ))}
                                     {m.semanaKey && <div><span className="text-gray-400">Semana:</span> <span className="text-gray-700">{m.semanaKey}</span></div>}
                                     {m.propietario && <div><span className="text-gray-400">Propietario:</span> <span className="text-gray-700">{m.propietario}</span></div>}
+                                    {/* B2-AUDITORIA-UX — la anulación existía en el documento y
+                                        no se mostraba en ninguna parte: se leía una descripción
+                                        en pasado sin saber que ya había sido revertida. Solo
+                                        campos persistidos; lo ausente no se rellena. */}
+                                    {anulacion && (
+                                      <div className="col-span-2 mt-1 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 sm:col-span-4">
+                                        <div className="font-semibold text-gray-500">Movimiento anulado</div>
+                                        <div className="mt-0.5 flex flex-col gap-0.5">
+                                          {anulacion.at != null && (
+                                            <div><span className="text-gray-400">Anulado el:</span> <span className="text-gray-700">{fmtFecha(anulacion.at)}</span></div>
+                                          )}
+                                          {anulacion.porUid && (
+                                            <div>
+                                              <span className="text-gray-400">Anulado por:</span>{' '}
+                                              <span className="text-gray-700">
+                                                {presentarActor(anulacion.porUid, nombresActores[anulacion.porUid])?.nombre}
+                                              </span>{' '}
+                                              <code className="font-mono text-[11px] text-gray-400">{anulacion.porUid}</code>
+                                            </div>
+                                          )}
+                                          {anulacion.motivo && (
+                                            <div><span className="text-gray-400">Motivo:</span> <span className="text-gray-700">{anulacion.motivo}</span></div>
+                                          )}
+                                          {anulacion.movimientoId && (
+                                            <div><span className="text-gray-400">Revertido por:</span> <code className="font-mono text-gray-700">{anulacion.movimientoId}</code></div>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
                                   </div>
                                 </td>
                               </tr>
