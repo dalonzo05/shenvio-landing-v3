@@ -29,8 +29,6 @@ import {
   diaSiguiente,
   puedeAvanzar,
   normalizarDiaSeleccionado,
-  entregaSinFecha,
-  type EntradaDiaOrden,
 } from '@/lib/dia-operativo'
 import { SolicitudDrawer } from './_components/SolicitudDrawer'
 import { IrAFicha } from './_components/IrAFicha'
@@ -312,14 +310,16 @@ function PanelGestorPageContent() {
   // Métricas del DÍA SELECCIONADO. Cada una con su propio timestamp: creadas
   // por `createdAt`, entregadas por `historial.entregadoAt`. No se mezclan.
   //
-  // `sinFecha` cuenta las entregadas que no pueden fecharse. Solo alcanza a
-  // ver las creadas ese mismo día —es lo que hay cargado—, así que es un
-  // indicio, no un censo. Se muestra para no dar el total por completo cuando
-  // no lo está; jamás para repartirlas a ojo entre días.
+  // Regla definitiva de "Entregadas": son EXACTAMENTE las órdenes cuyo
+  // `historial.entregadoAt` cae en el rango del día. Una orden sin ese
+  // timestamp no se atribuye a ningún día desde este KPI, y la pantalla
+  // tampoco intenta cuantificar cuántas quedaron fuera: solo podría verlas
+  // entre las creadas ese mismo día, así que sería un conteo parcial
+  // presentado como total. Eso queda como deuda de datos, no como copy:
+  // DASH-DATE-EXCLUIDAS-PARCIAL.
   const kpisDia = useMemo(() => ({
     creadas: ordenesDelDia.length,
     entregadas: entregadasDelDia.length,
-    sinFecha: ordenesDelDia.filter(o => entregaSinFecha(o as EntradaDiaOrden)).length,
   }), [ordenesDelDia, entregadasDelDia])
 
   // Operación pendiente AHORA. Ninguna mira el día seleccionado.
@@ -492,12 +492,6 @@ function PanelGestorPageContent() {
             </p>
             <p className="mt-0.5 text-xs font-semibold text-gray-500">Entregadas</p>
             <p className="text-[10px] text-gray-400">por fecha de entrega registrada</p>
-            {/* Se dice cuántas quedaron fuera en vez de inflar el total. */}
-            {kpisDia.sinFecha > 0 && (
-              <p className="mt-1 text-[10px] text-amber-600" title="Entregadas creadas este día cuyo historial.entregadoAt no existe: no se les puede atribuir una fecha de entrega.">
-                {kpisDia.sinFecha} entregada{kpisDia.sinFecha > 1 ? 's' : ''} sin fecha de entrega registrada
-              </p>
-            )}
           </div>
         </div>
       </section>
