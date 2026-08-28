@@ -16,9 +16,22 @@ import {
   Zap,
   DollarSign,
   Layers,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react'
 import { collection, onSnapshot, query, where, limit, Timestamp } from 'firebase/firestore'
 import { db } from '@/fb/config'
+import {
+  hoyOperativo,
+  rangoDiaOperativo,
+  esHoyOperativo,
+  diaAnterior,
+  diaSiguiente,
+  puedeAvanzar,
+  normalizarDiaSeleccionado,
+  entregaSinFecha,
+  type EntradaDiaOrden,
+} from '@/lib/dia-operativo'
 import { SolicitudDrawer } from './_components/SolicitudDrawer'
 import { IrAFicha } from './_components/IrAFicha'
 import { useModuleGuard } from '../_hooks/useModuleGuard'
@@ -28,6 +41,8 @@ type OrdenActiva = {
   estado?: string
   createdAt?: Timestamp
   updatedAt?: Timestamp
+  // DASH-DATE: única fuente de la fecha de entrega. Ver lib/dia-operativo.ts.
+  historial?: { entregadoAt?: Timestamp }
   ownerSnapshot?: { companyName?: string; nombre?: string }
   userId?: string
   asignacion?: { motorizadoNombre?: string; motorizadoId?: string } | null
@@ -129,16 +144,91 @@ function PanelGestorPageContent() {
   const [busqueda, setBusqueda] = useState('')
   const [filtroEstado, setFiltroEstado] = useState<FiltroEstado>('todos')
   const [cobrosAlerta, setCobrosAlerta] = useState<CobroAlerta[]>([])
-  const [ordenesHoy, setOrdenesHoy] = useState<OrdenActiva[]>([])
+  const [ordenesDelDia, setOrdenesDelDia] = useState<OrdenActiva[]>([])
+  const [entregadasDelDia, setEntregadasDelDia] = useState<OrdenActiva[]>([])
+  const [entregadasError, setEntregadasError] = useState(false)
   const [ordenesActivas, setOrdenesActivas] = useState<OrdenActiva[]>([])
   const [ordenesPendientes, setOrdenesPendientes] = useState<OrdenActiva[]>([])
+  const [ordenesConfirmadas, setOrdenesConfirmadas] = useState<OrdenActiva[]>([])
   const [selectedOrdenId, setSelectedOrdenId] = useState<string | null>(null)
 
+  // ─── DASH-DATE · reloj y día operativo ─────────────────────────────────────
+  //
+  // `ahoraMs` es el único reloj de la pantalla. Vive en el state y avanza con
+  // un tick de 60 s, así que los deltas ("hace 40m", ">2 h") dejan de quedarse
+  // congelados esperando un snapshot que quizá no llegue nunca.
+  //
+  // `diaSeleccionado` es un día operativo de Nicaragua ('YYYY-MM-DD'), no un
+  // Date: el huso del dispositivo no debe decidir a qué día pertenece una
+  // orden. Toda la aritmética vive en lib/dia-operativo.ts.
+  const [ahoraMs, setAhoraMs] = useState<number>(() => Date.now())
+  const [diaSeleccionado, setDiaSeleccionado] = useState<string>(() => hoyOperativo(Date.now()) ?? '')
+  // Mientras el usuario esté "en Hoy", el panel sigue al día operativo. Si
+  // eligió una fecha histórica, cruzar la medianoche NO se la cambia debajo.
+  const [siguiendoHoy, setSiguiendoHoy] = useState(true)
+
   useEffect(() => {
-    const hoyStart = new Date(); hoyStart.setHours(0, 0, 0, 0)
-    const q = query(collection(db, 'solicitudes_envio'), where('createdAt', '>=', Timestamp.fromDate(hoyStart)))
-    return onSnapshot(q, (snap) => setOrdenesHoy(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))))
+    const id = setInterval(() => setAhoraMs(Date.now()), 60_000)
+    return () => clearInterval(id)
   }, [])
+
+  // Cambio de día automático: el bug de "hoy congelado" era que el rango se
+  // calculaba una sola vez al montar. Ahora el tick lo detecta.
+  useEffect(() => {
+    if (!siguiendoHoy) return
+    const hoy = hoyOperativo(ahoraMs)
+    if (hoy && hoy !== diaSeleccionado) setDiaSeleccionado(hoy)
+  }, [ahoraMs, siguiendoHoy, diaSeleccionado])
+
+  const esHoy = esHoyOperativo(diaSeleccionado, ahoraMs)
+  const puedeIrAdelante = puedeAvanzar(diaSeleccionado, ahoraMs)
+  const hoyStr = hoyOperativo(ahoraMs) ?? ''
+
+  const irADia = (dia: string | null) => {
+    const destino = normalizarDiaSeleccionado(dia, ahoraMs)
+    if (!destino) return
+    setDiaSeleccionado(destino)
+    // Volver a Hoy reengancha el seguimiento; cualquier otro día lo suelta.
+    setSiguiendoHoy(destino === hoyOperativo(ahoraMs))
+  }
+
+  // Órdenes CREADAS en el día seleccionado. Rango cerrado por ambos extremos:
+  // sin tope superior el panel sumaba días enteros al cruzar la medianoche.
+  useEffect(() => {
+    const rango = rangoDiaOperativo(diaSeleccionado)
+    if (!rango) return
+    const q = query(
+      collection(db, 'solicitudes_envio'),
+      where('createdAt', '>=', Timestamp.fromMillis(rango.inicioMs)),
+      where('createdAt', '<=', Timestamp.fromMillis(rango.finMs)),
+    )
+    return onSnapshot(q, (snap) => setOrdenesDelDia(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<OrdenActiva, 'id'>) }))))
+  }, [diaSeleccionado])
+
+  // Órdenes ENTREGADAS en el día seleccionado. Se consulta `historial.entregadoAt`
+  // directamente: es la única prueba de cuándo se entregó. Una orden sin ese
+  // campo no entra en la query y por tanto no cuenta — que es exactamente lo
+  // que se quiere, en vez de atribuirle la fecha de creación.
+  useEffect(() => {
+    const rango = rangoDiaOperativo(diaSeleccionado)
+    if (!rango) return
+    setEntregadasError(false)
+    const q = query(
+      collection(db, 'solicitudes_envio'),
+      where('historial.entregadoAt', '>=', Timestamp.fromMillis(rango.inicioMs)),
+      where('historial.entregadoAt', '<=', Timestamp.fromMillis(rango.finMs)),
+    )
+    return onSnapshot(
+      q,
+      (snap) => setEntregadasDelDia(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<OrdenActiva, 'id'>) }))),
+      (err) => {
+        // Si la query falla, mostrar 0 sería afirmar que no hubo entregas.
+        console.error('[dashboard] Error consultando entregas del día:', err)
+        setEntregadasError(true)
+        setEntregadasDelDia([])
+      },
+    )
+  }, [diaSeleccionado])
 
   useEffect(() => {
     const q = query(collection(db, 'solicitudes_envio'), where('estado', 'in', ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega']))
@@ -148,6 +238,14 @@ function PanelGestorPageContent() {
   useEffect(() => {
     const q = query(collection(db, 'solicitudes_envio'), where('estado', 'in', ['pendiente', 'nueva']))
     return onSnapshot(q, (snap) => setOrdenesPendientes(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))))
+  }, [])
+
+  // DASH-DATE — "Sin asignar" es backlog vivo, no una métrica del día. Antes
+  // salía de las órdenes creadas hoy, así que una orden confirmada ayer y
+  // todavía sin motorizado —la más urgente— desaparecía al cambiar el día.
+  useEffect(() => {
+    const q = query(collection(db, 'solicitudes_envio'), where('estado', '==', 'confirmada'))
+    return onSnapshot(q, (snap) => setOrdenesConfirmadas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<OrdenActiva, 'id'>) }))))
   }, [])
 
   useEffect(() => {
@@ -205,18 +303,37 @@ function PanelGestorPageContent() {
     return rows
   }, [motorizados, busqueda, filtroEstado])
 
-  const kpisHoy = useMemo(() => ({
-    creadas: ordenesHoy.length,
-    entregadas: ordenesHoy.filter(o => o.estado === 'entregado').length,
+  // Backlog vivo: no depende del día seleccionado.
+  const confirmadasSinAsignar = useMemo(
+    () => ordenesConfirmadas.filter(o => !o.asignacion?.motorizadoId),
+    [ordenesConfirmadas],
+  )
+
+  // Métricas del DÍA SELECCIONADO. Cada una con su propio timestamp: creadas
+  // por `createdAt`, entregadas por `historial.entregadoAt`. No se mezclan.
+  //
+  // `sinFecha` cuenta las entregadas que no pueden fecharse. Solo alcanza a
+  // ver las creadas ese mismo día —es lo que hay cargado—, así que es un
+  // indicio, no un censo. Se muestra para no dar el total por completo cuando
+  // no lo está; jamás para repartirlas a ojo entre días.
+  const kpisDia = useMemo(() => ({
+    creadas: ordenesDelDia.length,
+    entregadas: entregadasDelDia.length,
+    sinFecha: ordenesDelDia.filter(o => entregaSinFecha(o as EntradaDiaOrden)).length,
+  }), [ordenesDelDia, entregadasDelDia])
+
+  // Operación pendiente AHORA. Ninguna mira el día seleccionado.
+  const kpisBacklog = useMemo(() => ({
     enCurso: ordenesActivas.length,
-    sinAsignar: ordenesHoy.filter(o => o.estado === 'confirmada' && !o.asignacion?.motorizadoId).length,
-    rechazadas: ordenesHoy.filter(o => o.estado === 'rechazada').length,
-  }), [ordenesHoy, ordenesActivas])
+    sinAsignar: confirmadasSinAsignar.length,
+    pendientesConfirmacion: ordenesPendientes.length,
+    pendientesAceptacion: ordenesActivas.filter(o => o.estado === 'asignada').length,
+  }), [ordenesActivas, confirmadasSinAsignar, ordenesPendientes])
 
   const resumenMacroZonas = useMemo(() => {
     const retiro = new Map<string, number>()
     const entrega = new Map<string, number>()
-    for (const o of ordenesHoy) {
+    for (const o of ordenesDelDia) {
       if (o.macroZonaRetiroNombre) retiro.set(o.macroZonaRetiroNombre, (retiro.get(o.macroZonaRetiroNombre) ?? 0) + 1)
       if (o.macroZonaEntregaNombre) entrega.set(o.macroZonaEntregaNombre, (entrega.get(o.macroZonaEntregaNombre) ?? 0) + 1)
     }
@@ -225,14 +342,16 @@ function PanelGestorPageContent() {
       topEntrega: [...entrega.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3),
       hasData: retiro.size > 0 || entrega.size > 0,
     }
-  }, [ordenesHoy])
+  }, [ordenesDelDia])
 
   const ordenesAccion = useMemo(() => {
-    const now = Date.now()
+    // DASH-DATE: el reloj entra por `ahoraMs`, que avanza con el tick. Antes
+    // era Date.now() dentro del memo y solo se reevaluaba con un snapshot: una
+    // orden podía cruzar las 2 h sin que la alerta llegara a aparecer.
+    const now = ahoraMs
     const DOS_HORAS = 2 * 60 * 60 * 1000
 
     const pendientesConfirmacion = ordenesPendientes
-    const confirmadasSinAsignar = ordenesHoy.filter(o => o.estado === 'confirmada' && !o.asignacion?.motorizadoId)
     const asignadasPendienteAceptacion = ordenesActivas.filter(o => o.estado === 'asignada')
     const enRiesgo = ordenesActivas.filter(o => {
       const ts = typeof o.updatedAt?.toDate === 'function' ? o.updatedAt.toDate().getTime() : 0
@@ -262,15 +381,16 @@ function PanelGestorPageContent() {
       enRiesgo: enRiesgo.length,
       todas,
     }
-  }, [ordenesPendientes, ordenesHoy, ordenesActivas])
+  }, [ordenesPendientes, confirmadasSinAsignar, ordenesActivas, ahoraMs])
 
   const alertas = useMemo(() => {
-    const now = Date.now()
+    const now = ahoraMs
     const TREINTA_MIN = 30 * 60 * 1000
     const DOS_HORAS = 2 * 60 * 60 * 1000
 
-    const sinAsignarMucho = ordenesHoy.filter(o => {
-      if (o.estado !== 'confirmada' || o.asignacion?.motorizadoId) return false
+    // Sobre el backlog vivo, no sobre las creadas del día: una orden de ayer
+    // sin asignar lleva MÁS tiempo esperando, no menos.
+    const sinAsignarMucho = confirmadasSinAsignar.filter(o => {
       const ts = typeof o.createdAt?.toDate === 'function' ? o.createdAt.toDate().getTime() : 0
       return ts > 0 && (now - ts) > TREINTA_MIN
     })
@@ -281,7 +401,7 @@ function PanelGestorPageContent() {
     })
 
     return { sinAsignarMucho, atascadas }
-  }, [ordenesHoy, ordenesActivas])
+  }, [confirmadasSinAsignar, ordenesActivas, ahoraMs])
 
   const ordenesPorMotorizado = useMemo(() => {
     const map = new Map<string, number>()
@@ -294,7 +414,8 @@ function PanelGestorPageContent() {
 
   function tiempoRelativo(ts?: Timestamp): string {
     if (!ts || typeof ts.toDate !== 'function') return '—'
-    const diff = Math.floor((Date.now() - ts.toDate().getTime()) / 60000)
+    // Con `ahoraMs` el texto se refresca solo cada minuto.
+    const diff = Math.floor((ahoraMs - ts.toDate().getTime()) / 60000)
     if (diff < 1) return 'ahora'
     if (diff < 60) return `hace ${diff}m`
     return `hace ${Math.floor(diff / 60)}h ${diff % 60}m`
@@ -318,21 +439,92 @@ function PanelGestorPageContent() {
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-5">
 
-      {/* KPIs del día */}
-      <div className="grid grid-cols-5 gap-3">
-        {[
-          { label: 'Creadas hoy', value: kpisHoy.creadas, color: 'text-gray-900', bg: 'bg-white border-gray-200' },
-          { label: 'Entregadas', value: kpisHoy.entregadas, color: 'text-green-700', bg: 'bg-green-50 border-green-200' },
-          { label: 'En curso', value: kpisHoy.enCurso, color: 'text-blue-700', bg: 'bg-blue-50 border-blue-200' },
-          { label: 'Sin asignar', value: kpisHoy.sinAsignar, color: kpisHoy.sinAsignar > 0 ? 'text-orange-600' : 'text-gray-500', bg: kpisHoy.sinAsignar > 0 ? 'bg-orange-50 border-orange-200' : 'bg-white border-gray-200' },
-          { label: 'Rechazadas', value: kpisHoy.rechazadas, color: kpisHoy.rechazadas > 0 ? 'text-red-600' : 'text-gray-500', bg: kpisHoy.rechazadas > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-gray-200' },
-        ].map(k => (
-          <div key={k.label} className={`${k.bg} border rounded-xl px-4 py-3`}>
-            <p className={`text-2xl font-black ${k.color}`}>{k.value}</p>
-            <p className="text-xs font-semibold text-gray-500 mt-0.5">{k.label}</p>
+      {/* ── DASH-DATE · Día seleccionado ──────────────────────────────────── */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-black text-gray-900">Día seleccionado</h2>
+            <span className="text-[11px] text-gray-400">hora de Nicaragua</span>
           </div>
-        ))}
-      </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => irADia(diaAnterior(diaSeleccionado))}
+              title="Día anterior"
+              className="rounded-lg border border-gray-200 p-1.5 text-gray-600 transition hover:bg-gray-50"
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <input
+              type="date"
+              value={diaSeleccionado}
+              max={hoyStr}
+              onChange={(e) => irADia(e.target.value)}
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#004aad]/20"
+            />
+            <button
+              onClick={() => irADia(diaSiguiente(diaSeleccionado))}
+              disabled={!puedeIrAdelante}
+              title={puedeIrAdelante ? 'Día siguiente' : 'No hay días posteriores a hoy'}
+              className="rounded-lg border border-gray-200 p-1.5 text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <ChevronRight size={16} />
+            </button>
+            <button
+              onClick={() => irADia(hoyStr)}
+              disabled={esHoy}
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Hoy
+            </button>
+          </div>
+        </div>
+
+        {/* Solo métricas históricas del día. Cada una con su propio timestamp. */}
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <div className="rounded-xl border border-gray-200 bg-white px-4 py-3">
+            <p className="text-2xl font-black text-gray-900">{kpisDia.creadas}</p>
+            <p className="mt-0.5 text-xs font-semibold text-gray-500">Creadas</p>
+            <p className="text-[10px] text-gray-400">por fecha de creación</p>
+          </div>
+          <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3">
+            <p className="text-2xl font-black text-green-700">
+              {entregadasError ? <span className="text-gray-400" title="No se pudo consultar; el 0 sería engañoso">—</span> : kpisDia.entregadas}
+            </p>
+            <p className="mt-0.5 text-xs font-semibold text-gray-500">Entregadas</p>
+            <p className="text-[10px] text-gray-400">por fecha de entrega registrada</p>
+            {/* Se dice cuántas quedaron fuera en vez de inflar el total. */}
+            {kpisDia.sinFecha > 0 && (
+              <p className="mt-1 text-[10px] text-amber-600" title="Entregadas creadas este día cuyo historial.entregadoAt no existe: no se les puede atribuir una fecha de entrega.">
+                {kpisDia.sinFecha} entregada{kpisDia.sinFecha > 1 ? 's' : ''} sin fecha de entrega registrada
+              </p>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* ── Operación pendiente ahora ─────────────────────────────────────────
+          No depende del día seleccionado: es lo que está abierto en este
+          momento. Una orden de ayer sin asignar sigue acá aunque se navegue a
+          otra fecha. */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-black text-gray-900">Operación pendiente ahora</h2>
+          <span className="text-[11px] text-gray-400">no depende del día seleccionado</span>
+        </div>
+        <div className="mt-3 grid grid-cols-4 gap-3">
+          {[
+            { label: 'En curso', value: kpisBacklog.enCurso, color: 'text-blue-700', bg: 'bg-blue-50 border-blue-200' },
+            { label: 'Sin asignar', value: kpisBacklog.sinAsignar, color: kpisBacklog.sinAsignar > 0 ? 'text-orange-600' : 'text-gray-500', bg: kpisBacklog.sinAsignar > 0 ? 'bg-orange-50 border-orange-200' : 'bg-white border-gray-200' },
+            { label: 'Pend. confirmación', value: kpisBacklog.pendientesConfirmacion, color: kpisBacklog.pendientesConfirmacion > 0 ? 'text-yellow-700' : 'text-gray-500', bg: kpisBacklog.pendientesConfirmacion > 0 ? 'bg-yellow-50 border-yellow-200' : 'bg-white border-gray-200' },
+            { label: 'Pend. aceptación', value: kpisBacklog.pendientesAceptacion, color: kpisBacklog.pendientesAceptacion > 0 ? 'text-blue-700' : 'text-gray-500', bg: 'bg-white border-gray-200' },
+          ].map(k => (
+            <div key={k.label} className={`${k.bg} border rounded-xl px-4 py-3`}>
+              <p className={`text-2xl font-black ${k.color}`}>{k.value}</p>
+              <p className="text-xs font-semibold text-gray-500 mt-0.5">{k.label}</p>
+            </div>
+          ))}
+        </div>
+      </section>
 
       {/* Alertas operacionales */}
       {(alertas.sinAsignarMucho.length > 0 || alertas.atascadas.length > 0 || cobrosAlerta.length > 0) && (
@@ -485,11 +677,15 @@ function PanelGestorPageContent() {
       <section className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
         <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
           <MapPin className="h-4 w-4 text-violet-500" />
-          <h2 className="text-sm font-black text-gray-900">Distribución por macrozona — hoy</h2>
+          {/* El conteo sale de `createdAt`, así que el título dice "creadas":
+              insinuar entregas sobre una fuente de creación sería mentir. */}
+          <h2 className="text-sm font-black text-gray-900">
+            Distribución por macrozona · órdenes creadas — {diaSeleccionado}
+          </h2>
         </div>
         {!resumenMacroZonas.hasData ? (
           <div className="px-5 py-8 text-center text-sm text-gray-400">
-            Sin datos de macrozona en las órdenes de hoy.
+            Sin datos de macrozona en las órdenes creadas ese día.
           </div>
         ) : (
           <div className="grid grid-cols-2 divide-x divide-gray-100">
