@@ -1,19 +1,165 @@
-// B2-PAGO-MEDIO — Lado UI del medio de pago.
+// B2-PAGO-MEDIO — Con qué se pagó el delivery. Contrato del lado app.
 //
-// El contrato (enum cerrado, validación y orden de resolución) vive en
-// `functions/src/medio-pago.ts` y se importa desde acá. La dirección del
-// import es deliberada: la app puede mirar hacia `functions/`, pero
-// `functions/` no puede mirar hacia afuera sin arrastrar su rootDir y cambiar
-// las rutas de su artefacto de deploy. Un solo contrato, sin enums duplicados.
+// ⚠️ ESPEJO DELIBERADO de `functions/src/medio-pago.ts`. Los dos archivos
+// declaran el mismo contrato y deben mantenerse alineados a mano: mismo enum,
+// mismas reglas, mismos veredictos. No se comparte un módulo entre app y
+// Functions a propósito — un import cruzado arrastraría `functions/src` al
+// compilado raíz de tests, cambiando el rootDir común y el layout de
+// `.test-build`, y ataría el gate de la app al artefacto de otro subproyecto.
+// La frontera autoritativa de seguridad sigue siendo la validación
+// server-side; esta copia es la que usa la UI y la que cubren los tests.
+// Ver deuda PAGO-MEDIO-ENUM-ESPEJADO.
 //
-// Este archivo solo añade lo que el formulario necesita y el servidor no.
+// ── Regla de negocio ────────────────────────────────────────────────────────
 //
-// PURO: sin Firestore, sin React.
+// `cobroDelivery.formaPago` es la ÚNICA fuente persistente y autoritativa del
+// medio. Su ausencia significa "nadie lo registró" y se presenta como
+// "No registrado" — nunca como impago, y nunca como excusa para deducirlo.
+//
+// Está PROHIBIDO derivar el medio de cualquier otra cosa: `quienPaga` (dice
+// quién y cuándo, no con qué), `recibio: true` (dice que hay dinero que
+// depositar, no en qué forma), el receptor, el motorizado, el momento
+// —recolección o entrega— o la existencia de una obligación de depósito.
+// Traducir `quienPaga` fue exactamente el origen del bug "Ef. entrega", que
+// afirmaba efectivo sobre un cobro cuyo medio nadie había registrado.
+//
+// PURO y sin imports: sin Firestore, sin React, sin fechas.
 
-import { esMedioPago, type MedioPago } from '../functions/src/medio-pago'
+/** Conjunto cerrado. Cualquier valor fuera de aquí no se persiste jamás. */
+export const MEDIOS_PAGO = ['efectivo', 'transferencia'] as const
 
-export { MEDIOS_PAGO, esMedioPago } from '../functions/src/medio-pago'
-export type { MedioPago } from '../functions/src/medio-pago'
+export type MedioPago = (typeof MEDIOS_PAGO)[number]
+
+/**
+ * ¿Es uno de los dos valores persistibles?
+ *
+ * Estricto a propósito: sin `trim()`, sin normalizar mayúsculas y sin
+ * sinónimos. `Efectivo`, `EFECTIVO` y `transferencia_deposito` son inválidos.
+ * Un enum que acepta variantes deja de ser cerrado, y el filtro de Base de
+ * datos —Efectivo / Transferencia / No registrado— se volvería ciego a lo que
+ * no contempla.
+ */
+export function esMedioPago(v: unknown): v is MedioPago {
+  return typeof v === 'string' && (MEDIOS_PAGO as readonly string[]).includes(v)
+}
+
+// ─── Resolución del formaPago al cerrar ───────────────────────────────────────
+
+export interface ResolucionFormaPago {
+  /** Valor a persistir, o null si no debe escribirse el campo. */
+  formaPago: MedioPago | null
+  /** true cuando el valor salió del temporal de la recolección. */
+  consumeTemporal: boolean
+}
+
+/**
+ * Qué `formaPago` debe quedar al cerrar `cobroDelivery`.
+ *
+ * Orden de autoridad, sin ninguna otra fuente:
+ *
+ *   1. `formaPagoExistente` válido → se CONSERVA. Un cierre posterior nunca
+ *      pisa lo que ya estaba: si el gestor o un cierre previo lo fijaron, esa
+ *      es la verdad y un medio contradictorio se descarta.
+ *   2. `medioDeEstaLlamada` — el motorizado acaba de declararlo (entrega
+ *      directa).
+ *   3. `medioTemporal` — lo declaró al cobrar en la recolección y viajó en
+ *      `cobrosMotorizado.delivery.medio` hasta acá.
+ *   4. Nada → no se escribe `formaPago`. "No estoy seguro" termina siempre
+ *      aquí, y no existe camino posterior que pueda completarlo.
+ *
+ * `consumeTemporal` avisa de que el temporal cumplió su función: quien llama
+ * debe borrarlo en el MISMO update, para que después del cierre el medio viva
+ * en un solo sitio y una reversión no deje nada capaz de regenerarlo.
+ */
+export function resolverFormaPago(entrada: {
+  formaPagoExistente?: unknown
+  medioDeEstaLlamada?: unknown
+  medioTemporal?: unknown
+}): ResolucionFormaPago {
+  if (esMedioPago(entrada.formaPagoExistente)) {
+    return { formaPago: entrada.formaPagoExistente, consumeTemporal: false }
+  }
+  if (esMedioPago(entrada.medioDeEstaLlamada)) {
+    return { formaPago: entrada.medioDeEstaLlamada, consumeTemporal: false }
+  }
+  if (esMedioPago(entrada.medioTemporal)) {
+    return { formaPago: entrada.medioTemporal, consumeTemporal: true }
+  }
+  return { formaPago: null, consumeTemporal: false }
+}
+
+/**
+ * ¿Hay que borrar `cobrosMotorizado.delivery.medio` por dot-path en el cierre?
+ *
+ * Solo cuando el patch NO reescribe el mapa `delivery` completo. Firestore
+ * rechaza un update que contenga a la vez un campo y un ancestro suyo, así que
+ * las dos formas de consumir el temporal son excluyentes:
+ *
+ *   · se reescribe `cobrosMotorizado.delivery` → basta con omitir `medio`;
+ *   · no se reescribe                          → hace falta el delete del leaf.
+ *
+ * Se borra siempre que el temporal exista, lo haya usado o no: después del
+ * cierre la única fuente del medio debe ser `cobroDelivery.formaPago`.
+ */
+export function debeBorrarTemporalPorRuta(entrada: {
+  reescribeMapaDelivery: boolean
+  temporalPresente: boolean
+}): boolean {
+  return entrada.temporalPresente && !entrada.reescribeMapaDelivery
+}
+
+// ─── Reglas del payload y del cierre ──────────────────────────────────────────
+
+export type VeredictoMedio =
+  | 'ausente'
+  | 'valido'
+  | 'invalido'
+  | 'no_permitido_en_producto'
+
+/**
+ * ¿Qué hacer con el `medio` que llegó en una respuesta de cobro?
+ *
+ * `medio` solo tiene sentido para el delivery: el producto es dinero del
+ * comercio y su medio no es una pregunta que este flujo responda. Enviarlo ahí
+ * se RECHAZA explícitamente en vez de ignorarse — un payload que trae un campo
+ * que nadie va a usar es un malentendido, y callarlo lo perpetúa.
+ *
+ * `undefined` y `null` son ausencia legítima: el SDK de Functions serializa una
+ * propiedad con valor `undefined` como `null`, así que ambos significan "el
+ * motorizado no respondió con un medio".
+ */
+export function evaluarMedioDePayload(entrada: {
+  medio: unknown
+  esProducto: boolean
+}): VeredictoMedio {
+  const ausente = entrada.medio === undefined || entrada.medio === null
+  if (entrada.esProducto) return ausente ? 'ausente' : 'no_permitido_en_producto'
+  if (ausente) return 'ausente'
+  return esMedioPago(entrada.medio) ? 'valido' : 'invalido'
+}
+
+/**
+ * ¿Se admite una llamada a la callable que no trae ninguna confirmación de
+ * cobro?
+ *
+ * El guard general es fail-closed: sin delivery, producto ni cargotrans no hay
+ * nada legítimo que escribir. Se abre UNA excepción estrecha: el cierre de
+ * `cobroDelivery` al entregar.
+ *
+ * Existe porque el cierre dejó de hacerlo el cliente. Las Rules solo le
+ * permiten al motorizado escribir `cobroDelivery` en su primera aparición y
+ * con un `hasOnly` que excluye `formaPago` por construcción, así que el medio
+ * jamás podría persistirse desde ahí. Centralizarlo en la Function —que usa
+ * Admin SDK— es lo que hace posible el feature sin tocar Rules.
+ */
+export function permiteCierreSinConfirmaciones(entrada: {
+  nuevo: string
+  traePayloadDeCobro: boolean
+}): boolean {
+  return entrada.nuevo === 'entregado' && !entrada.traePayloadDeCobro
+}
+
+// ─── Lado UI (no existe en la copia de Functions) ─────────────────────────────
 
 /**
  * Lo que el motorizado elige cuando no sabe con qué le pagaron.

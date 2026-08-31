@@ -1,4 +1,13 @@
-// B2-PAGO-MEDIO — Con qué se pagó el delivery. Fuente única del contrato.
+// B2-PAGO-MEDIO — Con qué se pagó el delivery. Contrato del lado Functions.
+//
+// ⚠️ ESPEJO DELIBERADO de `lib/medio-pago.ts`. Los dos archivos declaran el
+// mismo contrato y deben mantenerse alineados a mano: mismo enum, mismas
+// reglas, mismos veredictos. No se comparte un módulo entre app y Functions a
+// propósito — un import cruzado arrastraría `functions/src` al compilado raíz
+// de tests, cambiando el rootDir común y el layout de `.test-build`, y ataría
+// el gate de la app al artefacto de otro subproyecto. Esta copia es la
+// FRONTERA AUTORITATIVA DE SEGURIDAD: lo que el cliente mande se valida acá,
+// nunca allá. Ver deuda PAGO-MEDIO-ENUM-ESPEJADO.
 //
 // `cobroDelivery.formaPago` es la ÚNICA fuente persistente y autoritativa del
 // medio. Su ausencia significa "nadie lo registró" y se presenta como
@@ -11,13 +20,11 @@
 // Traducir `quienPaga` fue exactamente el origen del bug "Ef. entrega", que
 // afirmaba efectivo sobre un cobro cuyo medio nadie había registrado.
 //
-// PURO y SIN IMPORTS a propósito. Vive dentro de `functions/src` porque el
-// subproyecto de Functions no puede importar hacia afuera: su tsconfig declara
-// `include: ["src"]` con `outDir: "lib"`, así que un import a `../../lib/*`
-// arrastraría el rootDir inferido hasta la raíz del repo y cambiaría las rutas
-// del artefacto de deploy. La app sí puede importar hacia adentro —el sentido
-// inverso no toca el build de Functions— y por eso este archivo es el contrato
-// compartido en vez de dos enums duplicados.
+// PURO y SIN IMPORTS a propósito: ni hacia `../../lib` ni hacia ningún otro
+// sitio. El tsconfig de Functions declara `include: ["src"]` con
+// `outDir: "lib"`, así que cualquier import hacia afuera arrastraría el
+// rootDir inferido hasta la raíz del repo y cambiaría las rutas del artefacto
+// de deploy.
 
 /** Conjunto cerrado. Cualquier valor fuera de aquí no se persiste jamás. */
 export const MEDIOS_PAGO = ['efectivo', 'transferencia'] as const;

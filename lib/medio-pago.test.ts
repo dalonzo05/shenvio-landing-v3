@@ -1,9 +1,11 @@
 // B2-PAGO-MEDIO — suite focal del contrato del medio de pago.
 //
-// Prueba el módulo que vive en `functions/src/medio-pago.ts`, que es la fuente
-// única del enum, del orden de resolución y de las dos reglas del cierre. Se
-// importa por ruta relativa porque el script de tests compila con
-// `moduleResolution node` y sin alias.
+// Prueba `lib/medio-pago.ts`, la copia de la app. `functions/src/medio-pago.ts`
+// es su espejo deliberado y NO se importa desde acá: hacerlo arrastraría
+// `functions/src` al compilado raíz y cambiaría el layout de `.test-build`.
+// Las dos copias se mantienen alineadas a mano (PAGO-MEDIO-ENUM-ESPEJADO); la
+// de Functions es la frontera autoritativa de seguridad y se verifica con su
+// propio `tsc` y con el E2E.
 //
 // Lo que estos tests defienden no es el layout: es que el medio NUNCA se
 // deduzca de algo que no lo demuestra.
@@ -17,8 +19,6 @@ import {
   debeBorrarTemporalPorRuta,
   evaluarMedioDePayload,
   permiteCierreSinConfirmaciones,
-} from '../functions/src/medio-pago'
-import {
   MEDIO_NO_SABE,
   OPCIONES_MEDIO,
   medioParaPayload,
