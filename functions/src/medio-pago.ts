@@ -1,13 +1,17 @@
 // B2-PAGO-MEDIO — Con qué se pagó el delivery. Contrato del lado Functions.
 //
-// ⚠️ ESPEJO DELIBERADO de `lib/medio-pago.ts`. Los dos archivos declaran el
-// mismo contrato y deben mantenerse alineados a mano: mismo enum, mismas
-// reglas, mismos veredictos. No se comparte un módulo entre app y Functions a
-// propósito — un import cruzado arrastraría `functions/src` al compilado raíz
-// de tests, cambiando el rootDir común y el layout de `.test-build`, y ataría
-// el gate de la app al artefacto de otro subproyecto. Esta copia es la
-// FRONTERA AUTORITATIVA DE SEGURIDAD: lo que el cliente mande se valida acá,
-// nunca allá. Ver deuda PAGO-MEDIO-ENUM-ESPEJADO.
+// ⚠️ ESTA ES LA FRONTERA AUTORITATIVA. Todo lo que decide qué se persiste
+// vive acá y solo acá: la validación del payload, la resolución de
+// `formaPago`, el consumo del temporal y el guard del cierre. `lib/medio-pago.ts`
+// NO replica nada de esto — solo transmite lo que el motorizado eligió. Lo
+// único duplicado entre app y Functions son los dos literales del enum, a
+// propósito, para no cruzar un import entre subproyectos: uno arrastraría
+// `functions/src` al compilado raíz de tests y ataría el gate de la app al
+// artefacto de otro proyecto. Ver deuda PAGO-MEDIO-ENUM-ESPEJADO.
+//
+// Sin cobertura de tests unitarios: el subproyecto no tiene runner y no se creó
+// uno en este bloque. Se verifica con su `tsc`, inspección focal y el E2E en
+// staging tras el deploy — deuda PAGO-MEDIO-FUNCTIONS-SIN-TESTS.
 //
 // `cobroDelivery.formaPago` es la ÚNICA fuente persistente y autoritativa del
 // medio. Su ausencia significa "nadie lo registró" y se presenta como
