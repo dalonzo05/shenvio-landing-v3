@@ -47,6 +47,13 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { FieldValue } from 'firebase-admin/firestore';
 import { semanaKeyDeFecha } from './cobro-semanal';
+import {
+  evaluarMedioDePayload,
+  resolverFormaPago,
+  debeBorrarTemporalPorRuta,
+  permiteCierreSinConfirmaciones,
+  type MedioPago,
+} from './medio-pago';
 
 const MAX_ID_LEN = 200;
 const MAX_JUSTIFICACION_LEN = 500;
@@ -172,6 +179,8 @@ type NuevoEstadoTransicion = 'retirado' | 'entregado';
 interface RespuestaCobroInput {
   recibio?: unknown;
   justificacion?: unknown;
+  /** B2-PAGO-MEDIO: solo en `cobros.delivery`, y solo con recibio true. */
+  medio?: unknown;
 }
 
 interface CobrosInput {
@@ -198,6 +207,8 @@ interface ConfirmarTransicionResultado {
 interface RespuestaCobro {
   recibio: boolean;
   justificacion?: string;
+  /** Presente solo si el motorizado eligió Efectivo o Transferencia. */
+  medio?: MedioPago;
 }
 
 /**
@@ -210,14 +221,24 @@ interface RespuestaCobro {
  * ya aplicaba el botón "Confirmar" en el cliente (bloqueadoDelivery/
  * bloqueadoProducto).
  */
-function validarRespuestaCobro(raw: unknown, etiqueta: string): RespuestaCobro {
+function validarRespuestaCobro(raw: unknown, etiqueta: string, esProducto: boolean): RespuestaCobro {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     throw new HttpsError('invalid-argument', `${etiqueta} inválido.`);
   }
   const obj = raw as RespuestaCobroInput;
   const claves = Object.keys(obj);
-  if (!claves.every((k) => k === 'recibio' || k === 'justificacion')) {
+  if (!claves.every((k) => k === 'recibio' || k === 'justificacion' || k === 'medio')) {
     throw new HttpsError('invalid-argument', `${etiqueta} tiene campos no permitidos.`);
+  }
+  // B2-PAGO-MEDIO — el medio solo tiene sentido para el delivery. En producto
+  // se RECHAZA explícitamente en vez de ignorarse: un payload con un campo que
+  // nadie va a usar es un malentendido, y callarlo lo perpetúa.
+  const veredictoMedio = evaluarMedioDePayload({ medio: obj.medio, esProducto });
+  if (veredictoMedio === 'no_permitido_en_producto') {
+    throw new HttpsError('invalid-argument', `${etiqueta} no admite medio de pago.`);
+  }
+  if (veredictoMedio === 'invalido') {
+    throw new HttpsError('invalid-argument', `${etiqueta}.medio no es un medio de pago válido.`);
   }
   if (typeof obj.recibio !== 'boolean') {
     throw new HttpsError('invalid-argument', `${etiqueta}.recibio debe ser boolean.`);
@@ -229,6 +250,8 @@ function validarRespuestaCobro(raw: unknown, etiqueta: string): RespuestaCobro {
     if (obj.justificacion.length > MAX_JUSTIFICACION_LEN) {
       throw new HttpsError('invalid-argument', `${etiqueta}.justificacion demasiado larga.`);
     }
+    // Sin dinero recibido no hay medio que registrar: la UI ni siquiera hace
+    // la pregunta, y si llegara igual se descarta acá.
     return { recibio: false, justificacion: obj.justificacion.trim() };
   }
   // != null (no !== undefined): el SDK cliente de Functions serializa una
@@ -240,7 +263,12 @@ function validarRespuestaCobro(raw: unknown, etiqueta: string): RespuestaCobro {
   if (obj.justificacion != null) {
     throw new HttpsError('invalid-argument', `${etiqueta} no debe incluir justificacion cuando recibio es true.`);
   }
-  return { recibio: true };
+  return {
+    recibio: true,
+    // Solo viaja si el veredicto fue 'valido'; "No estoy seguro" no manda la
+    // clave y aquí queda ausente, que es lo que debe ocurrir.
+    ...(veredictoMedio === 'valido' ? { medio: obj.medio as MedioPago } : {}),
+  };
 }
 
 function validarCargotransCobro(raw: unknown): { monto: number } {
@@ -405,6 +433,23 @@ function construirCobroDelivery(
   if (esCredito) {
     patch.semanaKey = semanaKeyDeFecha(new Date());
   }
+
+  // ── B2-PAGO-MEDIO: con qué se pagó ───────────────────────────────────────
+  //
+  // Tres fuentes y ninguna más, en el orden que fija resolverFormaPago(): lo
+  // ya persistido manda, luego el medio declarado en esta llamada, luego el
+  // temporal que viajó desde la recolección. Si no hay ninguna, el campo NO se
+  // escribe y la orden queda en "No registrado".
+  //
+  // Nunca se mira `quienPaga`, `recibio`, el receptor ni el momento: ninguno
+  // dice CON QUÉ se pagó. Traducir `quienPaga` fue el bug "Ef. entrega".
+  const { formaPago } = resolverFormaPago({
+    formaPagoExistente: orden.cobroDelivery?.formaPago,
+    medioDeEstaLlamada: deliveryAnswer?.medio,
+    medioTemporal: orden.cobrosMotorizado?.delivery?.medio,
+  });
+  if (formaPago) patch.formaPago = formaPago;
+
   return patch;
 }
 
@@ -481,11 +526,27 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
     const { showDelivery, showProducto, showCargotransCobro, deducirDelCE } = calcularShowFlags(orden, dep, nuevo);
 
     if (!showDelivery && !showProducto && !showCargotransCobro) {
-      // Esta orden no requiere ninguna confirmación de cobro en esta
-      // transición — el cliente no debería haber llamado a esta función
-      // (el flujo normal usa el updateDoc directo, sin cobros). Fail-closed:
-      // no hay nada legítimo que esta llamada pueda escribir.
-      throw new HttpsError('failed-precondition', 'Esta transición no requiere confirmación de cobro.');
+      // Fail-closed con UNA excepción estrecha (B2-PAGO-MEDIO).
+      //
+      // Antes: sin delivery, producto ni cargotrans no había nada legítimo que
+      // escribir, porque el cierre de `cobroDelivery` lo hacía el cliente por
+      // updateDoc directo. Ahora ese cierre vive acá, y por eso existe una
+      // llamada legítima sin confirmaciones: entregar una orden cuyo cobro ya
+      // se resolvió antes (típicamente cobrada en la recolección).
+      //
+      // Se centraliza porque las Rules solo permiten al motorizado escribir
+      // `cobroDelivery` en su PRIMERA aparición y con un hasOnly que excluye
+      // `formaPago` por construcción: desde el cliente el medio no podría
+      // persistirse nunca. La Function usa Admin SDK, así que cierra sin tocar
+      // Rules — y de paso desaparece la fórmula duplicada cliente/servidor.
+      //
+      // La excepción es estrecha a propósito: solo 'entregado' y solo sin
+      // ningún payload de cobro. Con `cobros` o `cargotransCobro` presentes
+      // sigue siendo un error, igual que cualquier otra transición.
+      const traePayloadDeCobro = cobrosInput != null || cargotransCobroInput != null;
+      if (!permiteCierreSinConfirmaciones({ nuevo, traePayloadDeCobro })) {
+        throw new HttpsError('failed-precondition', 'Esta transición no requiere confirmación de cobro.');
+      }
     }
 
     // ── Producto primero: la rama "delivery deducido del CE" necesita su
@@ -495,7 +556,7 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
       if (!cobrosInput?.producto) {
         throw new HttpsError('invalid-argument', 'Falta la confirmación del producto.');
       }
-      productoAnswer = validarRespuestaCobro(cobrosInput.producto, 'cobros.producto');
+      productoAnswer = validarRespuestaCobro(cobrosInput.producto, 'cobros.producto', true);
       // != null: el cliente real siempre incluye la clave `producto` en
       // `cobros` (con valor undefined cuando no aplica), y el SDK la
       // serializa como null, no la omite — ver nota en validarRespuestaCobro().
@@ -513,7 +574,7 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
       if (!cobrosInput?.delivery) {
         throw new HttpsError('invalid-argument', 'Falta la confirmación del delivery.');
       }
-      deliveryAnswer = validarRespuestaCobro(cobrosInput.delivery, 'cobros.delivery');
+      deliveryAnswer = validarRespuestaCobro(cobrosInput.delivery, 'cobros.delivery', false);
     } else if (deliveryDeducidoDelCE) {
       // El delivery va implícito en la respuesta del producto — el cliente
       // NO manda cobros.delivery en este caso (mismo comportamiento que
@@ -556,6 +617,13 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
         recibio: deliveryAnswer.recibio,
         at: FieldValue.serverTimestamp(),
         ...(deliveryAnswer.justificacion ? { justificacion: deliveryAnswer.justificacion } : {}),
+        // B2-PAGO-MEDIO — transporte temporal, NO fuente de lectura: solo
+        // existe para que el medio declarado al cobrar en la recolección
+        // llegue al cierre de la entrega. No se muestra, no se filtra y
+        // ninguna lógica financiera lo consulta. En la entrega directa este
+        // mismo objeto se reescribe sin él (ver el cierre), así que ahí no
+        // llega a persistir.
+        ...(nuevo !== 'entregado' && deliveryAnswer.medio ? { medio: deliveryAnswer.medio } : {}),
       };
       if (!deliveryAnswer.recibio) hayPendiente = true;
     }
@@ -594,6 +662,28 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
     // ── Al entregar: cobroDelivery + marcador de crédito semanal ──────
     if (nuevo === 'entregado') {
       patch.cobroDelivery = construirCobroDelivery(orden, deliveryAnswer, productoAnswer);
+
+      // ── B2-PAGO-MEDIO: consumo one-shot del temporal ───────────────────
+      //
+      // Después del cierre, el medio debe vivir en UN solo sitio:
+      // cobroDelivery.formaPago. Si quedara además el temporal, una reversión
+      // posterior —que borra formaPago— dejaría una fuente capaz de
+      // regenerarlo, y el insumo se convertiría en una segunda verdad.
+      //
+      // Dos formas de consumirlo, excluyentes por construcción: si este patch
+      // reescribe el mapa `cobrosMotorizado.delivery`, basta con haberlo
+      // omitido allí; si no lo reescribe, hace falta borrar la hoja por
+      // dot-path. Firestore rechaza un update que contenga a la vez un campo
+      // y un ancestro suyo, así que nunca pueden ir las dos.
+      if (
+        debeBorrarTemporalPorRuta({
+          reescribeMapaDelivery: patch['cobrosMotorizado.delivery'] !== undefined,
+          temporalPresente: orden.cobrosMotorizado?.delivery?.medio !== undefined,
+        })
+      ) {
+        // Solo la hoja: monto, recibio, at y justificacion quedan intactos.
+        patch['cobrosMotorizado.delivery.medio'] = FieldValue.delete();
+      }
       const precioDelivery = orden.confirmacion?.precioFinalCordobas ?? 0;
       const quienPagaOrig = orden.pagoDelivery?.quienPaga ?? '';
       const esCredito = orden.tipoCliente === 'credito' || quienPagaOrig === 'credito_semanal';

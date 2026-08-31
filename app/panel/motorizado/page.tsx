@@ -13,6 +13,7 @@ import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBouc
 import { registrarMovimiento } from '@/lib/financial-writes';
 import { calcularDeposito } from '@/lib/calculo-deposito';
 import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
+import { OPCIONES_MEDIO, medioParaPayload, type SeleccionMedio, type MedioPago } from '@/lib/medio-pago';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -166,6 +167,10 @@ type PendingConfirm = {
   justDeliveryTexto: string;
   justProductoTexto: string;
   montoCargotrans: string;
+  // B2-PAGO-MEDIO: con qué le pagaron el delivery. Empieza vacío —sin default—
+  // y solo se pregunta cuando declaró haberlo recibido. "No estoy seguro" es
+  // una respuesta válida que NO envía medio.
+  medioDelivery: SeleccionMedio;
 };
 
 /** Razón final a persistir: con "Otro", la razón es el texto que escribió. */
@@ -284,7 +289,7 @@ const acumularCallable = httpsCallable<{ ordenId: string }, { ok: true; yaAcumul
 // monto real que el motorizado cuenta en efectivo, no derivable del
 // documento).
 
-type RespuestaCobroPayload = { recibio: boolean; justificacion?: string }
+type RespuestaCobroPayload = { recibio: boolean; justificacion?: string; medio?: MedioPago }
 
 const responderAsignacionCallable = httpsCallable<
   { solicitudId: string; accion: 'aceptar' | 'rechazar' },
@@ -590,60 +595,14 @@ export default function PanelMotorizadoPage() {
       const p: any = { estado: nuevo, updatedAt: serverTimestamp(), [`historial.${nuevo}At`]: serverTimestamp() };
       if (nuevo === 'entregado') p.entregadoAt = serverTimestamp();
 
-      // ── Al entregar: registrar cobroDelivery ──────────────────────────────
-      if (nuevo === 'entregado') {
-        const precioDelivery = o.confirmacion?.precioFinalCordobas ?? 0
-        const quienPaga = o.pagoDelivery?.quienPaga ?? ''
-        const esCredito = o.tipoCliente === 'credito' || quienPaga === 'credito_semanal'
-        const semanaKey = esCredito ? getSemanaKey(new Date()) : undefined
-
-        // Sin cobros en esta llamada: el único cobro ya registrado (si lo
-        // hay) es el de una recolección confirmada en 'retirado', vía la
-        // Function. Se lee de o.cobrosMotorizado, ya escrito por esa llamada
-        // previa.
-        const esRecoleccion = quienPaga === 'recoleccion'
-        const motorizadoYaCobro = esRecoleccion && o.cobrosMotorizado?.delivery?.recibio === true
-        p['cobroDelivery'] = {
-          monto: precioDelivery,
-          tipoCliente: esCredito ? 'credito' : 'contado',
-          quienPaga,
-          estado: precioDelivery === 0
-            ? 'no_cobrar'
-            : (esCredito ? 'pendiente' : (motorizadoYaCobro ? 'pagado' : 'pendiente')),
-          registradoAt: serverTimestamp(),
-          ...(semanaKey ? { semanaKey } : {}),
-        }
-
-        // Crédito con monto > 0: la acumulación en cobros_semanales ya NO se
-        // hace desde acá. El cliente solo deja el marcador 'pendiente' dentro
-        // de la misma transacción de entrega, y después llama a la callable,
-        // que resuelve comercio, precio y semana server-side. Así el
-        // motorizado no necesita ninguna lectura sobre cobros_semanales —
-        // que era lo que obligaba a abrirle la colección entera (P1).
-        if (esCredito && precioDelivery > 0) {
-          p['acumulacionCobroSemanal.estado'] = 'pendiente'
-          p['acumulacionCobroSemanal.updatedAt'] = serverTimestamp()
-
-          await runTransaction(db, async (tx) => {
-            tx.update(doc(db, 'solicitudes_envio', o.id), p)
-          })
-          if (motorizadoDocId) {
-            await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: 'disponible', updatedAt: serverTimestamp() })
-          }
-          // La entrega ya está confirmada: si esto falla, la orden queda
-          // entregada y 'pendiente', y se reintenta sola al reabrir la
-          // pantalla. Nunca se revierte la entrega por un fallo de red.
-          void acumularConReintento(o.id, setErr)
-          const coordFinalCredito =
-            o.entrega?.coord ??
-            (o.tipoServicio === 'fuera_managua' ? o.fueraManagua?.coordsPuntoLogistico ?? null : null)
-          if (motorizadoDocId && coordFinalCredito) {
-            actualizarUbicacionOperativa(motorizadoDocId, coordFinalCredito);
-          }
-          return
-        }
-      }
-      // ─────────────────────────────────────────────────────────────────────
+      // B2-PAGO-MEDIO — acá se construía `cobroDelivery` al entregar,
+      // duplicando la fórmula de confirmarTransicionConCobro. Ese cierre lo
+      // hace ahora SOLO la Function: es la única que puede persistir
+      // `formaPago` —las Rules se lo prohíben al motorizado por
+      // construcción— y tener una sola fórmula evita que las dos copias se
+      // separen. cambiar() enruta toda transición a `entregado` por la
+      // callable, así que esta función ya no ve ese caso.
+      // Cierra PAGO-CLIENTE-ESCRIBE-COBRODELIVERY para `entregado`.
 
       await updateDoc(doc(db, 'solicitudes_envio', o.id), p);
       // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
@@ -768,6 +727,16 @@ export default function PanelMotorizadoPage() {
       o.fueraManagua?.pagoCargotrans === 'efectivo_motorizado';
 
     if (!showDelivery && !showProducto && !showCargotransCobro) {
+      // B2-PAGO-MEDIO — el cierre de `cobroDelivery` al entregar dejó de
+      // hacerlo el cliente: ahora lo centraliza la Function, que es la única
+      // que puede persistir `formaPago` (las Rules se lo prohíben al
+      // motorizado por construcción). Sin confirmaciones que pedir, se llama
+      // igual pero sin payload de cobro. El resto de transiciones sigue por
+      // el updateDoc directo de siempre.
+      if (nuevo === 'entregado') {
+        executeConfirmarConCobro(o, 'entregado');
+        return;
+      }
       executeCambiar(o, nuevo);
       return;
     }
@@ -788,6 +757,7 @@ export default function PanelMotorizadoPage() {
       justDeliveryTexto: '',
       justProductoTexto: '',
       montoCargotrans: '',
+      medioDelivery: '',
     });
   }
 
@@ -1283,6 +1253,29 @@ export default function PanelMotorizadoPage() {
                                       )}
                                     </div>
                                   )}
+                                  {/* B2-PAGO-MEDIO — solo cuando declaró que SÍ recibió.
+                                      Sin preselección y opcional: "No estoy seguro" es una
+                                      respuesta legítima que deja el medio sin registrar.
+                                      Nadie lo deduce después de que el motorizado lo diga. */}
+                                  {pc.recibioDelivery && (
+                                    <div style={{ marginTop: 10 }}>
+                                      <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 6px' }}>
+                                        ¿Con qué te pagaron? <span style={{ fontWeight: 500, color: '#9ca3af' }}>(opcional)</span>
+                                      </p>
+                                      <div style={{ display: 'flex', gap: 6 }}>
+                                        {OPCIONES_MEDIO.map((opt) => {
+                                          const sel = pc.medioDelivery === opt.value;
+                                          return (
+                                            <button key={opt.value}
+                                              onClick={() => setPendingConfirm((p) => p ? { ...p, medioDelivery: sel ? '' : opt.value } : p)}
+                                              style={{ flex: 1, padding: '8px 0', borderRadius: 10, border: `2px solid ${sel ? '#004aad' : '#e5e7eb'}`, background: sel ? '#eff6ff' : '#fff', color: sel ? '#004aad' : '#6b7280', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                                              {opt.label}
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
                               )}
 
@@ -1380,8 +1373,21 @@ export default function PanelMotorizadoPage() {
                                     // monto tampoco se envía: nunca lo edita el usuario acá (ver
                                     // calcDeposito()) — el servidor lo recalcula desde el
                                     // documento, no confía en lo que mande el cliente.
+                                    //
+                                    // B2-PAGO-MEDIO: `medio` solo viaja si el motorizado
+                                    // declaró haber recibido el delivery Y eligió Efectivo o
+                                    // Transferencia. "No estoy seguro" y "sin responder" no
+                                    // mandan la clave: el medio queda ausente y nadie lo
+                                    // inventa después. Producto nunca lleva medio — el
+                                    // servidor lo rechaza explícitamente.
                                     const deliveryCobro = pc.showDelivery
-                                      ? { recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? justificacionFinal(pc.justDelivery, pc.justDeliveryTexto) : undefined }
+                                      ? {
+                                          recibio: pc.recibioDelivery,
+                                          justificacion: !pc.recibioDelivery ? justificacionFinal(pc.justDelivery, pc.justDeliveryTexto) : undefined,
+                                          ...(pc.recibioDelivery && medioParaPayload(pc.medioDelivery)
+                                            ? { medio: medioParaPayload(pc.medioDelivery) }
+                                            : {}),
+                                        }
                                       : undefined;
                                     executeConfirmarConCobro(
                                       pc.order,
