@@ -1,0 +1,19 @@
+{
+  // B2-PAGO-MEDIO — tsconfig SOLO para los tests locales de Functions.
+  //
+  // `tsconfig.json` (el del deploy) queda intacto: sigue con `include: ["src"]`
+  // y `outDir: "lib"`, así que ningún archivo de test entra en el artefacto que
+  // se sube a Cloud Functions. Este config existe aparte, compila `src` + `test`
+  // a `.test-build` —ignorado por git— y no lo usa ningún script de build.
+  //
+  // `rootDir` se fija de forma explícita para que la salida sea determinista y
+  // no cambie de forma según qué archivos entren en la compilación.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": ".test-build",
+    "rootDir": ".",
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": ["src", "test"]
+}
