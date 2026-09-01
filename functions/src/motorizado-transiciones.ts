@@ -47,13 +47,7 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { FieldValue } from 'firebase-admin/firestore';
 import { semanaKeyDeFecha } from './cobro-semanal';
-import {
-  evaluarMedioDePayload,
-  resolverFormaPago,
-  debeBorrarTemporalPorRuta,
-  permiteCierreSinConfirmaciones,
-  type MedioPago,
-} from './medio-pago';
+import { resolverFormaPago, permiteCierreSinConfirmaciones } from './medio-pago';
 
 const MAX_ID_LEN = 200;
 const MAX_JUSTIFICACION_LEN = 500;
@@ -179,8 +173,6 @@ type NuevoEstadoTransicion = 'retirado' | 'entregado';
 interface RespuestaCobroInput {
   recibio?: unknown;
   justificacion?: unknown;
-  /** B2-PAGO-MEDIO: solo en `cobros.delivery`, y solo con recibio true. */
-  medio?: unknown;
 }
 
 interface CobrosInput {
@@ -207,8 +199,6 @@ interface ConfirmarTransicionResultado {
 interface RespuestaCobro {
   recibio: boolean;
   justificacion?: string;
-  /** Presente solo si el motorizado eligió Efectivo o Transferencia. */
-  medio?: MedioPago;
 }
 
 /**
@@ -221,24 +211,17 @@ interface RespuestaCobro {
  * ya aplicaba el botón "Confirmar" en el cliente (bloqueadoDelivery/
  * bloqueadoProducto).
  */
-function validarRespuestaCobro(raw: unknown, etiqueta: string, esProducto: boolean): RespuestaCobro {
+function validarRespuestaCobro(raw: unknown, etiqueta: string): RespuestaCobro {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     throw new HttpsError('invalid-argument', `${etiqueta} inválido.`);
   }
   const obj = raw as RespuestaCobroInput;
   const claves = Object.keys(obj);
-  if (!claves.every((k) => k === 'recibio' || k === 'justificacion' || k === 'medio')) {
+  // B2-PAGO-MEDIO — el payload volvió a ser { recibio, justificacion }: el
+  // motorizado no declara la forma de pago, así que `medio` deja de ser una
+  // clave aceptada y este allowlist la rechaza como cualquier otra intrusa.
+  if (!claves.every((k) => k === 'recibio' || k === 'justificacion')) {
     throw new HttpsError('invalid-argument', `${etiqueta} tiene campos no permitidos.`);
-  }
-  // B2-PAGO-MEDIO — el medio solo tiene sentido para el delivery. En producto
-  // se RECHAZA explícitamente en vez de ignorarse: un payload con un campo que
-  // nadie va a usar es un malentendido, y callarlo lo perpetúa.
-  const veredictoMedio = evaluarMedioDePayload({ medio: obj.medio, esProducto });
-  if (veredictoMedio === 'no_permitido_en_producto') {
-    throw new HttpsError('invalid-argument', `${etiqueta} no admite medio de pago.`);
-  }
-  if (veredictoMedio === 'invalido') {
-    throw new HttpsError('invalid-argument', `${etiqueta}.medio no es un medio de pago válido.`);
   }
   if (typeof obj.recibio !== 'boolean') {
     throw new HttpsError('invalid-argument', `${etiqueta}.recibio debe ser boolean.`);
@@ -250,8 +233,6 @@ function validarRespuestaCobro(raw: unknown, etiqueta: string, esProducto: boole
     if (obj.justificacion.length > MAX_JUSTIFICACION_LEN) {
       throw new HttpsError('invalid-argument', `${etiqueta}.justificacion demasiado larga.`);
     }
-    // Sin dinero recibido no hay medio que registrar: la UI ni siquiera hace
-    // la pregunta, y si llegara igual se descarta acá.
     return { recibio: false, justificacion: obj.justificacion.trim() };
   }
   // != null (no !== undefined): el SDK cliente de Functions serializa una
@@ -263,12 +244,7 @@ function validarRespuestaCobro(raw: unknown, etiqueta: string, esProducto: boole
   if (obj.justificacion != null) {
     throw new HttpsError('invalid-argument', `${etiqueta} no debe incluir justificacion cuando recibio es true.`);
   }
-  return {
-    recibio: true,
-    // Solo viaja si el veredicto fue 'valido'; "No estoy seguro" no manda la
-    // clave y aquí queda ausente, que es lo que debe ocurrir.
-    ...(veredictoMedio === 'valido' ? { medio: obj.medio as MedioPago } : {}),
-  };
+  return { recibio: true };
 }
 
 function validarCargotransCobro(raw: unknown): { monto: number } {
@@ -436,17 +412,21 @@ function construirCobroDelivery(
 
   // ── B2-PAGO-MEDIO: con qué se pagó ───────────────────────────────────────
   //
-  // Tres fuentes y ninguna más, en el orden que fija resolverFormaPago(): lo
-  // ya persistido manda, luego el medio declarado en esta llamada, luego el
-  // temporal que viajó desde la recolección. Si no hay ninguna, el campo NO se
-  // escribe y la orden queda en "No registrado".
+  // El motorizado no declara la forma de pago; se deriva del flujo, que ya
+  // está calculado arriba. `motorizadoYaCobro` solo puede ser true en un
+  // cobro FÍSICO: con crédito o con quienPaga 'transferencia',
+  // calcularDeposito() pone tieneDelivery = false y el modal del cobro ni
+  // siquiera se abre. Confirmar que recibió en ese contexto es la misma
+  // evidencia que ya obliga a depositar, así que afirma efectivo sin inferir.
   //
-  // Nunca se mira `quienPaga`, `recibio`, el receptor ni el momento: ninguno
-  // dice CON QUÉ se pagó. Traducir `quienPaga` fue el bug "Ef. entrega".
-  const { formaPago } = resolverFormaPago({
+  // La transferencia NO se escribe acá: nace del comprobante que confirma el
+  // gestor en Cobros. Un motivo del tipo "indicó que pagará por transferencia"
+  // explica por qué no hubo efectivo — no confirma un pago.
+  const formaPago = resolverFormaPago({
     formaPagoExistente: orden.cobroDelivery?.formaPago,
-    medioDeEstaLlamada: deliveryAnswer?.medio,
-    medioTemporal: orden.cobrosMotorizado?.delivery?.medio,
+    motorizadoYaCobro,
+    esCredito,
+    esPorTransferencia: quienPaga === 'transferencia',
   });
   if (formaPago) patch.formaPago = formaPago;
 
@@ -556,7 +536,7 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
       if (!cobrosInput?.producto) {
         throw new HttpsError('invalid-argument', 'Falta la confirmación del producto.');
       }
-      productoAnswer = validarRespuestaCobro(cobrosInput.producto, 'cobros.producto', true);
+      productoAnswer = validarRespuestaCobro(cobrosInput.producto, 'cobros.producto');
       // != null: el cliente real siempre incluye la clave `producto` en
       // `cobros` (con valor undefined cuando no aplica), y el SDK la
       // serializa como null, no la omite — ver nota en validarRespuestaCobro().
@@ -574,7 +554,7 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
       if (!cobrosInput?.delivery) {
         throw new HttpsError('invalid-argument', 'Falta la confirmación del delivery.');
       }
-      deliveryAnswer = validarRespuestaCobro(cobrosInput.delivery, 'cobros.delivery', false);
+      deliveryAnswer = validarRespuestaCobro(cobrosInput.delivery, 'cobros.delivery');
     } else if (deliveryDeducidoDelCE) {
       // El delivery va implícito en la respuesta del producto — el cliente
       // NO manda cobros.delivery en este caso (mismo comportamiento que
@@ -617,13 +597,6 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
         recibio: deliveryAnswer.recibio,
         at: FieldValue.serverTimestamp(),
         ...(deliveryAnswer.justificacion ? { justificacion: deliveryAnswer.justificacion } : {}),
-        // B2-PAGO-MEDIO — transporte temporal, NO fuente de lectura: solo
-        // existe para que el medio declarado al cobrar en la recolección
-        // llegue al cierre de la entrega. No se muestra, no se filtra y
-        // ninguna lógica financiera lo consulta. En la entrega directa este
-        // mismo objeto se reescribe sin él (ver el cierre), así que ahí no
-        // llega a persistir.
-        ...(nuevo !== 'entregado' && deliveryAnswer.medio ? { medio: deliveryAnswer.medio } : {}),
       };
       if (!deliveryAnswer.recibio) hayPendiente = true;
     }
@@ -662,28 +635,6 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
     // ── Al entregar: cobroDelivery + marcador de crédito semanal ──────
     if (nuevo === 'entregado') {
       patch.cobroDelivery = construirCobroDelivery(orden, deliveryAnswer, productoAnswer);
-
-      // ── B2-PAGO-MEDIO: consumo one-shot del temporal ───────────────────
-      //
-      // Después del cierre, el medio debe vivir en UN solo sitio:
-      // cobroDelivery.formaPago. Si quedara además el temporal, una reversión
-      // posterior —que borra formaPago— dejaría una fuente capaz de
-      // regenerarlo, y el insumo se convertiría en una segunda verdad.
-      //
-      // Dos formas de consumirlo, excluyentes por construcción: si este patch
-      // reescribe el mapa `cobrosMotorizado.delivery`, basta con haberlo
-      // omitido allí; si no lo reescribe, hace falta borrar la hoja por
-      // dot-path. Firestore rechaza un update que contenga a la vez un campo
-      // y un ancestro suyo, así que nunca pueden ir las dos.
-      if (
-        debeBorrarTemporalPorRuta({
-          reescribeMapaDelivery: patch['cobrosMotorizado.delivery'] !== undefined,
-          temporalPresente: orden.cobrosMotorizado?.delivery?.medio !== undefined,
-        })
-      ) {
-        // Solo la hoja: monto, recibio, at y justificacion quedan intactos.
-        patch['cobrosMotorizado.delivery.medio'] = FieldValue.delete();
-      }
       const precioDelivery = orden.confirmacion?.precioFinalCordobas ?? 0;
       const quienPagaOrig = orden.pagoDelivery?.quienPaga ?? '';
       const esCredito = orden.tipoCliente === 'credito' || quienPagaOrig === 'credito_semanal';

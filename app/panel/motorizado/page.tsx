@@ -13,7 +13,6 @@ import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBouc
 import { registrarMovimiento } from '@/lib/financial-writes';
 import { calcularDeposito } from '@/lib/calculo-deposito';
 import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
-import { OPCIONES_MEDIO, medioParaPayload, type SeleccionMedio, type MedioPago } from '@/lib/medio-pago';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -167,10 +166,6 @@ type PendingConfirm = {
   justDeliveryTexto: string;
   justProductoTexto: string;
   montoCargotrans: string;
-  // B2-PAGO-MEDIO: con qué le pagaron el delivery. Empieza vacío —sin default—
-  // y solo se pregunta cuando declaró haberlo recibido. "No estoy seguro" es
-  // una respuesta válida que NO envía medio.
-  medioDelivery: SeleccionMedio;
 };
 
 /** Razón final a persistir: con "Otro", la razón es el texto que escribió. */
@@ -289,7 +284,7 @@ const acumularCallable = httpsCallable<{ ordenId: string }, { ok: true; yaAcumul
 // monto real que el motorizado cuenta en efectivo, no derivable del
 // documento).
 
-type RespuestaCobroPayload = { recibio: boolean; justificacion?: string; medio?: MedioPago }
+type RespuestaCobroPayload = { recibio: boolean; justificacion?: string }
 
 const responderAsignacionCallable = httpsCallable<
   { solicitudId: string; accion: 'aceptar' | 'rechazar' },
@@ -757,7 +752,6 @@ export default function PanelMotorizadoPage() {
       justDeliveryTexto: '',
       justProductoTexto: '',
       montoCargotrans: '',
-      medioDelivery: '',
     });
   }
 
@@ -1201,9 +1195,17 @@ export default function PanelMotorizadoPage() {
                         (() => {
                           const pc = pendingConfirm;
                           const esPcFueraManagua = pc.order.tipoServicio === 'fuera_managua';
-                          const RAZONES_DELIVERY_RETIRO = ['Se acordó cobrar en la entrega', 'Comercio ya pagó por transferencia', 'El comercio tiene crédito / cobrará luego', 'Error en el monto acordado', 'Otro'];
-                          const RAZONES_DELIVERY_RETIRO_FUERA = ['Comercio no estaba al momento del retiro', 'Se acordará el cobro luego', 'Comercio ya pagó por transferencia', 'Error en el monto acordado', 'Otro'];
-                          const RAZONES_DELIVERY_ENTREGA = ['El cliente no estaba / no atendió', 'El cliente no tenía efectivo', 'El cliente rechazó el producto', 'Error en el monto acordado', 'Otro'];
+                          // B2-PAGO-MEDIO — un motivo explica POR QUÉ no entró el
+                          // efectivo; nunca afirma con qué se pagó. "Indicó que
+                          // pagará por transferencia" deja el cobro pendiente y
+                          // la transferencia sigue necesitando boucher y
+                          // confirmación del gestor para existir.
+                          // OJO: 'Se acordó cobrar en la entrega' es
+                          // JUSTIFICACION_DEFER_DELIVERY y participa en lógica
+                          // estricta (calculo-deposito.ts). No tocar ese string.
+                          const RAZONES_DELIVERY_RETIRO = ['Se acordó cobrar en la entrega', 'Comercio indicó que pagará por transferencia', 'El comercio tiene crédito / cobrará luego', 'Error en el monto acordado', 'Otro'];
+                          const RAZONES_DELIVERY_RETIRO_FUERA = ['Comercio no estaba al momento del retiro', 'Se acordará el cobro luego', 'Comercio indicó que pagará por transferencia', 'Error en el monto acordado', 'Otro'];
+                          const RAZONES_DELIVERY_ENTREGA = ['El cliente no estaba / no atendió', 'El cliente no tenía efectivo', 'Cliente indicó que pagará por transferencia', 'El cliente rechazó el producto', 'Error en el monto acordado', 'Otro'];
                           const RAZONES_PRODUCTO = ['El cliente no estaba / no atendió', 'El cliente no tenía efectivo', 'El cliente rechazó el producto', 'Error en el monto acordado', 'Otro'];
                           const razonesList = pc.esRetiro
                             ? (esPcFueraManagua ? RAZONES_DELIVERY_RETIRO_FUERA : RAZONES_DELIVERY_RETIRO)
@@ -1253,29 +1255,12 @@ export default function PanelMotorizadoPage() {
                                       )}
                                     </div>
                                   )}
-                                  {/* B2-PAGO-MEDIO — solo cuando declaró que SÍ recibió.
-                                      Sin preselección y opcional: "No estoy seguro" es una
-                                      respuesta legítima que deja el medio sin registrar.
-                                      Nadie lo deduce después de que el motorizado lo diga. */}
-                                  {pc.recibioDelivery && (
-                                    <div style={{ marginTop: 10 }}>
-                                      <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 6px' }}>
-                                        ¿Con qué te pagaron? <span style={{ fontWeight: 500, color: '#9ca3af' }}>(opcional)</span>
-                                      </p>
-                                      <div style={{ display: 'flex', gap: 6 }}>
-                                        {OPCIONES_MEDIO.map((opt) => {
-                                          const sel = pc.medioDelivery === opt.value;
-                                          return (
-                                            <button key={opt.value}
-                                              onClick={() => setPendingConfirm((p) => p ? { ...p, medioDelivery: sel ? '' : opt.value } : p)}
-                                              style={{ flex: 1, padding: '8px 0', borderRadius: 10, border: `2px solid ${sel ? '#004aad' : '#e5e7eb'}`, background: sel ? '#eff6ff' : '#fff', color: sel ? '#004aad' : '#6b7280', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
-                                              {opt.label}
-                                            </button>
-                                          );
-                                        })}
-                                      </div>
-                                    </div>
-                                  )}
+                                  {/* B2-PAGO-MEDIO — acá vivía un selector
+                                      Efectivo/Transferencia/No estoy seguro. Se retiró: el
+                                      motorizado no decide la forma de pago. En recolección y
+                                      entrega el cobro ES físico por definición del flujo, así
+                                      que confirmar que recibió ya demuestra efectivo, y la
+                                      Function lo deriva sin preguntarle nada. */}
                                 </div>
                               )}
 
@@ -1374,20 +1359,11 @@ export default function PanelMotorizadoPage() {
                                     // calcDeposito()) — el servidor lo recalcula desde el
                                     // documento, no confía en lo que mande el cliente.
                                     //
-                                    // B2-PAGO-MEDIO: `medio` solo viaja si el motorizado
-                                    // declaró haber recibido el delivery Y eligió Efectivo o
-                                    // Transferencia. "No estoy seguro" y "sin responder" no
-                                    // mandan la clave: el medio queda ausente y nadie lo
-                                    // inventa después. Producto nunca lleva medio — el
-                                    // servidor lo rechaza explícitamente.
+                                    // B2-PAGO-MEDIO: el payload vuelve a llevar solo
+                                    // recibio + justificacion. El medio no se pregunta ni se
+                                    // envía: lo deriva la Function del propio flujo.
                                     const deliveryCobro = pc.showDelivery
-                                      ? {
-                                          recibio: pc.recibioDelivery,
-                                          justificacion: !pc.recibioDelivery ? justificacionFinal(pc.justDelivery, pc.justDeliveryTexto) : undefined,
-                                          ...(pc.recibioDelivery && medioParaPayload(pc.medioDelivery)
-                                            ? { medio: medioParaPayload(pc.medioDelivery) }
-                                            : {}),
-                                        }
+                                      ? { recibio: pc.recibioDelivery, justificacion: !pc.recibioDelivery ? justificacionFinal(pc.justDelivery, pc.justDeliveryTexto) : undefined }
                                       : undefined;
                                     executeConfirmarConCobro(
                                       pc.order,
