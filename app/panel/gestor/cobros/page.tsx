@@ -44,6 +44,11 @@ import {
   etiquetaResolucion,
   type EntradaIncidencia,
 } from '@/lib/incidencia-cobro'
+import {
+  visibleEnCobrosContado,
+  etiquetaFormaPagoCobros,
+  FORMA_PAGO_COBROS_AUSENTE,
+} from '@/lib/cobros-contado'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1287,33 +1292,16 @@ function CobrosPageContent() {
 
   // ── Derived state ──────────────────────────────────────────────────────────
 
-  // Filtrar contado pendientes — solo órdenes con razón explícita de cobro
+  // Filtrar contado pendientes — solo órdenes con razón explícita de cobro.
+  //
+  // B2-PAGO-MEDIO-BOUCHER-REVIEW: el predicado vivía escrito a mano acá y no
+  // reconocía `en_revision_deposito`, así que una orden con el boucher del
+  // comercio en revisión desaparecía de todas las bandejas del gestor. Ahora
+  // lo decide `lib/cobros-contado.ts`, que sí enumera los estados y está
+  // cubierto por tests —incluida una invariante cruzada con el helper del
+  // comercio, para que un estado nuevo obligue a decidir en los dos lados.
   const contadoOrdenes = useMemo(() =>
-    contadoRaw.filter((s) => {
-      // Excluir crédito
-      if (s.tipoCliente === 'credito' || s.pagoDelivery?.quienPaga === 'credito_semanal') return false
-
-      // Excluir incidencias activas (van en tab Incidencias)
-      if (s.cobroPendiente === true) return false
-
-      const cd = s.cobroDelivery
-
-      // Excluir ya pagadas o no cobrar
-      if (cd?.estado === 'pagado' || cd?.estado === 'no_cobrar') return false
-
-      // ✅ Mostrar: el sistema lo marcó explícitamente como pendiente
-      // (nuevo sistema: se escribe al marcar entregado, o desde resolución de incidencia)
-      if (cd?.estado === 'pendiente') return true
-
-      // ✅ Mostrar: transferencia bancaria aún no confirmada
-      // (el cliente debe depositar a Storkhub, no pasa por el motorizado)
-      if (s.pagoDelivery?.quienPaga === 'transferencia') return true
-
-      // Todo lo demás (legacy, efectivo ya cobrado por motorizado, etc.) → NO mostrar
-      // Las órdenes históricas donde el motorizado cobró en efectivo
-      // ya están manejadas por el flujo de depósito.
-      return false
-    }),
+    contadoRaw.filter((s) => visibleEnCobrosContado(s)),
     [contadoRaw]
   )
 
@@ -1803,23 +1791,38 @@ function CobrosPageContent() {
                           <td className={tdCls}>{fmtDate(s.entregadoAt)}</td>
                           <td className={tdCls}><LinkOrden id={s.id} ancla="cobros" /></td>
                           <td className={`${tdCls} font-semibold text-gray-900`}>{getClienteNombre(s, comercioNames)}</td>
+                          {/* B2-PAGO-MEDIO-BOUCHER-REVIEW — el medio REAL, y
+                              nada más. Acá se leía `quienPaga` y se mostraba
+                              su negación como "Efectivo": una orden cuyo
+                              motorizado había declarado "el cliente pagará por
+                              transferencia" aparecía afirmando efectivo. Pero
+                              `entrega` dice CUÁNDO se cobra, no CON QUÉ, y
+                              mientras el cobro sigue abierto no hay medio que
+                              afirmar. Misma corrección que B2-BASE-PAGO-DETALLE
+                              hizo en Base de datos.
+
+                              El estado del comprobante SÍ se conserva: es un
+                              hecho del cobro, no una afirmación sobre el
+                              medio, y es lo que le dice al gestor si hay algo
+                              que revisar. */}
                           <td className={tdCls}>
-                            {esTransferencia ? (
-                              <div className="flex flex-col gap-1">
-                                <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-                                  <ArrowRightLeft className="h-3 w-3" /> Transferencia
+                            <div className="flex flex-col gap-1">
+                              {s.cobroDelivery?.formaPago ? (
+                                <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 border border-gray-200">
+                                  {s.cobroDelivery.formaPago === 'transferencia'
+                                    ? <ArrowRightLeft className="h-3 w-3" />
+                                    : <Banknote className="h-3 w-3" />}
+                                  {etiquetaFormaPagoCobros(s.cobroDelivery.formaPago)}
                                 </span>
-                                {tieneBoucher ? (
-                                  <span className="text-[11px] font-semibold text-blue-600">📎 Boucher adjunto</span>
-                                ) : (
-                                  <span className="text-[11px] font-semibold text-amber-500">⏳ Esperando boucher</span>
-                                )}
-                              </div>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 border border-gray-200">
-                                <Banknote className="h-3 w-3" /> Efectivo
-                              </span>
-                            )}
+                              ) : (
+                                <span className="text-xs italic text-gray-400">{FORMA_PAGO_COBROS_AUSENTE}</span>
+                              )}
+                              {tieneBoucher ? (
+                                <span className="text-[11px] font-semibold text-blue-600">📎 Boucher en revisión</span>
+                              ) : esTransferencia ? (
+                                <span className="text-[11px] font-semibold text-amber-500">⏳ Esperando boucher</span>
+                              ) : null}
+                            </div>
                           </td>
                           <td className={`${tdCls} text-right font-semibold text-gray-900`}>
                             {fmt(s.cobroDelivery?.monto ?? (s as any).confirmacion?.precioFinalCordobas)}

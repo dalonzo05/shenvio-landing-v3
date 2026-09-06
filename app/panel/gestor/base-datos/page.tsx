@@ -269,6 +269,9 @@ function getColValue(s: Solicitud, colKey: string, comercioNames: Record<string,
       const recibio = s.cobrosMotorizado?.delivery?.recibio
       if (qp === 'credito_semanal') return 'Crédito'
       if (cd?.estado === 'pagado') return 'Sí'
+      // B2-PAGO-MEDIO-BOUCHER-REVIEW: mismo orden y mismo texto que la celda,
+      // para que el filtro de la columna coincida con lo que se ve.
+      if (cd?.estado === 'en_revision_deposito') return 'Rev.'
       if (qp === 'transferencia') return 'Trans. pend.'
       if (recibio === true) return 'Sí'
       if (recibio === false) return 'No'
@@ -955,7 +958,9 @@ function BaseDatosPageContent() {
     const rows = filtered.map((s) => {
       const comercio = s.ownerSnapshot?.companyName || s.ownerSnapshot?.nombre || (s.userId ? comercioNames[s.userId] : '') || ''
       const cd = s.cobroDelivery
-      const pagó = cd?.estado === 'pagado' ? `Sí (${cd.formaPago || ''})` : s.pagoDelivery?.quienPaga === 'transferencia' ? 'Trans. pend.' : s.cobrosMotorizado?.delivery?.recibio === true ? 'Sí' : s.cobrosMotorizado?.delivery?.recibio === false ? 'No' : '—'
+      // B2-PAGO-MEDIO-BOUCHER-REVIEW: 'Rev.' va después de 'pagado' y antes de
+      // todo lo demás, igual que en la celda y en el filtro.
+      const pagó = cd?.estado === 'pagado' ? `Sí (${cd.formaPago || ''})` : cd?.estado === 'en_revision_deposito' ? 'Rev.' : s.pagoDelivery?.quienPaga === 'transferencia' ? 'Trans. pend.' : s.cobrosMotorizado?.delivery?.recibio === true ? 'Sí' : s.cobrosMotorizado?.delivery?.recibio === false ? 'No' : '—'
       const fCobro = cd?.pagadoAt ? formatDate(cd.pagadoAt) : s.cobrosMotorizado?.delivery?.at ? formatDate(s.cobrosMotorizado.delivery.at as any) : ''
       // B2-BASE-PAGO-DETALLE: sin formaPago persistido no se cae a quienPaga,
       // que responde otra pregunta. Mismo criterio y mismo texto que la columna.
@@ -1104,7 +1109,7 @@ function BaseDatosPageContent() {
                 <Th config={{ colKey: 'delivery', label: 'Delivery', filterType: 'number' }}
                     filter={colFilters['delivery']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
-                <Th config={{ colKey: 'pago', label: 'Pagó', filterType: 'select', selectOptions: ['Sí', 'No', 'Crédito', 'Trans. pend.'] }}
+                <Th config={{ colKey: 'pago', label: 'Pagó', filterType: 'select', selectOptions: ['Sí', 'No', 'Rev.', 'Crédito', 'Trans. pend.'] }}
                     filter={colFilters['pago']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
                 <Th config={{ colKey: 'fCobro', label: 'F. Cobro', filterType: 'date' }}
@@ -1231,6 +1236,17 @@ function BaseDatosPageContent() {
                               Sí ({label})
                             </span>
                           )
+                        }
+                        // B2-PAGO-MEDIO-BOUCHER-REVIEW — estado intermedio
+                        // explícito. Con un boucher esperando al gestor esta
+                        // celda decía "No" en rojo —un hecho cerrado— mientras
+                        // la columna Estado contable de al lado decía "En
+                        // revisión". Va antes de `quienPaga` y de `recibio`
+                        // porque cobroDelivery es la autoridad: ni el flujo ni
+                        // lo que cobró el motorizado desmienten un comprobante
+                        // presentado.
+                        if (cd?.estado === 'en_revision_deposito') {
+                          return <span className="inline-flex rounded-full bg-blue-50 border border-blue-200 px-2 py-0.5 text-[11px] font-semibold text-blue-700" title="Comprobante en revisión del gestor">Rev.</span>
                         }
                         if (qp === 'transferencia') {
                           return <span className="inline-flex rounded-full bg-yellow-50 border border-yellow-200 px-2 py-0.5 text-[11px] font-semibold text-yellow-700">Trans. pend.</span>
