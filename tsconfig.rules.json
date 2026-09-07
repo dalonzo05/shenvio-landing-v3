@@ -1,0 +1,20 @@
+{
+  // IDENTIDAD-HUMANA-1 — compilación de los tests de firestore.rules.
+  //
+  // Aparte del `tsc` de `npm test` a propósito: esa suite es pura y no
+  // necesita emulador, y mezclarlas obligaría a levantar Firestore para
+  // correr un test de formato de códigos. `outDir` propio para que el layout
+  // de `.test-build` siga siendo plano e idempotente.
+  "compilerOptions": {
+    "outDir": ".rules-build",
+    "rootDir": "test",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "target": "es2022",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["test"]
+}

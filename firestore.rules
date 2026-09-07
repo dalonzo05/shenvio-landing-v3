@@ -1171,18 +1171,25 @@ service cloud.firestore {
           && request.resource.data.digitadoAt == request.time;
       }
 
-      allow create: if isAdminOrGestor()
-        || (isMotorizadoRole() && request.resource.data.motorizadoUid == request.auth.uid)
-        || (
-          isDigitador()
-          && camposDigitacionDeposito()
-          && request.resource.data.estado == 'pendiente_boucher'
-          && request.resource.data.montoTotal is number
-          && request.resource.data.montoTotal >= 0
-          && digitacionAutoatribuida()
+      // IDENTIDAD-HUMANA-1 — el OR va entre parentesis a proposito.
+      //
+      // && liga mas fuerte que ||, asi que sin este parentesis
+      // "A || B || C && sinCodigoEntrante()" se lee como
+      // "A || B || (C && sinCodigoEntrante())" y la restriccion solo aplicaba
+      // a la ultima rama: gestor y motorizado seguian pudiendo inyectar un
+      // codigo al crear. Lo detectaron los casos L y M de la suite de Rules.
+      allow create: if (
+          isAdminOrGestor()
+          || (isMotorizadoRole() && request.resource.data.motorizadoUid == request.auth.uid)
+          || (
+            isDigitador()
+            && camposDigitacionDeposito()
+            && request.resource.data.estado == 'pendiente_boucher'
+            && request.resource.data.montoTotal is number
+            && request.resource.data.montoTotal >= 0
+            && digitacionAutoatribuida()
+          )
         )
-        // IDENTIDAD-HUMANA-1: vale para las tres ramas — motorizado, gestor
-        // y digitador. Ninguna escribe el codigo; lo asigna el trigger.
         && sinCodigoEntrante();
 
       // STORAGE ORPHANS BLOQUE 1: 'resource != null' en cada rama no-staff

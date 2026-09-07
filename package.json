@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test:rules": "tsc -p tsconfig.rules.json && firebase emulators:exec --only firestore \"node --test .rules-build\"",
     "test": "tsc lib/calculo-deposito.ts lib/calculo-deposito.test.ts lib/estado-cobro-comercio.ts lib/estado-cobro-comercio.test.ts lib/incidencia-cobro.ts lib/incidencia-cobro.test.ts lib/actor-resolucion.ts lib/actor-resolucion.test.ts lib/deposito-orden.ts lib/deposito-orden.test.ts lib/timeline-orden.ts lib/timeline-orden.test.ts lib/trazabilidad-pago.ts lib/trazabilidad-pago.test.ts lib/ruta-orden.ts lib/ruta-orden.test.ts lib/resumen-orden.ts lib/resumen-orden.test.ts lib/campos-base-datos.ts lib/campos-base-datos.test.ts lib/estado-contable-base.ts lib/estado-contable-base.test.ts lib/evento-auditoria.ts lib/evento-auditoria.test.ts lib/dia-operativo.ts lib/dia-operativo.test.ts lib/codigo-humano.ts lib/codigo-humano.test.ts lib/ordinal-comercio.ts lib/ordinal-comercio.test.ts lib/estados-solicitud.ts lib/cobros-contado.ts lib/cobros-contado.test.ts --outDir .test-build --module commonjs --moduleResolution node --target es2022 --strict --esModuleInterop --skipLibCheck --types node && node --test .test-build"
   },
   "dependencies": {
@@ -25,6 +26,7 @@
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
+    "@firebase/rules-unit-testing": "^5.0.2",
     "@tailwindcss/postcss": "^4.1.11",
     "@types/firebase": "^2.4.32",
     "@types/google.maps": "^3.58.1",

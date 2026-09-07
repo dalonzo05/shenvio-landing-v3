@@ -19,6 +19,9 @@ import {
   formatearCodigo,
   PREFIJO_ORDEN,
   PREFIJO_DEPOSITO,
+  esMotivoEstructural,
+  esFalloTransitorio,
+  MOTIVOS_ESTRUCTURALES,
   type Decision,
 } from '../src/codigos';
 
@@ -196,5 +199,89 @@ test('K15 · formato canónico: sin padding, sin minúsculas, con guion', () => 
   assert.equal(formatearCodigo(PREFIJO_ORDEN, 1000000), 'SH-1000000');
   for (const n of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 2]) {
     assert.throws(() => formatearCodigo(PREFIJO_ORDEN, n), /secuencia invalida/);
+  }
+});
+
+// ─── Clasificación de fallos y política de retry ─────────────────────────────
+//
+// La Function declara `retry: true`, verificado en el manifiesto de deploy
+// (`__endpoint.eventTrigger.retry === true`). Eso hace que una excepción se
+// vuelva a entregar, así que QUÉ lanza y qué no deja de ser un detalle: es la
+// diferencia entre un bucle y un documento sin código para siempre.
+
+test('K16 · los motivos estructurales no mejoran reintentando', () => {
+  for (const m of MOTIVOS_ESTRUCTURALES) {
+    assert.equal(esMotivoEstructural(m), true, `${m} no figura como estructural`);
+  }
+  assert.equal(esMotivoEstructural('YA_ASIGNADO'), false);
+  assert.equal(esMotivoEstructural('cualquier_otra_cosa'), false);
+});
+
+test('K17 · TODO "bloquear" que produce decidirAsignacion es estructural', () => {
+  // Es la invariante que garantiza que no hay bucle: si algún camino
+  // devolviera un motivo no clasificado, este test lo caza antes de que
+  // alguien lo relance por error.
+  const casos: Array<Parameters<typeof decidirAsignacion>[0]> = [
+    { prefijo: 'ORD', codigoActual: undefined, secuenciaActual: undefined, valorContador: 1000 },
+    { prefijo: PREFIJO_ORDEN, codigoActual: 'SH-1', secuenciaActual: undefined, valorContador: 1000 },
+    { prefijo: PREFIJO_ORDEN, codigoActual: undefined, secuenciaActual: 1, valorContador: 1000 },
+    { prefijo: PREFIJO_ORDEN, codigoActual: 'SH-1', secuenciaActual: 2, valorContador: 1000 },
+    { prefijo: PREFIJO_ORDEN, codigoActual: undefined, secuenciaActual: undefined, valorContador: undefined },
+    { prefijo: PREFIJO_ORDEN, codigoActual: undefined, secuenciaActual: undefined, valorContador: -3 },
+    { prefijo: PREFIJO_ORDEN, codigoActual: undefined, secuenciaActual: undefined, valorContador: Number.MAX_SAFE_INTEGER },
+  ];
+  let bloqueos = 0;
+  for (const c of casos) {
+    const d = decidirAsignacion(c);
+    if (d.accion !== 'bloquear') continue;
+    bloqueos++;
+    assert.equal(esMotivoEstructural(d.motivo), true, `motivo sin clasificar: ${d.motivo}`);
+  }
+  assert.equal(bloqueos, casos.length, 'algún caso dejó de bloquear');
+});
+
+test('K18 · fallos de infraestructura ⇒ transitorios (se relanzan)', () => {
+  const transitorios: unknown[] = [
+    { code: 14 }, { code: 'unavailable' }, { code: 'UNAVAILABLE' },
+    { code: 4 }, { code: 'deadline-exceeded' },
+    { code: 10 }, { code: 'aborted' },
+    { code: 13 }, { code: 'internal' },
+    { code: 8 }, { code: 'resource-exhausted' },
+    { code: 2 }, { code: 'unknown' },
+  ];
+  for (const e of transitorios) {
+    assert.equal(esFalloTransitorio(e), true, `no marcó transitorio ${JSON.stringify(e)}`);
+  }
+});
+
+test('K19 · fallos permanentes ⇒ NO transitorios (no se relanzan)', () => {
+  const permanentes: unknown[] = [
+    { code: 3 }, { code: 'invalid-argument' },
+    { code: 5 }, { code: 'not-found' },
+    { code: 6 }, { code: 'already-exists' },
+    { code: 7 }, { code: 'permission-denied' },
+    { code: 9 }, { code: 'failed-precondition' },
+    { code: 16 }, { code: 'unauthenticated' },
+  ];
+  for (const e of permanentes) {
+    assert.equal(esFalloTransitorio(e), false, `marcó transitorio ${JSON.stringify(e)}`);
+  }
+});
+
+test('K20 · los errores propios del módulo NO se reintentan', () => {
+  // formatearCodigo solo puede lanzar si alguien lo llama mal, y eso no lo
+  // arregla ningún reintento. Hoy es inalcanzable —decidirAsignacion valida
+  // prefijo y secuencia antes— pero la clasificación no depende de eso.
+  assert.equal(esFalloTransitorio(new Error('prefijo no permitido: "ORD"')), false);
+  assert.equal(esFalloTransitorio(new Error('secuencia invalida: 0')), false);
+});
+
+test('K21 · lo desconocido se reintenta, y es a propósito', () => {
+  // Las decisiones de este módulo no lanzan: devuelven 'bloquear' y salen
+  // limpio. Una excepción sin código reconocible es casi siempre red o
+  // backend. Y los dos errores no cuestan lo mismo: un reintento de mas es
+  // barato, un documento sin codigo es permanente.
+  for (const e of [new Error('socket hang up'), 'texto suelto', null, undefined, {}, { code: {} }, 42]) {
+    assert.equal(esFalloTransitorio(e), true, `no reintentaria ${JSON.stringify(e) ?? String(e)}`);
   }
 });

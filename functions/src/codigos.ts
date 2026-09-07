@@ -149,6 +149,58 @@ export function decidirAsignacion(entrada: EntradaDecision): Decision {
   };
 }
 
+/** Motivos que NO mejoran reintentando: el dato o la configuracion estan mal. */
+export const MOTIVOS_ESTRUCTURALES = [
+  'CODIGO_ESTADO_PARCIAL',
+  'CODIGO_INCOHERENTE',
+  'CONTADOR_CORRUPTO',
+  'CONTADOR_AUSENTE',
+  'CONTADOR_DESBORDADO',
+  'PREFIJO_NO_PERMITIDO',
+  'DOC_INEXISTENTE',
+] as const;
+
+export function esMotivoEstructural(motivo: string): boolean {
+  return (MOTIVOS_ESTRUCTURALES as readonly string[]).includes(motivo);
+}
+
+/**
+ * Codigos gRPC que merecen otra entrega del evento.
+ *
+ * Firestore los expone en `err.code`, a veces numerico y a veces en texto.
+ * Se aceptan las dos formas porque el Admin SDK y el emulador no coinciden.
+ */
+const CODIGOS_TRANSITORIOS = new Set<string | number>([
+  2, 'unknown',
+  4, 'deadline-exceeded',
+  8, 'resource-exhausted',
+  10, 'aborted',
+  13, 'internal',
+  14, 'unavailable',
+]);
+
+/** Errores que lanza este modulo. Son bugs de llamada, no infraestructura. */
+const MENSAJE_PROPIO = /^(prefijo no permitido|secuencia invalida)/;
+
+/**
+ * ¿Este fallo merece que Eventarc vuelva a entregar el evento?
+ *
+ * El default para lo desconocido es SI, y es deliberado. Las decisiones de
+ * este modulo no lanzan —devuelven 'bloquear' y salen limpio—, asi que una
+ * excepcion que llegue hasta aqui es casi siempre infraestructura. Y los dos
+ * errores no son simetricos: equivocarse marcando transitorio cuesta unos
+ * reintentos acotados; equivocarse marcando estructural deja el documento sin
+ * codigo PARA SIEMPRE, porque el trigger solo dispara en la creacion.
+ */
+export function esFalloTransitorio(err: unknown): boolean {
+  if (err instanceof Error && MENSAJE_PROPIO.test(err.message)) return false;
+  const codigo = (err as { code?: unknown } | null)?.code;
+  if (typeof codigo === 'number' || typeof codigo === 'string') {
+    return CODIGOS_TRANSITORIOS.has(typeof codigo === 'string' ? codigo.toLowerCase() : codigo);
+  }
+  return true;
+}
+
 /**
  * Aplica la decisión dentro de UNA transacción.
  *
@@ -167,26 +219,51 @@ async function asignarCodigo(
   const docRef = db.collection(coleccion).doc(docId);
   const contadorRef = db.collection('contadores').doc(contadorId);
 
-  const resultado = await db.runTransaction(async (tx) => {
-    const [docSnap, contadorSnap] = await Promise.all([tx.get(docRef), tx.get(contadorRef)]);
+  let resultado: Decision;
+  try {
+    resultado = await db.runTransaction(async (tx) => {
+      const [docSnap, contadorSnap] = await Promise.all([tx.get(docRef), tx.get(contadorRef)]);
 
-    // El documento pudo borrarse entre la creación y el trigger.
-    if (!docSnap.exists) return { accion: 'noop', motivo: 'DOC_INEXISTENTE' } as Decision;
+      // El documento pudo borrarse entre la creación y el trigger.
+      if (!docSnap.exists) return { accion: 'noop', motivo: 'DOC_INEXISTENTE' } as Decision;
 
-    const data = docSnap.data() ?? {};
-    const decision = decidirAsignacion({
-      prefijo,
-      codigoActual: data.codigo,
-      secuenciaActual: data.secuencia,
-      valorContador: contadorSnap.exists ? contadorSnap.data()?.valor : undefined,
+      const data = docSnap.data() ?? {};
+      const decision = decidirAsignacion({
+        prefijo,
+        codigoActual: data.codigo,
+        secuenciaActual: data.secuencia,
+        valorContador: contadorSnap.exists ? contadorSnap.data()?.valor : undefined,
+      });
+
+      if (decision.accion === 'asignar') {
+        tx.update(contadorRef, { valor: decision.siguienteValor });
+        tx.update(docRef, { codigo: decision.codigo, secuencia: decision.secuencia });
+      }
+      return decision;
     });
-
-    if (decision.accion === 'asignar') {
-      tx.update(contadorRef, { valor: decision.siguienteValor });
-      tx.update(docRef, { codigo: decision.codigo, secuencia: decision.secuencia });
-    }
-    return decision;
-  });
+  } catch (err) {
+    // La transaccion misma fallo. runTransaction ya reintenta internamente
+    // los ABORTED por contencion, asi que llegar aqui significa que ni eso
+    // basto.
+    const transitorio = esFalloTransitorio(err);
+    console.error(
+      JSON.stringify({
+        fn: 'asignarCodigo',
+        coleccion,
+        docId,
+        prefijo,
+        accion: 'fallo',
+        transitorio,
+        codigoError: (err as { code?: unknown } | null)?.code ?? null,
+        mensaje: err instanceof Error ? err.message : String(err),
+      }),
+    );
+    // Transitorio: se relanza y Eventarc vuelve a entregar el evento (la
+    // Function declara retry: true). Estructural: se sale limpio, porque
+    // reintentarlo daria exactamente el mismo error en bucle.
+    if (transitorio) throw err;
+    return;
+  }
 
   // Log estructurado, mismo formato que el resto de Functions del repo.
   console.log(
@@ -207,10 +284,31 @@ async function asignarCodigo(
   // bloqueados quedan en el log para revisión manual.
 }
 
-export const asignarCodigoOrden = onDocumentCreated('solicitudes_envio/{id}', async (event) => {
-  await asignarCodigo('solicitudes_envio', event.params.id, PREFIJO_ORDEN, CONTADOR_ORDENES);
-});
+// retry: true — POR QUE, y que implica.
+//
+// EventHandlerOptions.retry se traduce a failurePolicy en el manifiesto de
+// deploy (firebase-functions 5.1.1, v2/options.js). Ausente, como estaba
+// hasta ahora, significa SIN reentrega: una excepcion se pierde y el
+// documento se queda sin codigo para siempre, porque el trigger solo dispara
+// en la creacion y no hay segunda oportunidad.
+//
+// Con retry: true, Eventarc reentrega los fallos con backoff. El riesgo
+// clasico de esa opcion es el bucle: un error que siempre falla, reintentado
+// hasta agotar la ventana. Aqui no puede pasar, y no por suerte: los fallos
+// ESTRUCTURALES no lanzan. Un contador corrupto, un estado parcial o un
+// prefijo invalido devuelven 'bloquear', se registran y la Function termina
+// normalmente. Solo se relanza lo que esFalloTransitorio() reconoce como
+// infraestructura, que es justamente lo que un reintento puede arreglar.
+export const asignarCodigoOrden = onDocumentCreated(
+  { document: 'solicitudes_envio/{id}', retry: true },
+  async (event) => {
+    await asignarCodigo('solicitudes_envio', event.params.id, PREFIJO_ORDEN, CONTADOR_ORDENES);
+  },
+);
 
-export const asignarCodigoDeposito = onDocumentCreated('ordenes_deposito/{id}', async (event) => {
-  await asignarCodigo('ordenes_deposito', event.params.id, PREFIJO_DEPOSITO, CONTADOR_DEPOSITOS);
-});
+export const asignarCodigoDeposito = onDocumentCreated(
+  { document: 'ordenes_deposito/{id}', retry: true },
+  async (event) => {
+    await asignarCodigo('ordenes_deposito', event.params.id, PREFIJO_DEPOSITO, CONTADOR_DEPOSITOS);
+  },
+);

@@ -53,3 +53,4 @@ ui-debug.log
 
 # salida de `npm test` (compilación temporal de la suite focal)
 .test-build/
+.rules-build/
