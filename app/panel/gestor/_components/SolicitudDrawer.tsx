@@ -29,6 +29,8 @@ import {
   type MotorizadoRankeado,
 } from '@/lib/motorizado-ranking'
 import { ResumenRapido } from './ResumenRapido'
+import { trazabilidadPago, type EntradaTrazabilidad } from '@/lib/trazabilidad-pago'
+import { presentarActor } from '@/lib/actor-resolucion'
 import {
   X,
   ExternalLink,
@@ -103,6 +105,9 @@ export type SolicitudDetalle = {
   }
   cobroDelivery?: {
     estado?: string; formaPago?: string; notaPago?: string; pagadoAt?: any; monto?: number
+    // FIN-SEMANTICA-UX-1: quién y cuándo confirmó el cobro. Ya los escriben
+    // BoucherModal y PagoContadoModal; hasta ahora el drawer no los declaraba.
+    confirmadoPor?: string; confirmadoAt?: Timestamp
     boucherUrl?: string; boucherPath?: string; boucherAt?: any; subidoPor?: string
     // P1-S2B: un comprobante por actor + puntero de vigencia.
     boucherComercio?: { url?: string; path?: string; at?: Timestamp }
@@ -459,6 +464,15 @@ export function SolicitudDrawer({
   const [ctransUploading, setCtransUploading] = useState(false)
   const [ctransErr, setCtransErr] = useState<string | null>(null)
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
+
+  // FIN-SEMANTICA-UX-1 — el recorrido real del dinero, con el helper que ya es
+  // autoritativo y que la ficha completa (BloquesCobros) y Base ya consumen.
+  // Acá se leía `pagoDelivery.quienPaga` a pelo, que es el ACUERDO pactado al
+  // crear la orden, y se presentaba como si fuera el desenlace.
+  const traza = useMemo(
+    () => (solicitud ? trazabilidadPago(solicitud as EntradaTrazabilidad) : null),
+    [solicitud],
+  )
 
   useEffect(() => {
     const t = setInterval(() => setTick(Date.now()), 1000)
@@ -1009,7 +1023,11 @@ export function SolicitudDrawer({
                   )}
                   <InfoRow label="Precio final" value={solicitud.confirmacion?.precioFinalCordobas != null ? money(solicitud.confirmacion.precioFinalCordobas) : undefined} />
                   <InfoRow label="Cobro CE" value={solicitud.cobroContraEntrega?.aplica ? money(solicitud.cobroContraEntrega.monto) : 'No aplica'} />
-                  <InfoRow label="Quién paga delivery" value={solicitud.tipoCliente === 'credito' ? 'Crédito semanal' : solicitud.pagoDelivery?.quienPaga} />
+                  {/* FIN-SEMANTICA-UX-1 — esto es el PLAN, y ahora lo dice.
+                      Se rotulaba "Quién paga delivery" con el valor crudo
+                      ('entrega'), que se leía como el desenlace del cobro. El
+                      resultado real vive en su propia sección, abajo. */}
+                  <InfoRow label="Cobro previsto" value={solicitud.tipoCliente === 'credito' ? 'Comercio, en crédito semanal' : traza?.quienPaga} />
                   <InfoRow label="Creada" value={formatDateTime(solicitud.createdAt)} />
                 </div>
                 {/* Lógica de deducción delivery ↔ cobro producto */}
@@ -1055,20 +1073,56 @@ export function SolicitudDrawer({
               </Section>
 
               {/* Boucher de pago delivery (transferencia) */}
-              {solicitud.pagoDelivery?.quienPaga === 'transferencia' && (
-                <Section title="Pago delivery — Transferencia" accent="blue">
+              {/* FIN-SEMANTICA-UX-1 — RESULTADO REAL, separado del plan.
+                  Esta sección se condicionaba a `pagoDelivery.quienPaga ===
+                  'transferencia'`, o sea al ACUERDO. Una orden pactada como
+                  'entrega' que terminó pagándose por transferencia y con el
+                  boucher ya confirmado por el gestor no mostraba nada de eso:
+                  el desenlace quedaba invisible. Ahora la condición es el
+                  cobro, no el plan. */}
+              {(solicitud.cobroDelivery || solicitud.pagoDelivery?.quienPaga === 'transferencia') && (
+                <Section title="Resultado del cobro" accent="blue">
                   <div className="space-y-3">
                     <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                      <InfoRow label="Estado" value={
-                        solicitud.cobroDelivery?.estado === 'pagado' ? '✓ Confirmado'
-                        : solicitud.cobroDelivery?.estado === 'en_revision_deposito' ? '🔍 En revisión'
-                        : '⏳ Pendiente'
-                      } />
+                      {/* Estado frente al CLIENTE. No dice si ShEnvíos ya
+                          recibió el dinero: eso son los destinos, más abajo. */}
+                      <InfoRow label="Estado" value={traza?.estadoCliente.etiqueta} />
                       <InfoRow label="Monto" value={solicitud.cobroDelivery?.monto != null ? money(solicitud.cobroDelivery.monto) : solicitud.confirmacion?.precioFinalCordobas != null ? money(solicitud.confirmacion.precioFinalCordobas) : undefined} />
-                      {solicitud.cobroDelivery?.pagadoAt && <InfoRow label="Confirmado" value={formatDateTime(solicitud.cobroDelivery.pagadoAt)} />}
+                      {/* Medio REAL. `traza.medioPago` solo tiene valor si un
+                          gestor lo confirmó (formaPago + pagadoAt); nunca se
+                          deriva de quienPaga. Sin confirmar se enuncia como
+                          "No registrado", no como un medio supuesto. */}
+                      <InfoRow
+                        label="Medio real"
+                        value={traza?.medioPago === 'efectivo' ? 'Efectivo' : traza?.medioPago === 'transferencia' ? 'Transferencia' : traza?.medioPago ?? 'No registrado'}
+                      />
+                      {traza?.receptor && <InfoRow label="Recibió el dinero" value={traza.receptor.etiqueta} />}
+                      {solicitud.cobroDelivery?.pagadoAt && <InfoRow label="Fecha de pago" value={formatDateTime(solicitud.cobroDelivery.pagadoAt)} />}
+                      {(() => {
+                        // presentarActor() ya resuelve esto: sin nombre no
+                        // inventa nada, dice "Usuario interno" y deja el UID
+                        // como referencia técnica secundaria. El drawer no
+                        // carga usuarios/, así que no se pide el nombre — ver
+                        // deuda DRAWER-ACTOR-SIN-NOMBRE.
+                        const actor = presentarActor(solicitud.cobroDelivery?.confirmadoPor, null)
+                        if (!actor) return null
+                        return <InfoRow label="Confirmado por" value={actor.nombre} />
+                      })()}
+                      {solicitud.cobroDelivery?.confirmadoAt && <InfoRow label="Confirmado" value={formatDateTime(solicitud.cobroDelivery.confirmadoAt)} />}
+                      {solicitud.cobroDelivery?.notaPago && <InfoRow label="Nota" value={solicitud.cobroDelivery.notaPago} />}
                       {solicitud.cobroDelivery?.boucherVigente && <InfoRow label="Vigente" value={solicitud.cobroDelivery.boucherVigente === 'gestor' ? 'Gestor' : 'Comercio'} />}
                       {!solicitud.cobroDelivery?.boucherVigente && solicitud.cobroDelivery?.subidoPor && <InfoRow label="Subido por" value={solicitud.cobroDelivery.subidoPor === 'gestor' ? 'Gestor' : 'Comercio'} />}
                     </div>
+                    {/* Adónde falta que llegue el dinero. Que el cliente haya
+                        pagado y que ShEnvíos lo tenga son dos tramos distintos
+                        del mismo billete. */}
+                    {traza && traza.destinos.length > 0 && (
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                        {traza.destinos.map((d) => (
+                          <InfoRow key={d.destino} label={`Depósito · ${d.etiqueta}`} value={`${money(d.monto)} — ${d.situacion}`} />
+                        ))}
+                      </div>
+                    )}
                     {/* P1-S2B: los comprobantes de comercio y gestor son objetos
                         distintos y ambos se conservan. Acá se muestran los dos
                         cuando existen, marcando cuál está vigente — es la

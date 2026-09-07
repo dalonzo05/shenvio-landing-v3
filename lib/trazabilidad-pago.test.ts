@@ -293,3 +293,110 @@ test('COPY · "pagado" se presenta como "Cobrado", no como dinero recibido', () 
   // Una clave futura no se oculta.
   assert.equal(etiquetaEstadoCliente('otra'), 'otra')
 })
+
+// ─── FIN-SEMANTICA-UX-1 · el plan no es el resultado ──────────────────────────
+//
+// `pagoDelivery.quienPaga` es el ACUERDO que se pactó al crear la orden.
+// `cobroDelivery.formaPago` es lo que REALMENTE pasó, y solo existe cuando un
+// gestor lo confirmó. El drawer los mezclaba: mostraba el plan como si fuera
+// el desenlace, y escondía el resultado cuando no coincidían.
+//
+// Caso que lo destapó — WXfAQe3UkF2XVERZLpNX: plan `entrega`, el motorizado no
+// recibió, el cliente pagó por transferencia y el gestor confirmó el boucher.
+
+/** Base: contado, sin cobro contra entrega, delivery 80. */
+function ordenPlan(quienPaga: string, over: Partial<EntradaTrazabilidad> = {}): EntradaTrazabilidad {
+  return {
+    tipoServicio: 'normal',
+    tipoCliente: 'contado',
+    asignacion: { motorizadoNombre: MOTO },
+    cobroContraEntrega: { aplica: false, monto: 0 },
+    confirmacion: { precioFinalCordobas: 80 },
+    pagoDelivery: { quienPaga, deducirDelCobroContraEntrega: false },
+    cobrosMotorizado: { delivery: { monto: 80, recibio: false } },
+    cobroDelivery: { estado: 'pendiente', monto: 80 },
+    ...over,
+  }
+}
+
+const PAGADO_EFECTIVO = { estado: 'pagado', monto: 80, formaPago: 'efectivo', pagadoAt: 'ts' }
+const PAGADO_TRANSFER = { estado: 'pagado', monto: 80, formaPago: 'transferencia', pagadoAt: 'ts' }
+
+test('S9 · plan entrega + resultado efectivo: los dos visibles y distintos', () => {
+  const t = trazabilidadPago(ordenPlan('entrega', {
+    cobrosMotorizado: { delivery: { monto: 80, recibio: true } },
+    cobroDelivery: PAGADO_EFECTIVO,
+  }))
+  assert.equal(t.quienPaga, 'Destinatario, al entregar', 'el plan')
+  assert.equal(t.medioPago, 'efectivo', 'el resultado')
+  assert.equal(t.estadoCliente.etiqueta, 'Cobrado')
+  assert.equal(t.receptor?.clave, 'motorizado')
+})
+
+test('S10 · plan entrega + resultado transferencia: el resultado NO queda oculto', () => {
+  // El caso real. Antes el drawer condicionaba toda la sección de
+  // transferencia a quienPaga === 'transferencia', así que con plan 'entrega'
+  // el boucher y la confirmación desaparecían de pantalla.
+  const t = trazabilidadPago(ordenPlan('entrega', { cobroDelivery: PAGADO_TRANSFER }))
+  assert.equal(t.quienPaga, 'Destinatario, al entregar')
+  assert.equal(t.medioPago, 'transferencia')
+  assert.notEqual(t.medioPago, null, 'el resultado real se perdió')
+  assert.equal(t.estadoCliente.etiqueta, 'Cobrado')
+  // El motorizado no recibió nada: no puede figurar como receptor.
+  assert.equal(t.receptor, null)
+})
+
+test('S11 · plan recolección + resultado efectivo', () => {
+  const t = trazabilidadPago(ordenPlan('recoleccion', {
+    cobrosMotorizado: { delivery: { monto: 80, recibio: true } },
+    cobroDelivery: PAGADO_EFECTIVO,
+  }))
+  assert.equal(t.quienPaga, 'Comercio, al retirar')
+  assert.equal(t.medioPago, 'efectivo')
+  assert.equal(t.receptor?.clave, 'motorizado')
+})
+
+test('S12 · formaPago sin pagadoAt ⇒ no se afirma un resultado', () => {
+  // La reversión borra pagadoAt y formaPago, pero deja metodoPagoReal. Un
+  // formaPago suelto sin pagadoAt es un residuo, no una confirmación.
+  const t = trazabilidadPago(ordenPlan('entrega', {
+    cobroDelivery: { estado: 'pendiente', monto: 80, formaPago: 'transferencia' },
+  }))
+  assert.equal(t.medioPago, null)
+  assert.equal(t.estadoCliente.etiqueta, 'Por cobrar')
+})
+
+test('S13 · boucher en revisión ⇒ resultado intermedio, sin medio afirmado', () => {
+  // Estado exacto de WXfAQe3UkF2XVERZLpNX ahora mismo en staging.
+  const t = trazabilidadPago(ordenPlan('entrega', {
+    cobroDelivery: { estado: 'en_revision_deposito', monto: 80 },
+  }))
+  assert.equal(t.quienPaga, 'Destinatario, al entregar')
+  assert.equal(t.estadoCliente.clave, 'en_revision')
+  assert.equal(t.estadoCliente.etiqueta, 'Comprobante en revisión')
+  assert.equal(t.medioPago, null, 'afirmó un medio antes de que el gestor confirmara')
+  assert.equal(t.estadoCliente.montoPendiente, 80)
+})
+
+test('S14 · crédito: el plan se enuncia y el resultado sigue abierto', () => {
+  const t = trazabilidadPago({
+    ...ordenPlan('credito_semanal'),
+    tipoCliente: 'credito',
+    cobroDelivery: { estado: 'pendiente', monto: 80 },
+  })
+  assert.equal(t.quienPaga, 'Comercio, en crédito semanal')
+  assert.equal(t.medioPago, null)
+  assert.equal(t.estadoCliente.etiqueta, 'Por cobrar')
+})
+
+test('S15 · el plan nunca determina el medio real', () => {
+  // Para los cuatro planes, sin formaPago persistido el medio es null. Que
+  // 'transferencia' sea la misma cadena como plan y como medio es justo lo que
+  // hacía verosímil derivar uno del otro.
+  for (const qp of ['entrega', 'recoleccion', 'transferencia', 'credito_semanal']) {
+    assert.equal(trazabilidadPago(ordenPlan(qp)).medioPago, null, `el plan ${qp} produjo un medio`)
+  }
+  // Y con el medio persistido, es el medio quien manda, no el plan.
+  assert.equal(trazabilidadPago(ordenPlan('transferencia', { cobroDelivery: PAGADO_EFECTIVO })).medioPago, 'efectivo')
+  assert.equal(trazabilidadPago(ordenPlan('entrega', { cobroDelivery: PAGADO_TRANSFER })).medioPago, 'transferencia')
+})

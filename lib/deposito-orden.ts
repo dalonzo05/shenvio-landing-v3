@@ -175,3 +175,88 @@ export function idsDepositoDeOrden(orden: EntradaDepositoOrden): Array<{ destino
   }
   return out
 }
+
+// ─── FIN-SEMANTICA-UX-1 ───────────────────────────────────────────────────────
+//
+// Resumen de UNA orden en UN valor, para las superficies que tienen una sola
+// celda —la columna DEPOSITADO de Base, su filtro y su CSV— y no espacio para
+// las dos líneas.
+//
+// Existe porque esa columna leía `confirmadoComercio` / `confirmadoStorkhub` y
+// nada más, y esos dos booleanos no distinguen tres cosas que son distintas:
+//
+//   · "no hay nada que depositar"  de  "falta depositar"
+//     → una orden sin cobro contra entrega mostraba "⏳ Comercio", sugiriendo
+//       una deuda con el comercio donde la obligación es 0.
+//
+//   · "confirmado"  de  "convertido en deuda"
+//     → convertirDepositoEnDeuda() escribe el MISMO confirmadoStorkhubAt que
+//       una confirmación real, así que un depósito que el motorizado nunca
+//       pagó se mostraba como "✓ Storkhub".
+//
+// Ambos casos conviven hoy en la misma orden histórica (yomoyxzBvljBwiEkwhaI).
+//
+// No añade lógica: lee las dos líneas de lineasDeposito() y elige el texto.
+
+/** Cuando las dos líneas relevantes no dicen lo mismo. */
+export const ETIQUETA_RESUMEN_MIXTO = 'Parcial'
+
+/**
+ * Textos que puede devolver `resumenDepositoOrden().etiqueta`, para poblar el
+ * desplegable del filtro.
+ *
+ * No es exhaustivo por construcción: `etiquetaEstadoDeposito()` devuelve el
+ * estado crudo cuando no lo reconoce, así que un estado inesperado produciría
+ * un texto fuera de esta lista. Es el mismo comportamiento que ya tenía la
+ * columna y se prefiere a inventarle una etiqueta a un dato que no entendemos.
+ */
+export const ETIQUETAS_RESUMEN_DEPOSITO: readonly string[] = [
+  'No corresponde',
+  'Pendiente de depósito',
+  'Esperando comprobante',
+  'En revisión',
+  'Confirmado',
+  'Convertido en deuda',
+  'Rechazado',
+  'Anulado',
+  ETIQUETA_RESUMEN_MIXTO,
+]
+
+export interface ResumenDepositoOrden {
+  /** Las dos líneas, tal como las devuelve lineasDeposito(). */
+  lineas: LineaDeposito[]
+  /**
+   * Solo las que exigen algo: obligación > 0, o depósito ya registrado.
+   *
+   * Un depósito registrado entra aunque la obligación calculada sea 0: existe
+   * el documento, tiene un estado y esconderlo sería perder el rastro.
+   */
+  relevantes: LineaDeposito[]
+  /** Un único texto para celda estrecha, filtro y CSV. */
+  etiqueta: string
+}
+
+/**
+ * Estado de depósito de una orden, resumido.
+ *
+ * Sin obligación y sin depósito no se dice "Pendiente": no hay nada que
+ * esperar. Con depósito registrado se dice SU estado real —nunca un ✓ binario
+ * derivado de `confirmadoXAt`, que también se escribe al convertir en deuda.
+ */
+export function resumenDepositoOrden(
+  orden: EntradaDepositoOrden,
+  depositos: Partial<Record<DestinoDeposito, DepositoRegistrado | null>> = {},
+): ResumenDepositoOrden {
+  const lineas = lineasDeposito(orden, depositos)
+  const relevantes = lineas.filter((l) => l.clave !== 'no_corresponde' || l.deposito !== null)
+
+  let etiqueta: string
+  if (relevantes.length === 0) {
+    etiqueta = 'No corresponde'
+  } else {
+    const textos = [...new Set(relevantes.map((l) => l.texto))]
+    etiqueta = textos.length === 1 ? textos[0] : ETIQUETA_RESUMEN_MIXTO
+  }
+
+  return { lineas, relevantes, etiqueta }
+}

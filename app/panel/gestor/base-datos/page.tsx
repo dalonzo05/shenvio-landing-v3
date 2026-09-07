@@ -9,6 +9,14 @@ import { telefonoComercio, telefonoRetiro, telefonoEntrega, zonaRetiro, zonaEntr
 import { trazabilidadPago } from '@/lib/trazabilidad-pago'
 import { estadoContable, type EntradaEstadoContable, type ClaveEstadoContable } from '@/lib/estado-contable-base'
 import {
+  resumenDepositoOrden,
+  idsDepositoDeOrden,
+  ETIQUETAS_RESUMEN_DEPOSITO,
+  type EntradaDepositoOrden,
+  type DepositoRegistrado,
+  type DestinoDeposito,
+} from '@/lib/deposito-orden'
+import {
   collection,
   onSnapshot,
   orderBy,
@@ -236,7 +244,25 @@ function estadoClass(e?: EstadoSolicitud): string {
 
 function roundTo10(n: any): number { return Math.round(Number(n) / 10) * 10 }
 
-function getColValue(s: Solicitud, colKey: string, comercioNames: Record<string, string>, comercioTelefonos: Record<string, string> = {}): string | number | null {
+/**
+ * FIN-SEMANTICA-UX-1 — los depósitos que esta orden referencia, ya leídos.
+ *
+ * `lineasDeposito()` necesita el documento real para poder decir "Convertido
+ * en deuda" en vez de un ✓ binario. Sin él la lectura sigue siendo correcta,
+ * solo menos precisa: degrada a "Pendiente de depósito" / "No corresponde".
+ */
+function depositosDeOrden(
+  s: Solicitud,
+  cache: Record<string, DepositoRegistrado>,
+): Partial<Record<DestinoDeposito, DepositoRegistrado | null>> {
+  const out: Partial<Record<DestinoDeposito, DepositoRegistrado | null>> = {}
+  for (const { destino, id } of idsDepositoDeOrden(s as EntradaDepositoOrden)) {
+    out[destino] = cache[id] ?? null
+  }
+  return out
+}
+
+function getColValue(s: Solicitud, colKey: string, comercioNames: Record<string, string>, comercioTelefonos: Record<string, string> = {}, depositosCache: Record<string, DepositoRegistrado> = {}): string | number | null {
   switch (colKey) {
     case 'estado': return s.estado ?? null
     case 'semana': return s.registro?.semana ?? (s.createdAt ? getWeekNumber(s.createdAt.toDate()) : null)
@@ -257,10 +283,11 @@ function getColValue(s: Solicitud, colKey: string, comercioNames: Record<string,
       return typeof (ts as any).toDate === 'function' ? (ts as any).toDate().toISOString().split('T')[0] : null
     }
     case 'depositado': {
-      const dep = s.registro?.deposito
-      if (dep?.confirmadoComercio && dep?.confirmadoStorkhub) return 'Todo'
-      if (dep?.confirmadoComercio || dep?.confirmadoStorkhub) return 'Parcial'
-      return 'Pendiente'
+      // FIN-SEMANTICA-UX-1: antes se leían solo confirmadoComercio y
+      // confirmadoStorkhub, que no distinguen "no hay nada que depositar" de
+      // "falta depositar", ni "confirmado" de "convertido en deuda". La
+      // autoridad es lineasDeposito(), vía su resumen.
+      return resumenDepositoOrden(s as EntradaDepositoOrden, depositosDeOrden(s, depositosCache)).etiqueta
     }
     case 'delivery': return getPrecio(s)
     case 'pago': {
@@ -820,6 +847,9 @@ function BaseDatosPageContent() {
   const [comercioNames, setComercioNames] = useState<Record<string, string>>({})
   // B2-BASE-DECISIONAL — uid → teléfono. '' significa "consultado, no tiene".
   const [comercioTelefonos, setComercioTelefonos] = useState<Record<string, string>>({})
+  // FIN-SEMANTICA-UX-1 — ordenes_deposito referenciados, por id.
+  const [depositosCache, setDepositosCache] = useState<Record<string, DepositoRegistrado>>({})
+  const depositosPedidos = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'motorizado'), (snap) => {
@@ -835,6 +865,37 @@ function BaseDatosPageContent() {
     const unsub = onSnapshot(q, (snap) => { setSolicitudes(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Solicitud, 'id'>) }))); setLoading(false) })
     return () => unsub()
   }, [desde, hasta])
+
+  // FIN-SEMANTICA-UX-1 — leer los ordenes_deposito que las órdenes referencian.
+  //
+  // La columna DEPOSITADO no puede decir "Convertido en deuda" sin el
+  // documento: la orden solo guarda confirmadoStorkhub/Comercio, y esos flags
+  // valen true tanto para una confirmación real como para una conversión en
+  // deuda. El estado verdadero vive en ordenes_deposito.
+  //
+  // Coste acotado: solo se piden los IDs que las órdenes ya referencian, una
+  // sola vez cada uno (el ref evita repetir entre renders y entre cambios de
+  // rango), y los depósitos son agrupados — varias órdenes comparten uno. El
+  // conjunto queda limitado por el rango de fechas, igual que las órdenes.
+  // Mismo patrón que gestor/depositos usa para el historial.
+  useEffect(() => {
+    const ids = [...new Set(
+      solicitudes
+        .flatMap((s) => idsDepositoDeOrden(s as EntradaDepositoOrden).map((r) => r.id))
+        .filter((id) => !depositosPedidos.current.has(id))
+    )]
+    if (ids.length === 0) return
+    ids.forEach((id) => depositosPedidos.current.add(id))
+    Promise.all(ids.map((id) => getDoc(doc(db, 'ordenes_deposito', id)))).then((snaps) => {
+      const nuevos: Record<string, DepositoRegistrado> = {}
+      snaps.forEach((snap, i) => {
+        // Un depósito que no existe no se cachea como nada: se deja fuera y la
+        // línea degrada a "Pendiente de depósito", que es la verdad disponible.
+        if (snap.exists()) nuevos[ids[i]] = { id: ids[i], ...(snap.data() as Omit<DepositoRegistrado, 'id'>) }
+      })
+      if (Object.keys(nuevos).length > 0) setDepositosCache((prev) => ({ ...prev, ...nuevos }))
+    })
+  }, [solicitudes])
 
   // Fetch comercio names for orders without ownerSnapshot (self-created by comercio)
   useEffect(() => {
@@ -926,15 +987,15 @@ function BaseDatosPageContent() {
       }
       for (const [colKey, f] of Object.entries(colFilters)) {
         if (!f) continue
-        if (!applyFilter(f, getColValue(s, colKey, comercioNames, comercioTelefonos))) return false
+        if (!applyFilter(f, getColValue(s, colKey, comercioNames, comercioTelefonos, depositosCache))) return false
       }
       return true
     })
 
     if (sortCol) {
       result = [...result].sort((a, b) => {
-        const va = getColValue(a, sortCol, comercioNames, comercioTelefonos)
-        const vb = getColValue(b, sortCol, comercioNames, comercioTelefonos)
+        const va = getColValue(a, sortCol, comercioNames, comercioTelefonos, depositosCache)
+        const vb = getColValue(b, sortCol, comercioNames, comercioTelefonos, depositosCache)
         const sa = va === null ? '' : String(va)
         const sb = vb === null ? '' : String(vb)
         const na = Number(va), nb = Number(vb)
@@ -944,7 +1005,7 @@ function BaseDatosPageContent() {
     }
 
     return result
-  }, [solicitudes, search, colFilters, sortCol, sortDir, comercioNames, comercioTelefonos])
+  }, [solicitudes, search, colFilters, sortCol, sortDir, comercioNames, comercioTelefonos, depositosCache])
 
   const totales = filtered.reduce(
     (acc, s) => { acc.precio += getPrecio(s) || 0; acc.totalDelivery += s.cobroContraEntrega?.monto || 0; acc.depositado += s.registro?.deposito?.monto || 0; acc.cs += s.registro?.csRecaudado || 0; acc.usd += s.registro?.usdRecaudado || 0; return acc },
@@ -1103,7 +1164,7 @@ function BaseDatosPageContent() {
                 <Th config={{ colKey: 'fDeposito', label: 'F. Depósito', filterType: 'date' }}
                     filter={colFilters['fDeposito']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
-                <Th config={{ colKey: 'depositado', label: 'Depositado', filterType: 'select', selectOptions: ['Pendiente', 'Parcial', 'Todo'] }}
+                <Th config={{ colKey: 'depositado', label: 'Depositado', filterType: 'select', selectOptions: [...ETIQUETAS_RESUMEN_DEPOSITO] }}
                     filter={colFilters['depositado']} openFilterCol={openFilterCol} sortCol={sortCol} sortDir={sortDir}
                     onOpenFilter={setOpenFilterCol} onApplyFilter={handleApplyFilter} onCloseFilter={() => setOpenFilterCol(null)} onSort={handleSort} />
                 <Th config={{ colKey: 'delivery', label: 'Delivery', filterType: 'number' }}
@@ -1205,15 +1266,39 @@ function BaseDatosPageContent() {
                     </Td>
                     <Td>
                       {(() => {
-                        const dep = s.registro?.deposito
-                        const okC = dep?.confirmadoComercio
-                        const okS = dep?.confirmadoStorkhub
-                        if (!okC && !okS) return <span className="inline-flex items-center rounded-full bg-yellow-50 border border-yellow-200 px-2 py-0.5 text-[11px] font-semibold text-yellow-700">Pendiente</span>
-                        if (okC && okS) return <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-semibold text-green-700">✓ Todo</span>
+                        // FIN-SEMANTICA-UX-1 — una línea por destino que
+                        // realmente deba algo, con el estado REAL del depósito.
+                        //
+                        // Antes se pintaban siempre los dos badges desde
+                        // confirmadoComercio/confirmadoStorkhub. Eso afirmaba
+                        // dos cosas falsas a la vez sobre la misma orden:
+                        // "⏳ Comercio" donde la obligación es 0 —una deuda
+                        // que no existe— y "✓ Storkhub" sobre un depósito
+                        // convertido en deuda, que escribe el mismo
+                        // confirmadoStorkhubAt que una confirmación real.
+                        const { relevantes } = resumenDepositoOrden(
+                          s as EntradaDepositoOrden,
+                          depositosDeOrden(s, depositosCache),
+                        )
+                        if (relevantes.length === 0) {
+                          return <span className="text-gray-300 text-xs" title="Esta orden no genera obligación de depósito">N/A</span>
+                        }
+                        const tono = (l: (typeof relevantes)[number]) =>
+                          l.clave === 'sin_deposito' ? 'bg-yellow-50 border-yellow-200 text-yellow-700'
+                          : l.deposito?.estado === 'confirmado' ? 'bg-green-50 border-green-200 text-green-700'
+                          : l.deposito?.estado === 'convertido_en_deuda' || l.deposito?.estado === 'rechazado' ? 'bg-red-50 border-red-200 text-red-700'
+                          : 'bg-blue-50 border-blue-200 text-blue-700'
                         return (
                           <div className="flex flex-col gap-0.5">
-                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${okC ? 'bg-green-50 border-green-200 text-green-700' : 'bg-yellow-50 border-yellow-200 text-yellow-700'}`}>{okC ? '✓ Comercio' : '⏳ Comercio'}</span>
-                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${okS ? 'bg-green-50 border-green-200 text-green-700' : 'bg-yellow-50 border-yellow-200 text-yellow-700'}`}>{okS ? '✓ Storkhub' : '⏳ Storkhub'}</span>
+                            {relevantes.map((l) => (
+                              <span
+                                key={l.destino}
+                                title={`${l.etiqueta} · ${money(l.obligacion)}${l.esAgrupado ? ` · depósito de ${l.ordenesEnDeposito} órdenes` : ''}`}
+                                className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${tono(l)}`}
+                              >
+                                {l.destino === 'comercio' ? 'Comercio' : 'Storkhub'}: {l.texto}
+                              </span>
+                            ))}
                           </div>
                         )
                       })()}
