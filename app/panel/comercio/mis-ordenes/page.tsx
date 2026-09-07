@@ -16,6 +16,7 @@ import { db } from '@/fb/config'
 import { compressImage, uploadDeliveryBoucher } from '@/fb/storage'
 import { useUser } from '@/app/Components/UserProvider'
 import { Package, Upload, X } from 'lucide-react'
+import { ordinalesDeComercio, etiquetaOrdinal } from '@/lib/ordinal-comercio'
 import {
   estadoDeliveryComercio,
   estadoDepositoProductoComercio,
@@ -227,6 +228,15 @@ export default function MisOrdenesPage() {
   }
 
   const activas = ['pendiente_confirmacion', 'confirmada', 'asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega']
+
+  // IDENTIDAD-HUMANA-1 — "Viaje #23". Se calcula sobre el conjunto YA
+  // cargado: esta pantalla trae todas las ordenes del comercio, asi que no
+  // cuesta ninguna lectura extra. No se persiste (ver lib/ordinal-comercio).
+  //
+  // Se numera sobre `ordenes` y NO sobre `filtered`: el ordinal es la
+  // posicion historica del viaje, no la fila de la tabla. Filtrar por
+  // "Entregadas" no debe renumerar nada.
+  const ordinales = useMemo(() => ordinalesDeComercio(ordenes), [ordenes])
 
   const filtered = useMemo(() => {
     if (filtro === 'activas') return ordenes.filter((o) => activas.includes(o.estado || ''))
@@ -450,9 +460,16 @@ export default function MisOrdenesPage() {
                       })()}
                     </td>
                     <td className={tdCls}>
-                      <span className={`inline-flex text-xs font-semibold px-2.5 py-1 rounded-full border ${estadoCl}`}>
-                        {estadoLabel[o.estado || ''] || o.estado}
-                      </span>
+                      <div className="flex flex-col gap-1 items-start">
+                        <span className={`inline-flex text-xs font-semibold px-2.5 py-1 rounded-full border ${estadoCl}`}>
+                          {estadoLabel[o.estado || ''] || o.estado}
+                        </span>
+                        {/* Solo en viajes realizados: una orden en curso o
+                            cancelada todavia no es un viaje. */}
+                        {etiquetaOrdinal(ordinales[o.id]) && (
+                          <span className="text-[11px] font-semibold text-gray-400">{etiquetaOrdinal(ordinales[o.id])}</span>
+                        )}
+                      </div>
                     </td>
                     <td className={tdCls}>
                       {!o.cobroContraEntrega?.aplica ? (

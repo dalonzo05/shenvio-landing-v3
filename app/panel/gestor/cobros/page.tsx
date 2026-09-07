@@ -44,6 +44,7 @@ import {
   etiquetaResolucion,
   type EntradaIncidencia,
 } from '@/lib/incidencia-cobro'
+import { mostrarCodigo } from '@/lib/codigo-humano'
 import {
   visibleEnCobrosContado,
   etiquetaFormaPagoCobros,
@@ -115,6 +116,10 @@ type CobroDelivery = {
 
 type Solicitud = {
   id: string
+  // IDENTIDAD-HUMANA-1 — codigo operativo. Lo asigna un trigger; los
+  // documentos historicos no lo tienen y caen al ID corto.
+  codigo?: string
+  secuencia?: number
   createdAt?: Timestamp
   entregadoAt?: Timestamp
   cobroPendiente?: boolean
@@ -260,7 +265,7 @@ function getTipoCobro(s: Solicitud): string {
  * el ID como texto plano, así que para entender un caso había que buscarlo a
  * mano. El ancla lleva directo al bloque relevante.
  */
-function LinkOrden({ id, ancla }: { id: string; ancla: 'cobros' | 'incidencia' }) {
+function LinkOrden({ id, ancla, codigo }: { id: string; ancla: 'cobros' | 'incidencia'; codigo?: string }) {
   return (
     <Link
       // B2.5 — misma ruta de siempre, ahora construida por el helper común.
@@ -268,7 +273,7 @@ function LinkOrden({ id, ancla }: { id: string; ancla: 'cobros' | 'incidencia' }
       className="font-mono text-blue-600 hover:text-blue-800 hover:underline transition"
       title={`Ver ficha completa · ${id}`}
     >
-      {id.slice(0, 8)}…
+      {mostrarCodigo(codigo, id)}
     </Link>
   )
 }
@@ -1697,7 +1702,7 @@ function CobrosPageContent() {
                   const requiereRevision = acu.estado === 'requiere_revision'
                   return (
                     <tr key={s.id} className="hover:bg-gray-50/70">
-                      <td className="px-4 py-3 font-mono text-xs"><LinkOrden id={s.id} ancla="cobros" /></td>
+                      <td className="px-4 py-3 font-mono text-xs"><LinkOrden id={s.id} ancla="cobros" codigo={s.codigo} /></td>
                       <td className="px-4 py-3">{getClienteNombre(s, comercioNames)}</td>
                       <td className="px-4 py-3 text-gray-500">{fmtFecha(s.entregadoAt)}</td>
                       {/* B1.2: el pendiente real, no el precio de lista. Con un
@@ -1789,7 +1794,7 @@ function CobrosPageContent() {
                       return (
                         <tr key={s.id} className={`hover:bg-gray-50 transition-colors ${tieneBoucher ? 'bg-blue-50/40' : ''}`}>
                           <td className={tdCls}>{fmtDate(s.entregadoAt)}</td>
-                          <td className={tdCls}><LinkOrden id={s.id} ancla="cobros" /></td>
+                          <td className={tdCls}><LinkOrden id={s.id} ancla="cobros" codigo={s.codigo} /></td>
                           <td className={`${tdCls} font-semibold text-gray-900`}>{getClienteNombre(s, comercioNames)}</td>
                           {/* B2-PAGO-MEDIO-BOUCHER-REVIEW — el medio REAL, y
                               nada más. Acá se leía `quienPaga` y se mostraba
@@ -1984,7 +1989,7 @@ function CobrosPageContent() {
                       return (
                         <tr key={s.id} className="hover:bg-gray-50 transition-colors">
                           <td className={tdCls}>{fmtDate(s.cobroDelivery?.pagadoAt)}</td>
-                          <td className={tdCls}><LinkOrden id={s.id} ancla="cobros" /></td>
+                          <td className={tdCls}><LinkOrden id={s.id} ancla="cobros" codigo={s.codigo} /></td>
                           <td className={`${tdCls} font-semibold text-gray-900`}>{getClienteNombre(s, comercioNames)}</td>
                           <td className={tdCls}>
                             {esTrans ? (
@@ -2196,7 +2201,7 @@ function CobrosPageContent() {
                             ? fmtDate(resolucion?.at)
                             : fmtDate(s.createdAt)}
                         </td>
-                        <td className={tdCls}><LinkOrden id={s.id} ancla="incidencia" /></td>
+                        <td className={tdCls}><LinkOrden id={s.id} ancla="incidencia" codigo={s.codigo} /></td>
                         <td className={`${tdCls} font-semibold text-gray-900`}>{comercio}</td>
                         <td className={tdCls}>
                           <div className="flex items-center gap-2">

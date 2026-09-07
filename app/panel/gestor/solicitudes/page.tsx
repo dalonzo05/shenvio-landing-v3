@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
 import { rutaOrden } from '@/lib/ruta-orden'
+import { coincideCodigo } from '@/lib/codigo-humano'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
   rankearMotorizados,
@@ -829,7 +830,10 @@ function GestorSolicitudesPageContent() {
           .join(' ')
           .toLowerCase()
 
-        return values.includes(q)
+        // IDENTIDAD-HUMANA-1 — SH-1058, sh-1058, SH 1058 o 1058. El numero
+        // suelto compara por igualdad exacta con la secuencia, asi que no
+        // arrastra telefonos ni montos (ver coincideCodigo).
+        return values.includes(q) || coincideCodigo((s as { codigo?: string }).codigo, busqueda)
       })
     }
 

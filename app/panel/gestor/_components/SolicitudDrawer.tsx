@@ -31,6 +31,7 @@ import {
 import { ResumenRapido } from './ResumenRapido'
 import { trazabilidadPago, type EntradaTrazabilidad } from '@/lib/trazabilidad-pago'
 import { presentarActor } from '@/lib/actor-resolucion'
+import { mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
 import {
   X,
   ExternalLink,
@@ -58,6 +59,10 @@ export type EstadoSolicitud =
 
 export type SolicitudDetalle = {
   id: string
+  // IDENTIDAD-HUMANA-1 — codigo operativo. Lo asigna un trigger; los
+  // documentos historicos no lo tienen y caen al ID corto.
+  codigo?: string
+  secuencia?: number
   createdAt?: Timestamp
   updatedAt?: Timestamp
   estado?: EstadoSolicitud
@@ -788,7 +793,14 @@ export function SolicitudDrawer({
               <X size={16} />
             </button>
             <div className="min-w-0">
-              <div className="text-[11px] text-gray-400 font-mono truncate leading-none mb-1">{solicitudId}</div>
+              {/* IDENTIDAD-HUMANA-1 — SH-N al frente cuando existe; el ID
+                  tecnico queda en el title, que sigue siendo la identidad. */}
+              <div
+                className={`truncate leading-none mb-1 font-mono ${esFallbackTecnico(solicitud?.codigo) ? 'text-[11px] text-gray-400' : 'text-xs font-bold text-gray-700'}`}
+                title={solicitudId}
+              >
+                {mostrarCodigo(solicitud?.codigo, solicitudId, 12)}
+              </div>
               {solicitud ? (
                 <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${estadoClass(solicitud.estado)}`}>
                   {statusLabel(solicitud.estado)}

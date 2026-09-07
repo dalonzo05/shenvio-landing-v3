@@ -29,6 +29,7 @@ import { detalleIncidencia } from '@/lib/incidencia-cobro'
 import { construirTimeline, uidsDeTimeline } from '@/lib/timeline-orden'
 import { ImageLightbox } from '../../../_components/ImageLightbox'
 import { nombreDeUsuario } from '@/lib/actor-resolucion'
+import { mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
 import { idsDepositoDeOrden, type DepositoRegistrado, type DestinoDeposito } from '@/lib/deposito-orden'
 
 /** Etiqueta sin emoji para el visor ampliado y los textos accesibles. */
@@ -1067,7 +1068,13 @@ function GestorSolicitudDetallePageContent() {
           </Link>
 
           <div>
-            <h1 className="text-3xl font-bold text-gray-900">Orden {solicitud.id}</h1>
+            {/* IDENTIDAD-HUMANA-1 — el codigo manda en el titulo; el ID
+                tecnico se conserva debajo porque esta es la ficha donde se
+                copia para soporte y para cruzar con Firestore. */}
+            <h1 className="text-3xl font-bold text-gray-900">Orden {mostrarCodigo((solicitud as { codigo?: string }).codigo, solicitud.id, 32)}</h1>
+            {!esFallbackTecnico((solicitud as { codigo?: string }).codigo) && (
+              <p className="text-xs font-mono text-gray-400 mt-1">{solicitud.id}</p>
+            )}
             <div className="flex flex-wrap items-center gap-2 mt-2">
               <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${estadoClass(solicitud.estado)}`}>
                 {statusLabel(solicitud.estado)}

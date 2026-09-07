@@ -74,6 +74,27 @@ service cloud.firestore {
       return isActiveUser() && userDoc().data.get('rol', '') == 'admin';
     }
 
+    // IDENTIDAD-HUMANA-1 — 'codigo' y 'secuencia' son de servidor.
+    //
+    // Los asigna un trigger con Admin SDK dentro de una transaccion sobre
+    // contadores/{ordenes,depositos}. El Admin SDK no pasa por estas reglas,
+    // asi que negarselos al cliente no le quita nada al trigger.
+    //
+    // Si el cliente pudiera escribirlos, el codigo dejaria de ser unico: no
+    // hay forma de comprobar desde aqui que un valor entrante sea el que el
+    // contador entrego, y bastaria un cliente con un bug para repartir dos
+    // veces el mismo SH-N.
+    function sinCodigoEntrante() {
+      return !request.resource.data.keys().hasAny(['codigo', 'secuencia']);
+    }
+
+    // Para updates: el cliente no puede crear, cambiar ni borrar ninguno de
+    // los dos. Se mira affectedKeys(), que cubre las tres cosas a la vez.
+    function noTocaCodigo() {
+      return !request.resource.data.diff(resource.data).affectedKeys()
+           .hasAny(['codigo', 'secuencia']);
+    }
+
     // Bloque 0C-A: hacía falta separar gestor de admin. isAdminOrGestor() los
     // trata igual, y eso es justo lo que permitía la escalada de privilegios
     // sobre usuarios/ — ver el bloque de control de rol en ese match.
@@ -635,7 +656,9 @@ service cloud.firestore {
         && (
           esCreadorDeSolicitud(request.resource.data.userId)
           || isAdminOrGestor()
-        );
+        )
+        // IDENTIDAD-HUMANA-1: el codigo lo pone el trigger, nunca quien crea.
+        && sinCodigoEntrante();
 
       // DIGITADOR V1: lectura amplia de órdenes entregadas necesaria para
       // construir la misma lista de "pendientes de depósito" que ve el
@@ -716,7 +739,10 @@ service cloud.firestore {
 
       // Gestor/admin: acceso completo salvo reabrir una orden cerrada por
       // una vía que no sea la reactivación explícita.
-      allow update: if isAdminOrGestor() && transicionDesdeCerradoValida();
+      // IDENTIDAD-HUMANA-1: noTocaCodigo() solo hace falta en esta rama. Las
+      // de motorizado y comercio ya traen su propia allowlist de raiz
+      // (hasOnly), que deja fuera codigo y secuencia por construccion.
+      allow update: if isAdminOrGestor() && transicionDesdeCerradoValida() && noTocaCodigo();
 
       // acumulacionCobroSemanal es el marcador de conciliación del cobro
       // semanal (P1). El motorizado solo puede DEJARLO PEDIDO: pone
@@ -1154,7 +1180,10 @@ service cloud.firestore {
           && request.resource.data.montoTotal is number
           && request.resource.data.montoTotal >= 0
           && digitacionAutoatribuida()
-        );
+        )
+        // IDENTIDAD-HUMANA-1: vale para las tres ramas — motorizado, gestor
+        // y digitador. Ninguna escribe el codigo; lo asigna el trigger.
+        && sinCodigoEntrante();
 
       // STORAGE ORPHANS BLOQUE 1: 'resource != null' en cada rama no-staff
       // — digitarDepositoStorkhub/digitarDepositoComercio (depositos/page.tsx)
@@ -1179,7 +1208,9 @@ service cloud.firestore {
         || (isDigitador() && resource != null && resource.data.get('digitadoPorUid', null) == request.auth.uid);
 
       // Gestor/admin: puede confirmar, rechazar y editar libremente
-      allow update: if isAdminOrGestor();
+      // IDENTIDAD-HUMANA-1: "libremente" ya no incluye el codigo. Las ramas
+      // de motorizado y digitador tienen hasOnly y no lo necesitan.
+      allow update: if isAdminOrGestor() && noTocaCodigo();
 
       // Motorizado: solo puede subir boucher y pasar a en_revision.
       // Mismo cambio que create/read — se exige rol motorizado activo. Los
@@ -1238,6 +1269,21 @@ service cloud.firestore {
     // aquí directamente, ni siquiera gestor/admin, para que las invariantes
     // cruzadas (FIFO, montoPendiente, pertenencia de comercioId) se validen
     // en código de confianza y no en reglas.
+    // IDENTIDAD-HUMANA-1 — contadores de codigos legibles.
+    //
+    // contadores/ordenes y contadores/depositos guardan { valor: number }, la
+    // ultima secuencia repartida. Solo los toca el trigger asignarCodigo*
+    // (Admin SDK, que no pasa por estas reglas), dentro de la misma
+    // transaccion en la que escribe el codigo en el documento.
+    //
+    // Denegado TODO al cliente, lectura incluida y para cualquier rol. No es
+    // dato de nadie en particular: es estado global del sistema, y dejarlo
+    // leer solo serviria para adivinar cuantas ordenes hay. Mismo criterio
+    // que cargos_delivery, aqui llevado tambien al read.
+    match /contadores/{contadorId} {
+      allow read, write: if false;
+    }
+
     match /cargos_delivery/{cargoId} {
       allow read: if isAdminOrGestor()
         || (isComercioRole() && resource.data.comercioId == comercioIdDelUsuario());

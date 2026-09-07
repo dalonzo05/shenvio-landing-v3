@@ -7,6 +7,7 @@ import { ResumenRapido } from '../_components/ResumenRapido'
 import { Section, InfoRow } from '../_components/SolicitudDrawer'
 import { telefonoComercio, telefonoRetiro, telefonoEntrega, zonaRetiro, zonaEntrega, etiquetaFormaPago, FORMA_PAGO_AUSENTE } from '@/lib/campos-base-datos'
 import { trazabilidadPago } from '@/lib/trazabilidad-pago'
+import { mostrarCodigo, coincideCodigo } from '@/lib/codigo-humano'
 import { estadoContable, type EntradaEstadoContable, type ClaveEstadoContable } from '@/lib/estado-contable-base'
 import {
   resumenDepositoOrden,
@@ -72,6 +73,10 @@ type Registro = {
 
 type Solicitud = {
   id: string
+  // IDENTIDAD-HUMANA-1 — codigo operativo (SH-N). Lo asigna un trigger; los
+  // historicos no lo tienen y caen al ID corto.
+  codigo?: string
+  secuencia?: number
   createdAt?: Timestamp
   updatedAt?: Timestamp
   estado?: EstadoSolicitud
@@ -983,7 +988,10 @@ function BaseDatosPageContent() {
         // B2-BASE-PAGO-DETALLE: buscaba sobre registro.zona, vacío en todas
         // las órdenes. Ahora sobre la clasificación real, retiro y entrega.
         const zonas = `${zonaRetiro(s) || ''} ${zonaEntrega(s) || ''}`.toLowerCase()
-        if (!comercio.includes(q) && !entrega.includes(q) && !zonas.includes(q)) return false
+        // IDENTIDAD-HUMANA-1 — buscar por SH-1058, sh-1058, SH 1058 o 1058.
+        // El numero suelto compara por igualdad exacta, asi que un telefono
+        // o un monto no arrastran una orden ajena (ver coincideCodigo).
+        if (!comercio.includes(q) && !entrega.includes(q) && !zonas.includes(q) && !coincideCodigo(s.codigo, search)) return false
       }
       for (const [colKey, f] of Object.entries(colFilters)) {
         if (!f) continue
@@ -1028,7 +1036,7 @@ function BaseDatosPageContent() {
       const formaPago = etiquetaFormaPago(cd?.formaPago)
       const ec = estadoContable(s as EntradaEstadoContable)
       return [
-        s.id.slice(0, 8),
+        mostrarCodigo(s.codigo, s.id),
         formatDate(s.createdAt),
         s.asignacion?.motorizadoNombre || '',
         comercio,
@@ -1204,7 +1212,10 @@ function BaseDatosPageContent() {
                         onClick={() => setSelectedId(s.id)}
                         className="font-mono text-[#004aad] hover:underline"
                       >
-                        <span className="text-gray-400 mr-1">{idx + 1}.</span>{s.id.slice(0, 6)}
+                        {/* IDENTIDAD-HUMANA-1 — SH-N al frente; el ID tecnico
+                            queda en el title y sigue siendo la identidad real. */}
+                        <span className="text-gray-400 mr-1">{idx + 1}.</span>
+                        <span title={s.id}>{mostrarCodigo(s.codigo, s.id, 6)}</span>
                       </button>
                     </Td>
 

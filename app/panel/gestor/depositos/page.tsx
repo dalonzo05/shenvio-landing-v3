@@ -37,12 +37,17 @@ import {
   Eye,
 } from 'lucide-react'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
+import { mostrarCodigo, coincideCodigo } from '@/lib/codigo-humano'
 import { IrAFicha } from '../_components/IrAFicha'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Solicitud = {
   id: string
+  // IDENTIDAD-HUMANA-1 — codigo operativo. Lo asigna un trigger; los
+  // documentos historicos no lo tienen y caen al ID corto.
+  codigo?: string
+  secuencia?: number
   estado?: string
   tipoCliente?: 'contado' | 'credito'
   createdAt?: Timestamp
@@ -107,6 +112,10 @@ type MainTab = 'pendientes' | 'por_revisar' | 'historial'
 // Documento de ordenes_deposito (una transferencia bancaria completa)
 type DepositoOrderDoc = {
   id: string
+  // IDENTIDAD-HUMANA-1 — codigo operativo. Lo asigna un trigger; los
+  // documentos historicos no lo tienen y caen al ID corto.
+  codigo?: string
+  secuencia?: number
   creadoAt?: Timestamp
   tipo?: string
   estado?: string
@@ -251,16 +260,19 @@ function ChipOrdenDeposito({
   corte,
   onVerRapido,
   className,
+  codigo,
 }: {
   id: string
   corte: number
   onVerRapido: (id: string) => void
   className: string
+  codigo?: string
 }) {
   return (
     <span className="inline-flex items-center">
       <button type="button" onClick={() => onVerRapido(id)} className={className} title={`Vista rápida · ${id}`}>
-        {id.slice(0, corte)}…
+        {/* IDENTIDAD-HUMANA-1 — SH-N si lo tiene; si no, el ID corto de siempre. */}
+        {mostrarCodigo(codigo, id, corte)}
       </button>
       <IrAFicha id={id} anchor="depositos" className="ml-0.5" />
     </span>
@@ -590,14 +602,25 @@ function DepositosPageContent() {
 
   // ── Grupos filtrados (tabla resumen Pendientes) ────────────────────────────
 
+  // IDENTIDAD-HUMANA-1 — los chips de orden dentro de un deposito reciben
+  // solo el ID (vienen de dep.solicitudIds). Este mapa les da el codigo sin
+  // ninguna lectura nueva: sale de las ordenes que la pantalla ya carga.
+  const codigoPorOrden = useMemo(() => {
+    const m: Record<string, string> = {}
+    ordenes.forEach((o) => { if (typeof o.codigo === 'string') m[o.id] = o.codigo })
+    return m
+  }, [ordenes])
+
   const gruposFiltrados = useMemo(() => {
     let list = gruposMotorizado
     if (busqueda.trim()) {
       const q = busqueda.toLowerCase()
       list = list.filter((g) => {
         if (g.motorizadoNombre.toLowerCase().includes(q)) return true
+        // IDENTIDAD-HUMANA-1 — tambien por SH-N: SH-1058, sh-1058, 1058.
         if (g.storkhub.ordenes.some((o) =>
           o.id.toLowerCase().includes(q) ||
+          coincideCodigo(o.codigo, busqueda) ||
           (o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre || '').toLowerCase().includes(q) ||
           (o.entrega?.nombreApellido || '').toLowerCase().includes(q)
         )) return true
@@ -605,6 +628,7 @@ function DepositosPageContent() {
           c.nombre.toLowerCase().includes(q) ||
           c.ordenes.some((o) =>
             o.id.toLowerCase().includes(q) ||
+            coincideCodigo(o.codigo, busqueda) ||
             (o.entrega?.nombreApellido || '').toLowerCase().includes(q)
           )
         )) return true
@@ -773,6 +797,19 @@ function DepositosPageContent() {
       //    este depositoId, punto de reintento si el paso 2 falla. Antes de
       //    esta escritura, compressImage() puede fallar sin dejar rastro
       //    (nada se escribió todavía) — no hace falta que corra antes.
+      // IDENTIDAD-HUMANA-1 — { merge: true } es prerequisito de los codigos.
+      //
+      // El guard de arriba es `yaConfirmado` = existe && estado 'confirmado'
+      // && tiene boucher. Un reintento tras fallar el upload deja el doc en
+      // 'pendiente_boucher' SIN boucher, asi que `yaConfirmado` es false y
+      // este setDoc se vuelve a ejecutar sobre un documento que ya existe.
+      // Sin merge, ese reintento borraria el `codigo` y la `secuencia` que el
+      // trigger ya asigno, y el documento quedaria sin identidad operativa
+      // para siempre: el trigger solo dispara en la creacion.
+      //
+      // No hay semantica de reemplazo que preservar: el payload reescribe
+      // todos sus propios campos, y lo unico que sobrevive al merge —el
+      // boucher de un intento anterior— lo pisa el paso 3 igualmente.
       await setDoc(depositoRef, {
         creadoAt: serverTimestamp(),
         tipo: 'recaudacion_motorizado_storkhub',
@@ -788,7 +825,7 @@ function DepositosPageContent() {
         montoBruto,
         gastosDescontados,
         gastosIds: gastosDeMotorizado.map((g) => g.id),
-      })
+      }, { merge: true })
 
       // 2) Comprimir y subir boucher al MISMO depositoId — si cualquiera de
       //    los dos falla, el doc queda en 'pendiente_boucher' y un
@@ -848,7 +885,10 @@ function DepositosPageContent() {
         motorizadoNombre: motNombre,
         solicitudIds: ordenes.map((o) => o.id),
         montoTotal,
-      })
+      // IDENTIDAD-HUMANA-1 — mismo motivo que en confirmarStorkhub: un
+      // reintento tras fallar el upload reejecuta este setDoc sobre un doc que
+      // ya existe, y sin merge borraria el codigo asignado por el trigger.
+      }, { merge: true })
 
       // Mismo criterio que confirmarStorkhub: el namespace es del motorizado.
       const blob = await compressImage(boucherFile)
@@ -1793,7 +1833,7 @@ function DepositosPageContent() {
                                     <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Órdenes incluidas</p>
                                     <div className="flex flex-wrap gap-1.5">
                                       {dep.solicitudIds.map((sid) => (
-                                        <ChipOrdenDeposito key={sid} id={sid} corte={8} onVerRapido={setSelectedOrdenId}
+                                        <ChipOrdenDeposito key={sid} id={sid} codigo={codigoPorOrden[sid]} corte={8} onVerRapido={setSelectedOrdenId}
                                           className="rounded bg-white border border-gray-200 px-2 py-0.5 font-mono text-xs text-blue-600 hover:bg-blue-50 transition" />
                                       ))}
                                     </div>
@@ -2060,7 +2100,7 @@ function DepositosPageContent() {
                         <td className={tdCls}>
                           <div className="flex flex-wrap gap-1">
                             {(dep.solicitudIds ?? []).map((sid) => (
-                              <ChipOrdenDeposito key={sid} id={sid} corte={6} onVerRapido={setSelectedOrdenId}
+                              <ChipOrdenDeposito key={sid} id={sid} codigo={codigoPorOrden[sid]} corte={6} onVerRapido={setSelectedOrdenId}
                                 className="font-mono text-[11px] text-blue-600 bg-blue-50 hover:bg-blue-100 px-1.5 py-0.5 rounded transition" />
                             ))}
                           </div>
