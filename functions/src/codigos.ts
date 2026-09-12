@@ -1,6 +1,6 @@
 // IDENTIDAD-HUMANA-1 — asignación de códigos legibles: LADO ESCRITURA.
 //
-// SH-1058 y DEP-247 son identificadores operativos, globales y secuenciales.
+// SH-0001 y DEP-0247 son identificadores operativos, globales y secuenciales.
 // No reemplazan el ID de Firestore, no son FK y NO autorizan nada.
 //
 // ── Por qué un trigger y no el cliente ───────────────────────────────────────
@@ -34,8 +34,8 @@
 // Por eso el FORMATO es un contrato enunciado en los dos lados. Acá se
 // escribe; en `lib/codigo-humano.ts` se lee, valida y busca. No se duplica
 // ninguna decisión —el servidor no parsea, el cliente no genera— y las dos
-// suites lo atan contra los mismos literales del bloque: SH-1001, DEP-1001,
-// SH-1000000.
+// suites lo atan contra los mismos literales del bloque: SH-0001, DEP-0001,
+// SH-9999 y SH-10000.
 
 import { onDocumentCreated } from 'firebase-functions/v2/firestore';
 import * as admin from 'firebase-admin';
@@ -50,11 +50,16 @@ export type PrefijoCodigo = (typeof PREFIJOS)[number];
 export const CONTADOR_ORDENES = 'ordenes';
 export const CONTADOR_DEPOSITOS = 'depositos';
 
+/** Ancho mínimo del número. Por debajo se rellena con ceros. */
+export const ANCHO_MINIMO = 4;
+
 /**
  * Compone el código canónico. Espejo exacto de `lib/codigo-humano.ts`.
  *
- * Sin padding por decisión de producto: un ancho fijo obligaría a convivir con
- * dos formatos al pasar de 999.999 a 1.000.000. El orden lo da `secuencia`.
+ * Cuatro dígitos como mínimo, y a partir de 10.000 el número crece solo:
+ * `SH-0001`, `SH-0015`, `SH-9999`, `SH-10000`. Un mismo número tiene una
+ * sola representación válida, que es lo que permite que la comprobación de
+ * coherencia de `decidirAsignacion` sea una igualdad de cadenas.
  */
 export function formatearCodigo(prefijo: string, secuencia: number): string {
   if (!(PREFIJOS as readonly string[]).includes(prefijo)) {
@@ -63,7 +68,7 @@ export function formatearCodigo(prefijo: string, secuencia: number): string {
   if (!Number.isSafeInteger(secuencia) || secuencia < 1) {
     throw new Error(`secuencia invalida: ${JSON.stringify(secuencia)}`);
   }
-  return `${prefijo}-${secuencia}`;
+  return `${prefijo}-${String(secuencia).padStart(ANCHO_MINIMO, '0')}`;
 }
 
 export type Decision =
@@ -113,8 +118,11 @@ export function decidirAsignacion(entrada: EntradaDecision): Decision {
 
   // A · ya asignado y coherente.
   if (tieneCodigo && tieneSecuencia) {
+    // Se compone con el MISMO formateador que escribe el código: si el
+    // padding cambiara y esta comprobación usara una plantilla suelta, todo
+    // documento existente pasaría a leerse como incoherente.
     const esperado = esEntero(entrada.secuenciaActual) && entrada.secuenciaActual >= 1
-      ? `${entrada.prefijo}-${entrada.secuenciaActual}`
+      ? formatearCodigo(entrada.prefijo, entrada.secuenciaActual)
       : null;
     if (esperado !== null && entrada.codigoActual === esperado) {
       return { accion: 'noop', motivo: 'YA_ASIGNADO' };

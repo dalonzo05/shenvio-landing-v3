@@ -12,6 +12,7 @@ import { httpsCallable } from 'firebase/functions';
 import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBoucher, type TipoEvidencia } from '@/fb/storage'
 import { registrarMovimiento } from '@/lib/financial-writes';
 import { calcularDeposito } from '@/lib/calculo-deposito';
+import { mostrarCodigo } from '@/lib/codigo-humano';
 import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -33,6 +34,9 @@ type EstadoAceptacion = 'pendiente' | 'aceptada' | 'rechazada' | 'expirada';
 
 type Solicitud = {
   id: string;
+  // IDENTIDAD-HUMANA-1B — codigo operativo (SH-0001). Lo asigna un trigger;
+  // hasta entonces, y en las ordenes historicas, no existe.
+  codigo?: string;
   userId?: string;
   estado?: EstadoSolicitud;
   createdAt?: Timestamp;
@@ -1079,7 +1083,7 @@ export default function PanelMotorizadoPage() {
                           <span style={{ fontSize: 22, fontWeight: 900, color: sem.text, letterSpacing: -1 }}>{fmtRemaining(o.ms)}</span>
                           <span style={{ fontSize: 11, fontWeight: 800, color: sem.text }}>{sem.label}</span>
                         </div>
-                        <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</span>
+                        <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace' }} title={o.id}>{mostrarCodigo(o.codigo, o.id, 8)}</span>
                       </div>
 
                       {/* Price + deposit preview */}
@@ -1163,7 +1167,7 @@ export default function PanelMotorizadoPage() {
                           {enCurso.length >= 2 && (
                             <span style={{ fontSize: 10, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: 0.5 }}>Orden {idx + 1} de {enCurso.length}</span>
                           )}
-                          <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</span>
+                          <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace' }} title={o.id}>{mostrarCodigo(o.codigo, o.id, 8)}</span>
                         </div>
                       </div>
 
@@ -1605,7 +1609,7 @@ export default function PanelMotorizadoPage() {
                                   <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #e0f2fe', gap: 8 }}>
                                     <div style={{ flex: 1 }}>
                                       <p style={{ fontSize: 12, fontWeight: 600, color: '#1e40af', margin: 0 }}>{o.entrega?.nombreApellido || '—'}</p>
-                                      <p style={{ fontSize: 10, color: '#93c5fd', margin: 0, fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</p>
+                                      <p style={{ fontSize: 10, color: '#93c5fd', margin: 0, fontFamily: 'monospace' }} title={o.id}>{mostrarCodigo(o.codigo, o.id, 8)}</p>
                                     </div>
                                     <p style={{ fontSize: 13, fontWeight: 700, color: '#2563eb', margin: 0, flexShrink: 0 }}>{fmt(dep.totalAStorkhub)}</p>
                                   </div>
@@ -1738,7 +1742,7 @@ export default function PanelMotorizadoPage() {
                                   <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #ede9fe', gap: 8 }}>
                                     <div style={{ flex: 1 }}>
                                       <p style={{ fontSize: 12, fontWeight: 600, color: '#5b21b6', margin: 0 }}>{o.entrega?.nombreApellido || '—'}</p>
-                                      <p style={{ fontSize: 10, color: '#c4b5fd', margin: 0, fontFamily: 'monospace' }}>#{o.id.slice(0, 8)}</p>
+                                      <p style={{ fontSize: 10, color: '#c4b5fd', margin: 0, fontFamily: 'monospace' }} title={o.id}>{mostrarCodigo(o.codigo, o.id, 8)}</p>
                                     </div>
                                     <p style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', margin: 0, flexShrink: 0 }}>{fmt(dep.totalAlComercio)}</p>
                                   </div>

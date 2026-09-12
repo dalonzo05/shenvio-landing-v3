@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
 import { rutaOrden } from '@/lib/ruta-orden'
-import { coincideCodigo } from '@/lib/codigo-humano'
+import { coincideCodigo, mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
   rankearMotorizados,
@@ -1727,12 +1727,21 @@ function GestorSolicitudesPageContent() {
                     return (
                       <tr key={s.id} className={`align-middle transition-colors group ${s.estado === 'confirmada' ? 'bg-emerald-50/20 hover:bg-emerald-50/50' : 'hover:bg-blue-50/60'}`}>
                         <td className="px-3 py-2 border-r border-gray-100">
+                          {/* IDENTIDAD-HUMANA-1B — SH-0001 al frente. El ID
+                              técnico sigue siendo la identidad real: es el que
+                              construye la ruta y el que queda en el title para
+                              copiarlo. Mientras el trigger no asigne código, se
+                              cae al ID corto en vez de dejar el hueco. */}
                           <Link
                             href={`/panel/gestor/solicitudes/${s.id}`}
-                            className="block font-semibold text-xs text-gray-900 hover:text-blue-700 hover:underline truncate max-w-[170px]"
+                            className={`block hover:text-blue-700 hover:underline truncate max-w-[170px] ${
+                              esFallbackTecnico((s as { codigo?: string }).codigo)
+                                ? 'font-mono text-[11px] text-gray-500'
+                                : 'font-semibold text-sm text-gray-900'
+                            }`}
                             title={s.id}
                           >
-                            {s.id}
+                            {mostrarCodigo((s as { codigo?: string }).codigo, s.id, 8)}
                           </Link>
                           <div className="text-[11px] text-gray-500 mt-0.5 truncate">
                             {formatDateTime(s.createdAt)}

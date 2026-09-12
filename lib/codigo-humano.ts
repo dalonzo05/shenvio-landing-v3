@@ -32,15 +32,28 @@ export type PrefijoCodigo = typeof PREFIJO_ORDEN | typeof PREFIJO_DEPOSITO
 
 export const PREFIJOS: readonly PrefijoCodigo[] = [PREFIJO_ORDEN, PREFIJO_DEPOSITO]
 
+/** Ancho mínimo del número. Por debajo se rellena con ceros. */
+export const ANCHO_MINIMO = 4
+
 /**
- * Forma canónica: PREFIJO en mayúsculas, guion, y un entero sin ceros a la
- * izquierda. Es lo ÚNICO que puede quedar persistido.
+ * Forma canónica: PREFIJO en mayúsculas, guion y el número con AL MENOS
+ * cuatro dígitos. Es lo ÚNICO que puede quedar persistido.
  *
- * Sin padding por decisión de producto: al pasar de 999.999 a 1.000.000 un
- * ancho fijo obligaría a convivir con dos formatos, y el orden lexicográfico
- * se rompería justo ahí. El orden lo da `secuencia`, que es número.
+ * El padding existe por una razón de lectura, no de estética: `SH-1` se lee
+ * como un identificador provisional o truncado, y `SH-1001` como la orden
+ * número mil uno de un negocio que solo lleva una. Cuatro dígitos dan un
+ * identificador que se ve completo desde el primero.
+ *
+ * A partir de 10.000 el número crece solo, sin ancho artificial: rellenar
+ * más allá obligaría a elegir un techo, y no hay ninguno. La contrapartida
+ * es que el orden lexicográfico deja de coincidir con el numérico en ese
+ * salto — no importa, porque quien ordena es `secuencia`, que es número.
+ *
+ * Dos formas quedan fuera y merecen decirse: `SH-0000` (no hay secuencia 0)
+ * y `SH-00001` o `SH-010000` (ceros por encima del ancho mínimo). Un mismo
+ * número tiene exactamente una representación válida.
  */
-const CANONICO = /^(SH|DEP)-([1-9][0-9]*)$/
+const CANONICO = /^(SH|DEP)-((?!0000)[0-9]{4}|[1-9][0-9]{4,})$/
 
 /**
  * Búsqueda tolerante. Acepta separador guion, espacio o nada, y minúsculas:
@@ -71,7 +84,7 @@ export function formatearCodigo(prefijo: string, secuencia: number): string {
   if (!Number.isInteger(secuencia) || secuencia < 1) {
     throw new Error(`secuencia invalida: ${JSON.stringify(secuencia)}`)
   }
-  return `${prefijo}-${secuencia}`
+  return `${prefijo}-${String(secuencia).padStart(ANCHO_MINIMO, '0')}`
 }
 
 /** ¿Este valor es un código canónico? Estricto: es el contrato de persistencia. */
@@ -86,7 +99,8 @@ export function prefijoDeCodigo(v: unknown): PrefijoCodigo | null {
 }
 
 /**
- * Secuencia de un código canónico, o null.
+ * Secuencia de un código canónico, o null. Los ceros del padding no cuentan:
+ * `SH-0015` es 15.
  *
  * Solo lee el código: no cae a `secuencia` ni a ningún otro campo. Si los dos
  * están y discrepan, eso es una incoherencia que corresponde detectar, no
@@ -120,10 +134,11 @@ export function parseBusquedaCodigo(consulta: string): ConsultaCodigo | null {
   if (!q) return null
   const m = q.match(BUSQUEDA)
   if (!m) return null
+  // Los ceros a la izquierda se descartan: con el padding son la forma
+  // NORMAL de escribir el código, así que "0001" y "1" son la misma orden.
+  // `0` y `0000` no lo son: no existe la secuencia cero.
   const secuencia = Number(m[2])
-  // `0`, `007` y cualquier cosa que no sea un entero positivo no son códigos.
   if (!Number.isSafeInteger(secuencia) || secuencia < 1) return null
-  if (m[2].length > 1 && m[2][0] === '0') return null
   return { prefijo: (m[1] as PrefijoCodigo) ?? null, secuencia }
 }
 

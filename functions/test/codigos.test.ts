@@ -1,8 +1,8 @@
-// IDENTIDAD-HUMANA-1 — suite focal de la frontera de asignación de códigos.
+// IDENTIDAD-HUMANA-1B — suite focal de la frontera de asignación de códigos.
 //
 // Ejecuta la implementación real de `src/codigos.ts`: sin espejo, sin réplica,
-// sin import cruzado hacia `lib/`. Los literales —SH-1001, DEP-1001,
-// SH-1000000— son los mismos que fija `lib/codigo-humano.test.ts`, y esa
+// sin import cruzado hacia `lib/`. Los literales —SH-0001, DEP-0001, SH-9999,
+// SH-10000— son los mismos que fija `lib/codigo-humano.test.ts`, y esa
 // coincidencia es lo que ata el contrato de formato a través de una frontera
 // que ningún import puede cruzar.
 //
@@ -25,13 +25,16 @@ import {
   type Decision,
 } from '../src/codigos';
 
-/** Documento recién creado, sin código, con el contador sembrado en 1000. */
+/**
+ * Documento recién creado, sin código, con el contador en 0 — que es como
+ * queda staging tras el reset de 1B, así que el primer código es SH-0001.
+ */
 const nuevo = (over: Partial<Parameters<typeof decidirAsignacion>[0]> = {}) =>
   decidirAsignacion({
     prefijo: PREFIJO_ORDEN,
     codigoActual: undefined,
     secuenciaActual: undefined,
-    valorContador: 1000,
+    valorContador: 0,
     ...over,
   });
 
@@ -44,45 +47,61 @@ const asignada = (d: Decision) => {
 
 test('K1 · documento nuevo sin código ⇒ asigna el siguiente', () => {
   const d = asignada(nuevo());
-  assert.equal(d.secuencia, 1001);
-  assert.equal(d.siguienteValor, 1001);
+  assert.equal(d.secuencia, 1);
+  assert.equal(d.siguienteValor, 1);
 });
 
 test('K2 · prefijo de orden ⇒ SH', () => {
-  assert.equal(asignada(nuevo()).codigo, 'SH-1001');
+  assert.equal(asignada(nuevo()).codigo, 'SH-0001');
 });
 
 test('K3 · prefijo de depósito ⇒ DEP', () => {
-  assert.equal(asignada(nuevo({ prefijo: PREFIJO_DEPOSITO })).codigo, 'DEP-1001');
+  assert.equal(asignada(nuevo({ prefijo: PREFIJO_DEPOSITO })).codigo, 'DEP-0001');
 });
 
-test('K4 · contador 1000 ⇒ 1001 (primer código de staging)', () => {
-  assert.equal(asignada(nuevo({ valorContador: 1000 })).codigo, 'SH-1001');
-  assert.equal(asignada(nuevo({ valorContador: 1000, prefijo: PREFIJO_DEPOSITO })).codigo, 'DEP-1001');
+test('K4 · contador 0 ⇒ el primer código de staging', () => {
+  assert.equal(asignada(nuevo({ valorContador: 0 })).codigo, 'SH-0001');
+  assert.equal(asignada(nuevo({ valorContador: 0, prefijo: PREFIJO_DEPOSITO })).codigo, 'DEP-0001');
 });
 
-test('K5 · 999999 ⇒ SH-1000000, sin cambiar de formato', () => {
+test('K4b · los saltos de ancho', () => {
+  // 14 ⇒ 0015 sigue con padding; 999 ⇒ 1000 lo llena justo; 9999 ⇒ 10000 lo
+  // supera y a partir de ahí el número crece solo.
+  assert.equal(asignada(nuevo({ valorContador: 14 })).codigo, 'SH-0015');
+  assert.equal(asignada(nuevo({ valorContador: 998 })).codigo, 'SH-0999');
+  assert.equal(asignada(nuevo({ valorContador: 999 })).codigo, 'SH-1000');
+  assert.equal(asignada(nuevo({ valorContador: 9998 })).codigo, 'SH-9999');
+  assert.equal(asignada(nuevo({ valorContador: 9999 })).codigo, 'SH-10000');
+  assert.equal(asignada(nuevo({ valorContador: 10000 })).codigo, 'SH-10001');
+});
+
+test('K5 · 999999 ⇒ SH-1000000, sin relleno artificial', () => {
   const d = asignada(nuevo({ valorContador: 999999 }));
   assert.equal(d.codigo, 'SH-1000000');
   assert.equal(d.secuencia, 1000000);
 });
 
 test('K5b · un contador en 0 da el primer código, no el cero', () => {
-  assert.equal(asignada(nuevo({ valorContador: 0 })).codigo, 'SH-1');
+  assert.equal(asignada(nuevo({ valorContador: 0 })).secuencia, 1);
+  assert.equal(asignada(nuevo({ valorContador: 0 })).codigo, 'SH-0001');
 });
 
 // ── Idempotencia ─────────────────────────────────────────────────────────────
 
 test('K6 · documento ya completo y coherente ⇒ no-op', () => {
-  const d = nuevo({ codigoActual: 'SH-1001', secuenciaActual: 1001 });
+  // La coherencia se comprueba con el MISMO formateador, así que el padding
+  // cuenta: 'SH-0001' con secuencia 1 es coherente, 'SH-1' no lo es.
+  const d = nuevo({ codigoActual: 'SH-0001', secuenciaActual: 1 });
   assert.equal(d.accion, 'noop');
   assert.equal((d as { motivo: string }).motivo, 'YA_ASIGNADO');
+  assert.equal(nuevo({ codigoActual: 'SH-1000', secuenciaActual: 1000 }).accion, 'noop');
+  assert.equal(nuevo({ codigoActual: 'SH-10000', secuenciaActual: 10000 }).accion, 'noop');
 });
 
 test('K7 · retry del mismo evento ⇒ mismo código y ningún número consumido', () => {
-  // Primera entrega: asigna 1001 y deja el contador en 1001.
-  const primera = asignada(nuevo({ valorContador: 1000 }));
-  assert.equal(primera.codigo, 'SH-1001');
+  // Primera entrega: asigna la 1 y deja el contador en 1.
+  const primera = asignada(nuevo({ valorContador: 0 }));
+  assert.equal(primera.codigo, 'SH-0001');
   // Segunda entrega del MISMO evento: el documento ya se releyó con código.
   const segunda = nuevo({
     codigoActual: primera.codigo,
@@ -93,16 +112,16 @@ test('K7 · retry del mismo evento ⇒ mismo código y ningún número consumido
 });
 
 test('K8 · dos asignaciones consecutivas dan códigos distintos', () => {
-  const a = asignada(nuevo({ valorContador: 1000 }));
+  const a = asignada(nuevo({ valorContador: 0 }));
   const b = asignada(nuevo({ valorContador: a.siguienteValor }));
-  assert.equal(a.codigo, 'SH-1001');
-  assert.equal(b.codigo, 'SH-1002');
+  assert.equal(a.codigo, 'SH-0001');
+  assert.equal(b.codigo, 'SH-0002');
   assert.notEqual(a.codigo, b.codigo);
   assert.equal(b.secuencia - a.secuencia, 1);
 });
 
 test('K8b · 50 asignaciones encadenadas: sin huecos ni repetidos', () => {
-  let valor = 1000;
+  let valor = 0;
   const vistos: string[] = [];
   for (let i = 0; i < 50; i++) {
     const d = asignada(nuevo({ valorContador: valor }));
@@ -110,28 +129,33 @@ test('K8b · 50 asignaciones encadenadas: sin huecos ni repetidos', () => {
     valor = d.siguienteValor;
   }
   assert.equal(new Set(vistos).size, 50, 'hubo códigos repetidos');
-  assert.equal(vistos[0], 'SH-1001');
-  assert.equal(vistos[49], 'SH-1050');
-  assert.equal(valor, 1050);
+  assert.equal(vistos[0], 'SH-0001');
+  assert.equal(vistos[9], 'SH-0010');
+  assert.equal(vistos[49], 'SH-0050');
+  assert.equal(valor, 50);
 });
 
 // ── Estados parciales: fail closed ───────────────────────────────────────────
 
 test('K9 · código sin secuencia ⇒ bloquear, no reparar', () => {
-  const d = nuevo({ codigoActual: 'SH-1001', secuenciaActual: undefined });
+  const d = nuevo({ codigoActual: 'SH-0001', secuenciaActual: undefined });
   assert.equal(d.accion, 'bloquear');
   assert.equal((d as { motivo: string }).motivo, 'CODIGO_ESTADO_PARCIAL');
 });
 
 test('K10 · secuencia sin código ⇒ bloquear, no reparar', () => {
-  const d = nuevo({ codigoActual: undefined, secuenciaActual: 1001 });
+  const d = nuevo({ codigoActual: undefined, secuenciaActual: 1 });
   assert.equal(d.accion, 'bloquear');
   assert.equal((d as { motivo: string }).motivo, 'CODIGO_ESTADO_PARCIAL');
 });
 
 test('K10b · los dos presentes pero discrepantes ⇒ bloquear', () => {
   // Reconstruir uno desde el otro sería elegir cuál miente. Se para.
-  for (const [c, s] of [['SH-1001', 999], ['SH-1001', 'mil uno'], ['DEP-5', 5], ['sh-1001', 1001], ['SH-1001', 0]] as const) {
+  // El padding entra en la comparación: un documento con el formato viejo
+  // ('SH-1' con secuencia 1) ya no es coherente y se bloquea en vez de
+  // reescribirse solo. Es lo correcto: reformatear en caliente sería
+  // cambiarle el identificador a una orden que alguien ya pudo anotar.
+  for (const [c, s] of [['SH-1001', 999], ['SH-1001', 'mil uno'], ['DEP-0005', 5], ['sh-0001', 1], ['SH-0001', 0], ['SH-1', 1], ['SH-01', 1], ['SH-00001', 1]] as const) {
     const d = nuevo({ codigoActual: c, secuenciaActual: s });
     assert.equal(d.accion, 'bloquear', `no bloqueó con codigo=${c} secuencia=${JSON.stringify(s)}`);
     assert.equal((d as { motivo: string }).motivo, 'CODIGO_INCOHERENTE');
@@ -192,10 +216,13 @@ test('K14 · numeroOrden no participa: la firma ni siquiera lo admite', () => {
   assert.equal(d.codigo, 'SH-1058');
 });
 
-test('K15 · formato canónico: sin padding, sin minúsculas, con guion', () => {
-  assert.equal(formatearCodigo(PREFIJO_ORDEN, 1), 'SH-1');
+test('K15 · formato canónico: cuatro dígitos mínimo, mayúsculas y guion', () => {
+  assert.equal(formatearCodigo(PREFIJO_ORDEN, 1), 'SH-0001');
+  assert.equal(formatearCodigo(PREFIJO_ORDEN, 15), 'SH-0015');
   assert.equal(formatearCodigo(PREFIJO_ORDEN, 1058), 'SH-1058');
-  assert.equal(formatearCodigo(PREFIJO_DEPOSITO, 247), 'DEP-247');
+  assert.equal(formatearCodigo(PREFIJO_DEPOSITO, 247), 'DEP-0247');
+  assert.equal(formatearCodigo(PREFIJO_ORDEN, 9999), 'SH-9999');
+  assert.equal(formatearCodigo(PREFIJO_ORDEN, 10000), 'SH-10000');
   assert.equal(formatearCodigo(PREFIJO_ORDEN, 1000000), 'SH-1000000');
   for (const n of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 2]) {
     assert.throws(() => formatearCodigo(PREFIJO_ORDEN, n), /secuencia invalida/);
@@ -223,9 +250,9 @@ test('K17 · TODO "bloquear" que produce decidirAsignacion es estructural', () =
   // alguien lo relance por error.
   const casos: Array<Parameters<typeof decidirAsignacion>[0]> = [
     { prefijo: 'ORD', codigoActual: undefined, secuenciaActual: undefined, valorContador: 1000 },
-    { prefijo: PREFIJO_ORDEN, codigoActual: 'SH-1', secuenciaActual: undefined, valorContador: 1000 },
+    { prefijo: PREFIJO_ORDEN, codigoActual: 'SH-0001', secuenciaActual: undefined, valorContador: 1000 },
     { prefijo: PREFIJO_ORDEN, codigoActual: undefined, secuenciaActual: 1, valorContador: 1000 },
-    { prefijo: PREFIJO_ORDEN, codigoActual: 'SH-1', secuenciaActual: 2, valorContador: 1000 },
+    { prefijo: PREFIJO_ORDEN, codigoActual: 'SH-0001', secuenciaActual: 2, valorContador: 1000 },
     { prefijo: PREFIJO_ORDEN, codigoActual: undefined, secuenciaActual: undefined, valorContador: undefined },
     { prefijo: PREFIJO_ORDEN, codigoActual: undefined, secuenciaActual: undefined, valorContador: -3 },
     { prefijo: PREFIJO_ORDEN, codigoActual: undefined, secuenciaActual: undefined, valorContador: Number.MAX_SAFE_INTEGER },

@@ -2296,12 +2296,15 @@ function DepositoGrupo({
                 return (
                   <tr key={o.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-4 py-2.5">
+                      {/* IDENTIDAD-HUMANA-1B — la ORDEN incluida en el desglose
+                          se nombra SH-0001; el depósito que la agrupa tiene su
+                          propio DEP-0001. El ID técnico queda en el title. */}
                       <button
                         onClick={() => onSelectOrden(o.id)}
                         className="font-mono text-xs text-blue-600 hover:text-blue-800 hover:underline transition"
-                        title="Ver detalles de la orden"
+                        title={`Ver detalles de la orden · ${o.id}`}
                       >
-                        {o.id.slice(0, 8)}
+                        {mostrarCodigo(o.codigo, o.id, 8)}
                       </button>
                     </td>
                     <td className="px-4 py-2.5 text-xs text-gray-600">{fmtDate(getEntregadoAt(o))}</td>
