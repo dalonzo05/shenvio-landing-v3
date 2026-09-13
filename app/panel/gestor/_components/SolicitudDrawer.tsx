@@ -29,6 +29,7 @@ import {
   type MotorizadoRankeado,
 } from '@/lib/motorizado-ranking'
 import { ResumenRapido } from './ResumenRapido'
+import { depositoVisible } from '@/lib/deposito-orden'
 import { trazabilidadPago, type EntradaTrazabilidad } from '@/lib/trazabilidad-pago'
 import { presentarActor } from '@/lib/actor-resolucion'
 import { mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
@@ -1128,13 +1129,25 @@ export function SolicitudDrawer({
                     {/* Adónde falta que llegue el dinero. Que el cliente haya
                         pagado y que ShEnvíos lo tenga son dos tramos distintos
                         del mismo billete. */}
-                    {traza && traza.destinos.length > 0 && (
-                      <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                        {traza.destinos.map((d) => (
-                          <InfoRow key={d.destino} label={`Depósito · ${d.etiqueta}`} value={`${money(d.monto)} — ${d.situacion}`} />
-                        ))}
-                      </div>
-                    )}
+                    {(() => {
+                      // TRAZABILIDAD-DINERO-UX-1 — traza.destinos se calcula sin
+                      // ordenes_deposito, y un depósito ya confirmado salía como
+                      // "Pendiente de depósito". depositoVisible() mira el puntero
+                      // de la orden y no afirma un estado que el drawer no leyó.
+                      const dv = depositoVisible(solicitud as never)
+                      if (dv.lineas.length === 0) return null
+                      return (
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                          {dv.lineas.map((l) => (
+                            <InfoRow
+                              key={l.destino}
+                              label={`Depósito · ${l.destinoEtiqueta}`}
+                              value={`${money(l.obligacion)} — ${l.texto}${l.responsable ? ` · ${l.responsable}` : ''}`}
+                            />
+                          ))}
+                        </div>
+                      )
+                    })()}
                     {/* P1-S2B: los comprobantes de comercio y gestor son objetos
                         distintos y ambos se conservan. Acá se muestran los dos
                         cuando existen, marcando cuál está vigente — es la

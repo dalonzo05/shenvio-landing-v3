@@ -46,6 +46,13 @@ import {
 } from '@/lib/incidencia-cobro'
 import { mostrarCodigo } from '@/lib/codigo-humano'
 import {
+  depositoVisible,
+  depositosDesdeCache,
+  idsDepositoDeOrden,
+  type DepositoRegistrado,
+  type EntradaDepositoOrden,
+} from '@/lib/deposito-orden'
+import {
   visibleEnCobrosContado,
   etiquetaFormaPagoCobros,
   FORMA_PAGO_COBROS_AUSENTE,
@@ -124,6 +131,10 @@ type Solicitud = {
   entregadoAt?: Timestamp
   cobroPendiente?: boolean
   cobroDelivery?: CobroDelivery
+  // TRAZABILIDAD-DINERO-UX-1 — punteros a ordenes_deposito. calcularDeposito()
+  // lee además confirmacion, cobroContraEntrega y tipoServicio, que el
+  // documento trae aunque este tipo local no los declare.
+  registro?: { deposito?: { storkhubDepositoId?: string; comercioDepositoId?: string } | null } | null
   ownerSnapshot?: { uid?: string; companyName?: string; nombre?: string }
   userId?: string
   tipoCliente?: 'contado' | 'credito'
@@ -1457,6 +1468,43 @@ function CobrosPageContent() {
     [contadoRaw]
   )
 
+  // TRAZABILIDAD-DINERO-UX-1 — ordenes_deposito referenciados por el Historial.
+  //
+  // "Cobrado" responde si el cliente pagó; la columna Depósito responde qué
+  // pasó después con ese dinero, y eso vive en ordenes_deposito. Para decir
+  // "Confirmado" o "Convertido en deuda" hace falta el documento.
+  //
+  // Sin N+1 a ciegas: solo con el Historial abierto, solo los IDs que las
+  // filas pagadas referencian, deduplicados (un depósito agrupa varias
+  // órdenes) y pedidos una sola vez cada uno. Mientras no llegan, la celda
+  // dice "Registrado" o "Pendiente · Motorizado" según el puntero de la orden
+  // — nunca una deuda ni un cierre inventados.
+  const [depositosCache, setDepositosCache] = useState<Record<string, DepositoRegistrado>>({})
+  const depositosPedidos = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (contadoSub !== 'pagados') return
+    const ids = [...new Set(
+      contadoPagados
+        .flatMap((s) => idsDepositoDeOrden(s as unknown as EntradaDepositoOrden).map((r) => r.id))
+        .filter((id) => !depositosPedidos.current.has(id)),
+    )]
+    if (ids.length === 0) return
+    ids.forEach((id) => depositosPedidos.current.add(id))
+    Promise.all(ids.map((id) => getDoc(doc(db, 'ordenes_deposito', id))))
+      .then((snaps) => {
+        const nuevos: Record<string, DepositoRegistrado> = {}
+        snaps.forEach((snap, i) => {
+          if (snap.exists()) nuevos[ids[i]] = { id: ids[i], ...(snap.data() as Omit<DepositoRegistrado, 'id'>) }
+        })
+        if (Object.keys(nuevos).length > 0) setDepositosCache((prev) => ({ ...prev, ...nuevos }))
+      })
+      .catch((e) => {
+        // Se liberan para reintentar; la celda sigue diciendo solo lo demostrable.
+        console.error('[cobros] no se pudieron leer depósitos del historial', e)
+        ids.forEach((id) => depositosPedidos.current.delete(id))
+      })
+  }, [contadoSub, contadoPagados])
+
   // Marca pagado un grupo de cobros contado (mismo cliente + día) en una sola
   // runTransaction. Por cada solicitud:
   //  - se relee dentro de la transacción (nunca se confía en el prop `o`);
@@ -1977,6 +2025,7 @@ function CobrosPageContent() {
                       <th className={thCls}>Orden</th>
                       <th className={thCls}>Cliente</th>
                       <th className={thCls}>Forma</th>
+                      <th className={thCls}>Depósito</th>
                       <th className={thCls}>Nota</th>
                       <th className={`${thCls} text-right`}>Monto</th>
                       <th className={thCls}>Acción</th>
@@ -2003,6 +2052,31 @@ function CobrosPageContent() {
                             ) : (
                               <span className="text-xs text-gray-400">—</span>
                             )}
+                          </td>
+                          {/* TRAZABILIDAD-DINERO-UX-1 — qué pasó después con el dinero.
+                              "Cobrado" no es "depositado": SH-0001 está cobrada y el
+                              motorizado todavía debe los C$110 a StorkHub. */}
+                          <td className={tdCls}>
+                            {(() => {
+                              const orden = s as unknown as EntradaDepositoOrden
+                              const dv = depositoVisible(orden, depositosDesdeCache(orden, depositosCache))
+                              const tono = dv.lineas.length === 0
+                                ? 'bg-gray-50 text-gray-500 border-gray-200'
+                                : dv.pendiente
+                                  ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                  : dv.desconocido
+                                    ? 'bg-gray-50 text-gray-600 border-gray-200'
+                                    : 'bg-green-50 text-green-700 border-green-200'
+                              const detalle = dv.lineas.map((l) => `${l.destinoEtiqueta}: ${l.texto} · ${fmt(l.obligacion)}`).join(' | ')
+                              return (
+                                <span
+                                  className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full border whitespace-nowrap ${tono}`}
+                                  title={detalle || 'Esta orden no genera obligación de depósito'}
+                                >
+                                  {dv.resumen}
+                                </span>
+                              )
+                            })()}
                           </td>
                           <td className={`${tdCls} max-w-[160px]`}>
                             {s.cobroDelivery?.notaPago

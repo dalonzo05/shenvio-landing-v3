@@ -400,3 +400,32 @@ test('S15 · el plan nunca determina el medio real', () => {
   assert.equal(trazabilidadPago(ordenPlan('transferencia', { cobroDelivery: PAGADO_EFECTIVO })).medioPago, 'efectivo')
   assert.equal(trazabilidadPago(ordenPlan('entrega', { cobroDelivery: PAGADO_TRANSFER })).medioPago, 'transferencia')
 })
+
+// ─── TRAZABILIDAD-DINERO-UX-1 · el efectivo de la Function ───────────────────
+//
+// SH-0001: el motorizado cobró C$110 en efectivo al entregar. La Function
+// escribe cobroDelivery con estado 'pagado' y formaPago 'efectivo', pero SIN
+// pagadoAt — ese campo solo lo pone el gestor al confirmar desde Cobros. El
+// medio real existía y el drawer lo mostraba como "No registrado".
+
+test('M1 · SH-0001 ⇒ Cobrado · Efectivo, y el dinero todavía no llegó a StorkHub', () => {
+  const t = trazabilidadPago(ordenPlan('entrega', {
+    confirmacion: { precioFinalCordobas: 110 },
+    cobrosMotorizado: { delivery: { monto: 110, recibio: true } },
+    cobroDelivery: { estado: 'pagado', monto: 110, formaPago: 'efectivo' },
+  }))
+  assert.equal(t.estadoCliente.etiqueta, 'Cobrado')
+  assert.equal(t.medioPago, 'efectivo', 'el efectivo de la Function quedó sin medio')
+  assert.equal(t.receptor?.clave, 'motorizado')
+  // Cobrado NO es depositado: son dos tramos del mismo billete.
+  assert.equal(t.cobradoPeroNoDepositado, true)
+})
+
+test('M2 · un formaPago sobre un cobro que no está pagado sigue sin afirmarse', () => {
+  for (const estado of ['pendiente', 'en_revision_deposito', 'no_cobrar']) {
+    const t = trazabilidadPago(ordenPlan('entrega', {
+      cobroDelivery: { estado, monto: 80, formaPago: 'transferencia' },
+    }))
+    assert.equal(t.medioPago, null, `afirmó un medio con estado=${estado}`)
+  }
+})

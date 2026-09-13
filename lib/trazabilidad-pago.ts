@@ -165,11 +165,17 @@ export function trazabilidadPago(
   }
 
   // ── Medio de pago ─────────────────────────────────────────────────────────
-  // Solo si un gestor lo registró Y el cobro sigue vigente: la reversión borra
-  // pagadoAt pero deja metodoPagoReal, que quedaría mintiendo.
+  // Solo si el cobro consta como hecho (`estado === 'pagado'`).
+  //
+  // TRAZABILIDAD-DINERO-UX-1: antes se exigía `pagadoAt`, pensando en la
+  // reversión. Pero revertirPagada() borra formaPago Y pagadoAt a la vez, así
+  // que ese residuo no existe. Lo que sí existe es el efectivo que la Function
+  // registra al cerrar la entrega: trae formaPago 'efectivo' y estado 'pagado'
+  // pero NO pagadoAt —ese campo solo lo pone el gestor desde Cobros—, y
+  // quedaba como "No registrado" en el drawer mientras Cobros decía "Efectivo".
   const forma = orden.cobroDelivery?.formaPago
   const medioPago =
-    typeof forma === 'string' && forma.trim() && orden.cobroDelivery?.pagadoAt != null
+    typeof forma === 'string' && forma.trim() && orden.cobroDelivery?.estado === 'pagado'
       ? forma.trim()
       : null
 

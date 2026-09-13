@@ -260,3 +260,132 @@ export function resumenDepositoOrden(
 
   return { lineas, relevantes, etiqueta }
 }
+
+// ─── TRAZABILIDAD-DINERO-UX-1 ─────────────────────────────────────────────────
+//
+// Qué se puede AFIRMAR del depósito de una orden desde una vista que no
+// siempre tiene los documentos de ordenes_deposito a mano.
+//
+// El problema: lineasDeposito() decide "Pendiente de depósito" solo porque no
+// le pasaron el documento, sin mirar si la orden apunta a uno. Llamada con `{}`
+// desde una vista barata, convierte un depósito confirmado en una deuda. Para
+// no inventar esa deuda, el drawer compartido, el de Base y Cobros dejaron de
+// hablar de depósitos — y así escondieron la deuda REAL de SH-0001: el
+// motorizado cobró C$110 en efectivo y todavía no los depositó.
+//
+// La salida es el mismo criterio que ya usa estado-contable-base.ts: el
+// puntero de la propia orden (`registro.deposito.<destino>DepositoId`) es lo
+// que distingue los dos casos, y está en la orden, sin leer nada más.
+//
+//   con documento leído         → su estado real (Confirmado, En revisión…)
+//   con puntero, sin documento  → "Depósito registrado": existe, estado no visto
+//   sin puntero, obligación > 0 → "Pendiente de depósito": nadie lo registró
+//   sin puntero, obligación 0   → no corresponde, no se muestra
+//
+// No añade lógica financiera: la obligación sigue saliendo de
+// calcularDeposito() vía lineasDeposito(), y el texto de cada estado de
+// etiquetaEstadoDeposito().
+
+/** Lo único que se afirma de un depósito que existe pero no se leyó. */
+export const TEXTO_DEPOSITO_SIN_DETALLE = 'Depósito registrado'
+
+export type ClaveDepositoVisible = 'pendiente' | 'registrado' | 'registrado_sin_detalle'
+
+export interface LineaDepositoVisible {
+  destino: DestinoDeposito
+  /** 'StorkHub' | 'Comercio'. */
+  destinoEtiqueta: string
+  /** Lo que ESTA orden obliga a depositar. Nunca el total de un agrupado. */
+  obligacion: number
+  clave: ClaveDepositoVisible
+  /** Estado del documento de ordenes_deposito, solo si se leyó. */
+  estado: string | null
+  texto: string
+  /**
+   * Quién tiene el dinero ahora. Solo se afirma cuando no hay depósito
+   * registrado: la obligación sale de calcularDeposito(), que modela el
+   * efectivo que recibió el motorizado, así que sin depósito lo tiene él.
+   */
+  responsable: string | null
+}
+
+export interface DepositoVisible {
+  /** Solo destinos que exigen algo o que ya tienen depósito. */
+  lineas: LineaDepositoVisible[]
+  /** Hay al menos un depósito demostrablemente abierto. */
+  pendiente: boolean
+  /** Hay un depósito registrado cuyo estado esta vista no leyó. */
+  desconocido: boolean
+  /** Un único texto corto, para una celda. */
+  resumen: string
+}
+
+/**
+ * Documentos de un cache por ID, indexados por destino según los punteros de
+ * la orden. Un depósito referenciado que todavía no está en el cache queda en
+ * null: nunca se inventa.
+ */
+export function depositosDesdeCache(
+  orden: EntradaDepositoOrden,
+  cache: Record<string, DepositoRegistrado>,
+): Partial<Record<DestinoDeposito, DepositoRegistrado | null>> {
+  const out: Partial<Record<DestinoDeposito, DepositoRegistrado | null>> = {}
+  for (const { destino, id } of idsDepositoDeOrden(orden)) out[destino] = cache[id] ?? null
+  return out
+}
+
+function resumenLinea(l: LineaDepositoVisible): string {
+  if (l.clave === 'pendiente') return l.responsable ? `Pendiente · ${l.responsable}` : 'Pendiente'
+  if (l.clave === 'registrado_sin_detalle') return 'Registrado'
+  return l.estado === 'confirmado' ? `Confirmado · ${l.destinoEtiqueta}` : l.texto
+}
+
+/**
+ * Estado visible del depósito de una orden.
+ *
+ * @param orden      documento de solicitudes_envio
+ * @param depositos  documentos ya leídos, por destino. Puede venir vacío: el
+ *                   resultado nunca afirma una deuda por no tenerlos.
+ */
+export function depositoVisible(
+  orden: EntradaDepositoOrden,
+  depositos: Partial<Record<DestinoDeposito, DepositoRegistrado | null>> = {},
+): DepositoVisible {
+  const punteros = new Set(idsDepositoDeOrden(orden).map((r) => r.destino))
+  const lineas: LineaDepositoVisible[] = []
+
+  for (const l of lineasDeposito(orden, depositos)) {
+    const base = {
+      destino: l.destino,
+      destinoEtiqueta: l.destino === 'storkhub' ? 'StorkHub' : 'Comercio',
+      obligacion: l.obligacion,
+    }
+    if (l.deposito) {
+      lineas.push({ ...base, clave: 'registrado', estado: l.deposito.estado ?? null, texto: l.texto, responsable: null })
+    } else if (punteros.has(l.destino)) {
+      // Existe el documento y no lo tenemos. Ni "pendiente" ni "confirmado":
+      // tampoco sirve confirmadoStorkhub, que convertir en deuda también escribe.
+      lineas.push({ ...base, clave: 'registrado_sin_detalle', estado: null, texto: TEXTO_DEPOSITO_SIN_DETALLE, responsable: null })
+    } else if (l.obligacion > 0) {
+      lineas.push({ ...base, clave: 'pendiente', estado: null, texto: l.texto, responsable: 'Motorizado' })
+    }
+  }
+
+  // Abierto = nadie lo depositó, o hay documento y no está confirmado
+  // (en revisión, esperando comprobante, rechazado, convertido en deuda,
+  // anulado). Mismo criterio que resumenOrden() usa en la ficha.
+  const pendiente = lineas.some(
+    (l) => l.clave === 'pendiente' || (l.clave === 'registrado' && l.estado !== 'confirmado'),
+  )
+  const desconocido = lineas.some((l) => l.clave === 'registrado_sin_detalle')
+
+  let resumen: string
+  if (lineas.length === 0) {
+    resumen = 'No corresponde'
+  } else {
+    const textos = [...new Set(lineas.map(resumenLinea))]
+    resumen = textos.length === 1 ? textos[0] : ETIQUETA_RESUMEN_MIXTO
+  }
+
+  return { lineas, pendiente, desconocido, resumen }
+}

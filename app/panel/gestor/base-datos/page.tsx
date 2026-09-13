@@ -7,11 +7,12 @@ import { ResumenRapido } from '../_components/ResumenRapido'
 import { Section, InfoRow } from '../_components/SolicitudDrawer'
 import { telefonoComercio, telefonoRetiro, telefonoEntrega, zonaRetiro, zonaEntrega, etiquetaFormaPago, FORMA_PAGO_AUSENTE } from '@/lib/campos-base-datos'
 import { trazabilidadPago } from '@/lib/trazabilidad-pago'
-import { mostrarCodigo, coincideCodigo } from '@/lib/codigo-humano'
+import { mostrarCodigo, coincideCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
 import { estadoContable, type EntradaEstadoContable, type ClaveEstadoContable } from '@/lib/estado-contable-base'
 import {
   resumenDepositoOrden,
   idsDepositoDeOrden,
+  depositoVisible,
   ETIQUETAS_RESUMEN_DEPOSITO,
   type EntradaDepositoOrden,
   type DepositoRegistrado,
@@ -363,10 +364,13 @@ function SolicitudDrawer({
   solicitudId,
   onClose,
   comercioNames = {},
+  depositosCache = {},
 }: {
   solicitudId: string
   onClose: () => void
   comercioNames?: Record<string, string>
+  /** TRAZABILIDAD-DINERO-UX-1 — los ordenes_deposito que la tabla ya leyó. */
+  depositosCache?: Record<string, DepositoRegistrado>
 }) {
   const [solicitud, setSolicitud] = useState<Solicitud | null>(null)
   const [loading, setLoading] = useState(true)
@@ -490,7 +494,14 @@ function SolicitudDrawer({
               <X size={18} />
             </button>
             <div>
-              <div className="text-xs text-gray-400 font-mono">{solicitudId}</div>
+              {/* TRAZABILIDAD-DINERO-UX-1 — SH-0001 al frente; el ID técnico
+                  queda en el title y sigue siendo la identidad real. */}
+              <div
+                className={`font-mono ${esFallbackTecnico(solicitud?.codigo) ? 'text-xs text-gray-400' : 'text-sm font-bold text-gray-800'}`}
+                title={solicitudId}
+              >
+                {mostrarCodigo(solicitud?.codigo, solicitudId, 12)}
+              </div>
               {solicitud && (
                 <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium mt-0.5 ${estadoClass(solicitud.estado)}`}>
                   {statusLabel(solicitud.estado)}
@@ -529,7 +540,7 @@ function SolicitudDrawer({
                   compartido. Repetía el recorrido que la ficha cuenta con
                   timestamps y actores en #historial. La reemplaza la misma
                   conclusión que usa el resto del panel. */}
-              <ResumenRapido solicitudId={solicitudId} orden={solicitud as never} />
+              <ResumenRapido solicitudId={solicitudId} orden={solicitud as never} depositos={depositosDeOrden(solicitud, depositosCache)} />
 
               {/* B2-BASE-PAGO-DETALLE — Pagos y cobros.
                   El drawer quedaba entre una tabla muy resumida y la ficha
@@ -582,7 +593,23 @@ function SolicitudDrawer({
                       {t.quienPaga && <InfoRow label="Quién paga" value={t.quienPaga} />}
                       {/* Cada renglón solo si un campo lo respalda. */}
                       {t.receptor && <InfoRow label="Recibió el dinero" value={t.receptor.etiqueta} />}
-                      {t.medioPago && <InfoRow label="Forma de pago" value={t.medioPago} />}
+                      {t.medioPago && (
+                        <InfoRow
+                          label="Forma de pago"
+                          value={t.medioPago === 'efectivo' ? 'Efectivo' : t.medioPago === 'transferencia' ? 'Transferencia' : t.medioPago}
+                        />
+                      )}
+                      {/* TRAZABILIDAD-DINERO-UX-1 — qué pasó después con el dinero.
+                          Con los documentos que la tabla ya tiene en cache: estado
+                          real si se leyó, "Depósito registrado" si todavía no, y
+                          "Pendiente · Motorizado" solo si nadie lo registró. */}
+                      {depositoVisible(solicitud as EntradaDepositoOrden, depositosDeOrden(solicitud, depositosCache)).lineas.map((l) => (
+                        <InfoRow
+                          key={l.destino}
+                          label={`Depósito ${l.destinoEtiqueta}`}
+                          value={`${l.texto}${l.responsable ? ` · ${l.responsable}` : ''} · ${money(l.obligacion)}`}
+                        />
+                      ))}
                       {solicitud.cobrosMotorizado?.delivery?.at && (
                         <InfoRow label="Fecha de cobro" value={formatDateTime(solicitud.cobrosMotorizado.delivery.at)} />
                       )}
@@ -1410,7 +1437,7 @@ function BaseDatosPageContent() {
 
       {/* Drawer de detalle */}
       {selectedId && (
-        <SolicitudDrawer solicitudId={selectedId} onClose={() => setSelectedId(null)} comercioNames={comercioNames} />
+        <SolicitudDrawer solicitudId={selectedId} onClose={() => setSelectedId(null)} comercioNames={comercioNames} depositosCache={depositosCache} />
       )}
     </div>
   )

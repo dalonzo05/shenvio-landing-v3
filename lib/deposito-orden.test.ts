@@ -14,6 +14,9 @@ import {
   resumenDepositoOrden,
   ETIQUETAS_RESUMEN_DEPOSITO,
   ETIQUETA_RESUMEN_MIXTO,
+  depositoVisible,
+  depositosDesdeCache,
+  TEXTO_DEPOSITO_SIN_DETALLE,
   type EntradaDepositoOrden,
   type DepositoRegistrado,
 } from './deposito-orden'
@@ -356,4 +359,93 @@ test('R10 · toda etiqueta esperable está en la lista del filtro', () => {
   }
   assert.ok(ETIQUETAS_RESUMEN_DEPOSITO.includes(resumenDepositoOrden(ordenSoloDelivery()).etiqueta))
   assert.ok(ETIQUETAS_RESUMEN_DEPOSITO.includes(resumenDepositoOrden(ordenSoloDelivery({ cobrosMotorizado: { delivery: { recibio: false } } })).etiqueta))
+})
+
+// ─── TRAZABILIDAD-DINERO-UX-1 · depositoVisible ──────────────────────────────
+//
+// El caso de referencia es SH-0001 en staging: entregada, delivery C$110
+// cobrado en efectivo por el motorizado, y ningún depósito registrado todavía.
+
+test('T1 · SH-0001: cobrado y sin depósito ⇒ pendiente, lo tiene el motorizado', () => {
+  const dv = depositoVisible(ordenSoloDelivery())
+  assert.equal(dv.lineas.length, 1)
+  const l = dv.lineas[0]
+  assert.equal(l.destino, 'storkhub')
+  assert.equal(l.obligacion, 110)
+  assert.equal(l.clave, 'pendiente')
+  assert.equal(l.texto, 'Pendiente de depósito')
+  assert.equal(l.responsable, 'Motorizado')
+  assert.equal(dv.pendiente, true, 'SH-0001 se leyó como cerrada')
+  assert.equal(dv.desconocido, false)
+  assert.equal(dv.resumen, 'Pendiente · Motorizado')
+})
+
+test('T2 · puntero sin documento ⇒ "registrado", NUNCA una deuda inventada', () => {
+  // Es el caso que obligaba a los drawers a callar: con `{}`, lineasDeposito()
+  // dice "Pendiente de depósito" sobre un depósito que ya existe.
+  const orden = ordenSoloDelivery({ registro: { deposito: { storkhubDepositoId: 'DEP_x' } } })
+  const dv = depositoVisible(orden)
+  assert.equal(dv.lineas[0].clave, 'registrado_sin_detalle')
+  assert.equal(dv.lineas[0].texto, TEXTO_DEPOSITO_SIN_DETALLE)
+  assert.equal(dv.lineas[0].responsable, null)
+  assert.equal(dv.pendiente, false, 'afirmó una deuda sin haber leído el depósito')
+  assert.equal(dv.desconocido, true)
+  assert.equal(dv.resumen, 'Registrado')
+})
+
+test('T3 · confirmadoStorkhub no sustituye al documento', () => {
+  // Convertir en deuda escribe el mismo flag que confirmar: no prueba nada.
+  const orden = ordenSoloDelivery({
+    registro: { deposito: { storkhubDepositoId: 'DEP_x', confirmadoStorkhub: true } },
+  })
+  const dv = depositoVisible(orden)
+  assert.equal(dv.lineas[0].clave, 'registrado_sin_detalle')
+  assert.notEqual(dv.resumen, 'Confirmado · StorkHub')
+})
+
+test('T4 · depósito confirmado ⇒ Confirmado · StorkHub, sin pendiente', () => {
+  const orden = ordenSoloDelivery({ registro: { deposito: { storkhubDepositoId: 'DEP_ok' } } })
+  const dv = depositoVisible(orden, { storkhub: depositoCon('confirmado', { id: 'DEP_ok' }) })
+  assert.equal(dv.lineas[0].clave, 'registrado')
+  assert.equal(dv.lineas[0].estado, 'confirmado')
+  assert.equal(dv.pendiente, false)
+  assert.equal(dv.desconocido, false)
+  assert.equal(dv.resumen, 'Confirmado · StorkHub')
+})
+
+test('T5 · convertido_en_deuda ⇒ abierto, nunca confirmado', () => {
+  const orden = ordenSoloDelivery({
+    registro: { deposito: { storkhubDepositoId: 'DEP_d', confirmadoStorkhub: true } },
+  })
+  const dv = depositoVisible(orden, { storkhub: depositoCon('convertido_en_deuda', { id: 'DEP_d' }) })
+  assert.equal(dv.resumen, 'Convertido en deuda')
+  assert.equal(dv.pendiente, true)
+})
+
+test('T6 · en revisión y esperando comprobante siguen abiertos', () => {
+  for (const [estado, texto] of [['en_revision', 'En revisión'], ['pendiente_boucher', 'Esperando comprobante']] as const) {
+    const orden = ordenSoloDelivery({ registro: { deposito: { storkhubDepositoId: 'D' } } })
+    const dv = depositoVisible(orden, { storkhub: depositoCon(estado, { id: 'D' }) })
+    assert.equal(dv.resumen, texto)
+    assert.equal(dv.pendiente, true, `${estado} se leyó como cerrado`)
+  }
+})
+
+test('T7 · sin obligación ⇒ No corresponde, sin líneas y sin pendiente', () => {
+  // quienPaga transferencia: el motorizado no toca ese dinero.
+  const orden = ordenSoloDelivery({ pagoDelivery: { quienPaga: 'transferencia', deducirDelCobroContraEntrega: false } })
+  assert.equal(lineasDeposito(orden).every((l) => l.obligacion === 0), true, 'precondición: la orden no debe generar obligación')
+  const dv = depositoVisible(orden)
+  assert.deepEqual(dv.lineas, [])
+  assert.equal(dv.pendiente, false)
+  assert.equal(dv.desconocido, false)
+  assert.equal(dv.resumen, 'No corresponde')
+})
+
+test('T8 · depositosDesdeCache indexa por el puntero de la orden', () => {
+  const orden = ordenSoloDelivery({ registro: { deposito: { storkhubDepositoId: 'A', comercioDepositoId: 'B' } } })
+  const dep = depositoCon('confirmado', { id: 'A' })
+  const m = depositosDesdeCache(orden, { A: dep })
+  assert.equal(m.storkhub, dep)
+  assert.equal(m.comercio, null, 'un depósito no leído debe quedar en null, no inventarse')
 })

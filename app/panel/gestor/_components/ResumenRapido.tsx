@@ -1,34 +1,40 @@
 'use client'
 // B2-DRAWER-SLIM — cabecera conclusiva del drawer.
 //
-// POR QUÉ NO USA resumenOrden() (B2.6)
+// TRAZABILIDAD-DINERO-UX-1 — ahora también habla del depósito.
 //
-// El drawer NO carga `ordenes_deposito`: solo lee la orden, el comercio, los
-// motorizados y las órdenes activas. Pasarle `{}` como depósitos a
-// resumenOrden() haría que lineasDeposito() viera `deposito: null` en una
-// orden ya depositada y anunciara "Motorizado debe depositar C$110" sobre un
-// depósito confirmado. Una deuda inventada en la vista que el gestor usa para
-// decidir rápido es peor que no decir nada.
+// Antes callaba sobre depósitos por una razón válida: el drawer no carga
+// ordenes_deposito, y resumenOrden() con `{}` anunciaba "Motorizado debe
+// depositar C$110" sobre un depósito ya confirmado. Pero callar tenía un
+// precio que no estaba a la vista: el mensaje de vacío, "Sin cobros ni
+// incidencias abiertas en esta orden", se leía como un cierre, y SH-0001 lo
+// mostraba mientras el motorizado seguía con C$110 de StorkHub en el bolsillo.
 //
-// La alternativa —añadir dos getDoc por cada apertura de drawer, en cinco
-// módulos— encarecería una vista cuyo objetivo es justamente ser barata.
+// depositoVisible() resuelve el dilema sin leer nada: el puntero de la propia
+// orden dice si alguien registró el depósito. Sin puntero y con obligación, la
+// deuda es demostrable. Con puntero y sin documento, se dice que existe y se
+// remite a la ficha — nunca se afirma su estado.
 //
-// Así que acá solo se afirma lo que la ORDEN demuestra por sí sola:
+// "Sin pendientes financieros" solo se dice cuando cobro, incidencia y
+// depósito están los tres determinados. Si hay un depósito cuyo estado no se
+// ve, el mensaje se acota a lo que sí se sabe.
 //
-//   estado operativo   solicitudes_envio.estado
-//   cobro del delivery estadoDeliveryComercio()  — cobroDelivery vive en la orden
-//   incidencia         hayIncidenciaSinClasificar() — cobrosMotorizado, ídem
-//
-// Los depósitos y la trazabilidad completa quedan explícitamente remitidos a
-// la ficha. Nunca se dice "sin pendientes": el drawer no puede saberlo.
+// Base de datos, que sí tiene los documentos en cache, los pasa en `depositos`
+// y entonces se muestra el estado real.
 
 import Link from 'next/link'
-import { AlertTriangle, Wallet, ArrowRight } from 'lucide-react'
+import { AlertTriangle, Wallet, ArrowRight, CheckCircle2 } from 'lucide-react'
 import { estadoDeliveryComercio, type EntradaEstadoComercio } from '@/lib/estado-cobro-comercio'
 import { hayIncidenciaSinClasificar, type EntradaIncidencia } from '@/lib/incidencia-cobro'
+import {
+  depositoVisible,
+  type DepositoRegistrado,
+  type DestinoDeposito,
+  type EntradaDepositoOrden,
+} from '@/lib/deposito-orden'
 import { rutaOrden, type AnchorOrden } from '@/lib/ruta-orden'
 
-type OrdenRapida = EntradaEstadoComercio & EntradaIncidencia
+type OrdenRapida = EntradaEstadoComercio & EntradaIncidencia & EntradaDepositoOrden
 
 const money = (n: number) => `C$ ${n.toLocaleString('es-NI')}`
 
@@ -41,12 +47,16 @@ interface Aviso {
 export function ResumenRapido({
   solicitudId,
   orden,
+  depositos = {},
 }: {
   solicitudId: string
   orden: OrdenRapida
+  /** Documentos de ordenes_deposito ya leídos por quien llama. Opcional. */
+  depositos?: Partial<Record<DestinoDeposito, DepositoRegistrado | null>>
 }) {
   const avisos: Aviso[] = []
 
+  // ── Cobro al cliente ──────────────────────────────────────────────────────
   const cliente = estadoDeliveryComercio(orden)
   if (cliente.clave === 'pendiente' && cliente.montoPendiente > 0) {
     avisos.push({ id: 'cobro', texto: `Comercio debe ${money(cliente.montoPendiente)} de delivery`, anchor: 'cobros' })
@@ -54,8 +64,30 @@ export function ResumenRapido({
     avisos.push({ id: 'revision', texto: `Comprobante del delivery en revisión · ${money(cliente.montoPendiente)}`, anchor: 'cobros' })
   }
 
+  // ── Incidencia ────────────────────────────────────────────────────────────
   if (hayIncidenciaSinClasificar(orden)) {
     avisos.push({ id: 'incidencia', texto: 'Incidencia de cobro por clasificar', anchor: 'incidencia' })
+  }
+
+  // ── Depósito: qué pasó después con el dinero ─────────────────────────────
+  // Otro tramo del mismo billete. Que el cliente haya pagado no dice que el
+  // efectivo haya llegado a su destino. Mismo texto que la ficha completa.
+  const dinero = depositoVisible(orden, depositos)
+  for (const l of dinero.lineas) {
+    const destino = l.destino === 'storkhub' ? 'a StorkHub' : 'al comercio'
+    if (l.clave === 'pendiente') {
+      avisos.push({
+        id: `deposito:${l.destino}`,
+        texto: `Motorizado debe depositar ${money(l.obligacion)} ${destino}`,
+        anchor: 'depositos',
+      })
+    } else if (l.clave === 'registrado' && l.estado !== 'confirmado') {
+      avisos.push({
+        id: `deposito:${l.destino}`,
+        texto: `Depósito ${destino}: ${l.texto.toLowerCase()} · ${money(l.obligacion)}`,
+        anchor: 'depositos',
+      })
+    }
   }
 
   const hrefFicha = rutaOrden(solicitudId)
@@ -77,14 +109,24 @@ export function ResumenRapido({
             ))}
           </ul>
         </>
-      ) : (
+      ) : dinero.desconocido ? (
+        // No se puede afirmar el cierre: hay un depósito que esta vista no leyó.
         <p className="text-xs text-gray-500 mb-2">
-          Sin cobros ni incidencias abiertas en esta orden.
+          Sin cobros al cliente ni incidencias pendientes.
+        </p>
+      ) : (
+        <p className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700 mb-2">
+          <CheckCircle2 aria-hidden className="h-3.5 w-3.5" />
+          Sin pendientes financieros en esta orden.
         </p>
       )}
 
-      {/* El drawer no ve los depósitos: lo dice en vez de afirmar que no hay
-          nada pendiente. La ficha sí los tiene, con su trazabilidad. */}
+      {dinero.desconocido && (
+        <p className="text-xs text-gray-500 mb-2">
+          Hay un depósito registrado; su estado se revisa en la ficha.
+        </p>
+      )}
+
       {hrefFicha && (
         <Link
           href={hrefFicha}
