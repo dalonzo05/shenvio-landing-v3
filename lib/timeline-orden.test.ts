@@ -199,7 +199,8 @@ test('T8 · delivery sin pagadoAt y sin estado pagado no genera evento', () => {
 
 test('T8b · estado "pagado" al entregar usa registradoAt, sin actor', () => {
   const e = uno(ordenCompleta(), 'delivery_pagado')!
-  assert.equal(e.titulo, 'Delivery cobrado por el motorizado')
+  // Sin formaPago no se afirma el medio; el actor tampoco (no está persistido).
+  assert.equal(e.titulo, 'Delivery cobrado')
   assert.equal(e.actorUid, undefined)
   assert.equal(e.at.toISOString(), '2026-08-22T03:23:57.827Z')
 })
@@ -233,7 +234,8 @@ test('T9 · depósito confirmado genera evento con timestamp y actor reales', ()
   const reg = t.find((e) => e.id === 'deposito_registrado:storkhub')!
   const conf = t.find((e) => e.id === 'deposito_confirmado:storkhub')!
   assert.equal(reg.at.toISOString(), '2026-08-21T22:27:44.618Z')
-  assert.equal(conf.titulo, 'Depósito confirmado (a storkhub)')
+  // Documento histórico sin código: se nombra por su ID corto.
+  assert.equal(conf.titulo, 'Depósito jF4c3L6A confirmado')
   assert.equal(conf.actorUid, ADMIN)
   assert.equal(conf.at.toISOString(), '2026-08-21T22:31:43.987Z')
   assert.ok(reg.at.getTime() < conf.at.getTime())
@@ -250,7 +252,7 @@ test('T9c · convertido en deuda no se presenta como confirmado', () => {
   const convertido: DepositoRegistrado = { ...depStorkhub, estado: 'convertido_en_deuda', notaConversion: 'No depositó', confirmadoPorUid: ADMIN }
   const e = construirTimeline(ordenSinIncidencia(), { storkhub: convertido })
     .find((x) => x.id === 'deposito_confirmado:storkhub')!
-  assert.equal(e.titulo, 'Depósito convertido en deuda (a storkhub)')
+  assert.equal(e.titulo, 'Depósito jF4c3L6A convertido en deuda')
   assert.equal(e.detalle, 'No depositó')
   // La conversión no persiste actor: no se hereda el de una confirmación.
   assert.equal(e.actorUid, undefined)
@@ -571,4 +573,77 @@ test('HITOS · "aceptó" y "en camino al retiro" no son hitos principales', () =
   const { recorrido } = sep(ordenCompleta())
   assert.equal(recorrido.some((e) => e.id === 'aceptada'), true)
   assert.equal(recorrido.some((e) => e.id === 'en_camino_retiro'), true)
+})
+
+// ── T20 · DEPOSITOS-UX-TRAZABILIDAD-1 · SH-0001 / DEP-0001 ───────────────────
+//
+// Staging, 2026-09-17: SH-0001 (jTIJLEhGeACcymBAj0jY) cobrada en efectivo por
+// John Pork 2; DEP-0001 (P4IMui3ILjs0P9U6eDgT) enviado 23:24:40Z, confirmado
+// por Admin Staging 01:03:05Z del 18.
+
+const MOTO_AUTH = 'juAOhfxi96dlLv8LV3mZwA3cK362'
+const DEP_0001: DepositoRegistrado = {
+  id: 'P4IMui3ILjs0P9U6eDgT',
+  codigo: 'DEP-0001',
+  tipo: 'recaudacion_motorizado_storkhub',
+  estado: 'confirmado',
+  destinatario: 'storkhub',
+  motorizadoUid: MOTO_AUTH,
+  solicitudIds: ['jTIJLEhGeACcymBAj0jY'],
+  montoTotal: 110,
+  creadoAt: '2026-09-17T23:24:40.777Z',
+  confirmadoAt: '2026-09-18T01:03:05.221Z',
+  confirmadoPorUid: ADMIN,
+}
+
+function sh0001(): EntradaTimeline {
+  return {
+    createdAt: '2026-09-13T17:38:47.428Z',
+    tipoCliente: 'contado',
+    pagoDelivery: { quienPaga: 'entrega', montoSugerido: 110, deducirDelCobroContraEntrega: false, tipo: 'contado' },
+    confirmacion: { precioFinalCordobas: 110, confirmadoAt: '2026-09-13T17:40:10.762Z', confirmadoPorUid: ADMIN },
+    cobrosMotorizado: { delivery: { monto: 110, recibio: true, at: '2026-09-13T17:46:11.338Z' } },
+    cobroContraEntrega: { aplica: false, monto: 0 },
+    cobroDelivery: { estado: 'pagado', monto: 110, formaPago: 'efectivo', quienPaga: 'entrega', registradoAt: '2026-09-13T17:46:11.338Z' },
+    historial: { entregadoAt: '2026-09-13T17:46:11.338Z' },
+    registro: {
+      deposito: {
+        storkhubDepositoId: 'P4IMui3ILjs0P9U6eDgT',
+        confirmadoStorkhub: true,
+        confirmadoStorkhubAt: '2026-09-18T01:03:05.221Z',
+      },
+    },
+  }
+}
+
+test('T20 · SH-0001: "Delivery cobrado en efectivo", sin actor persistido', () => {
+  const e = construirTimeline(sh0001(), { storkhub: DEP_0001 }).find((x) => x.id === 'delivery_pagado')!
+  assert.equal(e.titulo, 'Delivery cobrado en efectivo')
+  assert.equal(e.detalle, 'C$ 110')
+  // No se atribuye al motorizado: la orden no guarda quién registró el cobro.
+  assert.equal(e.actorUid, undefined)
+})
+
+test('T21 · DEP-0001 enviado a StorkHub, con el motorizado como actor', () => {
+  const e = construirTimeline(sh0001(), { storkhub: DEP_0001 }).find((x) => x.id === 'deposito_registrado:storkhub')!
+  assert.equal(e.titulo, 'DEP-0001 enviado a StorkHub')
+  assert.equal(e.actorUid, MOTO_AUTH)
+  assert.equal(e.at.toISOString(), '2026-09-17T23:24:40.777Z')
+  assert.equal(e.detalle, 'Esta orden aporta C$ 110')
+})
+
+test('T22 · DEP-0001 confirmado, con el confirmador como actor', () => {
+  const e = construirTimeline(sh0001(), { storkhub: DEP_0001 }).find((x) => x.id === 'deposito_confirmado:storkhub')!
+  assert.equal(e.titulo, 'DEP-0001 confirmado')
+  assert.equal(e.actorUid, ADMIN)
+  assert.equal(e.at.toISOString(), '2026-09-18T01:03:05.221Z')
+  // Los dos UIDs se resuelven en una sola pasada, uno por actor distinto.
+  assert.deepEqual(uidsDeTimeline(construirTimeline(sh0001(), { storkhub: DEP_0001 })).sort(), [ADMIN, MOTO_AUTH].sort())
+})
+
+test('T23 · tipo C: se registra como pago por transferencia, sin actor motorizado', () => {
+  const c: DepositoRegistrado = { ...DEP_0001, codigo: 'DEP-0003', tipo: 'pago_delivery_deposito', motorizadoUid: 'FdJUdV2PQj6YYK7tmIsg' }
+  const e = construirTimeline(sh0001(), { storkhub: c }).find((x) => x.id === 'deposito_registrado:storkhub')!
+  assert.equal(e.titulo, 'DEP-0003 · pago del delivery por transferencia registrado')
+  assert.equal(e.actorUid, undefined)
 })

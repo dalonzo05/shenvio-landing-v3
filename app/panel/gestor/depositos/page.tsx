@@ -38,6 +38,18 @@ import {
 } from 'lucide-react'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
 import { mostrarCodigo, coincideCodigo } from '@/lib/codigo-humano'
+import {
+  identidadDeposito,
+  origenDestinoDeposito,
+  estadoDeposito,
+  fechasDeposito,
+  confirmadorDeposito,
+  camposConfirmacionDeposito,
+  claseDeposito,
+  comprobanteDeposito,
+} from '@/lib/presentacion-deposito'
+import { fechaHoraOperativa } from '@/lib/fecha-operativa'
+import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
 import { IrAFicha } from '../_components/IrAFicha'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -130,6 +142,8 @@ type DepositoOrderDoc = {
   gastosDescontados?: number  // gastos deducidos del bruto
   gastosIds?: string[]   // IDs de gastos_motorizado descontados
   boucher?: { url: string; pathStorage: string } | null
+  /** Pago del delivery por transferencia (tipo C): comprobante plano. */
+  boucherUrl?: string | null
   rechazadoPor?: string
   rechazadoAt?: Timestamp
   motivoRechazo?: string
@@ -444,6 +458,30 @@ function DepositosPageContent() {
         setMotorizadoNames((prev) => ({ ...prev, ...updates }))
     })
   }, [porRevisar, historialDepositos])
+
+  // DEPOSITOS-UX-TRAZABILIDAD-1 — nombre de quien confirmó, digitó o rechazó.
+  // Una lectura de usuarios/{uid} por UID distinto, cacheada: lo ya pedido no
+  // se vuelve a pedir aunque cambien las listas. Sin nombre (o sin permiso de
+  // lectura) queda '' y se muestra "Usuario interno", nunca el UID al frente.
+  const [nombresUsuarios, setNombresUsuarios] = useState<Record<string, string>>({})
+  const usuariosPedidos = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const uids = [...new Set(
+      [...porRevisar, ...historialDepositos]
+        .flatMap((d) => [d.confirmadoPorUid, d.digitadoPorUid, d.rechazadoPor])
+        .filter((u): u is string => typeof u === 'string' && u.length > 0 && !usuariosPedidos.current.has(u)),
+    )]
+    if (uids.length === 0) return
+    uids.forEach((u) => usuariosPedidos.current.add(u))
+    Promise.all(uids.map((u) => getDoc(doc(db, 'usuarios', u)).catch(() => null))).then((snaps) => {
+      const nuevos: Record<string, string> = {}
+      snaps.forEach((snap, i) => {
+        nuevos[uids[i]] = snap?.exists() ? nombreDeUsuario(snap.data() as { name?: string; nombre?: string }) : ''
+      })
+      setNombresUsuarios((prev) => ({ ...prev, ...nuevos }))
+    })
+  }, [porRevisar, historialDepositos])
+  const nombreInterno = (uid?: string | null) => presentarActor(uid, nombresUsuarios[uid ?? ''])?.nombre ?? '—'
 
   // Fetch cuentas bancarias de comercios en "Por revisar"
   useEffect(() => {
@@ -835,7 +873,13 @@ function DepositosPageContent() {
       const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
 
       // 3) Boucher y transición a 'confirmado' en la MISMA escritura.
-      await updateDoc(depositoRef, { boucher: boucherData, estado: 'confirmado' })
+      // DEPOSITOS-UX-TRAZABILIDAD-1 — este flujo deja el depósito confirmado
+      // por el gestor, pero no decía quién ni cuándo. Solo hacia adelante.
+      await updateDoc(depositoRef, {
+        boucher: boucherData,
+        estado: 'confirmado',
+        ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
+      })
     } else {
       montoTotal = existente.data()?.montoTotal ?? 0
     }
@@ -895,7 +939,13 @@ function DepositosPageContent() {
       const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
       const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
 
-      await updateDoc(depositoRef, { boucher: boucherData, estado: 'confirmado' })
+      // DEPOSITOS-UX-TRAZABILIDAD-1 — este flujo deja el depósito confirmado
+      // por el gestor, pero no decía quién ni cuándo. Solo hacia adelante.
+      await updateDoc(depositoRef, {
+        boucher: boucherData,
+        estado: 'confirmado',
+        ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
+      })
     } else {
       montoTotal = existente.data()?.montoTotal ?? 0
     }
@@ -1684,9 +1734,10 @@ function DepositosPageContent() {
                 <thead>
                   <tr className="border-b bg-gray-50">
                     <th className="px-3 py-2.5 w-8"></th>
+                    <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Depósito</th>
                     <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Motorizado</th>
                     <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Destino</th>
-                    <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Fecha</th>
+                    <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Enviado</th>
                     <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wide text-gray-500">Monto</th>
                     <th className="px-3 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wide text-gray-500">Órd.</th>
                     <th className="px-3 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wide text-gray-500">Boucher</th>
@@ -1710,6 +1761,25 @@ function DepositosPageContent() {
                           <td className="px-3 py-3 text-center cursor-pointer" onClick={() => toggleExpandPorRevisar(dep.id)}>
                             {isExp ? <ChevronUp className="h-3.5 w-3.5 text-gray-400" /> : <ChevronDown className="h-3.5 w-3.5 text-gray-400" />}
                           </td>
+                          {/* DEPOSITOS-UX-TRAZABILIDAD-1 — DEP-N al frente; el ID de
+                              Firestore queda en el title y en el detalle expandido. */}
+                          <td className="px-3 py-3">
+                            {(() => {
+                              const ident = identidadDeposito(dep)
+                              return (
+                                <div className="flex flex-col gap-0.5">
+                                  <span className={`font-mono text-xs ${ident.esCodigo ? 'font-bold text-gray-900' : 'text-gray-500'}`} title={`ID técnico: ${ident.idTecnico}`}>{ident.texto}</span>
+                                  {/* Para el gestor esta cola solo trae abiertos; el
+                                      digitador ve también los suyos ya resueltos. */}
+                                  <span className={`inline-flex w-fit text-[10px] font-semibold px-1.5 py-0.5 rounded-full border ${
+                                    dep.estado === 'confirmado' ? 'bg-green-50 text-green-700 border-green-200'
+                                    : dep.estado === 'rechazado' ? 'bg-red-50 text-red-700 border-red-200'
+                                    : 'bg-amber-50 text-amber-700 border-amber-200'
+                                  }`}>{estadoDeposito(dep)}</span>
+                                </div>
+                              )
+                            })()}
+                          </td>
                           <td className="px-3 py-3">
                             <span className="text-xs font-semibold text-gray-800">{fmtNombreMotorizado(dep.motorizadoNombre, motorizadoNames, dep.motorizadoUid)}</span>
                           </td>
@@ -1719,7 +1789,8 @@ function DepositosPageContent() {
                               {dep.destinatarioNombre}
                             </span>
                           </td>
-                          <td className="px-3 py-3 text-xs text-gray-500">{fmtDate(dep.creadoAt)}</td>
+                          {/* Enviado, con hora, en Managua. */}
+                          <td className="px-3 py-3 text-xs text-gray-500 whitespace-nowrap">{fechaHoraOperativa(fechasDeposito(dep).enviado)}</td>
                           <td className="px-3 py-3 text-right">
                             <div>
                               <span className="text-sm font-black text-gray-900">{fmt(dep.montoTotal)}</span>
@@ -1810,7 +1881,7 @@ function DepositosPageContent() {
                         {/* ── DETALLE / FORMULARIOS EXPANDIDOS ── */}
                         {(isExp || devolviendoId === dep.id || convirtiendo === dep.id || rechazandoId === dep.id) && (
                           <tr>
-                            <td colSpan={8} className="bg-gray-50/60 px-4 py-4 border-t border-gray-100">
+                            <td colSpan={9} className="bg-gray-50/60 px-4 py-4 border-t border-gray-100">
                               <div className="flex flex-col gap-3">
 
                                 {/* Cuentas bancarias del comercio */}
@@ -1868,7 +1939,7 @@ function DepositosPageContent() {
                                         {replacingBoucherId === dep.id ? '⏳ Subiendo…' : '📷 Subir boucher'}
                                       </button>
                                     )}
-                                    <p className="text-[10px] text-gray-400 font-mono">ID: {dep.id}</p>
+                                    <p className="text-[10px] text-gray-400 font-mono select-all" title="Referencia técnica del documento">ID técnico: {dep.id}</p>
                                   </div>
                                 )}
 
@@ -1876,13 +1947,13 @@ function DepositosPageContent() {
                                 {isExp && (dep.digitadoPorUid || dep.confirmadoPorUid || dep.rechazadoPor) && (
                                   <div className="flex flex-wrap gap-3 text-[11px] text-gray-500">
                                     {dep.digitadoPorUid && (
-                                      <span>Digitado por <span className="font-mono">{dep.digitadoPorUid.slice(0, 8)}</span> · {fmtDateTime(dep.digitadoAt)}</span>
+                                      <span>Digitado por <span className="font-medium text-gray-700" title={dep.digitadoPorUid}>{nombreInterno(dep.digitadoPorUid)}</span> · {fechaHoraOperativa(dep.digitadoAt)}</span>
                                     )}
                                     {dep.confirmadoPorUid && (
-                                      <span>Confirmado por <span className="font-mono">{dep.confirmadoPorUid.slice(0, 8)}</span> · {fmtDateTime(dep.confirmadoAt)}</span>
+                                      <span>Confirmado por <span className="font-medium text-gray-700" title={dep.confirmadoPorUid}>{nombreInterno(dep.confirmadoPorUid)}</span> · {fechaHoraOperativa(dep.confirmadoAt)}</span>
                                     )}
                                     {dep.rechazadoPor && (
-                                      <span>Rechazado por <span className="font-mono">{dep.rechazadoPor.slice(0, 8)}</span> · {fmtDateTime(dep.rechazadoAt)}{dep.motivoRechazo ? ` · ${dep.motivoRechazo}` : ''}</span>
+                                      <span>Rechazado por <span className="font-medium text-gray-700" title={dep.rechazadoPor}>{nombreInterno(dep.rechazadoPor)}</span> · {fechaHoraOperativa(dep.rechazadoAt)}{dep.motivoRechazo ? ` · ${dep.motivoRechazo}` : ''}</span>
                                     )}
                                   </div>
                                 )}
@@ -2000,6 +2071,9 @@ function DepositosPageContent() {
         const motorizadosHist = (() => {
           const map = new Map<string, string>()
           historialDepositos.forEach((d) => {
+            // El pago del delivery por transferencia no es de un motorizado:
+            // no genera un filtro con su nombre (ni con el ID de su perfil).
+            if (claseDeposito(d) === 'transferencia_delivery') return
             if (d.motorizadoUid && d.motorizadoNombre) map.set(d.motorizadoUid, d.motorizadoNombre)
           })
           return [...map.entries()].map(([id, nombre]) => ({ id, nombre }))
@@ -2059,27 +2133,44 @@ function DepositosPageContent() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b bg-gray-50">
-                      <th className={thCls}>Fecha gestión</th>
-                      <th className={thCls}>Motorizado</th>
-                      <th className={thCls}>Comercio</th>
+                      {/* DEPOSITOS-UX-TRAZABILIDAD-1 — "Fecha gestión" mostraba
+                          creadoAt: la fecha en que se ENVIÓ, no la de la gestión.
+                          Ahora son dos columnas, cada una con su campo. */}
+                      <th className={thCls}>Depósito</th>
+                      <th className={thCls}>Enviado</th>
+                      <th className={thCls}>Confirmado</th>
+                      <th className={thCls}>Origen → Destino</th>
                       <th className={thCls}>Estado</th>
                       <th className={`${thCls} text-right`}>Monto</th>
                       <th className={thCls}>Órdenes</th>
                       <th className={thCls}>Comprobante</th>
+                      <th className={thCls}>Confirmado por</th>
                       <th className={thCls}></th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {filtered.map((dep) => (
                       <tr key={dep.id} className="hover:bg-gray-50 transition-colors">
-                        <td className={tdCls}>{fmtDateTime(dep.creadoAt)}</td>
-                        <td className={`${tdCls} font-semibold text-gray-800`}>{fmtNombreMotorizado(dep.motorizadoNombre, motorizadoNames, dep.motorizadoUid)}</td>
                         <td className={tdCls}>
+                          {(() => {
+                            const ident = identidadDeposito(dep)
+                            return (
+                              <span className={`font-mono text-xs ${ident.esCodigo ? 'font-bold text-gray-900' : 'text-gray-500'}`} title={`ID técnico: ${ident.idTecnico}`}>{ident.texto}</span>
+                            )
+                          })()}
+                        </td>
+                        <td className={`${tdCls} whitespace-nowrap`}>{fechaHoraOperativa(fechasDeposito(dep).enviado)}</td>
+                        <td className={`${tdCls} whitespace-nowrap`}>{fechaHoraOperativa(fechasDeposito(dep).confirmado)}</td>
+                        <td className={tdCls}>
+                          {/* Decide `tipo`: el pago del delivery por transferencia
+                              nunca se presenta como un depósito del motorizado. */}
                           <span className="flex items-center gap-1.5">
                             {dep.destinatario === 'storkhub'
                               ? <Landmark className="h-3.5 w-3.5 text-blue-500 flex-shrink-0" />
                               : <Store className="h-3.5 w-3.5 text-purple-500 flex-shrink-0" />}
-                            {dep.destinatarioNombre}
+                            <span className="font-semibold text-gray-800">
+                              {origenDestinoDeposito(dep, fmtNombreMotorizado(dep.motorizadoNombre, motorizadoNames, dep.motorizadoUid)).texto}
+                            </span>
                           </span>
                         </td>
                         <td className={tdCls}>
@@ -2090,10 +2181,8 @@ function DepositosPageContent() {
                                 <p className="text-[10px] text-gray-400 max-w-[160px] truncate" title={dep.notaConversion}>{dep.notaConversion}</p>
                               )}
                             </div>
-                          ) : dep.destinatario === 'storkhub' ? (
-                            <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">Delivery confirmado</span>
                           ) : (
-                            <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200">Producto confirmado</span>
+                            <span className="inline-flex text-[11px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">{estadoDeposito(dep)}</span>
                           )}
                         </td>
                         <td className={`${tdCls} text-right font-semibold text-gray-900`}>{fmt(dep.montoTotal)}</td>
@@ -2106,12 +2195,25 @@ function DepositosPageContent() {
                           </div>
                         </td>
                         <td className={tdCls}>
-                          {dep.boucher?.url ? (
-                            <button onClick={() => setBoucherModalUrl(dep.boucher!.url)} title="Ver comprobante">
-                              {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img src={dep.boucher.url} alt="boucher" className="w-8 h-8 rounded object-cover border border-green-200 hover:opacity-80 transition" />
-                            </button>
-                          ) : <span className="text-[11px] text-gray-400">—</span>}
+                          {(() => {
+                            // boucher.url en los depósitos del motorizado; boucherUrl
+                            // plano en el pago por transferencia.
+                            const url = comprobanteDeposito(dep)
+                            return url ? (
+                              <button onClick={() => setBoucherModalUrl(url)} title="Ver comprobante">
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img src={url} alt="boucher" className="w-8 h-8 rounded object-cover border border-green-200 hover:opacity-80 transition" />
+                              </button>
+                            ) : <span className="text-[11px] text-gray-400">—</span>
+                          })()}
+                        </td>
+                        <td className={tdCls}>
+                          {(() => {
+                            const actor = confirmadorDeposito(dep, nombresUsuarios)
+                            return actor
+                              ? <span className="text-xs text-gray-700" title={actor.uid}>{actor.nombre}</span>
+                              : <span className="text-[11px] text-gray-400">—</span>
+                          })()}
                         </td>
                         <td className={tdCls}>
                           <div className="flex items-center gap-2">
@@ -2284,7 +2386,7 @@ function DepositoGrupo({
                 <th className="px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Orden</th>
                 <th className="px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">Fecha entrega</th>
                 <th className="px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                  Comercio · Dirección · Cliente
+                  Comercio · Cliente
                 </th>
                 <th className="px-4 py-2 text-right text-[11px] font-semibold uppercase tracking-wide text-gray-500">Monto</th>
               </tr>
@@ -2309,12 +2411,13 @@ function DepositoGrupo({
                     </td>
                     <td className="px-4 py-2.5 text-xs text-gray-600">{fmtDate(getEntregadoAt(o))}</td>
                     <td className="px-4 py-2.5">
-                      <p className="text-xs font-semibold text-gray-800">{getNombreComercio(o, comercioNames)}</p>
+                      {/* Quién y para quién en una línea; la dirección, debajo. */}
+                      <p className="text-xs font-semibold text-gray-800">
+                        {getNombreComercio(o, comercioNames)}
+                        {o.entrega?.nombreApellido && <span className="font-normal text-gray-600"> · {o.entrega.nombreApellido}</span>}
+                      </p>
                       {o.entrega?.direccionEscrita && (
                         <p className="text-[11px] text-gray-500 mt-0.5">{o.entrega.direccionEscrita}</p>
-                      )}
-                      {o.entrega?.nombreApellido && (
-                        <p className="text-[11px] text-gray-400 mt-0.5">{o.entrega.nombreApellido}</p>
                       )}
                     </td>
                     <td className="px-4 py-2.5 text-xs text-right font-semibold text-gray-900">

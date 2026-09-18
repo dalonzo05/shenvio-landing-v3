@@ -35,6 +35,7 @@ import {
   type TipoEvento,
 } from '@/lib/timeline-orden'
 import { presentarActor } from '@/lib/actor-resolucion'
+import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 
 const ICONO: Record<string, typeof Package> = {
   creada: Package,
@@ -61,8 +62,10 @@ const COLOR: Record<TipoEvento, string> = {
   administrativo: 'bg-gray-100 text-gray-600 ring-gray-200',
 }
 
+// DEPOSITOS-UX-TRAZABILIDAD-1 — hora de Managua, no la del navegador: un
+// gestor en UTC−3 veía los eventos tres horas corridos.
 function fechaHora(d: Date) {
-  return `${d.toLocaleDateString('es-NI', { day: 'numeric', month: 'short', year: 'numeric' })} · ${d.toLocaleTimeString('es-NI', { hour: 'numeric', minute: '2-digit' })}`
+  return fechaHoraOperativa(d)
 }
 
 /** Una fila de la lista vertical. Idéntica en ambas secciones. */

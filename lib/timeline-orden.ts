@@ -17,6 +17,7 @@
 
 import { detalleIncidencia, etiquetaResolucion, resolucionPrincipal, type ResolucionIncidencia } from './incidencia-cobro'
 import { lineasDeposito, type EntradaDepositoOrden, type DepositoRegistrado, type DestinoDeposito } from './deposito-orden'
+import { nombreDeposito, origenDestinoDeposito, esDepositoDelMotorizado } from './presentacion-deposito'
 
 export type TipoEvento = 'operativo' | 'cobro' | 'deposito' | 'administrativo'
 
@@ -295,9 +296,20 @@ export function construirTimeline(
       detalle: [montoCd, cd.formaPago].filter(Boolean).join(' · ') || null,
     })
   } else if (cd?.estado === 'pagado') {
-    // cobroDelivery nació 'pagado' al entregar: el motorizado ya lo había
-    // cobrado. `registradoAt` es el instante en que ese hecho se persistió.
-    push('delivery_pagado', 'cobro', 'Delivery cobrado por el motorizado', cd.registradoAt, {
+    // cobroDelivery nació 'pagado' al entregar. `registradoAt` es el instante
+    // en que ese hecho se persistió.
+    //
+    // DEPOSITOS-UX-TRAZABILIDAD-1: el título dice el MEDIO, que sí está
+    // persistido (`formaPago`), y ya no dice "por el motorizado": ese actor no
+    // se guarda —la Function solo acepta al motorizado asignado, pero eso es
+    // una regla del flujo, no un dato de la orden— y la timeline no atribuye
+    // por deducción.
+    const titulo = cd.formaPago === 'efectivo'
+      ? 'Delivery cobrado en efectivo'
+      : cd.formaPago === 'transferencia'
+        ? 'Delivery cobrado por transferencia'
+        : 'Delivery cobrado'
+    push('delivery_pagado', 'cobro', titulo, cd.registradoAt, {
       detalle: montoCd,
     })
   }
@@ -308,9 +320,22 @@ export function construirTimeline(
   for (const l of lineas) {
     const dep = l.deposito
     if (dep) {
+      // DEPOSITOS-UX-TRAZABILIDAD-1 — el depósito se nombra por su DEP-N y el
+      // título sale de `tipo`: el pago del delivery por transferencia no es
+      // un envío del motorizado, aunque el documento lleve su nombre. Solo en
+      // los tipos de recaudación el actor es el motorizado, cuyo UID de Auth
+      // guarda el propio documento.
+      const od = origenDestinoDeposito(dep)
+      const delMotorizado = esDepositoDelMotorizado(dep)
+      const titulo = od.clase === 'transferencia_delivery'
+        ? `${nombreDeposito(dep)} · pago del delivery por transferencia registrado`
+        : delMotorizado
+          ? `${nombreDeposito(dep)} enviado a ${od.destino}`
+          : `${nombreDeposito(dep)} registrado (${l.etiqueta.toLowerCase()})`
       // El total de un depósito agrupado incluye órdenes ajenas: el detalle
       // habla solo del aporte de ESTA orden.
-      push(`deposito_registrado:${l.destino}`, 'deposito', `Depósito registrado (${l.etiqueta.toLowerCase()})`, dep.creadoAt, {
+      push(`deposito_registrado:${l.destino}`, 'deposito', titulo, dep.creadoAt, {
+        actorUid: delMotorizado ? dep.motorizadoUid : null,
         detalle: `Esta orden aporta ${money(l.obligacion)}`,
       })
     }
@@ -320,10 +345,14 @@ export function construirTimeline(
     // una confirmación normal. El título sale del estado real del documento,
     // no del nombre del campo.
     const convertido = dep?.estado === 'convertido_en_deuda'
+    // Con el documento a mano se nombra por su DEP-N; sin él (el puntero
+    // quedó colgando) se conserva el título genérico por destino.
+    const sujeto = dep ? nombreDeposito(dep) : 'Depósito'
+    const sufijo = dep ? '' : ` (${l.etiqueta.toLowerCase()})`
     push(
       `deposito_confirmado:${l.destino}`,
       'deposito',
-      convertido ? `Depósito convertido en deuda (${l.etiqueta.toLowerCase()})` : `Depósito confirmado (${l.etiqueta.toLowerCase()})`,
+      convertido ? `${sujeto} convertido en deuda${sufijo}` : `${sujeto} confirmado${sufijo}`,
       confirmadoAt,
       {
         // La conversión en deuda no persiste actor. → B2-TIMELINE-DEPOSITO-ACTOR.

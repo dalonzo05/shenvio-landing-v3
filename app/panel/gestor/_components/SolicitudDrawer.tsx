@@ -29,7 +29,21 @@ import {
   type MotorizadoRankeado,
 } from '@/lib/motorizado-ranking'
 import { ResumenRapido } from './ResumenRapido'
-import { depositoVisible } from '@/lib/deposito-orden'
+import {
+  depositoVisible,
+  idsDepositoDeOrden,
+  type DepositoRegistrado,
+  type DestinoDeposito,
+} from '@/lib/deposito-orden'
+import {
+  identidadDeposito,
+  origenDestinoDeposito,
+  estadoDeposito,
+  fechasDeposito,
+  comprobanteDeposito,
+  comprobanteClienteAplica,
+} from '@/lib/presentacion-deposito'
+import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { trazabilidadPago, type EntradaTrazabilidad } from '@/lib/trazabilidad-pago'
 import { presentarActor } from '@/lib/actor-resolucion'
 import { mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
@@ -537,6 +551,36 @@ export function SolicitudDrawer({
     return () => unsub()
   }, [solicitudId])
 
+  // DEPOSITOS-UX-TRAZABILIDAD-1 — los depósitos de ESTA orden, por el puntero
+  // de la propia orden: como máximo dos getDoc, sin listener y sin recorrer
+  // ordenes_deposito. La dependencia es la clave de IDs, no el objeto: el
+  // onSnapshot de la orden no dispara relecturas. Un depósito que no se pudo
+  // leer queda en null y la línea dice "Depósito registrado", nunca un estado
+  // inventado.
+  const [depositosOrden, setDepositosOrden] = useState<Partial<Record<DestinoDeposito, DepositoRegistrado | null>>>({})
+  const claveDepositos = solicitud
+    ? idsDepositoDeOrden(solicitud as never).map((d) => `${d.destino}:${d.id}`).join('|')
+    : ''
+  useEffect(() => {
+    if (!claveDepositos) { setDepositosOrden({}); return }
+    let vivo = true
+    const pares = claveDepositos.split('|').map((p) => {
+      const [destino, id] = p.split(':')
+      return { destino: destino as DestinoDeposito, id }
+    })
+    Promise.all(pares.map(({ destino, id }) =>
+      getDoc(doc(db, 'ordenes_deposito', id))
+        .then((snap) => ({ destino, dep: snap.exists() ? ({ id: snap.id, ...(snap.data() as object) } as DepositoRegistrado) : null }))
+        .catch(() => ({ destino, dep: null as DepositoRegistrado | null }))
+    )).then((res) => {
+      if (!vivo) return
+      const mapa: Partial<Record<DestinoDeposito, DepositoRegistrado | null>> = {}
+      res.forEach(({ destino, dep }) => { mapa[destino] = dep })
+      setDepositosOrden(mapa)
+    })
+    return () => { vivo = false }
+  }, [claveDepositos])
+
   // Fetch del comercio para resolver requiereBolso
   useEffect(() => {
     if (!solicitud?.userId) return
@@ -858,7 +902,7 @@ export function SolicitudDrawer({
                   el recorrido que la ficha ya cuenta con timestamps y actores
                   en #historial. La reemplaza una conclusión: qué requiere
                   atención, con lo que la propia orden puede demostrar. */}
-              <ResumenRapido solicitudId={solicitudId} orden={solicitud as never} />
+              <ResumenRapido solicitudId={solicitudId} orden={solicitud as never} depositos={depositosOrden} />
 
               {/* Tiempo restante */}
               {tiempoRestante !== null && (
@@ -1134,17 +1178,52 @@ export function SolicitudDrawer({
                       // ordenes_deposito, y un depósito ya confirmado salía como
                       // "Pendiente de depósito". depositoVisible() mira el puntero
                       // de la orden y no afirma un estado que el drawer no leyó.
-                      const dv = depositoVisible(solicitud as never)
+                      //
+                      // DEPOSITOS-UX-TRAZABILIDAD-1 — con el documento leído la
+                      // línea es la LIQUIDACIÓN: DEP-0001 · Motorizado → StorkHub ·
+                      // Confirmado, con fechas en Managua y su comprobante. El
+                      // comprobante del depósito no es el del pago del cliente
+                      // (más abajo): son dos papeles de dos movimientos distintos.
+                      const dv = depositoVisible(solicitud as never, depositosOrden)
                       if (dv.lineas.length === 0) return null
                       return (
-                        <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                          {dv.lineas.map((l) => (
-                            <InfoRow
-                              key={l.destino}
-                              label={`Depósito · ${l.destinoEtiqueta}`}
-                              value={`${money(l.obligacion)} — ${l.texto}${l.responsable ? ` · ${l.responsable}` : ''}`}
-                            />
-                          ))}
+                        <div className="space-y-2">
+                          {dv.lineas.map((l) => {
+                            const dep = depositosOrden[l.destino] ?? null
+                            if (!dep) {
+                              return (
+                                <InfoRow
+                                  key={l.destino}
+                                  label={`Depósito · ${l.destinoEtiqueta}`}
+                                  value={`${money(l.obligacion)} — ${l.texto}${l.responsable ? ` · ${l.responsable}` : ''}`}
+                                />
+                              )
+                            }
+                            const ident = identidadDeposito(dep)
+                            const f = fechasDeposito(dep)
+                            const comprobante = comprobanteDeposito(dep)
+                            return (
+                              <div key={l.destino} className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+                                <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">Liquidación · {l.destinoEtiqueta}</p>
+                                <p className="text-sm font-semibold text-gray-900">
+                                  <span className="font-mono" title={`ID técnico: ${ident.idTecnico}`}>{ident.texto}</span>
+                                  {' · '}{origenDestinoDeposito(dep).texto}{' · '}{estadoDeposito(dep)}
+                                </p>
+                                <p className="text-xs text-gray-500">
+                                  Esta orden aporta {money(l.obligacion)} · Enviado {fechaHoraOperativa(f.enviado)}
+                                  {f.confirmado != null && <> · Confirmado {fechaHoraOperativa(f.confirmado)}</>}
+                                </p>
+                                {comprobante && (
+                                  <button
+                                    onClick={() => setLightboxUrl(comprobante)}
+                                    className="mt-1 text-xs font-semibold text-blue-600 hover:underline"
+                                  >
+                                    Ver comprobante del depósito
+                                  </button>
+                                )}
+                              </div>
+                            )
+                          })}
                         </div>
                       )
                     })()}
@@ -1163,15 +1242,23 @@ export function SolicitudDrawer({
                       if (bG?.url) items.push({ titulo: 'Boucher del gestor', url: bG.url, at: bG.at, esVigente: vigente === 'gestor' })
                       if (legacyUrl) items.push({ titulo: 'Boucher adjunto', url: legacyUrl, at: solicitud.cobroDelivery?.boucherAt, esVigente: true })
 
-                      if (items.length === 0) {
+                      // DEPOSITOS-UX-TRAZABILIDAD-1 — esto es el comprobante del
+                      // PAGO DEL CLIENTE. En SH-0001, cobrada en efectivo y con su
+                      // depósito confirmado, decía "Sin boucher adjunto aún": no
+                      // faltaba nada, ese comprobante no aplica. Solo se habla de
+                      // él cuando existe o cuando el cobro va por transferencia.
+                      const aplica = comprobanteClienteAplica(solicitud.cobroDelivery, solicitud.pagoDelivery?.quienPaga, items.length > 0)
+                      if (aplica === 'no_aplica') return null
+                      if (aplica === 'esperando') {
                         return (
                           <div className="rounded-xl border border-dashed border-blue-200 py-5 text-center text-xs text-blue-400">
-                            Sin boucher adjunto aún
+                            Sin comprobante del pago del cliente aún
                           </div>
                         )
                       }
                       return (
                         <div className="space-y-3">
+                          <p className="text-[10px] font-bold uppercase tracking-wide text-gray-500">Comprobante del pago del cliente</p>
                           {items.map((it) => (
                             <div key={it.url} className="space-y-1.5">
                               <div className="flex items-center gap-2">

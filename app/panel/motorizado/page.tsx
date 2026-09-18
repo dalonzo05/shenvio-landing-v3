@@ -13,6 +13,14 @@ import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBouc
 import { registrarMovimiento } from '@/lib/financial-writes';
 import { calcularDeposito } from '@/lib/calculo-deposito';
 import { mostrarCodigo } from '@/lib/codigo-humano';
+import { nombreMotorizadoParaRegistro } from '@/lib/presentacion-deposito';
+import {
+  resumenDepositosMotorizado,
+  historialDepositosMotorizado,
+  TOPE_QUERY_HISTORIAL_MOTORIZADO,
+} from '@/lib/depositos-motorizado';
+import { fechaHoraOperativa } from '@/lib/fecha-operativa';
+import type { DepositoRegistrado } from '@/lib/deposito-orden';
 import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -426,6 +434,10 @@ export default function PanelMotorizadoPage() {
 
   // Motorizado doc (estado propio)
   const [motorizadoDocId, setMotorizadoDocId] = useState<string | null>(null);
+  // DEPOSITOS-UX-TRAZABILIDAD-1 — nombre del perfil de `motorizado`. Es el que
+  // se guarda como motorizadoNombre al crear un depósito: Auth no tiene
+  // displayName y el writer terminaba guardando el correo.
+  const [motorizadoNombrePerfil, setMotorizadoNombrePerfil] = useState<string | null>(null);
   const [motorizadoEstado, setMotorizadoEstado] = useState<'disponible' | 'ocupado' | 'inactivo' | null>(null);
   const [toggling, setToggling] = useState(false);
 
@@ -473,6 +485,8 @@ export default function PanelMotorizadoPage() {
         const d = s.docs[0];
         setMotorizadoDocId(d.id);
         setMotorizadoEstado((d.data() as any).estado ?? 'inactivo');
+        const nombrePerfil = (d.data() as { nombre?: unknown }).nombre;
+        setMotorizadoNombrePerfil(typeof nombrePerfil === 'string' ? nombrePerfil : null);
       }
     });
     return () => unsub();
@@ -907,22 +921,51 @@ export default function PanelMotorizadoPage() {
     [gastosNoLiquidados],
   );
 
-  const resumenDepositos = useMemo(() => {
-    let alComercio = 0, aStorkhubBruto = 0;
-    depositosPendientes.forEach((o) => {
-      const d = calcDeposito(o);
-      // Solo sumar el monto que aún no fue confirmado para evitar doble conteo
-      // tras convertirDepositoEnDeuda (que pone confirmadoStorkhub = true)
-      if (!o.registro?.deposito?.confirmadoStorkhub) {
-        aStorkhubBruto += d.totalAStorkhub;
-      }
-      if (!o.registro?.deposito?.confirmadoComercio) {
-        alComercio += d.totalAlComercio;
-      }
-    });
-    const aStorkhub = Math.max(0, aStorkhubBruto - totalGastosDeducibles);
-    return { alComercio, aStorkhub, aStorkhubBruto, total: alComercio + aStorkhub };
-  }, [depositosPendientes, totalGastosDeducibles]);
+  // DEPOSITOS-UX-TRAZABILIDAD-1 — P0. El total sumaba toda orden sin
+  // confirmadoStorkhub, así que un depósito ya ENVIADO seguía apareciendo como
+  // dinero por depositar mientras su tarjeta —que sí miraba el puntero— había
+  // desaparecido. Ahora se separa: pendiente (sin puntero) y en revisión (con
+  // puntero, sin confirmar). Lo confirmado o convertido en deuda ya no cuenta.
+  const resumenMotorizado = useMemo(
+    () => resumenDepositosMotorizado(entregadas, totalGastosDeducibles),
+    [entregadas, totalGastosDeducibles],
+  );
+  const resumenDepositos = {
+    alComercio: resumenMotorizado.pendiente.comercio,
+    aStorkhub: resumenMotorizado.pendiente.storkhub,
+    aStorkhubBruto: resumenMotorizado.pendiente.storkhubBruto,
+    total: resumenMotorizado.pendiente.total,
+  };
+
+  // DEPOSITOS-UX-TRAZABILIDAD-1 — historial propio de depósitos.
+  //
+  // Rules solo dejan leer los depósitos con motorizadoUid == auth.uid, y la
+  // query lleva ese mismo where(): sin él, el list() entero se deniega. No hay
+  // orderBy para no exigir un índice compuesto nuevo; se trae un tope y se
+  // ordena en el cliente. Solo con la pestaña Depósitos abierta.
+  const [depositosPropios, setDepositosPropios] = useState<DepositoRegistrado[]>([]);
+  const uidSesion = user?.uid ?? null;
+  useEffect(() => {
+    if (!uidSesion || tab !== 'depositos') return;
+    const q = query(
+      collection(db, 'ordenes_deposito'),
+      where('motorizadoUid', '==', uidSesion),
+      limit(TOPE_QUERY_HISTORIAL_MOTORIZADO),
+    );
+    return onSnapshot(q,
+      (s) => setDepositosPropios(s.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<DepositoRegistrado, 'id'>) }))),
+      (e) => console.error('[motorizado] historial de depósitos', e),
+    );
+  }, [uidSesion, tab]);
+  const codigoDeOrden = useMemo(() => {
+    const m: Record<string, string> = {};
+    ordenes.forEach((o) => { if (typeof o.codigo === 'string') m[o.id] = o.codigo; });
+    return m;
+  }, [ordenes]);
+  const misDepositos = useMemo(
+    () => historialDepositosMotorizado(depositosPropios, codigoDeOrden),
+    [depositosPropios, codigoDeOrden],
+  );
 
   // Load comercio bank accounts and names for deposit orders
   const [comercioAccounts, setComercioAccounts] = useState<Record<string, BankAccount[]>>({});
@@ -1056,7 +1099,7 @@ export default function PanelMotorizadoPage() {
           <StatCard label="Nuevas" value={pendientes.length} color={pendientes.length > 0 ? '#d97706' : '#6b7280'} bg={pendientes.length > 0 ? '#fffbeb' : '#f9fafb'} border={pendientes.length > 0 ? '#fde68a' : '#e5e7eb'} />
           <StatCard label="En curso" value={enCurso.length} color={enCurso.length > 0 ? '#2563eb' : '#6b7280'} bg={enCurso.length > 0 ? '#eff6ff' : '#f9fafb'} border={enCurso.length > 0 ? '#bfdbfe' : '#e5e7eb'} />
           <StatCard label="Hoy" value={historialFiltrado.length} color="#16a34a" bg="#f0fdf4" border="#bbf7d0" />
-          <StatCard label="Depósitos" value={depositosPendientes.length} color={depositosPendientes.length > 0 ? '#7c3aed' : '#6b7280'} bg={depositosPendientes.length > 0 ? '#f5f3ff' : '#f9fafb'} border={depositosPendientes.length > 0 ? '#ddd6fe' : '#e5e7eb'} />
+          <StatCard label="Depósitos" value={resumenMotorizado.pendiente.ordenes} color={resumenMotorizado.pendiente.ordenes > 0 ? '#7c3aed' : '#6b7280'} bg={resumenMotorizado.pendiente.ordenes > 0 ? '#f5f3ff' : '#f9fafb'} border={resumenMotorizado.pendiente.ordenes > 0 ? '#ddd6fe' : '#e5e7eb'} />
         </div>
       </div>
 
@@ -1544,7 +1587,9 @@ export default function PanelMotorizadoPage() {
 
             {/* Summary banner */}
             <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: '16px', marginBottom: 16, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
-              <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Resumen de hoy</p>
+              {/* DEPOSITOS-UX-TRAZABILIDAD-1 — decía "de hoy", pero la lista no
+                  filtra por fecha: suma todo lo pendiente, sea del día que sea. */}
+              <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Por depositar</p>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 12, padding: '12px 14px' }}>
                   <p style={{ fontSize: 11, color: '#7c3aed', fontWeight: 700, textTransform: 'uppercase' as const, margin: '0 0 4px', letterSpacing: 0.5 }}>Al comercio</p>
@@ -1571,14 +1616,28 @@ export default function PanelMotorizadoPage() {
               )}
               <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '12px 14px', marginTop: 10 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontSize: 13, color: '#374151', fontWeight: 600 }}>Total a depositar hoy</span>
+                  <span style={{ fontSize: 13, color: '#374151', fontWeight: 600 }}>Pendiente de depositar</span>
                   <span style={{ fontSize: 22, fontWeight: 900, color: '#111827' }}>{fmt(resumenDepositos.total)}</span>
                 </div>
               </div>
+              {/* Lo ya enviado se ve aparte: no es dinero que el motorizado
+                  todavía tenga que depositar. */}
+              {resumenMotorizado.enRevision.total > 0 && (
+                <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 12, padding: '10px 14px', marginTop: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: 13, color: '#92400e', fontWeight: 600 }}>En revisión</span>
+                    <span style={{ fontSize: 18, fontWeight: 900, color: '#b45309' }}>{fmt(resumenMotorizado.enRevision.total)}</span>
+                  </div>
+                  <p style={{ fontSize: 11, color: '#b45309', margin: '2px 0 0' }}>Ya enviado · esperando confirmación de StorkHub</p>
+                </div>
+              )}
             </div>
 
-            {depositosPendientes.length === 0
-              ? <EmptyState icon="✅" title="Sin depósitos pendientes" subtitle="No hay efectivo por depositar" />
+            {/* Vacío cuando no queda NADA por enviar. Antes miraba
+                depositosPendientes, que incluye lo ya enviado en revisión: tras
+                enviar no aparecía ni la tarjeta ni este mensaje. */}
+            {gruposDeposito.storkhub.orders.length === 0 && gruposDeposito.comercios.length === 0
+              ? <EmptyState icon="✅" title="Sin depósitos pendientes" subtitle={resumenMotorizado.enRevision.total > 0 ? 'Lo que enviaste está en revisión' : 'No hay efectivo por depositar'} />
               : (
                 <>
                   {/* ── Grupo Storkhub ── */}
@@ -1682,7 +1741,8 @@ export default function PanelMotorizadoPage() {
                                   destinatarioNombre: 'Storkhub',
                                   cuentasDestino: STORKHUB_ACCOUNTS.map((a) => ({ banco: a.bank, numero: a.number, titular: a.holder, moneda: a.currency })),
                                   motorizadoUid: auth.currentUser?.uid ?? '',
-                                  motorizadoNombre: user?.displayName ?? user?.email ?? '',
+                                  // DEPOSITOS-UX-TRAZABILIDAD-1 — perfil primero; nunca el correo.
+                                  motorizadoNombre: nombreMotorizadoParaRegistro({ perfil: motorizadoNombrePerfil, displayName: user?.displayName }),
                                   solicitudIds: g.orders.map((o) => o.id),
                                   montoTotal: g.total, // neto: delivery - gastos descontados
                                   montoBruto: resumenDepositos.aStorkhubBruto,
@@ -1815,7 +1875,8 @@ export default function PanelMotorizadoPage() {
                                   destinatarioNombre: g.nombre,
                                   cuentasDestino: g.accounts.map((a) => ({ banco: a.bank, numero: a.number, titular: a.holder, moneda: a.currency })),
                                   motorizadoUid: auth.currentUser?.uid ?? '',
-                                  motorizadoNombre: user?.displayName ?? user?.email ?? '',
+                                  // DEPOSITOS-UX-TRAZABILIDAD-1 — perfil primero; nunca el correo.
+                                  motorizadoNombre: nombreMotorizadoParaRegistro({ perfil: motorizadoNombrePerfil, displayName: user?.displayName }),
                                   solicitudIds: g.orders.map((o) => o.id),
                                   montoTotal: g.total,
                                   boucher: boucherData,
@@ -1846,6 +1907,45 @@ export default function PanelMotorizadoPage() {
                   })}
                 </>
               )}
+
+            {/* ── Mis depósitos ── DEPOSITOS-UX-TRAZABILIDAD-1 */}
+            {misDepositos.length > 0 && (
+              <div style={{ marginTop: 20 }}>
+                <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 10px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Mis depósitos</p>
+                <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
+                  {misDepositos.map((d) => {
+                    const c = colorEstadoDeposito(d.estadoClave);
+                    return (
+                      <div key={d.id} style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '12px 14px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                          <div style={{ minWidth: 0 }}>
+                            <p style={{ fontSize: 13, fontWeight: 800, color: '#111827', margin: 0, fontFamily: 'monospace' }} title={d.identidad.idTecnico}>{d.identidad.texto}</p>
+                            <p style={{ fontSize: 11, color: '#6b7280', margin: '2px 0 0' }}>
+                              A {d.destino} · {d.ordenes} orden{d.ordenes !== 1 ? 'es' : ''}{d.codigosOrdenes.length > 0 ? `: ${d.codigosOrdenes.join(', ')}` : ''}
+                            </p>
+                          </div>
+                          <div style={{ textAlign: 'right' as const, flexShrink: 0 }}>
+                            <p style={{ fontSize: 15, fontWeight: 800, color: '#111827', margin: 0 }}>{fmt(d.monto)}</p>
+                            <span style={{ display: 'inline-block', marginTop: 2, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: c.bg, color: c.fg, border: `1px solid ${c.borde}` }}>{d.estado}</span>
+                          </div>
+                        </div>
+                        <p style={{ fontSize: 11, color: '#6b7280', margin: '6px 0 0' }}>Enviado {fechaHoraOperativa(d.enviado)}</p>
+                        {d.confirmado != null && (
+                          <p style={{ fontSize: 11, color: '#6b7280', margin: '2px 0 0' }}>
+                            Confirmado {fechaHoraOperativa(d.confirmado)}{d.confirmadoPor ? ` · por ${d.confirmadoPor}` : ''}
+                          </p>
+                        )}
+                        {d.comprobante && (
+                          <a href={d.comprobante} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', marginTop: 6, fontSize: 12, color: '#2563eb', fontWeight: 600 }}>
+                            Ver comprobante
+                          </a>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -1969,7 +2069,7 @@ export default function PanelMotorizadoPage() {
         setTab={setTab}
         pendientesCount={pendientes.length}
         enCursoCount={enCurso.length}
-        depositosCount={depositosPendientes.length}
+        depositosCount={resumenMotorizado.pendiente.ordenes}
       />
     </div>
   );
@@ -2251,6 +2351,14 @@ function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
       <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0' }}>{dep.descripcion}</p>
     </div>
   );
+}
+
+/** Colores del estado de un depósito propio. Solo presentación. */
+function colorEstadoDeposito(estado: string | null): { bg: string; fg: string; borde: string } {
+  if (estado === 'confirmado') return { bg: '#f0fdf4', fg: '#15803d', borde: '#bbf7d0' };
+  if (estado === 'en_revision' || estado === 'pendiente_boucher') return { bg: '#fffbeb', fg: '#b45309', borde: '#fde68a' };
+  if (estado === 'rechazado' || estado === 'convertido_en_deuda') return { bg: '#fef2f2', fg: '#b91c1c', borde: '#fecaca' };
+  return { bg: '#f9fafb', fg: '#4b5563', borde: '#e5e7eb' };
 }
 
 function EmptyState({ icon, title, subtitle }: { icon: string; title: string; subtitle: string }) {

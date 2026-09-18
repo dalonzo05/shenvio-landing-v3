@@ -22,15 +22,25 @@ export type DestinoDeposito = 'storkhub' | 'comercio'
 /** Forma real de ordenes_deposito (ver DepositoOrderDoc en gestor/depositos). */
 export interface DepositoRegistrado {
   id: string
+  /** DEP-N. Lo asigna el trigger; los históricos no lo tienen. */
+  codigo?: string | null
+  secuencia?: number | null
+  /** Qué movimiento de dinero representa. Ver presentacion-deposito.ts. */
+  tipo?: string | null
   estado?: string | null
   destinatario?: DestinoDeposito | string | null
+  destinatarioId?: string | null
   destinatarioNombre?: string | null
+  /** UID de Auth del motorizado en los tipos de recaudación. */
+  motorizadoUid?: string | null
   motorizadoNombre?: string | null
   solicitudIds?: string[] | null
   montoTotal?: number | null
   montoBruto?: number | null
   gastosDescontados?: number | null
-  boucher?: { url?: string | null; pathStorage?: string | null } | null
+  boucher?: { url?: string | null; pathStorage?: string | null; uploadedAt?: unknown } | null
+  /** Forma plana del pago del delivery por transferencia (tipo C). */
+  boucherUrl?: string | null
   creadoAt?: unknown
   confirmadoAt?: unknown
   confirmadoPorUid?: string | null

@@ -20,6 +20,14 @@ import {
   type DestinoDeposito,
 } from '@/lib/deposito-orden'
 import { presentarActor } from '@/lib/actor-resolucion'
+import {
+  identidadDeposito,
+  origenDestinoDeposito,
+  fechasDeposito,
+  nombreMotorizadoDeposito,
+  comprobanteDeposito,
+} from '@/lib/presentacion-deposito'
+import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 
 function money(n: number | null | undefined) {
   if (typeof n !== 'number' || !Number.isFinite(n)) return '—'
@@ -46,14 +54,12 @@ export function BloqueDepositos({
   orden,
   depositos,
   nombresActores = {},
-  formatearFecha,
   onVerBoucher,
 }: {
   orden: EntradaDepositoOrden
   /** Documentos ya leídos por ID. Este componente no consulta nada. */
   depositos: Partial<Record<DestinoDeposito, DepositoRegistrado | null>>
   nombresActores?: Record<string, string>
-  formatearFecha: (v: unknown) => string
   onVerBoucher: (url: string, label: string) => void
 }) {
   const [detalleAbierto, setDetalleAbierto] = useState(false)
@@ -121,7 +127,7 @@ export function BloqueDepositos({
           {!detalleAbierto && (
             <p className="text-sm text-gray-600">
               {registrados
-                .map((l) => `${l.etiqueta.toLowerCase()}: ${l.texto.toLowerCase()}`)
+                .map((l) => `${identidadDeposito(l.deposito!).texto} · ${l.etiqueta.toLowerCase()}: ${l.texto.toLowerCase()}`)
                 .join(' · ')}
             </p>
           )}
@@ -130,14 +136,24 @@ export function BloqueDepositos({
             {registrados.map((l) => {
               const d = l.deposito!
               const actor = presentarActor(d.confirmadoPorUid, nombresActores[d.confirmadoPorUid ?? ''])
+              // DEPOSITOS-UX-TRAZABILIDAD-1 — DEP-N al frente, el ID de Firestore
+              // en el title; el origen lo decide `tipo`, y las fechas van en
+              // hora de Managua, no del navegador.
+              const ident = identidadDeposito(d)
+              const f = fechasDeposito(d)
+              const motorizado = nombreMotorizadoDeposito(d, nombresActores)
+              const comprobante = comprobanteDeposito(d)
               return (
                 <div key={l.destino} className="rounded-xl border border-gray-200 p-3.5">
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-gray-500">{l.etiqueta}</span>
-                      <span className="font-mono text-[11px] text-gray-400" title={d.id}>
-                        {d.id.slice(0, 10)}…
-                      </span>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className={`font-mono text-sm ${ident.esCodigo ? 'font-bold text-gray-900' : 'text-gray-500'}`} title={`ID técnico: ${ident.idTecnico}`}>
+                          {ident.texto}
+                        </span>
+                        <span className="text-xs font-semibold text-gray-500">{l.etiqueta}</span>
+                      </div>
+                      <p className="text-xs text-gray-600 mt-0.5">{origenDestinoDeposito(d, motorizado).texto}</p>
                     </div>
                     <span className={`inline-flex text-[11px] font-bold px-2 py-0.5 rounded-full border ${
                       COLOR_ESTADO[d.estado ?? ''] ?? 'bg-gray-100 text-gray-600 border-gray-200'
@@ -163,11 +179,13 @@ export function BloqueDepositos({
                     {typeof d.gastosDescontados === 'number' && d.gastosDescontados > 0 && (
                       <Dato label="Gastos descontados">{money(d.gastosDescontados)}</Dato>
                     )}
-                    {d.motorizadoNombre && <Dato label="Motorizado">{d.motorizadoNombre}</Dato>}
+                    {/* El nombre resuelto por UID; nunca el correo que se llegó
+                        a guardar como motorizadoNombre. */}
+                    {motorizado && <Dato label="Enviado por">{motorizado}</Dato>}
                     {/* Solo timestamps que el documento realmente tiene. */}
-                    {d.creadoAt != null && <Dato label="Creado">{formatearFecha(d.creadoAt)}</Dato>}
-                    {d.confirmadoAt != null && <Dato label="Confirmado">{formatearFecha(d.confirmadoAt)}</Dato>}
-                    {d.rechazadoAt != null && <Dato label="Rechazado">{formatearFecha(d.rechazadoAt)}</Dato>}
+                    {f.enviado != null && <Dato label="Enviado">{fechaHoraOperativa(f.enviado)}</Dato>}
+                    {f.confirmado != null && <Dato label="Confirmado">{fechaHoraOperativa(f.confirmado)}</Dato>}
+                    {d.rechazadoAt != null && <Dato label="Rechazado">{fechaHoraOperativa(d.rechazadoAt)}</Dato>}
                     {actor && (
                       <div>
                         <div className="text-gray-500">Confirmado por</div>
@@ -186,16 +204,16 @@ export function BloqueDepositos({
 
                   {/* Boucher vigente. No hay historial de reemplazos en el
                       schema, así que no se simula uno. */}
-                  {d.boucher?.url && (
+                  {comprobante && (
                     <button
                       type="button"
-                      onClick={() => onVerBoucher(d.boucher!.url!, `Boucher · ${l.etiqueta}`)}
+                      onClick={() => onVerBoucher(comprobante, `Comprobante ${ident.texto} · ${l.etiqueta}`)}
                       title="Ampliar comprobante"
                       className="mt-3 flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 p-1.5 pr-3 hover:bg-gray-100 hover:border-gray-300 transition cursor-zoom-in"
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
-                        src={d.boucher.url}
+                        src={comprobante}
                         alt={`Comprobante del depósito ${l.etiqueta.toLowerCase()}`}
                         className="w-10 h-10 object-cover rounded"
                         loading="lazy"

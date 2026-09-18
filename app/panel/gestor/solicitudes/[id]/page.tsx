@@ -31,6 +31,14 @@ import { ImageLightbox } from '../../../_components/ImageLightbox'
 import { nombreDeUsuario } from '@/lib/actor-resolucion'
 import { mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
 import { idsDepositoDeOrden, type DepositoRegistrado, type DestinoDeposito } from '@/lib/deposito-orden'
+import {
+  identidadDeposito,
+  origenDestinoDeposito,
+  estadoDeposito,
+  fechasDeposito,
+  comprobanteDeposito,
+} from '@/lib/presentacion-deposito'
+import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 
 /** Etiqueta sin emoji para el visor ampliado y los textos accesibles. */
 const LABEL_LIMPIO: Record<'retiro' | 'entrega' | 'deposito', string> = {
@@ -1774,7 +1782,6 @@ function GestorSolicitudDetallePageContent() {
             orden={solicitud as never}
             depositos={depositosOrden}
             nombresActores={nombresActores}
-            formatearFecha={formatDateTime}
             onVerBoucher={(url, label) => setEvidenciaAmpliada({ url, label })}
           />
 
@@ -1813,6 +1820,51 @@ function GestorSolicitudDetallePageContent() {
               </div>
             </div>
           )}
+
+          {/* DEPOSITOS-UX-TRAZABILIDAD-1 — Evidencias financieras.
+              Separadas a propósito de las fotográficas: retiro y entrega
+              prueban el recorrido del paquete; esto prueba el movimiento del
+              dinero. Sale de depositosOrden, que la ficha ya leyó para el
+              bloque Depósitos: ninguna lectura nueva. */}
+          {(() => {
+            const items = (['storkhub', 'comercio'] as const)
+              .map((destino) => ({ destino, dep: depositosOrden[destino] ?? null }))
+              .filter((x): x is { destino: 'storkhub' | 'comercio'; dep: DepositoRegistrado } => !!x.dep && !!comprobanteDeposito(x.dep))
+            if (items.length === 0) return null
+            return (
+              <div id="evidencias-financieras" className="scroll-mt-24 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                <h2 className="font-semibold text-gray-900">Evidencias financieras</h2>
+                <p className="text-xs text-gray-500 mb-4">Comprobantes de depósito del dinero de esta orden.</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {items.map(({ destino, dep }) => {
+                    const url = comprobanteDeposito(dep)!
+                    const ident = identidadDeposito(dep)
+                    const f = fechasDeposito(dep)
+                    return (
+                      <button
+                        key={destino}
+                        onClick={() => setEvidenciaAmpliada({ url, label: `Comprobante ${ident.texto}` })}
+                        title={`Ampliar comprobante · ID técnico ${ident.idTecnico}`}
+                        className="flex items-center gap-3 rounded-xl border border-gray-200 bg-gray-50 p-2 text-left hover:bg-gray-100 hover:border-gray-300 transition cursor-zoom-in"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={url} alt={`Comprobante ${ident.texto}`} className="h-16 w-16 shrink-0 rounded-lg object-cover" loading="lazy" />
+                        <div className="min-w-0 text-xs">
+                          <p className="font-mono text-sm font-bold text-gray-900">{ident.texto}</p>
+                          <p className="text-gray-700">Comprobante de depósito · {origenDestinoDeposito(dep).texto}</p>
+                          <p className="text-gray-700">Total {money(dep.montoTotal)} · {estadoDeposito(dep)}</p>
+                          <p className="text-gray-500">
+                            Enviado {fechaHoraOperativa(f.enviado)}
+                            {f.confirmado != null ? ` · Confirmado ${fechaHoraOperativa(f.confirmado)}` : ''}
+                          </p>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })()}
 
           {/* Evidencias Cargotrans */}
           {(solicitud as any).evidenciasCargotrans && (

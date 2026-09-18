@@ -21,7 +21,11 @@ import {
   assertFails,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing'
-import { doc, setDoc, updateDoc, getDoc, deleteField, serverTimestamp } from 'firebase/firestore'
+import assert from 'node:assert/strict'
+import {
+  doc, setDoc, updateDoc, getDoc, deleteField, serverTimestamp,
+  collection, query, where, limit, getDocs,
+} from 'firebase/firestore'
 
 // Identidades del arnés. El rol de comercio es 'Comercio' con mayúscula: así
 // está en las reglas y así se escribe en `usuarios`.
@@ -324,4 +328,55 @@ test('R-U2 · un contador nuevo tampoco se puede crear desde el cliente', async 
   for (const uid of [UID_GESTOR, UID_COMERCIO]) {
     await assertFails(setDoc(doc(como(uid), 'contadores', 'inventado'), { valor: 1 }))
   }
+})
+
+// ─── DEPOSITOS-UX-TRAZABILIDAD-1 ─────────────────────────────────────────────
+//
+// Los writers del gestor que dejan un depósito 'confirmado' ahora escriben
+// confirmadoPorUid y confirmadoAt; y el motorizado lee su propio historial con
+// una query acotada por motorizadoUid. Ninguna regla cambió: estos casos
+// prueban que las reglas vigentes aceptan exactamente eso, y nada más.
+
+test('W1 · gestor confirma un depósito registrado en nombre del motorizado, con quién y cuándo ⇒ ALLOW', async () => {
+  const id = await depositoConCodigo('depW1', { estado: 'pendiente_boucher' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', id), {
+    boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x' },
+    estado: 'confirmado',
+    confirmadoPorUid: UID_GESTOR,
+    confirmadoAt: serverTimestamp(),
+  }))
+})
+
+test('W2 · gestor registra el pago del delivery por transferencia, nacido confirmado con quién y cuándo ⇒ ALLOW', async () => {
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depW2'), {
+    creadoAt: serverTimestamp(),
+    tipo: 'pago_delivery_deposito',
+    estado: 'confirmado',
+    destinatario: 'storkhub',
+    destinatarioId: 'storkhub',
+    destinatarioNombre: 'Storkhub',
+    cuentasDestino: [],
+    motorizadoUid: 'motDoc1',
+    motorizadoNombre: 'John Pork',
+    solicitudIds: ['ord1'],
+    montoTotal: 110,
+    confirmadoPorUid: UID_GESTOR,
+    confirmadoAt: serverTimestamp(),
+  }))
+})
+
+test('W3 · el motorizado lista SUS depósitos con where(motorizadoUid == uid) ⇒ ALLOW', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'ordenes_deposito', 'propio'), { ...depositoBase(), codigo: 'DEP-0001', secuencia: 1 })
+    await setDoc(doc(ctx.firestore(), 'ordenes_deposito', 'ajeno'), { ...depositoBase({ motorizadoUid: 'otro_moto' }), codigo: 'DEP-0002', secuencia: 2 })
+  })
+  const db = como(UID_MOTO)
+  const snap = await assertSucceeds(getDocs(query(collection(db, 'ordenes_deposito'), where('motorizadoUid', '==', UID_MOTO), limit(100))))
+  assert.deepEqual(snap.docs.map((d) => d.id), ['propio'])
+})
+
+test('W4 · el motorizado no puede listar depósitos sin acotar, ni los de otro ⇒ DENY', async () => {
+  const db = como(UID_MOTO)
+  await assertFails(getDocs(query(collection(db, 'ordenes_deposito'), limit(100))))
+  await assertFails(getDocs(query(collection(db, 'ordenes_deposito'), where('motorizadoUid', '==', 'otro_moto'))))
 })

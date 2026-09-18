@@ -45,6 +45,7 @@ import {
   type EntradaIncidencia,
 } from '@/lib/incidencia-cobro'
 import { mostrarCodigo } from '@/lib/codigo-humano'
+import { liquidacionDeposito, camposConfirmacionDeposito } from '@/lib/presentacion-deposito'
 import {
   depositoVisible,
   depositosDesdeCache,
@@ -887,6 +888,10 @@ function BoucherModal({
         // el puntero — nunca "el último objeto que exista".
         boucherUrl: urlBoucherVigente(orden.cobroDelivery) ?? null,
         metadata: { clienteNombre: nombre },
+        // DEPOSITOS-UX-TRAZABILIDAD-1 — el documento nace 'confirmado' por el
+        // gestor: queda dicho quién y cuándo. Del UID de la sesión, nunca del
+        // 'desconocido' de respaldo que usa el movimiento.
+        ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
       })
       b.update(doc(db, 'solicitudes_envio', orden.id), {
         'cobroDelivery.estado': 'pagado',
@@ -1042,6 +1047,8 @@ function PagoContadoModal({
           solicitudIds: [orden.id],
           montoTotal: montoFinal,
           metadata: { referencia: nota.trim() || null, clienteNombre: nombre },
+          // DEPOSITOS-UX-TRAZABILIDAD-1 — ver arriba: nace confirmado por el gestor.
+          ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
         })
         b.update(doc(db, 'solicitudes_envio', orden.id), {
           ...updates,
@@ -2025,7 +2032,7 @@ function CobrosPageContent() {
                       <th className={thCls}>Orden</th>
                       <th className={thCls}>Cliente</th>
                       <th className={thCls}>Forma</th>
-                      <th className={thCls}>Depósito</th>
+                      <th className={thCls}>Liquidación</th>
                       <th className={thCls}>Nota</th>
                       <th className={`${thCls} text-right`}>Monto</th>
                       <th className={thCls}>Acción</th>
@@ -2058,23 +2065,48 @@ function CobrosPageContent() {
                               motorizado todavía debe los C$110 a StorkHub. */}
                           <td className={tdCls}>
                             {(() => {
+                              // DEPOSITOS-UX-TRAZABILIDAD-1 — "Forma" dice cómo pagó el
+                              // cliente; esta columna, cómo llegó ese dinero a su
+                              // destino: DEP-0001 · Motorizado → StorkHub · Confirmado ✓.
+                              // Mismo cache de antes: ninguna lectura nueva.
                               const orden = s as unknown as EntradaDepositoOrden
-                              const dv = depositoVisible(orden, depositosDesdeCache(orden, depositosCache))
-                              const tono = dv.lineas.length === 0
-                                ? 'bg-gray-50 text-gray-500 border-gray-200'
-                                : dv.pendiente
-                                  ? 'bg-amber-50 text-amber-700 border-amber-200'
-                                  : dv.desconocido
-                                    ? 'bg-gray-50 text-gray-600 border-gray-200'
-                                    : 'bg-green-50 text-green-700 border-green-200'
-                              const detalle = dv.lineas.map((l) => `${l.destinoEtiqueta}: ${l.texto} · ${fmt(l.obligacion)}`).join(' | ')
+                              const docs = depositosDesdeCache(orden, depositosCache)
+                              const dv = depositoVisible(orden, docs)
+                              if (dv.lineas.length === 0) {
+                                return (
+                                  <span
+                                    className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full border whitespace-nowrap bg-gray-50 text-gray-500 border-gray-200"
+                                    title="Esta orden no genera obligación de depósito"
+                                  >
+                                    No corresponde
+                                  </span>
+                                )
+                              }
                               return (
-                                <span
-                                  className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full border whitespace-nowrap ${tono}`}
-                                  title={detalle || 'Esta orden no genera obligación de depósito'}
-                                >
-                                  {dv.resumen}
-                                </span>
+                                <div className="flex flex-col gap-1">
+                                  {dv.lineas.map((l) => {
+                                    const dep = docs[l.destino] ?? null
+                                    const texto = dep
+                                      ? liquidacionDeposito(dep)
+                                      : l.clave === 'pendiente'
+                                        ? `Pendiente · ${l.responsable ?? 'Motorizado'}`
+                                        : l.texto
+                                    const tono = l.clave === 'pendiente' || (l.clave === 'registrado' && l.estado !== 'confirmado')
+                                      ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                      : l.clave === 'registrado_sin_detalle'
+                                        ? 'bg-gray-50 text-gray-600 border-gray-200'
+                                        : 'bg-green-50 text-green-700 border-green-200'
+                                    return (
+                                      <span
+                                        key={l.destino}
+                                        className={`inline-flex w-fit text-xs font-semibold px-2 py-0.5 rounded-full border whitespace-nowrap ${tono}`}
+                                        title={`${l.destinoEtiqueta}: ${l.texto} · ${fmt(l.obligacion)}${dep ? ` · ID técnico ${dep.id}` : ''}`}
+                                      >
+                                        {texto}
+                                      </span>
+                                    )
+                                  })}
+                                </div>
                               )
                             })()}
                           </td>
