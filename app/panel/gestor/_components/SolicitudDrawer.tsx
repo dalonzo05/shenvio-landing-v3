@@ -39,13 +39,13 @@ import {
   identidadDeposito,
   origenDestinoDeposito,
   estadoDeposito,
-  fechasDeposito,
   comprobanteDeposito,
   comprobanteClienteAplica,
 } from '@/lib/presentacion-deposito'
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
+import { montoAsociadoDeposito, momentosDeposito } from '@/lib/pago-transferencia'
 import { trazabilidadPago, type EntradaTrazabilidad } from '@/lib/trazabilidad-pago'
-import { presentarActor } from '@/lib/actor-resolucion'
+import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
 import { mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
 import {
   X,
@@ -456,6 +456,11 @@ export function InfoRow({ label, value, icon }: { label: string; value?: string 
 
 // ─── SolicitudDrawer ──────────────────────────────────────────────────────────
 
+// PAGO-TRANSFERENCIA-UX-1 — nombres de usuarios internos ya resueltos, por
+// UID. A nivel de módulo: el drawer se monta y desmonta en cada apertura, y
+// así un mismo confirmador se lee una sola vez por sesión.
+const nombresUsuariosDrawer = new Map<string, string>()
+
 export function SolicitudDrawer({
   solicitudId,
   onClose,
@@ -580,6 +585,30 @@ export function SolicitudDrawer({
     })
     return () => { vivo = false }
   }, [claveDepositos])
+
+  // PAGO-TRANSFERENCIA-UX-1 — quién confirmó el cobro, con nombre. Decía
+  // "Usuario interno" aunque el UID estaba guardado (DRAWER-ACTOR-SIN-NOMBRE).
+  // Una lectura por UID distinto, cacheada; sin permiso o sin nombre queda ''
+  // y se sigue mostrando "Usuario interno". No se infiere el rol.
+  const uidConfirmador = solicitud?.cobroDelivery?.confirmadoPor ?? null
+  const [nombreConfirmador, setNombreConfirmador] = useState<string | null>(null)
+  useEffect(() => {
+    if (!uidConfirmador) { setNombreConfirmador(null); return }
+    const cacheado = nombresUsuariosDrawer.get(uidConfirmador)
+    if (cacheado !== undefined) { setNombreConfirmador(cacheado); return }
+    let vivo = true
+    getDoc(doc(db, 'usuarios', uidConfirmador))
+      .then((snap) => {
+        const n = snap.exists() ? nombreDeUsuario(snap.data() as { name?: string; nombre?: string }) : ''
+        nombresUsuariosDrawer.set(uidConfirmador, n)
+        if (vivo) setNombreConfirmador(n)
+      })
+      .catch(() => {
+        nombresUsuariosDrawer.set(uidConfirmador, '')
+        if (vivo) setNombreConfirmador('')
+      })
+    return () => { vivo = false }
+  }, [uidConfirmador])
 
   // Fetch del comercio para resolver requiereBolso
   useEffect(() => {
@@ -1156,12 +1185,10 @@ export function SolicitudDrawer({
                       {traza?.receptor && <InfoRow label="Recibió el dinero" value={traza.receptor.etiqueta} />}
                       {solicitud.cobroDelivery?.pagadoAt && <InfoRow label="Fecha de pago" value={formatDateTime(solicitud.cobroDelivery.pagadoAt)} />}
                       {(() => {
-                        // presentarActor() ya resuelve esto: sin nombre no
-                        // inventa nada, dice "Usuario interno" y deja el UID
-                        // como referencia técnica secundaria. El drawer no
-                        // carga usuarios/, así que no se pide el nombre — ver
-                        // deuda DRAWER-ACTOR-SIN-NOMBRE.
-                        const actor = presentarActor(solicitud.cobroDelivery?.confirmadoPor, null)
+                        // presentarActor(): sin nombre no inventa nada, dice
+                        // "Usuario interno" y deja el UID como referencia
+                        // técnica secundaria. El nombre sale de usuarios/{uid}.
+                        const actor = presentarActor(solicitud.cobroDelivery?.confirmadoPor, nombreConfirmador)
                         if (!actor) return null
                         return <InfoRow label="Confirmado por" value={actor.nombre} />
                       })()}
@@ -1200,7 +1227,11 @@ export function SolicitudDrawer({
                               )
                             }
                             const ident = identidadDeposito(dep)
-                            const f = fechasDeposito(dep)
+                            // PAGO-TRANSFERENCIA-UX-1 — por tipo: en el C, "Pago de esta
+                            // orden" y "Comprobante enviado", no "aporta C$0" ni
+                            // "Enviado" a la hora de la confirmación.
+                            const aporte = montoAsociadoDeposito(dep, solicitud as never, l.obligacion)
+                            const momentos = momentosDeposito(dep, solicitud as never)
                             const comprobante = comprobanteDeposito(dep)
                             return (
                               <div key={l.destino} className="rounded-lg border border-gray-200 bg-white px-3 py-2">
@@ -1210,8 +1241,10 @@ export function SolicitudDrawer({
                                   {' · '}{origenDestinoDeposito(dep).texto}{' · '}{estadoDeposito(dep)}
                                 </p>
                                 <p className="text-xs text-gray-500">
-                                  Esta orden aporta {money(l.obligacion)} · Enviado {fechaHoraOperativa(f.enviado)}
-                                  {f.confirmado != null && <> · Confirmado {fechaHoraOperativa(f.confirmado)}</>}
+                                  {[
+                                    aporte.monto !== null ? `${aporte.etiqueta}: ${money(aporte.monto)}` : null,
+                                    ...momentos.map((m) => `${m.etiqueta} ${fechaHoraOperativa(m.valor)}`),
+                                  ].filter(Boolean).join(' · ')}
                                 </p>
                                 {comprobante && (
                                   <button

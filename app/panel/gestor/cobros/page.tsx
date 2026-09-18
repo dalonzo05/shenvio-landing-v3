@@ -55,6 +55,9 @@ import {
   MOTIVO_ANULACION_REVERSION,
 } from '@/lib/cobro-integridad'
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
+import { momentoCobro, resumenAtencionCobros } from '@/lib/pago-transferencia'
+import { normalizarFecha } from '@/lib/timeline-orden'
+import { ImageLightbox } from '../../_components/ImageLightbox'
 import {
   depositoVisible,
   depositosDesdeCache,
@@ -205,6 +208,16 @@ function fmtFecha(ts?: { toDate?: () => Date }) {
 function fmt(n?: number) {
   if (typeof n !== 'number') return '—'
   return `C$ ${n.toLocaleString('es-NI')}`
+}
+
+/**
+ * PAGO-TRANSFERENCIA-UX-1 — instante del cobro para ordenar el Historial:
+ * pagadoAt si lo confirmó un gestor, registradoAt si fue efectivo del
+ * motorizado (que no escribe pagadoAt). Antes se ordenaba solo por pagadoAt
+ * y el efectivo quedaba al fondo, sin fecha.
+ */
+function msCobro(s: Solicitud): number {
+  return normalizarFecha(momentoCobro(s as never))?.getTime() ?? 0
 }
 
 function fmtDate(v: any) {
@@ -816,6 +829,8 @@ function BoucherModal({
   // pago cerrado sin anular nada. Cada handler vuelve a comprobarlo contra el
   // documento actual: la pantalla puede estar desactualizada.
   const pagado = !puedeMutarBoucherCobro(orden.cobroDelivery)
+  // PAGO-TRANSFERENCIA-UX-1 — el comprobante se amplía acá, sin otra pestaña.
+  const [imagenAmpliada, setImagenAmpliada] = useState(false)
 
   // P1-S2B: "Quitar" NO borra evidencia. Ningún archivo se elimina de Storage
   // y ninguna referencia histórica se destruye: lo único que se mueve es el
@@ -966,12 +981,12 @@ function BoucherModal({
           </button>
         </div>
         <p className="text-xs text-gray-500 mb-3">
-          Orden <span className="font-mono">{orden.id.slice(0, 8)}</span> · {nombre} · <span className="font-semibold text-gray-700">{fmt(monto)}</span>
+          Orden <span className="font-mono" title={orden.id}>{mostrarCodigo(orden.codigo, orden.id)}</span> · {nombre} · <span className="font-semibold text-gray-700">{fmt(monto)}</span>
         </p>
 
         {localBoucherUrl ? (
           <>
-            <a href={localBoucherUrl} target="_blank" rel="noreferrer" className="block mb-2">
+            <button type="button" onClick={() => setImagenAmpliada(true)} className="block w-full mb-2 cursor-zoom-in" title="Ampliar comprobante">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={localBoucherUrl}
@@ -979,7 +994,10 @@ function BoucherModal({
                 className="w-full rounded-xl border border-gray-200 object-contain max-h-64"
               />
               <p className="text-xs text-center text-blue-600 mt-1 hover:underline">Ver imagen completa →</p>
-            </a>
+            </button>
+            {imagenAmpliada && (
+              <ImageLightbox url={localBoucherUrl} label="Boucher de transferencia" onClose={() => setImagenAmpliada(false)} />
+            )}
             {!pagado && (
             <div className="flex gap-2 mb-3">
               <button
@@ -1163,7 +1181,7 @@ function PagoContadoModal({
           </button>
         </div>
         <p className="text-xs text-gray-500 mb-4">
-          Orden <span className="font-mono">{orden.id.slice(0, 8)}</span> · {nombre} · <span className="font-semibold text-gray-700">{fmt(monto)}</span>
+          Orden <span className="font-mono" title={orden.id}>{mostrarCodigo(orden.codigo, orden.id)}</span> · {nombre} · <span className="font-semibold text-gray-700">{fmt(monto)}</span>
         </p>
 
         <p className="text-xs font-semibold text-gray-600 mb-2">Forma de cobro</p>
@@ -1552,7 +1570,7 @@ function CobrosPageContent() {
         if (s.tipoCliente === 'credito' || s.pagoDelivery?.quienPaga === 'credito_semanal') return false
         return s.cobroDelivery?.estado === 'pagado'
       })
-      .sort((a, b) => (b.cobroDelivery?.pagadoAt?.toMillis?.() || 0) - (a.cobroDelivery?.pagadoAt?.toMillis?.() || 0)),
+      .sort((a, b) => msCobro(b) - msCobro(a)),
     [contadoRaw]
   )
 
@@ -1873,6 +1891,30 @@ function CobrosPageContent() {
       {/* ── TAB: CONTADO ─────────────────────────────────────────────────── */}
       {mainTab === 'contado' && (
         <div className="flex flex-col gap-3">
+          {/* PAGO-TRANSFERENCIA-UX-1 — qué requiere acción, sobre la lista ya
+              cargada: comprobantes por revisar y transferencias sin comprobante. */}
+          {(() => {
+            const at = resumenAtencionCobros(contadoOrdenes as never)
+            if (at.total === 0) return null
+            return (
+              <button
+                type="button"
+                onClick={() => setContadoSub('por_orden')}
+                className="flex w-full flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left hover:bg-amber-100 transition"
+              >
+                <span className="text-sm font-semibold text-amber-800">
+                  {at.total} cobro{at.total !== 1 ? 's' : ''} requiere{at.total !== 1 ? 'n' : ''} atención · {fmt(at.monto)}
+                </span>
+                <span className="text-xs text-amber-700">
+                  {[
+                    at.enRevision ? `${at.enRevision} con comprobante por revisar` : null,
+                    at.esperandoComprobante ? `${at.esperandoComprobante} esperando comprobante` : null,
+                  ].filter(Boolean).join(' · ')}
+                </span>
+              </button>
+            )
+          })()}
+
           {/* Sub-toggle */}
           <div className="flex gap-2 flex-wrap">
             <button
@@ -2130,7 +2172,8 @@ function CobrosPageContent() {
                       const esTrans = fp === 'transferencia' || s.pagoDelivery?.quienPaga === 'transferencia'
                       return (
                         <tr key={s.id} className="hover:bg-gray-50 transition-colors">
-                          <td className={tdCls}>{fmtDate(s.cobroDelivery?.pagadoAt)}</td>
+                          {/* Fecha y hora en Managua; el efectivo del motorizado ya no queda en "—". */}
+                          <td className={`${tdCls} whitespace-nowrap`}>{fechaHoraOperativa(momentoCobro(s as never))}</td>
                           <td className={tdCls}><LinkOrden id={s.id} ancla="cobros" codigo={s.codigo} /></td>
                           <td className={`${tdCls} font-semibold text-gray-900`}>{getClienteNombre(s, comercioNames)}</td>
                           <td className={tdCls}>

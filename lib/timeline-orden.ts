@@ -18,6 +18,7 @@
 import { detalleIncidencia, etiquetaResolucion, resolucionPrincipal, type ResolucionIncidencia } from './incidencia-cobro'
 import { lineasDeposito, type EntradaDepositoOrden, type DepositoRegistrado, type DestinoDeposito } from './deposito-orden'
 import { nombreDeposito, origenDestinoDeposito, esDepositoDelMotorizado } from './presentacion-deposito'
+import { montoAsociadoDeposito } from './pago-transferencia'
 
 export type TipoEvento = 'operativo' | 'cobro' | 'deposito' | 'administrativo'
 
@@ -141,6 +142,17 @@ export function normalizarFecha(v: unknown): Date | null {
 }
 
 const money = (n: number) => `C$ ${n.toLocaleString('es-NI')}`
+
+/**
+ * PAGO-TRANSFERENCIA-UX-1 — "Esta orden aporta C$110" en A/B; en el tipo C
+ * "Pago de esta orden: C$80". Ahí la obligación de efectivo es 0 y decía
+ * "aporta C$0", que no es lo que pasó.
+ */
+function detalleAporte(dep: DepositoRegistrado, orden: EntradaTimeline, obligacion: number): string | null {
+  const m = montoAsociadoDeposito(dep, orden, obligacion)
+  if (m.monto === null) return null
+  return m.etiqueta === 'Pago de esta orden' ? `Pago de esta orden: ${money(m.monto)}` : `Esta orden aporta ${money(m.monto)}`
+}
 
 /**
  * Rango lógico para desempatar eventos con el MISMO timestamp.
@@ -336,7 +348,7 @@ export function construirTimeline(
       // habla solo del aporte de ESTA orden.
       push(`deposito_registrado:${l.destino}`, 'deposito', titulo, dep.creadoAt, {
         actorUid: delMotorizado ? dep.motorizadoUid : null,
-        detalle: `Esta orden aporta ${money(l.obligacion)}`,
+        detalle: detalleAporte(dep, orden, l.obligacion),
       })
     }
     const confirmadoAt = l.destino === 'storkhub' ? reg?.confirmadoStorkhubAt : reg?.confirmadoComercioAt
@@ -357,7 +369,7 @@ export function construirTimeline(
       {
         // La conversión en deuda no persiste actor. → B2-TIMELINE-DEPOSITO-ACTOR.
         actorUid: convertido ? null : dep?.confirmadoPorUid,
-        detalle: convertido ? dep?.notaConversion || null : `Esta orden aporta ${money(l.obligacion)}`,
+        detalle: convertido ? dep?.notaConversion || null : dep ? detalleAporte(dep, orden, l.obligacion) : `Esta orden aporta ${money(l.obligacion)}`,
       },
     )
   }

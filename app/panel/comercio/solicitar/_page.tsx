@@ -25,6 +25,7 @@ import { obtenerDistanciaMetros } from '@/lib/distancia'
 import { calcularRecargoZona, RECARGO_TERMINAL_BUS, type TipoServicio, type MetodoFueraManagua } from '@/lib/recargoZona'
 import { getPuntosActivos } from '@/fb/puntosLogisticos'
 import { type PuntoLogistico, sugerirPuntosParaDestino, encontrarCargotransMasCercano } from '@/lib/puntosLogisticos'
+import { OPCION_PLAN_TRANSFERENCIA } from '@/lib/pago-transferencia'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import StepIndicator from './_components/StepIndicator'
 import StickyOrderHeader from './_components/StickyOrderHeader'
@@ -2043,7 +2044,8 @@ export default function SolicitarEnvioPage() {
                   {[
                     { value: 'recoleccion', label: '🏁 Se paga en la recolección', desc: 'El motorizado cobra el delivery al retirar' },
                     ...(!esFueraManagua ? [{ value: 'entrega', label: '🏠 Lo paga el destinatario (entrega)', desc: 'El motorizado cobra el delivery al entregar' }] : []),
-                    { value: 'transferencia', label: '🏦 Ya se pagó por transferencia', desc: 'El delivery fue pagado previamente' },
+                    // PAGO-TRANSFERENCIA-UX-1 — plan, no pago: se paga después y se sube el comprobante.
+                    { value: 'transferencia', label: OPCION_PLAN_TRANSFERENCIA.comercio.label, desc: OPCION_PLAN_TRANSFERENCIA.comercio.desc },
                   ].map(opt => (
                     <button key={opt.value} type="button" onClick={() => setQuienPagaDelivery(opt.value as QuienPagaDelivery)} style={{ textAlign: 'left' as const, padding: '12px 14px', borderRadius: 10, cursor: 'pointer', border: `1px solid ${quienPagaDelivery === opt.value ? '#004aad' : '#e5e7eb'}`, background: quienPagaDelivery === opt.value ? '#eff6ff' : '#fff' }}>
                       <p style={{ fontSize: 13, fontWeight: 700, color: quienPagaDelivery === opt.value ? '#004aad' : '#111827', margin: '0 0 2px' }}>{opt.label}</p>

@@ -35,10 +35,10 @@ import {
   identidadDeposito,
   origenDestinoDeposito,
   estadoDeposito,
-  fechasDeposito,
   comprobanteDeposito,
 } from '@/lib/presentacion-deposito'
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
+import { momentosDeposito } from '@/lib/pago-transferencia'
 
 /** Etiqueta sin emoji para el visor ampliado y los textos accesibles. */
 const LABEL_LIMPIO: Record<'retiro' | 'entrega' | 'deposito', string> = {
@@ -1839,7 +1839,7 @@ function GestorSolicitudDetallePageContent() {
                   {items.map(({ destino, dep }) => {
                     const url = comprobanteDeposito(dep)!
                     const ident = identidadDeposito(dep)
-                    const f = fechasDeposito(dep)
+                    const momentos = momentosDeposito(dep, solicitud as never)
                     return (
                       <button
                         key={destino}
@@ -1854,8 +1854,7 @@ function GestorSolicitudDetallePageContent() {
                           <p className="text-gray-700">Comprobante de depósito · {origenDestinoDeposito(dep).texto}</p>
                           <p className="text-gray-700">Total {money(dep.montoTotal)} · {estadoDeposito(dep)}</p>
                           <p className="text-gray-500">
-                            Enviado {fechaHoraOperativa(f.enviado)}
-                            {f.confirmado != null ? ` · Confirmado ${fechaHoraOperativa(f.confirmado)}` : ''}
+                            {momentos.map((m) => `${m.etiqueta} ${fechaHoraOperativa(m.valor)}`).join(' · ')}
                           </p>
                         </div>
                       </button>

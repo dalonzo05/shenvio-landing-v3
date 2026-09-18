@@ -50,6 +50,7 @@ import {
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
 import { puedeMutarBoucherDeposito, asegurarBoucherDepositoMutable } from '@/lib/cobro-integridad'
+import { enviadoDeposito, accionesAdminDeposito } from '@/lib/pago-transferencia'
 import {
   camposEnlaceDigitacion,
   camposReaperturaRevision,
@@ -2212,7 +2213,9 @@ function DepositosPageContent() {
                             )
                           })()}
                         </td>
-                        <td className={`${tdCls} whitespace-nowrap`}>{fechaHoraOperativa(fechasDeposito(dep).enviado)}</td>
+                        {/* PAGO-TRANSFERENCIA-UX-1 — un DEP tipo C nace AL confirmar: su
+                            creadoAt no es un envío. Sin la orden no hay envío que mostrar. */}
+                        <td className={`${tdCls} whitespace-nowrap`}>{fechaHoraOperativa(enviadoDeposito(dep))}</td>
                         <td className={`${tdCls} whitespace-nowrap`}>{fechaHoraOperativa(fechasDeposito(dep).confirmado)}</td>
                         <td className={tdCls}>
                           {/* Decide `tipo`: el pago del delivery por transferencia
@@ -2278,7 +2281,9 @@ function DepositosPageContent() {
                                 Saldo {dep.saldoId.slice(0, 6)}…
                               </span>
                             )}
-                            {userRol === 'admin' && dep.estado !== 'convertido_en_deuda' && (
+                            {/* DEP-ACCIONES-ADMIN-ONLY — solo admin, y nunca sobre un
+                                tipo C (se corrige con Revertir en Cobros). Rules igual. */}
+                            {accionesAdminDeposito(dep, userRol).rehacer && (
                               <button
                                 onClick={() => rehacerDeposito(dep)}
                                 title="Rehacer depósito — vuelve a Por revisar"
@@ -2287,7 +2292,7 @@ function DepositosPageContent() {
                                 Rehacer
                               </button>
                             )}
-                            {userRol === 'admin' && (
+                            {accionesAdminDeposito(dep, userRol).eliminar && (
                               <button
                                 onClick={() => eliminarDeposito(dep)}
                                 title="Eliminar depósito (solo admin)"

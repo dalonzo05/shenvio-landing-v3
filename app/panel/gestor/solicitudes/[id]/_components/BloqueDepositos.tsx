@@ -23,11 +23,17 @@ import { presentarActor } from '@/lib/actor-resolucion'
 import {
   identidadDeposito,
   origenDestinoDeposito,
-  fechasDeposito,
   nombreMotorizadoDeposito,
   comprobanteDeposito,
 } from '@/lib/presentacion-deposito'
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
+import {
+  esPlanTransferencia,
+  estadoPagoTransferencia,
+  montoAsociadoDeposito,
+  momentosDeposito,
+} from '@/lib/pago-transferencia'
+import { estadoDeliveryComercio } from '@/lib/estado-cobro-comercio'
 
 function money(n: number | null | undefined) {
   if (typeof n !== 'number' || !Number.isFinite(n)) return '—'
@@ -67,6 +73,12 @@ export function BloqueDepositos({
   const hayObligacion = tieneObligacionDeposito(orden)
   const registrados = lineas.filter((l) => l.deposito)
   const hayRegistro = registrados.length > 0
+  // PAGO-TRANSFERENCIA-UX-1 — la misma orden, vista por su cobro.
+  const ordenCobro = orden as unknown as {
+    pagoDelivery?: { quienPaga?: string | null } | null
+    cobroDelivery?: { estado?: string | null; monto?: number | null; boucherVigente?: string | null; boucherComercio?: { at?: unknown } | null; boucherGestor?: { at?: unknown } | null; boucherAt?: unknown } | null
+    confirmacion?: { precioFinalCordobas?: number | null } | null
+  }
 
   return (
     <div id="depositos" className="scroll-mt-24 rounded-2xl border border-teal-200 bg-white p-5 shadow-sm">
@@ -74,7 +86,7 @@ export function BloqueDepositos({
 
       {/* ── Obligación derivada de esta orden ── */}
       <p className="text-xs font-bold uppercase tracking-wide text-gray-400 mb-2">
-        Obligación de esta orden
+        Obligación del motorizado
       </p>
 
       {!hayObligacion ? (
@@ -100,6 +112,32 @@ export function BloqueDepositos({
           ))}
         </div>
       )}
+
+      {/* ── Obligación del comercio ── PAGO-TRANSFERENCIA-UX-1
+          "No corresponde depósito del motorizado" es cierto pero incompleto:
+          en una orden con plan de transferencia, quien debe el delivery es el
+          comercio. Se muestra aparte, sin mezclarlo con el efectivo del
+          motorizado. Sale de la propia orden: ninguna lectura. */}
+      {esPlanTransferencia(ordenCobro) && (() => {
+        const ep = estadoPagoTransferencia(ordenCobro.cobroDelivery)
+        const monto = ordenCobro.cobroDelivery?.monto
+          ?? ordenCobro.confirmacion?.precioFinalCordobas
+          ?? estadoDeliveryComercio(orden as never).montoDelivery
+        return (
+          <div className="mb-4">
+            <p className="text-xs font-bold uppercase tracking-wide text-gray-400 mb-2">Obligación del comercio</p>
+            <div className="rounded-xl border border-gray-200 p-3 text-sm">
+              <div className="text-gray-500">Pago del delivery por transferencia</div>
+              <div className="text-base font-black text-gray-900">{money(monto)}</div>
+              <div className={`text-xs mt-0.5 ${
+                ep.clave === 'pagado' ? 'text-green-700' : ep.clave === 'en_revision' ? 'text-blue-700' : 'text-amber-600'
+              }`}>
+                {ep.titulo}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* ── Depósitos reales registrados ──
           B2.6: colapsados por defecto. La obligación de arriba es lo
@@ -140,7 +178,8 @@ export function BloqueDepositos({
               // en el title; el origen lo decide `tipo`, y las fechas van en
               // hora de Managua, no del navegador.
               const ident = identidadDeposito(d)
-              const f = fechasDeposito(d)
+              const momentos = momentosDeposito(d, ordenCobro)
+              const aporte = montoAsociadoDeposito(d, ordenCobro, l.obligacion)
               const motorizado = nombreMotorizadoDeposito(d, nombresActores)
               const comprobante = comprobanteDeposito(d)
               return (
@@ -163,7 +202,7 @@ export function BloqueDepositos({
                   </div>
 
                   <div className="grid grid-cols-2 gap-2.5 text-sm">
-                    <Dato label="Esta orden aporta">{money(l.obligacion)}</Dato>
+                    <Dato label={aporte.etiqueta}>{money(aporte.monto)}</Dato>
                     {/* Con un depósito agrupado, el total incluye órdenes
                         ajenas: mostrarlo como si fuera de esta orden sería
                         atribuirle al motorizado un monto que no le toca. */}
@@ -183,8 +222,8 @@ export function BloqueDepositos({
                         a guardar como motorizadoNombre. */}
                     {motorizado && <Dato label="Enviado por">{motorizado}</Dato>}
                     {/* Solo timestamps que el documento realmente tiene. */}
-                    {f.enviado != null && <Dato label="Enviado">{fechaHoraOperativa(f.enviado)}</Dato>}
-                    {f.confirmado != null && <Dato label="Confirmado">{fechaHoraOperativa(f.confirmado)}</Dato>}
+                    {/* Por tipo: A/B "Enviado"/"Confirmado"; C "Comprobante enviado"/"Pago confirmado". */}
+                    {momentos.map((m) => <Dato key={m.etiqueta} label={m.etiqueta}>{fechaHoraOperativa(m.valor)}</Dato>)}
                     {d.rechazadoAt != null && <Dato label="Rechazado">{fechaHoraOperativa(d.rechazadoAt)}</Dato>}
                     {actor && (
                       <div>

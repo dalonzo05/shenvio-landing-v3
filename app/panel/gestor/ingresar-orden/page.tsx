@@ -23,6 +23,7 @@ import { obtenerDistanciaMetros } from '@/lib/distancia'
 import { calcularRecargoZona, RECARGO_TERMINAL_BUS, type TipoServicio, type MetodoFueraManagua } from '@/lib/recargoZona'
 import { getPuntosActivos } from '@/fb/puntosLogisticos'
 import { type PuntoLogistico, sugerirPuntosParaDestino, encontrarCargotransMasCercano } from '@/lib/puntosLogisticos'
+import { OPCION_PLAN_TRANSFERENCIA } from '@/lib/pago-transferencia'
 import { useSearchParams } from 'next/navigation'
 import ClienteSearchModal, { ClienteModalItem } from '@/app/Components/ClienteSearchModal'
 import ComercioSearchModal, { ComercioModalItem } from '@/app/Components/ComercioSearchModal'
@@ -3106,7 +3107,9 @@ function GestorIngresarOrdenPageContent() {
               {[
                 { value: 'recoleccion', label: '🏁 Se paga en la recolección', desc: 'El motorizado cobra el delivery al retirar' },
                 ...(!esFueraManagua ? [{ value: 'entrega', label: '🏠 Lo paga el destinatario (entrega)', desc: 'El motorizado cobra el delivery al entregar' }] : []),
-                { value: 'transferencia', label: '🏦 Ya se pagó por transferencia', desc: 'El delivery fue pagado previamente' },
+                // PAGO-TRANSFERENCIA-UX-1 — es un PLAN, no un pago hecho: el
+                // cobro sigue pendiente hasta que StorkHub confirme el comprobante.
+                { value: 'transferencia', label: OPCION_PLAN_TRANSFERENCIA.gestor.label, desc: OPCION_PLAN_TRANSFERENCIA.gestor.desc },
               ].map((opt) => (
                 <button
                   key={opt.value}

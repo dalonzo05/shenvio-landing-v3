@@ -1381,7 +1381,21 @@ service cloud.firestore {
           || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['boucher', 'boucherUrl']);
       }
 
-      allow update: if isAdminOrGestor() && noTocaCodigo() && boucherDeConfirmadoIntacto();
+      // PAGO-TRANSFERENCIA-UX-1 · DEP-ACCIONES-ADMIN-ONLY — sacar un depósito
+      // de 'confirmado' (Rehacer lo devuelve a revisión) es solo del admin.
+      // Única excepción del gestor: anular un DEP tipo C al revertir su cobro
+      // (revertirPagada), que cobroPagadoIntegro() valida del lado de la orden.
+      // Confirmar desde un estado abierto no cambia: el estado previo no es
+      // 'confirmado'.
+      function salidaDeConfirmadoAutorizada() {
+        return resource.data.get('estado', '') != 'confirmado'
+          || request.resource.data.get('estado', '') == 'confirmado'
+          || isAdmin()
+          || (resource.data.get('tipo', '') == 'pago_delivery_deposito'
+              && request.resource.data.get('estado', '') == 'anulado');
+      }
+
+      allow update: if isAdminOrGestor() && noTocaCodigo() && boucherDeConfirmadoIntacto() && salidaDeConfirmadoAutorizada();
 
       // Motorizado: solo puede subir boucher y pasar a en_revision.
       // Mismo cambio que create/read — se exige rol motorizado activo. Los
@@ -1417,7 +1431,11 @@ service cloud.firestore {
         && request.resource.data.estado == 'en_revision'
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['boucher', 'updatedAt']);
 
-      allow delete: if isAdminOrGestor();
+      // DEP-ACCIONES-ADMIN-ONLY — Eliminar un depósito cerrado es solo del
+      // admin. El gestor conserva "Devolver al motorizado", que borra un
+      // depósito todavía abierto para que el motorizado lo rehaga.
+      allow delete: if isAdmin()
+        || (isAdminOrGestor() && resource.data.get('estado', '') in ['pendiente_boucher', 'en_revision']);
     }
 
     // Ledger financiero — solo gestor/admin puede leer o escribir.

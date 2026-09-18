@@ -17,6 +17,7 @@ import {
   type EntradaEstadoComercio,
 } from '@/lib/estado-cobro-comercio'
 import { etiquetaResolucion, type ResolucionIncidencia } from '@/lib/incidencia-cobro'
+import { estadoPagoTransferencia } from '@/lib/pago-transferencia'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -177,7 +178,9 @@ function debeDelivery(s: Solicitud): { debe: boolean | null; label: string; esta
   if (s.tipoCliente === 'credito' || qp === 'credito_semanal')
     return { debe: true, label: 'Crédito semanal — pendiente de cobro', estado }
   if (qp === 'transferencia')
-    return { debe: estado.clave !== 'pagado', label: estado.clave === 'pagado' ? 'Pagado por transferencia' : 'Pago por transferencia pendiente', estado }
+    // PAGO-TRANSFERENCIA-UX-1 — decía "pendiente" también con el comprobante
+    // ya en revisión. Un texto por estado real.
+    return { debe: estado.clave !== 'pagado', label: estado.clave === 'pagado' ? 'Pagado por transferencia' : estadoPagoTransferencia(s.cobroDelivery).titulo, estado }
 
   switch (estado.clave) {
     case 'pendiente':
@@ -634,9 +637,11 @@ export default function OrdenDetallePage() {
                     : orden.cobroDelivery?.estado === 'en_revision_deposito' ? 'text-blue-600'
                     : 'text-gray-400'
                   }`}>
-                    {orden.cobroDelivery?.estado === 'pagado' ? '✓ Pago confirmado'
-                    : orden.cobroDelivery?.estado === 'en_revision_deposito' ? 'En revisión por el gestor'
-                    : 'Pendiente — sube el boucher de tu transferencia'}
+                    {(() => {
+                      const ep = estadoPagoTransferencia(orden.cobroDelivery)
+                      if (ep.clave === 'pagado') return '✓ Pago confirmado'
+                      return ep.detalle ? `${ep.titulo} — ${ep.detalle}` : ep.titulo
+                    })()}
                   </p>
                 </div>
                 {urlBoucherVigente(orden.cobroDelivery) && (

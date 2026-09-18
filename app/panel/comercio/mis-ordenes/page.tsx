@@ -17,6 +17,7 @@ import { compressImage, uploadDeliveryBoucher } from '@/fb/storage'
 import { useUser } from '@/app/Components/UserProvider'
 import { Package, Upload, X } from 'lucide-react'
 import { ordinalesDeComercio, etiquetaOrdinal } from '@/lib/ordinal-comercio'
+import { ImageLightbox } from '../../_components/ImageLightbox'
 import {
   estadoDeliveryComercio,
   estadoDepositoProductoComercio,
@@ -156,6 +157,8 @@ export default function MisOrdenesPage() {
 
   // Boucher viewer modal
   const [viendoBoucherUrl, setViendoBoucherUrl] = useState<string | null>(null)
+  // PAGO-TRANSFERENCIA-UX-1 — la imagen se amplía acá, sin abrir otra pestaña.
+  const [boucherAmpliado, setBoucherAmpliado] = useState(false)
 
   useEffect(() => {
     // Identidad estable (Bloque A): comercioId, no auth.uid.
@@ -276,7 +279,7 @@ export default function MisOrdenesPage() {
                 <X className="h-4 w-4 text-gray-500" />
               </button>
             </div>
-            <a href={viendoBoucherUrl} target="_blank" rel="noreferrer" className="block mb-3">
+            <button type="button" onClick={() => setBoucherAmpliado(true)} className="block w-full mb-3 cursor-zoom-in" title="Ampliar comprobante">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={viendoBoucherUrl}
@@ -284,7 +287,10 @@ export default function MisOrdenesPage() {
                 className="w-full rounded-xl border border-gray-200 object-contain max-h-64"
               />
               <p className="text-xs text-center text-blue-600 mt-1 hover:underline">Ver imagen completa →</p>
-            </a>
+            </button>
+            {boucherAmpliado && (
+              <ImageLightbox url={viendoBoucherUrl} label="Boucher de transferencia" onClose={() => setBoucherAmpliado(false)} />
+            )}
             <button
               onClick={() => setViendoBoucherUrl(null)}
               className="w-full border border-gray-200 text-gray-600 text-sm font-semibold py-2.5 rounded-xl hover:bg-gray-50 transition"

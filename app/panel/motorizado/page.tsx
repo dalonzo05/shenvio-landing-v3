@@ -20,6 +20,7 @@ import {
   TOPE_QUERY_HISTORIAL_MOTORIZADO,
 } from '@/lib/depositos-motorizado';
 import { fechaHoraOperativa } from '@/lib/fecha-operativa';
+import { avisoNoCobrarMotorizado, descripcionCobroMotorizado } from '@/lib/pago-transferencia';
 import type { DepositoRegistrado } from '@/lib/deposito-orden';
 import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
 
@@ -1521,9 +1522,14 @@ export default function PanelMotorizadoPage() {
                               {dep.tieneProducto && <p style={{ fontSize: 12, color: '#7c3aed', margin: 0, fontWeight: 700 }}>+{fmt(dep.montoProducto)}</p>}
                             </div>
                           </div>
-                          {dep.descripcion && (
-                            <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0', padding: '6px 0 0', borderTop: '1px solid #f3f4f6' }}>{dep.descripcion}</p>
-                          )}
+                          {/* PAGO-TRANSFERENCIA-UX-1 — ya entregada: qué pasó, sin
+                              afirmar que el comercio ya pagó. */}
+                          {(() => {
+                            const desc = descripcionCobroMotorizado(dep.descripcion, dep.deliveryPorTransferencia, 'historial');
+                            return desc ? (
+                              <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0', padding: '6px 0 0', borderTop: '1px solid #f3f4f6' }}>{desc}</p>
+                            ) : null;
+                          })()}
                         </div>
                       </div>
                     );
@@ -2311,6 +2317,12 @@ function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
   const deliveryBase = o.precioDesglose?.deliveryBase ?? null;
   const ganancia = deliveryBase !== null ? deliveryBase * 0.8 : null;
   const deducir = !!o.pagoDelivery?.deducirDelCobroContraEntrega;
+  // PAGO-TRANSFERENCIA-UX-1 — el motorizado NO cobra un delivery que el
+  // comercio paga por transferencia. Antes era una línea gris en pasado
+  // ("Delivery ya pagado por transferencia") y en Nuevas/En curso eso ni
+  // siquiera era cierto todavía.
+  const aviso = avisoNoCobrarMotorizado(o);
+  const descripcion = descripcionCobroMotorizado(dep.descripcion, dep.deliveryPorTransferencia, 'operacion');
 
   // Con deducción: el cliente paga un solo monto (producto incluye delivery dentro)
   // Sin deducción: el cliente paga producto + delivery por separado
@@ -2320,6 +2332,12 @@ function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
 
   return (
     <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }}>
+      {aviso && (
+        <div style={{ background: '#fef2f2', border: '2px solid #dc2626', borderRadius: 10, padding: '10px 12px', marginBottom: 10 }}>
+          <p style={{ fontSize: 14, fontWeight: 900, color: '#b91c1c', margin: 0, letterSpacing: 0.3 }}>🚫 {aviso.titulo}</p>
+          <p style={{ fontSize: 12, fontWeight: 600, color: '#991b1b', margin: '3px 0 0' }}>{aviso.detalle}</p>
+        </div>
+      )}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Delivery</span>
         <span style={{ fontSize: 18, fontWeight: 900, color: '#111827' }}>{fmt(delivery)}</span>
@@ -2348,7 +2366,7 @@ function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
           <span style={{ fontSize: 22, fontWeight: 900, color: '#004aad' }}>{fmt(totalCliente)}</span>
         </div>
       )}
-      <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0' }}>{dep.descripcion}</p>
+      {descripcion && <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0' }}>{descripcion}</p>}
     </div>
   );
 }

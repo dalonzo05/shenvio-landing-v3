@@ -24,7 +24,7 @@ import {
 import assert from 'node:assert/strict'
 import {
   doc, setDoc, updateDoc, getDoc, deleteField, serverTimestamp,
-  collection, query, where, limit, getDocs, writeBatch,
+  collection, query, where, limit, getDocs, writeBatch, deleteDoc,
 } from 'firebase/firestore'
 
 // Identidades del arnés. El rol de comercio es 'Comercio' con mayúscula: así
@@ -477,12 +477,12 @@ test('Y8 · puntero al destino equivocado (comercio → depósito StorkHub) ⇒ 
 
 // ─── DEPOSITOS-UX-TRAZABILIDAD-1 (v2) · payloads del gestor ──────────────────
 
-test('Z1 · gestor rehace: depósito a en_revision y la orden pierde la confirmación ⇒ ALLOW', async () => {
+test('Z1 · admin rehace: depósito a en_revision y la orden pierde la confirmación ⇒ ALLOW', async () => {
   await sembrarDigitacion({
     depEstado: 'confirmado',
     registro: { deposito: { storkhubDepositoId: 'depD', confirmadoStorkhub: true, confirmadoStorkhubAt: new Date() } },
   })
-  const db = como(UID_GESTOR)
+  const db = como(UID_ADMIN)
   const b = writeBatch(db)
   b.set(doc(db, 'ordenes_deposito', 'depD'), { estado: 'en_revision' }, { merge: true })
   b.update(doc(db, 'solicitudes_envio', ORDEN_D), {
@@ -493,12 +493,12 @@ test('Z1 · gestor rehace: depósito a en_revision y la orden pierde la confirma
   await assertSucceeds(b.commit())
 })
 
-test('Z2 · gestor elimina el depósito y libera la orden en el mismo batch ⇒ ALLOW', async () => {
+test('Z2 · admin elimina el depósito y libera la orden en el mismo batch ⇒ ALLOW', async () => {
   await sembrarDigitacion({
     depEstado: 'confirmado',
     registro: { deposito: { storkhubDepositoId: 'depD', confirmadoStorkhub: true, confirmadoStorkhubAt: new Date() } },
   })
-  const db = como(UID_GESTOR)
+  const db = como(UID_ADMIN)
   const b = writeBatch(db)
   b.delete(doc(db, 'ordenes_deposito', 'depD'))
   b.update(doc(db, 'solicitudes_envio', ORDEN_D), {
@@ -786,4 +786,53 @@ test('H12 · revertir un cobro en efectivo con depósito del motorizado: legíti
   await assertSucceeds(reversion(como(UID_GESTOR), { anularDep: false, liberarOrden: false }))
   await sembrar()
   await assertFails(reversion(como(UID_GESTOR), { anularDep: false, liberarOrden: true }))
+})
+
+// ─── PAGO-TRANSFERENCIA-UX-1 · DEP-ACCIONES-ADMIN-ONLY ───────────────────────
+//
+// Rehacer (sacar de 'confirmado') y Eliminar un depósito cerrado son solo del
+// admin. El gestor conserva confirmar, devolver un depósito abierto y anular
+// el DEP tipo C al revertir su cobro.
+
+test('AD1 · admin rehace un depósito confirmado ⇒ ALLOW', async () => {
+  await depositoEn('confirmado')
+  await assertSucceeds(setDoc(doc(como(UID_ADMIN), 'ordenes_deposito', 'depI'), { estado: 'en_revision' }, { merge: true }))
+})
+
+test('AD2 · gestor intenta rehacer un depósito confirmado ⇒ DENY', async () => {
+  await depositoEn('confirmado')
+  await assertFails(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { estado: 'en_revision' }, { merge: true }))
+  // Ni a ningún otro estado.
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { estado: 'rechazado' }))
+})
+
+test('AD3 · admin elimina un depósito confirmado ⇒ ALLOW', async () => {
+  await depositoEn('confirmado')
+  await assertSucceeds(deleteDoc(doc(como(UID_ADMIN), 'ordenes_deposito', 'depI')))
+})
+
+test('AD4 · gestor intenta eliminar un depósito confirmado ⇒ DENY', async () => {
+  await depositoEn('confirmado')
+  await assertFails(deleteDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI')))
+  await depositoEn('convertido_en_deuda')
+  await assertFails(deleteDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI')))
+})
+
+test('AD5 · gestor devuelve al motorizado un depósito en revisión (lo borra) ⇒ ALLOW', async () => {
+  await depositoEn('en_revision')
+  await assertSucceeds(deleteDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI')))
+})
+
+test('AD6 · gestor confirma un depósito en revisión ⇒ ALLOW (sin regresión)', async () => {
+  await depositoEn('en_revision')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), {
+    estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
+  }))
+})
+
+test('AD7 · gestor sigue anulando un DEP tipo C confirmado (Revertir), pero no un tipo A ⇒ ALLOW / DENY', async () => {
+  await depositoEn('confirmado', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { estado: 'anulado', anuladoAt: serverTimestamp() }))
+  await depositoEn('confirmado')
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { estado: 'anulado', anuladoAt: serverTimestamp() }))
 })
