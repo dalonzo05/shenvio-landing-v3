@@ -350,22 +350,20 @@ test('W1 · gestor confirma un depósito registrado en nombre del motorizado, co
   }))
 })
 
-test('W2 · gestor registra el pago del delivery por transferencia, nacido confirmado con quién y cuándo ⇒ ALLOW', async () => {
-  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depW2'), {
-    creadoAt: serverTimestamp(),
-    tipo: 'pago_delivery_deposito',
-    estado: 'confirmado',
-    destinatario: 'storkhub',
-    destinatarioId: 'storkhub',
-    destinatarioNombre: 'Storkhub',
-    cuentasDestino: [],
-    motorizadoUid: 'motDoc1',
-    motorizadoNombre: 'John Pork',
-    solicitudIds: ['ord1'],
-    montoTotal: 110,
-    confirmadoPorUid: UID_GESTOR,
-    confirmadoAt: serverTimestamp(),
-  }))
+test('W2 · gestor registra el pago del delivery por transferencia junto con la confirmación del cobro ⇒ ALLOW', async () => {
+  // COBROS-PAGO-INTEGRIDAD-1: un DEP tipo C ya no nace suelto. Es la forma
+  // real de BoucherModal/PagoContadoModal: DEP + orden pagada, en una escritura.
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ord1'), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0001', secuencia: 1,
+      cobroDelivery: { estado: 'en_revision_deposito', monto: 110 },
+    })
+  })
+  const db = como(UID_GESTOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', 'depW2'), depositoTipoC({ solicitudIds: ['ord1'], montoTotal: 110 }))
+  b.update(doc(db, 'solicitudes_envio', 'ord1'), confirmacionTipoC('depW2'))
+  await assertSucceeds(b.commit())
 })
 
 test('W3 · el motorizado lista SUS depósitos con where(motorizadoUid == uid) ⇒ ALLOW', async () => {
@@ -581,4 +579,211 @@ test('BI8 · motorizado: reenvía desde rechazado ⇒ ALLOW; sobre confirmado �
   await assertSucceeds(updateDoc(doc(db, 'ordenes_deposito', 'depI'), { ...NUEVO_BOUCHER, estado: 'en_revision', updatedAt: serverTimestamp() }))
   await depositoEn('confirmado')
   await assertFails(updateDoc(doc(db, 'ordenes_deposito', 'depI'), { ...NUEVO_BOUCHER, estado: 'en_revision', updatedAt: serverTimestamp() }))
+})
+
+// ─── COBROS-PAGO-INTEGRIDAD-1 (hardening) · cobro pagado sellado en Rules ────
+//
+// Modela un cliente de gestor MODIFICADO que se salta los guards de Cobros.
+// Fixture: SH-0003 pagada por transferencia con su DEP-0002 tipo C, y su
+// movimiento pago_recibido activo.
+
+function depositoTipoC(extra: Record<string, unknown> = {}) {
+  return {
+    creadoAt: serverTimestamp(),
+    tipo: 'pago_delivery_deposito',
+    estado: 'confirmado',
+    destinatario: 'storkhub',
+    destinatarioId: 'storkhub',
+    destinatarioNombre: 'Storkhub',
+    cuentasDestino: [],
+    motorizadoUid: 'motDoc1',
+    motorizadoNombre: 'John Pork',
+    solicitudIds: ['ordP'],
+    montoTotal: 80,
+    confirmadoPorUid: UID_GESTOR,
+    confirmadoAt: serverTimestamp(),
+    ...extra,
+  }
+}
+
+function confirmacionTipoC(depId: string) {
+  return {
+    'cobroDelivery.estado': 'pagado',
+    'cobroDelivery.pagadoAt': serverTimestamp(),
+    'cobroDelivery.formaPago': 'transferencia',
+    'cobroDelivery.confirmadoPor': UID_GESTOR,
+    'cobroDelivery.confirmadoAt': serverTimestamp(),
+    'registro.deposito.confirmadoStorkhub': true,
+    'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
+    'registro.deposito.storkhubDepositoId': depId,
+  }
+}
+
+/** SH-0003 real: pagada por transferencia, DEP-C confirmado, movimiento activo. */
+async function sembrarPagadaTipoC() {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    await setDoc(doc(db, 'solicitudes_envio', 'ordP'), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0003', secuencia: 3,
+      cobroDelivery: {
+        estado: 'pagado', monto: 80, formaPago: 'transferencia', quienPaga: 'transferencia',
+        pagadoAt: new Date(), confirmadoAt: new Date(), confirmadoPor: UID_GESTOR,
+        boucherComercio: { url: 'https://example.test/c.jpg', path: 'p', at: new Date() }, boucherVigente: 'comercio',
+      },
+      registro: { deposito: { storkhubDepositoId: 'depC', confirmadoStorkhub: true, confirmadoStorkhubAt: new Date() } },
+    })
+    await setDoc(doc(db, 'ordenes_deposito', 'depC'), { ...depositoTipoC({ confirmadoAt: new Date(), creadoAt: new Date() }), codigo: 'DEP-0002', secuencia: 2 })
+    await setDoc(doc(db, 'ordenes_deposito', 'depOtro'), { ...depositoTipoC({ confirmadoAt: new Date(), creadoAt: new Date(), solicitudIds: ['otra'] }), codigo: 'DEP-0009', secuencia: 9 })
+    await setDoc(doc(db, 'movimientos_financieros', 'movP'), { tipo: 'pago_recibido', estado: 'activo', solicitudId: 'ordP', monto: 80, depositoId: 'depC' })
+  })
+}
+
+/** La reversión exacta de revertirPagada, con piezas que se pueden omitir. */
+function reversion(db: ReturnType<typeof como>, opts: { anularMov?: boolean; anularDep?: boolean; liberarOrden?: boolean } = {}) {
+  const { anularMov = true, anularDep = true, liberarOrden = true } = opts
+  const b = writeBatch(db)
+  b.update(doc(db, 'solicitudes_envio', 'ordP'), {
+    'cobroDelivery.estado': 'pendiente',
+    'cobroDelivery.pagadoAt': deleteField(),
+    'cobroDelivery.formaPago': deleteField(),
+    'cobroDelivery.notaPago': deleteField(),
+    'cobroDelivery.movimientoPagoId': 'movP',
+    ...(liberarOrden ? {
+      'registro.deposito.storkhubDepositoId': null,
+      'registro.deposito.confirmadoStorkhub': false,
+      'registro.deposito.confirmadoStorkhubAt': null,
+    } : {}),
+  })
+  if (anularMov) b.update(doc(db, 'movimientos_financieros', 'movP'), { estado: 'anulado', anuladoAt: serverTimestamp(), anuladoPorUid: UID_GESTOR, motivoAnulacion: 'x' })
+  if (anularDep) b.update(doc(db, 'ordenes_deposito', 'depC'), { estado: 'anulado', anuladoAt: serverTimestamp(), anuladoPorUid: UID_GESTOR, motivoAnulacion: 'x' })
+  return b.commit()
+}
+
+test('H1 · confirmación inicial legítima (DEP-C + orden pagada en un batch) ⇒ ALLOW', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordP'), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0003', secuencia: 3,
+      cobroDelivery: { estado: 'en_revision_deposito', monto: 80 },
+    })
+  })
+  const db = como(UID_GESTOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', 'depNuevo'), depositoTipoC())
+  b.update(doc(db, 'solicitudes_envio', 'ordP'), confirmacionTipoC('depNuevo'))
+  await assertSucceeds(b.commit())
+})
+
+test('H1b · también sobre una orden sin cobroDelivery previo (PagoContadoModal) ⇒ ALLOW', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordP'), { ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0003', secuencia: 3 })
+  })
+  const db = como(UID_GESTOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', 'depNuevo'), depositoTipoC())
+  b.update(doc(db, 'solicitudes_envio', 'ordP'), { ...confirmacionTipoC('depNuevo'), 'cobroDelivery.monto': 80 })
+  await assertSucceeds(b.commit())
+})
+
+test('H2 · ataque: reconfirmar una orden ya pagada con un segundo DEP-C ⇒ DENY', async () => {
+  await sembrarPagadaTipoC()
+  const db = como(UID_GESTOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', 'depDuplicado'), depositoTipoC())
+  b.update(doc(db, 'solicitudes_envio', 'ordP'), confirmacionTipoC('depDuplicado'))
+  await assertFails(b.commit())
+})
+
+test('H3 · ataque: DEP-C suelto, sin tocar la orden ⇒ DENY', async () => {
+  await sembrarPagadaTipoC()
+  await assertFails(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depSuelto'), depositoTipoC()))
+  // Ni sobre una orden no pagada, si no se confirma en la misma escritura.
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordQ'), { ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0004', secuencia: 4 })
+  })
+  await assertFails(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depSuelto2'), depositoTipoC({ solicitudIds: ['ordQ'] })))
+})
+
+test('H4 · ataque: reescribir la confirmación de un cobro pagado ⇒ DENY', async () => {
+  await sembrarPagadaTipoC()
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', 'ordP'), {
+    'cobroDelivery.pagadoAt': serverTimestamp(),
+    'cobroDelivery.confirmadoAt': serverTimestamp(),
+    'cobroDelivery.confirmadoPor': UID_GESTOR,
+  }))
+})
+
+test('H5 · ataque: cambiar el puntero de una orden pagada a otro DEP ⇒ DENY', async () => {
+  await sembrarPagadaTipoC()
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', 'ordP'), { 'registro.deposito.storkhubDepositoId': 'depOtro' }))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', 'ordP'), { 'registro.deposito.confirmadoStorkhub': false }))
+})
+
+test('H6 · ataque: "quitar" el boucher de un pagado (pasarlo a pendiente sin revertir) ⇒ DENY', async () => {
+  await sembrarPagadaTipoC()
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', 'ordP'), {
+    'cobroDelivery.estado': 'pendiente',
+    'cobroDelivery.boucherVigente': deleteField(),
+  }))
+})
+
+test('H7 · ataque: revertir dejando confirmadoStorkhub = true (cobro pendiente + liquidación confirmada) ⇒ DENY', async () => {
+  await sembrarPagadaTipoC()
+  await assertFails(reversion(como(UID_GESTOR), { liberarOrden: false }))
+})
+
+test('H8 · ataque: revertir sin anular el movimiento, o sin anular el DEP-C ⇒ DENY', async () => {
+  await sembrarPagadaTipoC()
+  await assertFails(reversion(como(UID_GESTOR), { anularMov: false }))
+  await assertFails(reversion(como(UID_GESTOR), { anularDep: false }))
+})
+
+test('H9 · reversión legítima completa (cobro + movimiento + DEP-C + orden) ⇒ ALLOW', async () => {
+  await sembrarPagadaTipoC()
+  await assertSucceeds(reversion(como(UID_GESTOR)))
+})
+
+test('H10 · orden pagada: anotar movimientoPagoId y editar campos ajenos al cobro ⇒ ALLOW', async () => {
+  await sembrarPagadaTipoC()
+  const db = como(UID_GESTOR)
+  await assertSucceeds(updateDoc(doc(db, 'solicitudes_envio', 'ordP'), { 'cobroDelivery.movimientoPagoId': 'movP' }))
+  await assertSucceeds(updateDoc(doc(db, 'solicitudes_envio', 'ordP'), { prioridad: true, updatedAt: serverTimestamp() }))
+})
+
+test('H11 · efectivo (tipo A): confirmar el depósito del motorizado sobre una orden cobrada ⇒ ALLOW', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    await setDoc(doc(db, 'solicitudes_envio', 'ordE'), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0001', secuencia: 1,
+      cobroDelivery: { estado: 'pagado', monto: 110, formaPago: 'efectivo' },
+      registro: { deposito: { storkhubDepositoId: 'depA' } },
+    })
+    await setDoc(doc(db, 'ordenes_deposito', 'depA'), { ...depositoBase({ estado: 'en_revision', solicitudIds: ['ordE'] }), codigo: 'DEP-0001', secuencia: 1 })
+  })
+  const db = como(UID_GESTOR)
+  const b = writeBatch(db)
+  b.update(doc(db, 'ordenes_deposito', 'depA'), { estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp() })
+  b.update(doc(db, 'solicitudes_envio', 'ordE'), {
+    'registro.deposito.confirmadoStorkhub': true,
+    'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
+    'registro.deposito.storkhubDepositoId': 'depA',
+  })
+  await assertSucceeds(b.commit())
+})
+
+test('H12 · revertir un cobro en efectivo con depósito del motorizado: legítimo sin tocar la liquidación; cambiándola ⇒ DENY', async () => {
+  const sembrar = async () => env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    await setDoc(doc(db, 'solicitudes_envio', 'ordP'), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0005', secuencia: 5,
+      cobroDelivery: { estado: 'pagado', monto: 110, formaPago: 'efectivo', pagadoAt: new Date() },
+      registro: { deposito: { storkhubDepositoId: 'depA', confirmadoStorkhub: true, confirmadoStorkhubAt: new Date() } },
+    })
+    await setDoc(doc(db, 'ordenes_deposito', 'depA'), { ...depositoBase({ estado: 'confirmado', solicitudIds: ['ordP'] }), codigo: 'DEP-0001', secuencia: 1 })
+    await setDoc(doc(db, 'movimientos_financieros', 'movP'), { tipo: 'pago_recibido', estado: 'activo', solicitudId: 'ordP', monto: 110 })
+  })
+  await sembrar()
+  // Legítimo: el depósito del motorizado es otro dinero y no se toca.
+  await assertSucceeds(reversion(como(UID_GESTOR), { anularDep: false, liberarOrden: false }))
+  await sembrar()
+  await assertFails(reversion(como(UID_GESTOR), { anularDep: false, liberarOrden: true }))
 })

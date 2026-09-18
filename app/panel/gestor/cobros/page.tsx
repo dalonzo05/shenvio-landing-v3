@@ -1665,6 +1665,11 @@ function CobrosPageContent() {
     setUploadingBoucherId(null)
     e.target.value = ''
     try {
+      // COBROS-PAGO-INTEGRIDAD-1 — antes de subir: el upload sobrescribe el
+      // objeto de Storage del gestor, y sobre un cobro ya pagado eso sería
+      // perder evidencia (firestore.rules deniega igual el update posterior).
+      const actual = await getDoc(doc(db, 'solicitudes_envio', targetId))
+      asegurarBoucherCobroMutable((actual.data() as { cobroDelivery?: CobroDelivery } | undefined)?.cobroDelivery)
       const blob = await compressImage(file)
       // P1-S2B: el gestor escribe su propio objeto también en la carga inicial.
       const { url, pathStorage } = await uploadDeliveryBoucher(targetId, 'gestor', blob)
