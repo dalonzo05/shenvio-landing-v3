@@ -33,6 +33,7 @@ const UID_COMERCIO = 'uid_comercio'
 const UID_GESTOR = 'uid_gestor'
 const UID_MOTO = 'uid_moto'
 const UID_DIGITADOR = 'uid_digitador'
+const UID_ADMIN = 'uid_admin'
 const COMERCIO_ID = 'com1'
 
 let env: RulesTestEnvironment
@@ -50,6 +51,7 @@ before(async () => {
     const db = ctx.firestore()
     await setDoc(doc(db, 'usuarios', UID_COMERCIO), { activo: true, rol: 'Comercio', comercioId: COMERCIO_ID })
     await setDoc(doc(db, 'usuarios', UID_GESTOR), { activo: true, rol: 'gestor' })
+    await setDoc(doc(db, 'usuarios', UID_ADMIN), { activo: true, rol: 'admin' })
     await setDoc(doc(db, 'usuarios', UID_MOTO), { activo: true, rol: 'motorizado' })
     await setDoc(doc(db, 'usuarios', UID_DIGITADOR), { activo: true, rol: 'digitador' })
     await setDoc(doc(db, 'comercios', COMERCIO_ID), { name: 'Mariposita', authUid: UID_COMERCIO })
@@ -65,6 +67,7 @@ beforeEach(async () => {
     const db = ctx.firestore()
     await setDoc(doc(db, 'usuarios', UID_COMERCIO), { activo: true, rol: 'Comercio', comercioId: COMERCIO_ID })
     await setDoc(doc(db, 'usuarios', UID_GESTOR), { activo: true, rol: 'gestor' })
+    await setDoc(doc(db, 'usuarios', UID_ADMIN), { activo: true, rol: 'admin' })
     await setDoc(doc(db, 'usuarios', UID_MOTO), { activo: true, rol: 'motorizado' })
     await setDoc(doc(db, 'usuarios', UID_DIGITADOR), { activo: true, rol: 'digitador' })
     await setDoc(doc(db, 'comercios', COMERCIO_ID), { name: 'Mariposita', authUid: UID_COMERCIO })
@@ -506,4 +509,76 @@ test('Z2 · gestor elimina el depósito y libera la orden en el mismo batch ⇒ 
     'registro.deposito.confirmadoStorkhubAt': null,
   })
   await assertSucceeds(b.commit())
+})
+
+// ─── COBROS-PAGO-INTEGRIDAD-1 · comprobante de un depósito confirmado ────────
+//
+// El boucher de un depósito confirmado es evidencia de dinero ya recibido.
+// Ni gestor ni admin lo reemplazan o quitan por el update normal; el resto
+// de los flujos (confirmar desde abierto, anular, rehacer) sigue igual.
+
+async function depositoEn(estado: string, extra: Record<string, unknown> = {}) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'ordenes_deposito', 'depI'), {
+      ...depositoBase({ estado, boucher: { url: 'https://example.test/original.jpg', pathStorage: 'x' }, ...extra }),
+      codigo: 'DEP-0001',
+      secuencia: 1,
+    })
+  })
+}
+const NUEVO_BOUCHER = { boucher: { url: 'https://example.test/nuevo.jpg', pathStorage: 'x' } }
+
+test('BI1 · gestor NO reemplaza el boucher de un depósito confirmado ⇒ DENY', async () => {
+  await depositoEn('confirmado')
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+})
+
+test('BI2 · admin tampoco ⇒ DENY', async () => {
+  await depositoEn('confirmado')
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+})
+
+test('BI3 · ni quitarlo, ni tocar boucherUrl (tipo C), ni cambiar estado y boucher a la vez ⇒ DENY', async () => {
+  await depositoEn('confirmado')
+  const db = como(UID_GESTOR)
+  await assertFails(updateDoc(doc(db, 'ordenes_deposito', 'depI'), { boucher: deleteField() }))
+  await depositoEn('confirmado', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
+  await assertFails(updateDoc(doc(db, 'ordenes_deposito', 'depI'), { boucherUrl: 'https://example.test/otro.jpg' }))
+  await depositoEn('confirmado')
+  await assertFails(updateDoc(doc(db, 'ordenes_deposito', 'depI'), { estado: 'en_revision', ...NUEVO_BOUCHER }))
+})
+
+test('BI4 · gestor reemplaza el boucher de un depósito en revisión ⇒ ALLOW (sin regresión)', async () => {
+  await depositoEn('en_revision')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+})
+
+test('BI5 · gestor anula un DEP tipo C confirmado sin tocar su comprobante ⇒ ALLOW', async () => {
+  await depositoEn('confirmado', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), {
+    estado: 'anulado',
+    anuladoAt: serverTimestamp(),
+    anuladoPorUid: UID_GESTOR,
+    motivoAnulacion: 'Reversión de cobro contado por gestor',
+  }))
+})
+
+test('BI6 · admin rehace un confirmado (solo estado) ⇒ ALLOW; después sí puede reemplazar ⇒ ALLOW', async () => {
+  await depositoEn('confirmado')
+  const db = como(UID_ADMIN)
+  await assertSucceeds(setDoc(doc(db, 'ordenes_deposito', 'depI'), { estado: 'en_revision' }, { merge: true }))
+  await assertSucceeds(updateDoc(doc(db, 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+})
+
+test('BI7 · digitador sigue corrigiendo su depósito en revisión ⇒ ALLOW', async () => {
+  await depositoEn('en_revision', { digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date() })
+  await assertSucceeds(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', 'depI'), { ...NUEVO_BOUCHER, updatedAt: serverTimestamp() }))
+})
+
+test('BI8 · motorizado: reenvía desde rechazado ⇒ ALLOW; sobre confirmado ⇒ DENY (sin regresión)', async () => {
+  await depositoEn('rechazado')
+  const db = como(UID_MOTO)
+  await assertSucceeds(updateDoc(doc(db, 'ordenes_deposito', 'depI'), { ...NUEVO_BOUCHER, estado: 'en_revision', updatedAt: serverTimestamp() }))
+  await depositoEn('confirmado')
+  await assertFails(updateDoc(doc(db, 'ordenes_deposito', 'depI'), { ...NUEVO_BOUCHER, estado: 'en_revision', updatedAt: serverTimestamp() }))
 })

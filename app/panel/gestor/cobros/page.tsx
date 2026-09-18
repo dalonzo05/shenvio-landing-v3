@@ -14,7 +14,6 @@ import {
   updateDoc,
   serverTimestamp,
   Timestamp,
-  writeBatch,
   runTransaction,
   deleteField,
 } from 'firebase/firestore'
@@ -46,6 +45,16 @@ import {
 } from '@/lib/incidencia-cobro'
 import { mostrarCodigo } from '@/lib/codigo-humano'
 import { liquidacionDeposito, camposConfirmacionDeposito } from '@/lib/presentacion-deposito'
+import {
+  puedeMutarBoucherCobro,
+  asegurarCobroConfirmable,
+  asegurarBoucherCobroMutable,
+  camposReversionCobro,
+  planReversionDeposito,
+  camposAnulacionDeposito,
+  MOTIVO_ANULACION_REVERSION,
+} from '@/lib/cobro-integridad'
+import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import {
   depositoVisible,
   depositosDesdeCache,
@@ -801,6 +810,12 @@ function BoucherModal({
   const replaceInputRef = useRef<HTMLInputElement>(null)
   const nombre = getClienteNombre(orden, nombres)
   const monto = orden.cobroDelivery?.monto ?? (orden as any).confirmacion?.precioFinalCordobas
+  // COBROS-PAGO-INTEGRIDAD-1 — este modal también se abre desde Historial
+  // cobrados. Sobre un cobro ya pagado es solo lectura: confirmar de nuevo
+  // creaba otro DEP tipo C y otro movimiento, y quitar/reemplazar reabría un
+  // pago cerrado sin anular nada. Cada handler vuelve a comprobarlo contra el
+  // documento actual: la pantalla puede estar desactualizada.
+  const pagado = !puedeMutarBoucherCobro(orden.cobroDelivery)
 
   // P1-S2B: "Quitar" NO borra evidencia. Ningún archivo se elimina de Storage
   // y ninguna referencia histórica se destruye: lo único que se mueve es el
@@ -814,19 +829,26 @@ function BoucherModal({
   async function handleQuitar() {
     setRemoving(true); setErr(null)
     try {
-      const cd = orden.cobroDelivery
-      const puedeVolverAComercio =
-        cd?.boucherVigente === 'gestor' && !!cd?.boucherComercio?.url
+      const ref = doc(db, 'solicitudes_envio', orden.id)
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref)
+        const cd = (snap.data() as { cobroDelivery?: CobroDelivery } | undefined)?.cobroDelivery
+        // COBROS-PAGO-INTEGRIDAD-1 — quitar sobre un pago confirmado lo
+        // reabría sin anular el DEP ni el movimiento.
+        asegurarBoucherCobroMutable(cd)
+        const puedeVolverAComercio =
+          cd?.boucherVigente === 'gestor' && !!cd?.boucherComercio?.url
 
-      await updateDoc(doc(db, 'solicitudes_envio', orden.id), {
-        'cobroDelivery.estado': puedeVolverAComercio ? 'en_revision_deposito' : 'pendiente',
-        'cobroDelivery.boucherVigente': puedeVolverAComercio ? 'comercio' : deleteField(),
-        // El histórico permanece: boucherComercio y boucherGestor NO se tocan.
-        'cobroDelivery.boucherUrl': deleteField(),
-        'cobroDelivery.boucherPath': deleteField(),
-        'cobroDelivery.boucherAt': deleteField(),
-        'cobroDelivery.subidoPor': deleteField(),
-        updatedAt: serverTimestamp(),
+        tx.update(ref, {
+          'cobroDelivery.estado': puedeVolverAComercio ? 'en_revision_deposito' : 'pendiente',
+          'cobroDelivery.boucherVigente': puedeVolverAComercio ? 'comercio' : deleteField(),
+          // El histórico permanece: boucherComercio y boucherGestor NO se tocan.
+          'cobroDelivery.boucherUrl': deleteField(),
+          'cobroDelivery.boucherPath': deleteField(),
+          'cobroDelivery.boucherAt': deleteField(),
+          'cobroDelivery.subidoPor': deleteField(),
+          updatedAt: serverTimestamp(),
+        })
       })
       onClose()
     } catch (e: any) {
@@ -842,21 +864,31 @@ function BoucherModal({
     e.target.value = ''
     setUploading(true); setErr(null)
     try {
+      const ref = doc(db, 'solicitudes_envio', orden.id)
+      // COBROS-PAGO-INTEGRIDAD-1 — se comprueba ANTES de subir: el upload
+      // sobrescribe el objeto de Storage del gestor, y sobre un pago
+      // confirmado eso ya sería perder evidencia.
+      const antes = await getDoc(ref)
+      asegurarBoucherCobroMutable((antes.data() as { cobroDelivery?: CobroDelivery } | undefined)?.cobroDelivery)
       const blob = await compressImage(file)
       // P1-S2B (decisión B-1): la corrección del gestor SIEMPRE se materializa
       // en su propio objeto. El comprobante del comercio no se sobrescribe ni
       // se borra — queda archivado como evidencia histórica.
       const { url, pathStorage } = await uploadDeliveryBoucher(orden.id, 'gestor', blob)
-      setLocalBoucherUrl(url)
-      await updateDoc(doc(db, 'solicitudes_envio', orden.id), {
-        'cobroDelivery.boucherGestor': {
-          url,
-          path: pathStorage,
-          at: serverTimestamp(),
-        },
-        'cobroDelivery.boucherVigente': 'gestor',
-        updatedAt: serverTimestamp(),
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref)
+        asegurarBoucherCobroMutable((snap.data() as { cobroDelivery?: CobroDelivery } | undefined)?.cobroDelivery)
+        tx.update(ref, {
+          'cobroDelivery.boucherGestor': {
+            url,
+            path: pathStorage,
+            at: serverTimestamp(),
+          },
+          'cobroDelivery.boucherVigente': 'gestor',
+          updatedAt: serverTimestamp(),
+        })
       })
+      setLocalBoucherUrl(url)
     } catch (e: any) {
       setErr(e?.message || 'Error al subir')
     } finally {
@@ -871,8 +903,16 @@ function BoucherModal({
       const montoFinal = monto ?? 0
       const depositoRef = doc(collection(db, 'ordenes_deposito'))
       const depositoId = depositoRef.id
-      const b = writeBatch(db)
-      b.set(depositoRef, {
+      const solRef = doc(db, 'solicitudes_envio', orden.id)
+      // COBROS-PAGO-INTEGRIDAD-1 — transacción con guard: se relee la orden y,
+      // si ya está pagada, no se escribe NADA (ni DEP, ni orden, ni el
+      // movimiento de abajo, que solo corre si la transacción se confirmó).
+      // Sin esto, "Confirmar pago" desde Historial cobrados duplicaba el DEP
+      // tipo C, el pago_recibido y el puntero.
+      await runTransaction(db, async (tx) => {
+      const actual = await tx.get(solRef)
+      asegurarCobroConfirmable((actual.data() as { cobroDelivery?: CobroDelivery } | undefined)?.cobroDelivery)
+      tx.set(depositoRef, {
         creadoAt: serverTimestamp(),
         tipo: 'pago_delivery_deposito',
         estado: 'confirmado',
@@ -893,7 +933,7 @@ function BoucherModal({
         // 'desconocido' de respaldo que usa el movimiento.
         ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
       })
-      b.update(doc(db, 'solicitudes_envio', orden.id), {
+      tx.update(solRef, {
         'cobroDelivery.estado': 'pagado',
         'cobroDelivery.pagadoAt': serverTimestamp(),
         'cobroDelivery.formaPago': 'transferencia',
@@ -903,7 +943,7 @@ function BoucherModal({
         'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
         'registro.deposito.storkhubDepositoId': depositoId,
       })
-      await b.commit()
+      })
       await registrarMovimiento('pago_recibido', montoFinal, uid,
         `Pago delivery por transferencia confirmado · ${nombre}`,
         { solicitudId: orden.id, depositoId })
@@ -940,6 +980,7 @@ function BoucherModal({
               />
               <p className="text-xs text-center text-blue-600 mt-1 hover:underline">Ver imagen completa →</p>
             </a>
+            {!pagado && (
             <div className="flex gap-2 mb-3">
               <button
                 onClick={() => replaceInputRef.current?.click()}
@@ -956,10 +997,12 @@ function BoucherModal({
                 {removing ? '…' : '✕ Quitar boucher'}
               </button>
             </div>
+            )}
           </>
         ) : (
           <div className="mb-3 rounded-xl border border-dashed border-gray-300 py-6 text-center">
             <p className="text-sm text-gray-400 mb-2">Sin boucher adjunto</p>
+            {!pagado && (
             <button
               onClick={() => replaceInputRef.current?.click()}
               disabled={uploading}
@@ -967,14 +1010,25 @@ function BoucherModal({
             >
               {uploading ? 'Subiendo…' : <><Upload className="inline h-3 w-3 mr-1" />Subir boucher</>}
             </button>
+            )}
           </div>
         )}
 
+        {/* Pago cerrado: se ve la evidencia, no se toca. */}
+        {pagado && (
+          <div className="mb-3 rounded-xl border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">
+            <p className="font-semibold">
+              ✓ Pago confirmado{orden.cobroDelivery?.pagadoAt ? ` · ${fechaHoraOperativa(orden.cobroDelivery.pagadoAt)}` : ''}
+            </p>
+            <p className="mt-0.5">Este comprobante ya no se puede reemplazar, quitar ni confirmar de nuevo. Si hay un error, usá Revertir.</p>
+          </div>
+        )}
         {err && <p className="text-xs text-red-600 mb-2">{err}</p>}
         <div className="flex gap-2">
           <button onClick={onClose} className="flex-1 border border-gray-200 text-gray-600 text-sm font-semibold py-2.5 rounded-xl hover:bg-gray-50 transition">
-            Cancelar
+            {pagado ? 'Cerrar' : 'Cancelar'}
           </button>
+          {!pagado && (
           <button
             onClick={handleConfirmar}
             disabled={saving || !localBoucherUrl}
@@ -982,6 +1036,7 @@ function BoucherModal({
           >
             {saving ? 'Confirmando…' : '✓ Confirmar pago'}
           </button>
+          )}
         </div>
       </div>
     </div>
@@ -1033,8 +1088,13 @@ function PagoContadoModal({
         // Crear registro de depósito por transferencia del cliente
         const depositoRef = doc(collection(db, 'ordenes_deposito'))
         const depositoId = depositoRef.id
-        const b = writeBatch(db)
-        b.set(depositoRef, {
+        const solRef = doc(db, 'solicitudes_envio', orden.id)
+        // COBROS-PAGO-INTEGRIDAD-1 — mismo guard que BoucherModal: nunca un
+        // segundo DEP tipo C ni un segundo movimiento sobre un cobro pagado.
+        await runTransaction(db, async (tx) => {
+        const actual = await tx.get(solRef)
+        asegurarCobroConfirmable((actual.data() as { cobroDelivery?: CobroDelivery } | undefined)?.cobroDelivery)
+        tx.set(depositoRef, {
           creadoAt: serverTimestamp(),
           tipo: 'pago_delivery_deposito',
           estado: 'confirmado',
@@ -1050,13 +1110,13 @@ function PagoContadoModal({
           // DEPOSITOS-UX-TRAZABILIDAD-1 — ver arriba: nace confirmado por el gestor.
           ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
         })
-        b.update(doc(db, 'solicitudes_envio', orden.id), {
+        tx.update(solRef, {
           ...updates,
           'registro.deposito.confirmadoStorkhub': true,
           'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
           'registro.deposito.storkhubDepositoId': depositoId,
         })
-        await b.commit()
+        })
         const movId = await registrarMovimiento('pago_recibido', montoFinal, uid,
           `Pago delivery por transferencia confirmado · ${nombre}`,
           { solicitudId: orden.id, depositoId })
@@ -1070,7 +1130,14 @@ function PagoContadoModal({
           await updateDoc(doc(db, 'solicitudes_envio', orden.id), { 'cobroDelivery.movimientoPagoId': movId })
         }
       } else {
-        await updateDoc(doc(db, 'solicitudes_envio', orden.id), updates)
+        const solRef = doc(db, 'solicitudes_envio', orden.id)
+        await runTransaction(db, async (tx) => {
+          const actual = await tx.get(solRef)
+          // COBROS-PAGO-INTEGRIDAD-1 — tampoco en efectivo: un segundo
+          // pago_recibido sobre un cobro ya pagado duplicaría el ledger.
+          asegurarCobroConfirmable((actual.data() as { cobroDelivery?: CobroDelivery } | undefined)?.cobroDelivery)
+          tx.update(solRef, updates)
+        })
         const movId = await registrarMovimiento('pago_recibido', montoFinal, uid,
           `Pago contado confirmado · ${nombre} · ${formaPago}`,
           { solicitudId: orden.id })
@@ -1445,16 +1512,30 @@ function CobrosPageContent() {
         throw new Error('El movimiento ya está anulado pero la solicitud seguía marcada como pagada. No se revirtió nada — requiere conciliación manual.')
       }
 
+      // COBROS-PAGO-INTEGRIDAD-1 — el pago por transferencia tiene además su
+      // DEP tipo C, que quedaba 'confirmado' con la orden marcada
+      // confirmadoStorkhub: cobro pendiente + liquidación confirmada. Se lee
+      // en esta misma transacción (antes de cualquier escritura) y, si es
+      // tipo C, se anula — no se borra — y la orden se libera. Un depósito
+      // del motorizado (tipo A/B) es otro dinero y no se toca.
+      const punteroId = (data.registro?.deposito?.storkhubDepositoId as string | undefined) ?? null
+      const depRef = punteroId ? doc(db, 'ordenes_deposito', punteroId) : null
+      const depSnap = depRef ? await tx.get(depRef) : null
+      const plan = planReversionDeposito(
+        punteroId,
+        depSnap?.exists() ? { id: depSnap.id, ...(depSnap.data() as { tipo?: string; estado?: string }) } : null,
+      )
+
       tx.update(solRef, {
-        'cobroDelivery.estado': 'pendiente',
-        'cobroDelivery.pagadoAt': deleteField(),
-        'cobroDelivery.formaPago': deleteField(),
-        'cobroDelivery.notaPago': deleteField(),
         // movimientoPagoId se conserva a propósito: queda apuntando al
         // movimiento (ahora anulado) como rastro de auditoría de que este
         // cobro fue pagado y luego revertido.
-        'cobroDelivery.movimientoPagoId': movimientoId,
+        ...camposReversionCobro(deleteField(), movimientoId),
+        ...plan.camposOrden,
       })
+      if (plan.anularDepositoId && depRef) {
+        tx.update(depRef, camposAnulacionDeposito(auth.currentUser?.uid, serverTimestamp(), MOTIVO_ANULACION_REVERSION))
+      }
       tx.update(movRef, {
         estado: 'anulado',
         anuladoAt: serverTimestamp(),

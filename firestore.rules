@@ -1267,7 +1267,18 @@ service cloud.firestore {
       // Gestor/admin: puede confirmar, rechazar y editar libremente
       // IDENTIDAD-HUMANA-1: "libremente" ya no incluye el codigo. Las ramas
       // de motorizado y digitador tienen hasOnly y no lo necesitan.
-      allow update: if isAdminOrGestor() && noTocaCodigo();
+      // COBROS-PAGO-INTEGRIDAD-1 — el comprobante de un depósito CONFIRMADO es
+      // evidencia de dinero ya recibido: ni gestor ni admin lo reemplazan o
+      // quitan (el path de Storage es fijo y el anterior se perdería). Para
+      // corregirlo está Rehacer, que primero lo devuelve a revisión — en una
+      // escritura aparte, sin tocar el boucher. Todo lo demás del gestor sigue
+      // igual: confirmar (desde un estado abierto), anular, convertir.
+      function boucherDeConfirmadoIntacto() {
+        return resource.data.get('estado', '') != 'confirmado'
+          || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['boucher', 'boucherUrl']);
+      }
+
+      allow update: if isAdminOrGestor() && noTocaCodigo() && boucherDeConfirmadoIntacto();
 
       // Motorizado: solo puede subir boucher y pasar a en_revision.
       // Mismo cambio que create/read — se exige rol motorizado activo. Los

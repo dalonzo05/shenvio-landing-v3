@@ -49,6 +49,7 @@ import {
 } from '@/lib/presentacion-deposito'
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
+import { puedeMutarBoucherDeposito, asegurarBoucherDepositoMutable } from '@/lib/cobro-integridad'
 import {
   camposEnlaceDigitacion,
   camposReaperturaRevision,
@@ -1339,6 +1340,11 @@ function DepositosPageContent() {
   async function reemplazarBoucher(dep: DepositoOrderDoc, file: File) {
     setReplacingBoucherId(dep.id)
     try {
+      // COBROS-PAGO-INTEGRIDAD-1 — el comprobante de un depósito confirmado es
+      // evidencia de dinero ya recibido, y el upload sobrescribe el mismo
+      // objeto de Storage. Se corta ANTES de subir; firestore.rules deniega
+      // igual el update. Para corregirlo existe Rehacer (vuelve a revisión).
+      asegurarBoucherDepositoMutable(dep.estado)
       const blob = await compressImage(file)
       // El reemplazo conserva el namespace del motorizado dueño del depósito,
       // que ya está guardado en el propio documento.
@@ -1853,13 +1859,15 @@ function DepositosPageContent() {
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
                                 <img src={dep.boucher.url} alt="boucher" className="w-8 h-8 rounded object-cover border border-green-200 hover:opacity-80 transition mx-auto" />
                               </button>
-                            ) : (
+                            ) : puedeMutarBoucherDeposito(dep.estado) ? (
                               <button
                                 onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
                                 className="text-[10px] text-red-400 font-semibold hover:text-red-600 transition"
                               >
                                 Sin boucher
                               </button>
+                            ) : (
+                              <span className="text-[10px] text-gray-400 font-semibold">Sin boucher</span>
                             )}
                           </td>
                           <td className="px-3 py-3 text-right">
@@ -1969,7 +1977,7 @@ function DepositosPageContent() {
                                           <img src={dep.boucher.url} alt="boucher" className="h-8 w-8 rounded object-cover border border-gray-200" />
                                           Ver comprobante
                                         </button>
-                                        {(!esDigitadorSesion || dep.estado === 'en_revision') && (
+                                        {(!esDigitadorSesion || dep.estado === 'en_revision') && puedeMutarBoucherDeposito(dep.estado) && (
                                           <button onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
                                             disabled={replacingBoucherId === dep.id}
                                             className="text-[11px] text-blue-500 hover:text-blue-700 hover:underline transition disabled:opacity-40">
@@ -1977,7 +1985,7 @@ function DepositosPageContent() {
                                           </button>
                                         )}
                                       </>
-                                    ) : (!esDigitadorSesion || dep.estado === 'en_revision') && (
+                                    ) : (!esDigitadorSesion || dep.estado === 'en_revision') && puedeMutarBoucherDeposito(dep.estado) && (
                                       <button onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
                                         disabled={replacingBoucherId === dep.id}
                                         className="text-[11px] font-semibold text-blue-500 hover:text-blue-700 transition border border-blue-200 bg-blue-50 px-3 py-1.5 rounded-lg disabled:opacity-40">
