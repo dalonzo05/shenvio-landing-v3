@@ -148,14 +148,18 @@ export interface FechasDeposito {
    * `creadoAt` cae al instante del boucher.
    */
   enviado: unknown
-  /** Cuándo lo confirmó un gestor. Ausente = no se confirmó (o no se registró). */
+  /**
+   * Cuándo lo confirmó un gestor. Solo si HOY está confirmado: "Rehacer" y
+   * revertir una conversión devuelven el documento a revisión conservando su
+   * confirmadoAt anterior como historial, y eso no es una confirmación vigente.
+   */
   confirmado: unknown
 }
 
-export function fechasDeposito(dep: Pick<DepositoRegistrado, 'creadoAt' | 'confirmadoAt' | 'boucher'>): FechasDeposito {
+export function fechasDeposito(dep: Pick<DepositoRegistrado, 'creadoAt' | 'confirmadoAt' | 'boucher' | 'estado'>): FechasDeposito {
   return {
     enviado: dep.creadoAt ?? dep.boucher?.uploadedAt ?? null,
-    confirmado: dep.confirmadoAt ?? null,
+    confirmado: dep.estado === 'confirmado' ? (dep.confirmadoAt ?? null) : null,
   }
 }
 
@@ -167,9 +171,12 @@ export function fechasDeposito(dep: Pick<DepositoRegistrado, 'creadoAt' | 'confi
  * admin en gestor) ni nada parecido.
  */
 export function confirmadorDeposito(
-  dep: Pick<DepositoRegistrado, 'confirmadoPorUid'>,
+  dep: Pick<DepositoRegistrado, 'confirmadoPorUid' | 'estado'>,
   nombres: Record<string, string> = {},
 ): ActorPresentado | null {
+  // Mismo criterio que fechasDeposito: un depósito reabierto no tiene un
+  // confirmador vigente, aunque el documento conserve el anterior.
+  if (dep.estado !== 'confirmado') return null
   return presentarActor(dep.confirmadoPorUid, nombres[dep.confirmadoPorUid ?? ''])
 }
 

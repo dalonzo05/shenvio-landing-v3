@@ -217,3 +217,13 @@ test('P21 · comprobante del cliente: se muestra si existe, se espera si va por 
   assert.equal(comprobanteClienteAplica({ estado: 'pagado', formaPago: 'transferencia' }, 'transferencia', false), 'no_aplica')
   assert.equal(comprobanteClienteAplica({ estado: 'pendiente' }, 'entrega', false), 'no_aplica')
 })
+
+test('P22 · depósito reabierto (Rehacer / revertir conversión): sin fecha ni confirmador vigentes', () => {
+  // El documento conserva confirmadoAt/confirmadoPorUid de la confirmación
+  // anterior como historial; eso no es una confirmación vigente.
+  const reabierto: DepositoRegistrado = { ...DEP_0001, estado: 'en_revision' }
+  assert.equal(fechasDeposito(reabierto).confirmado, null)
+  assert.equal(fechasDeposito(reabierto).enviado, '2026-09-17T23:24:40.777Z')
+  assert.equal(confirmadorDeposito(reabierto, NOMBRES), null)
+  assert.equal(liquidacionDeposito(reabierto), 'DEP-0001 · Motorizado → StorkHub · En revisión')
+})

@@ -30,6 +30,7 @@ import type {
   PropuestaAbonoSaldo,
 } from './financial-types'
 import { cuentas } from './financial-types'
+import { camposReaperturaRevision } from './deposito-transiciones'
 
 // ─── Reglas de timestamps ─────────────────────────────────────────────────────
 //
@@ -553,6 +554,12 @@ export async function revertirConversionEnDeuda(params: {
       saldoId: deleteField(),
       notaConversion: deleteField(),
       updatedAt: serverTimestamp(),
+    })
+    // DEPOSITOS-UX-TRAZABILIDAD-1 — pero tampoco pueden seguir afirmando que
+    // el destino está confirmado: el depósito volvió a revisión. Conservan el
+    // puntero (por eso no reaparecen en Pendientes) y pierden confirmadoX.
+    solicitudIds.forEach((sid) => {
+      b.update(doc(db, 'solicitudes_envio', sid), camposReaperturaRevision(destinatario, depositoId))
     })
   } else {
     // Caso A: sin boucher → el ordenes_deposito se anula (desaparece de "Por revisar")

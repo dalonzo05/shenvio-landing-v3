@@ -12,7 +12,6 @@ import {
   setDoc,
   updateDoc,
   writeBatch,
-  deleteDoc,
   serverTimestamp,
   Timestamp,
 } from 'firebase/firestore'
@@ -50,6 +49,12 @@ import {
 } from '@/lib/presentacion-deposito'
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
+import {
+  camposEnlaceDigitacion,
+  camposReaperturaRevision,
+  camposLiberacionDeposito,
+  eliminarLiberaOrdenes,
+} from '@/lib/deposito-transiciones'
 import { IrAFicha } from '../_components/IrAFicha'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -974,10 +979,12 @@ function DepositosPageContent() {
   // Mismo cálculo que confirmarStorkhub/confirmarComercio, pero el resultado
   // NUNCA llega a 'confirmado' directamente: nace 'en_revision', con
   // digitadoPorUid/digitadoAt, y queda en la misma cola "Por revisar" que ya
-  // usa el gestor para lo que sube el motorizado. Ni solicitudes_envio ni el
-  // ledger se tocan acá — eso ocurre solo si confirmarDepositoExistente lo
-  // aprueba después. confirmarStorkhub/confirmarComercio (arriba) quedan
-  // intactos: son la vía de un solo paso que sigue usando el gestor.
+  // usa el gestor para lo que sube el motorizado. El ledger no se toca acá, y
+  // de las órdenes solo se escribe el PUNTERO al depósito (DEPOSITOS-UX-
+  // TRAZABILIDAD-1): la confirmación, los flags y los movimientos ocurren
+  // solo si confirmarDepositoExistente lo aprueba después.
+  // confirmarStorkhub/confirmarComercio (arriba) quedan intactos: son la vía
+  // de un solo paso que sigue usando el gestor.
 
   // AUDITORÍA FINAL (ownership real del boucher): el documento Firestore se
   // crea PRIMERO (sin boucher) y recién después se sube el archivo — al
@@ -1071,7 +1078,18 @@ function DepositosPageContent() {
 
     // 3) Recién acá pasa a 'en_revision' — boucher y transición en la MISMA
     //    escritura, nunca uno sin el otro.
-    await updateDoc(depositoRef, { boucher: boucherData, estado: 'en_revision' })
+    //
+    // DEPOSITOS-UX-TRAZABILIDAD-1 — y en el MISMO batch, las órdenes quedan
+    // enlazadas al depósito (solo el puntero: confirmar sigue siendo del
+    // gestor). Sin esto seguían "pendientes": el motorizado y la propia cola
+    // de Pendientes las ofrecían para depositar otra vez el mismo dinero.
+    // firestore.rules acepta este update del digitador solo si el depósito,
+    // DESPUÉS del batch, es suyo, está en revisión, va a este destino e
+    // incluye la orden.
+    const b = writeBatch(db)
+    b.update(depositoRef, { boucher: boucherData, estado: 'en_revision' })
+    ordenes.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), camposEnlaceDigitacion('storkhub', depositoId)))
+    await b.commit()
   }
 
   async function digitarDepositoComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File, depositoId: string) {
@@ -1114,7 +1132,11 @@ function DepositosPageContent() {
     const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
     const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
 
-    await updateDoc(depositoRef, { boucher: boucherData, estado: 'en_revision' })
+    // Mismo batch que digitarDepositoStorkhub: depósito en revisión + puntero.
+    const b = writeBatch(db)
+    b.update(depositoRef, { boucher: boucherData, estado: 'en_revision' })
+    ordenes.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), camposEnlaceDigitacion('comercio', depositoId)))
+    await b.commit()
   }
 
   // ── Confirmar depósito existente (creado por motorizado o digitador) ──────
@@ -1362,11 +1384,21 @@ function DepositosPageContent() {
     if (!ok) return
     // 1. Anular movimientos del ledger — el depósito no está más confirmado
     await anularMovimientosDeDeposito(dep.id, 'Depósito revertido a revisión por gestor')
-    // 2. Resetear estado operativo
+    // 2. Resetear estado operativo.
+    //
+    // DEPOSITOS-UX-TRAZABILIDAD-1 — en el mismo batch, las órdenes dejan de
+    // afirmar la confirmación: quedaban con confirmadoX = true mientras el
+    // depósito volvía a revisión, y el motorizado lo veía cerrado. El puntero
+    // se conserva (el depósito sigue existiendo y siendo de estas órdenes);
+    // el documento guarda su confirmación anterior como historial.
     const ref = doc(db, 'ordenes_deposito', dep.id)
-    await setDoc(ref, {
+    const destino = dep.destinatario === 'storkhub' ? 'storkhub' : 'comercio'
+    const b = writeBatch(db)
+    b.set(ref, {
       estado: 'en_revision',
     }, { merge: true })
+    ;(dep.solicitudIds ?? []).forEach((sid) => b.update(doc(db, 'solicitudes_envio', sid), camposReaperturaRevision(destino, dep.id)))
+    await b.commit()
   }
 
   // ── Eliminar depósito (solo admin) ────────────────────────────────────────
@@ -1378,7 +1410,20 @@ function DepositosPageContent() {
     if (!ok) return
     // Anular movimientos del ledger antes de eliminar el doc
     await anularMovimientosDeDeposito(dep.id, 'Depósito eliminado por gestor')
-    await deleteDoc(doc(db, 'ordenes_deposito', dep.id))
+    // DEPOSITOS-UX-TRAZABILIDAD-1 — borrar el documento dejaba a las órdenes
+    // apuntando a un depósito inexistente y marcadas como confirmadas. Ahora
+    // se liberan en el mismo batch, igual que devolverAlMotorizado: si la
+    // obligación sigue viva, vuelve a pendiente. Excepción: un depósito
+    // convertido en deuda tiene su saldo en saldos_cargo_motorizado, que esto
+    // no anula — liberar las órdenes cobraría el mismo dinero dos veces. Ese
+    // caso queda como estaba (deuda DEPOSITO-BORRADO-FISICO).
+    const b = writeBatch(db)
+    b.delete(doc(db, 'ordenes_deposito', dep.id))
+    if (eliminarLiberaOrdenes(dep.estado)) {
+      const destino = dep.destinatario === 'storkhub' ? 'storkhub' : 'comercio'
+      ;(dep.solicitudIds ?? []).forEach((sid) => b.update(doc(db, 'solicitudes_envio', sid), camposLiberacionDeposito(destino)))
+    }
+    await b.commit()
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────

@@ -744,6 +744,56 @@ service cloud.firestore {
       // (hasOnly), que deja fuera codigo y secuencia por construccion.
       allow update: if isAdminOrGestor() && transicionDesdeCerradoValida() && noTocaCodigo();
 
+      // DEPOSITOS-UX-TRAZABILIDAD-1 — el digitador ENLAZA las órdenes al
+      // depósito que registra a nombre del motorizado.
+      //
+      // DIGITADOR V1 dejó al digitador sin ninguna escritura en esta
+      // colección. Consecuencia demostrada: su depósito quedaba en revisión
+      // pero las órdenes seguían sin puntero, así que el motorizado —y la
+      // cola de Pendientes— las seguían ofreciendo para depositar el mismo
+      // dinero otra vez. Se abre EXACTAMENTE esa escritura y nada más:
+      //
+      //   · solo cambia registro.deposito.<storkhub|comercio>DepositoId;
+      //     confirmadoX, sus fechas y todo el resto de la orden quedan
+      //     idénticos (diff sobre los submapas, sin enumerar);
+      //   · solo si la orden todavía no apuntaba a otro depósito;
+      //   · solo hacia un depósito que, DESPUÉS del batch (getAfter), fue
+      //     digitado por él, está en revisión, va a ese destino e incluye
+      //     esta orden — el batch es la transición a 'en_revision' del propio
+      //     depósito, así que no hay puntero sin depósito real que lo respalde.
+      //
+      // Confirmar sigue siendo exclusivo de gestor/admin.
+      function depositoDigitadoIncluyeOrden(depId, destino) {
+        let dep = getAfter(/databases/$(database)/documents/ordenes_deposito/$(depId)).data;
+        return dep.get('digitadoPorUid', null) == request.auth.uid
+          && dep.get('estado', '') == 'en_revision'
+          && dep.get('destinatario', '') == destino
+          && id in dep.get('solicitudIds', []);
+      }
+
+      function enlaceDeDigitadorValido(campo, destino) {
+        let ant = resource.data.get('registro', {});
+        let nue = request.resource.data.get('registro', {});
+        let antMap = ant is map ? ant : {};
+        let depAntRaw = antMap.get('deposito', {});
+        let depAnt = depAntRaw is map ? depAntRaw : {};
+        let depNue = nue is map ? nue.get('deposito', {}) : {};
+        return nue is map
+          && nue.diff(antMap).affectedKeys().hasOnly(['deposito'])
+          && depNue is map
+          && depNue.diff(depAnt).affectedKeys().hasOnly([campo])
+          && depAnt.get(campo, null) == null
+          && depNue.get(campo, null) is string
+          && depositoDigitadoIncluyeOrden(depNue.get(campo, ''), destino);
+      }
+
+      allow update: if isDigitador()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['registro'])
+        && (
+          enlaceDeDigitadorValido('storkhubDepositoId', 'storkhub')
+          || enlaceDeDigitadorValido('comercioDepositoId', 'comercio')
+        );
+
       // acumulacionCobroSemanal es el marcador de conciliación del cobro
       // semanal (P1). El motorizado solo puede DEJARLO PEDIDO: pone
       // estado='pendiente' al entregar, y nada más. Los estados finales

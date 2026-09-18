@@ -24,7 +24,7 @@ import {
 import assert from 'node:assert/strict'
 import {
   doc, setDoc, updateDoc, getDoc, deleteField, serverTimestamp,
-  collection, query, where, limit, getDocs,
+  collection, query, where, limit, getDocs, writeBatch,
 } from 'firebase/firestore'
 
 // Identidades del arnés. El rol de comercio es 'Comercio' con mayúscula: así
@@ -379,4 +379,131 @@ test('W4 · el motorizado no puede listar depósitos sin acotar, ni los de otro 
   const db = como(UID_MOTO)
   await assertFails(getDocs(query(collection(db, 'ordenes_deposito'), limit(100))))
   await assertFails(getDocs(query(collection(db, 'ordenes_deposito'), where('motorizadoUid', '==', 'otro_moto'))))
+})
+
+// ─── DEPOSITOS-UX-TRAZABILIDAD-1 (v2) · enlace del digitador ─────────────────
+//
+// El digitador registra el depósito y, en el MISMO batch que lo pasa a
+// 'en_revision', escribe el puntero en cada orden. Nada más: ni confirmación,
+// ni otras órdenes, ni otros campos.
+
+const ORDEN_D = 'ordD'
+
+async function sembrarDigitacion(opts: {
+  registro?: unknown
+  depEstado?: string
+  depDigitadoPor?: string
+  solicitudIds?: string[]
+  destinatario?: 'storkhub' | 'comercio'
+} = {}) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    const orden: Record<string, unknown> = { ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0001', secuencia: 1 }
+    if (opts.registro !== undefined) orden.registro = opts.registro
+    await setDoc(doc(db, 'solicitudes_envio', ORDEN_D), orden)
+    await setDoc(doc(db, 'ordenes_deposito', 'depD'), {
+      ...depositoBase({
+        estado: opts.depEstado ?? 'pendiente_boucher',
+        solicitudIds: opts.solicitudIds ?? [ORDEN_D],
+        destinatario: opts.destinatario ?? 'storkhub',
+        destinatarioId: opts.destinatario === 'comercio' ? COMERCIO_ID : 'storkhub',
+      }),
+      codigo: 'DEP-0001',
+      secuencia: 1,
+      digitadoPorUid: opts.depDigitadoPor ?? UID_DIGITADOR,
+      digitadoAt: new Date(),
+    })
+  })
+}
+
+function batchDigitacion(campo: 'storkhubDepositoId' | 'comercioDepositoId', extraOrden: Record<string, string | boolean | null> = {}) {
+  const db = como(UID_DIGITADOR)
+  const b = writeBatch(db)
+  b.update(doc(db, 'ordenes_deposito', 'depD'), {
+    boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x' },
+    estado: 'en_revision',
+  })
+  b.update(doc(db, 'solicitudes_envio', ORDEN_D), { [`registro.deposito.${campo}`]: 'depD', ...extraOrden })
+  return b.commit()
+}
+
+test('Y1 · digitador: depósito a en_revision + puntero StorkHub, en el mismo batch ⇒ ALLOW', async () => {
+  await sembrarDigitacion()
+  await assertSucceeds(batchDigitacion('storkhubDepositoId'))
+})
+
+test('Y1b · igual con registro.deposito = null en la orden ⇒ ALLOW', async () => {
+  await sembrarDigitacion({ registro: { deposito: null } })
+  await assertSucceeds(batchDigitacion('storkhubDepositoId'))
+})
+
+test('Y2 · digitador: depósito al comercio + puntero comercio ⇒ ALLOW', async () => {
+  await sembrarDigitacion({ destinatario: 'comercio' })
+  await assertSucceeds(batchDigitacion('comercioDepositoId'))
+})
+
+test('Y3 · la orden no está en solicitudIds del depósito ⇒ DENY', async () => {
+  await sembrarDigitacion({ solicitudIds: ['otraOrden'] })
+  await assertFails(batchDigitacion('storkhubDepositoId'))
+})
+
+test('Y4 · depósito digitado por OTRO usuario ⇒ DENY', async () => {
+  await sembrarDigitacion({ depEstado: 'en_revision', depDigitadoPor: 'otro_digitador' })
+  await assertFails(updateDoc(doc(como(UID_DIGITADOR), 'solicitudes_envio', ORDEN_D), { 'registro.deposito.storkhubDepositoId': 'depD' }))
+})
+
+test('Y5 · el depósito no queda en revisión (sigue pendiente_boucher) ⇒ DENY', async () => {
+  await sembrarDigitacion()
+  await assertFails(updateDoc(doc(como(UID_DIGITADOR), 'solicitudes_envio', ORDEN_D), { 'registro.deposito.storkhubDepositoId': 'depD' }))
+})
+
+test('Y6 · la orden ya apuntaba a otro depósito ⇒ DENY', async () => {
+  await sembrarDigitacion({ registro: { deposito: { storkhubDepositoId: 'depPrevio' } } })
+  await assertFails(batchDigitacion('storkhubDepositoId'))
+})
+
+test('Y7 · el digitador no puede confirmar ni tocar otros campos ⇒ DENY', async () => {
+  await sembrarDigitacion()
+  await assertFails(batchDigitacion('storkhubDepositoId', { 'registro.deposito.confirmadoStorkhub': true }))
+  await sembrarDigitacion()
+  await assertFails(batchDigitacion('storkhubDepositoId', { estado: 'confirmada' }))
+})
+
+test('Y8 · puntero al destino equivocado (comercio → depósito StorkHub) ⇒ DENY', async () => {
+  await sembrarDigitacion()
+  await assertFails(batchDigitacion('comercioDepositoId'))
+})
+
+// ─── DEPOSITOS-UX-TRAZABILIDAD-1 (v2) · payloads del gestor ──────────────────
+
+test('Z1 · gestor rehace: depósito a en_revision y la orden pierde la confirmación ⇒ ALLOW', async () => {
+  await sembrarDigitacion({
+    depEstado: 'confirmado',
+    registro: { deposito: { storkhubDepositoId: 'depD', confirmadoStorkhub: true, confirmadoStorkhubAt: new Date() } },
+  })
+  const db = como(UID_GESTOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', 'depD'), { estado: 'en_revision' }, { merge: true })
+  b.update(doc(db, 'solicitudes_envio', ORDEN_D), {
+    'registro.deposito.storkhubDepositoId': 'depD',
+    'registro.deposito.confirmadoStorkhub': false,
+    'registro.deposito.confirmadoStorkhubAt': null,
+  })
+  await assertSucceeds(b.commit())
+})
+
+test('Z2 · gestor elimina el depósito y libera la orden en el mismo batch ⇒ ALLOW', async () => {
+  await sembrarDigitacion({
+    depEstado: 'confirmado',
+    registro: { deposito: { storkhubDepositoId: 'depD', confirmadoStorkhub: true, confirmadoStorkhubAt: new Date() } },
+  })
+  const db = como(UID_GESTOR)
+  const b = writeBatch(db)
+  b.delete(doc(db, 'ordenes_deposito', 'depD'))
+  b.update(doc(db, 'solicitudes_envio', ORDEN_D), {
+    'registro.deposito.storkhubDepositoId': null,
+    'registro.deposito.confirmadoStorkhub': false,
+    'registro.deposito.confirmadoStorkhubAt': null,
+  })
+  await assertSucceeds(b.commit())
 })
