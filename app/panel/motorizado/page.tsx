@@ -18,9 +18,18 @@ import {
   resumenDepositosMotorizado,
   historialDepositosMotorizado,
   TOPE_QUERY_HISTORIAL_MOTORIZADO,
+  LIMITE_HISTORIAL_MOTORIZADO,
+  PESTANAS_DEPOSITOS_MOTORIZADO,
+  filasPestanaDepositos,
+  siguienteLimiteDepositos,
+  avisoTopeDepositos,
+  MENSAJE_IMAGEN_ILEGIBLE,
+  type PestanaDepositosMotorizado,
 } from '@/lib/depositos-motorizado';
+import { resumenViajeHistorial } from '@/lib/historial-viaje-motorizado';
+import { ImageLightbox } from '../_components/ImageLightbox';
 import { fechaHoraOperativa } from '@/lib/fecha-operativa';
-import { avisoNoCobrarMotorizado, descripcionCobroMotorizado } from '@/lib/pago-transferencia';
+import { avisoNoCobrarMotorizado, descripcionCobroMotorizado, etiquetaDeliveryMotorizado } from '@/lib/pago-transferencia';
 import type { DepositoRegistrado } from '@/lib/deposito-orden';
 import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
 
@@ -198,12 +207,6 @@ function tsToDate(v: any): Date | null {
 function fmt(n?: number) {
   if (typeof n !== 'number') return '-';
   return `C$ ${n.toLocaleString('es-NI')}`;
-}
-
-function fmtTime(v: any) {
-  const d = tsToDate(v);
-  if (!d) return '-';
-  return d.toLocaleString('es-NI', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' });
 }
 
 function fmtDateInput(d: Date) {
@@ -963,10 +966,23 @@ export default function PanelMotorizadoPage() {
     ordenes.forEach((o) => { if (typeof o.codigo === 'string') m[o.id] = o.codigo; });
     return m;
   }, [ordenes]);
+  // MOTORIZADO-UX-OPERATIVA-1 — todas las filas cargadas (≤ tope), ordenadas;
+  // la pestaña y "Ver más" recortan en el cliente, sin reads nuevas.
   const misDepositos = useMemo(
-    () => historialDepositosMotorizado(depositosPropios, codigoDeOrden),
+    () => historialDepositosMotorizado(depositosPropios, codigoDeOrden, TOPE_QUERY_HISTORIAL_MOTORIZADO),
     [depositosPropios, codigoDeOrden],
   );
+  const [pestanaDepositos, setPestanaDepositos] = useState<PestanaDepositosMotorizado>('todos');
+  const [limiteDepositos, setLimiteDepositos] = useState(LIMITE_HISTORIAL_MOTORIZADO);
+  const filasPestana = useMemo(() => filasPestanaDepositos(misDepositos, pestanaDepositos), [misDepositos, pestanaDepositos]);
+  const avisoTope = avisoTopeDepositos(depositosPropios.length);
+  const [comprobanteAmpliado, setComprobanteAmpliado] = useState<string | null>(null);
+
+  // Una imagen que el navegador no puede decodificar (p. ej. HEIC desde la
+  // galería en Android) hacía fallar createImageBitmap con un error crudo.
+  const comprimirComprobante = async (f: File): Promise<Blob> => {
+    try { return await compressImage(f); } catch { throw new Error(MENSAJE_IMAGEN_ILEGIBLE); }
+  };
 
   // Load comercio bank accounts and names for deposit orders
   const [comercioAccounts, setComercioAccounts] = useState<Record<string, BankAccount[]>>({});
@@ -1491,31 +1507,35 @@ export default function PanelMotorizadoPage() {
                   {historialFiltrado.map((o) => {
                     const dep = calcDeposito(o);
                     const comercioNombre = o.ownerSnapshot?.companyName || o.ownerSnapshot?.nombre || 'Comercio';
-                    const rutaResumen = [o.recoleccion?.direccionEscrita, o.entrega?.direccionEscrita].filter(Boolean).join(' → ');
+                    // MOTORIZADO-UX-OPERATIVA-1 — SH-N, zonas, fecha y forma de
+                    // cobro, todo de la orden ya cargada (0 reads). La ganancia
+                    // sigue calculándose como antes, acá abajo.
+                    const viaje = resumenViajeHistorial(o as never);
                     return (
                       <div key={o.id} style={{ background: '#fff', borderRadius: 16, marginBottom: 10, border: '1px solid #e5e7eb', overflow: 'hidden', boxShadow: '0 1px 2px rgba(0,0,0,0.04)' }}>
                         <div style={{ height: 3, background: '#16a34a' }} />
                         <div style={{ padding: '12px 14px' }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
-                              {/* Comercio dueño de la orden */}
-                              <p style={{ fontSize: 13, fontWeight: 800, color: '#111827', margin: '0 0 3px' }}>{comercioNombre}</p>
-                              {/* Ruta resumida */}
-                              {rutaResumen && (
-                                <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
-                                  📍 {rutaResumen}
-                                </p>
-                              )}
-                              {/* Destinatario */}
-                              <p style={{ fontSize: 11, color: '#9ca3af', margin: '0 0 2px' }}>
-                                Para: {o.tipoServicio === 'fuera_managua' && o.fueraManagua
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' as const, margin: '0 0 3px' }}>
+                                <span style={{ fontSize: 13, fontWeight: 800, color: '#111827', fontFamily: 'monospace' }} title={o.id}>{viaje.codigo}</span>
+                                <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 999, background: '#f0fdf4', color: '#15803d', border: '1px solid #bbf7d0' }}>{viaje.estado}</span>
+                              </div>
+                              {/* Zonas: concreta → macrozona → "—" */}
+                              <p style={{ fontSize: 12, fontWeight: 600, color: '#374151', margin: '0 0 2px', overflowWrap: 'anywhere' as const }}>
+                                📍 {viaje.zonaRetiro} → {viaje.zonaEntrega}
+                              </p>
+                              <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+                                {comercioNombre} · Para: {o.tipoServicio === 'fuera_managua' && o.fueraManagua
                                   ? (o.fueraManagua.puntoLogisticoNombre || o.fueraManagua.terminalSugerida || '-')
                                   : (o.entrega?.nombreApellido || '-')}
                               </p>
-                              <p style={{ fontSize: 11, color: '#d1d5db', margin: 0 }}>{fmtTime(o.entregadoAt)}</p>
+                              <p style={{ fontSize: 11, color: '#9ca3af', margin: 0 }}>{fechaHoraOperativa(viaje.entregadoAt)}</p>
+                              <p style={{ fontSize: 11, color: '#374151', margin: '3px 0 0' }}>Cobro: <span style={{ fontWeight: 700 }}>{viaje.formaCobro.texto}</span></p>
                             </div>
                             <div style={{ textAlign: 'right' as const, flexShrink: 0, marginLeft: 12 }}>
-                              <p style={{ fontSize: 15, fontWeight: 800, color: '#16a34a', margin: '0 0 2px' }}>{fmt(o.confirmacion?.precioFinalCordobas)}</p>
+                              <p style={{ fontSize: 10, color: '#9ca3af', margin: 0, textTransform: 'uppercase' as const, fontWeight: 600 }}>Delivery</p>
+                              <p style={{ fontSize: 15, fontWeight: 800, color: '#16a34a', margin: '0 0 2px' }}>{fmt(viaje.delivery ?? undefined)}</p>
                               {o.precioDesglose?.deliveryBase != null && (
                                 <p style={{ fontSize: 11, fontWeight: 700, color: '#15803d', margin: '0 0 2px' }}>💰 {fmt(o.precioDesglose.deliveryBase * 0.8)}</p>
                               )}
@@ -1596,15 +1616,15 @@ export default function PanelMotorizadoPage() {
               {/* DEPOSITOS-UX-TRAZABILIDAD-1 — decía "de hoy", pero la lista no
                   filtra por fecha: suma todo lo pendiente, sea del día que sea. */}
               <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 12px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Por depositar</p>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 10 }}>
                 <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 12, padding: '12px 14px' }}>
                   <p style={{ fontSize: 11, color: '#7c3aed', fontWeight: 700, textTransform: 'uppercase' as const, margin: '0 0 4px', letterSpacing: 0.5 }}>Al comercio</p>
-                  <p style={{ fontSize: 22, fontWeight: 900, color: '#7c3aed', margin: 0 }}>{fmt(resumenDepositos.alComercio)}</p>
+                  <p style={{ fontSize: 22, fontWeight: 900, color: '#7c3aed', margin: 0, overflowWrap: 'anywhere' as const }}>{fmt(resumenDepositos.alComercio)}</p>
                   <p style={{ fontSize: 11, color: '#a78bfa', margin: '4px 0 0' }}>Cobro producto</p>
                 </div>
                 <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 12, padding: '12px 14px' }}>
                   <p style={{ fontSize: 11, color: '#2563eb', fontWeight: 700, textTransform: 'uppercase' as const, margin: '0 0 4px', letterSpacing: 0.5 }}>A Storkhub</p>
-                  <p style={{ fontSize: 22, fontWeight: 900, color: '#2563eb', margin: 0 }}>{fmt(resumenDepositos.aStorkhub)}</p>
+                  <p style={{ fontSize: 22, fontWeight: 900, color: '#2563eb', margin: 0, overflowWrap: 'anywhere' as const }}>{fmt(resumenDepositos.aStorkhub)}</p>
                   {totalGastosDeducibles > 0 ? (
                     <p style={{ fontSize: 11, color: '#60a5fa', margin: '4px 0 0' }}>
                       {fmt(resumenDepositos.aStorkhubBruto)} delivery − {fmt(totalGastosDeducibles)} gastos
@@ -1702,7 +1722,7 @@ export default function PanelMotorizadoPage() {
                           <button
                             onClick={() => { setActiveGroupKey(key); groupBoucherRef.current?.click(); }}
                             style={{ width: '100%', background: groupBoucher[key] ? '#f0fdf4' : '#eff6ff', border: `1px solid ${groupBoucher[key] ? '#bbf7d0' : '#bfdbfe'}`, borderRadius: 10, padding: '9px', color: groupBoucher[key] ? '#16a34a' : '#2563eb', fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 4 }}>
-                            {groupBoucher[key] ? `✅ Boucher adjunto · Cambiar` : '📸 Adjuntar boucher del depósito'}
+                            {groupBoucher[key] ? `✅ Comprobante adjunto · Cambiar` : '📎 Adjuntar comprobante (foto o captura)'}
                           </button>
                           {groupBoucher[key] && groupBoucherPreview[key] && (
                             <img
@@ -1733,7 +1753,7 @@ export default function PanelMotorizadoPage() {
                                 let boucherData: { url: string; pathStorage: string; uploadedAt: ReturnType<typeof serverTimestamp>; motorizadoUid: string } | null = null;
                                 const bFile = groupBoucher[key];
                                 if (bFile) {
-                                  const blob = await compressImage(bFile);
+                                  const blob = await comprimirComprobante(bFile);
                                   const motorizadoAuthUid = auth.currentUser?.uid ?? '';
                                   const { url, pathStorage } = await uploadDepositoBoucher(motorizadoAuthUid, depositoId, blob);
                                   boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motorizadoAuthUid };
@@ -1836,7 +1856,7 @@ export default function PanelMotorizadoPage() {
                           <button
                             onClick={() => { setActiveGroupKey(key); groupBoucherRef.current?.click(); }}
                             style={{ width: '100%', background: groupBoucher[key] ? '#f0fdf4' : '#faf5ff', border: `1px solid ${groupBoucher[key] ? '#bbf7d0' : '#ddd6fe'}`, borderRadius: 10, padding: '9px', color: groupBoucher[key] ? '#16a34a' : '#7c3aed', fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 4 }}>
-                            {groupBoucher[key] ? `✅ Boucher adjunto · Cambiar` : '📸 Adjuntar boucher del depósito'}
+                            {groupBoucher[key] ? `✅ Comprobante adjunto · Cambiar` : '📎 Adjuntar comprobante (foto o captura)'}
                           </button>
                           {groupBoucher[key] && groupBoucherPreview[key] && (
                             <img
@@ -1867,7 +1887,7 @@ export default function PanelMotorizadoPage() {
                                 let boucherData: { url: string; pathStorage: string; uploadedAt: ReturnType<typeof serverTimestamp>; motorizadoUid: string } | null = null;
                                 const bFile = groupBoucher[key];
                                 if (bFile) {
-                                  const blob = await compressImage(bFile);
+                                  const blob = await comprimirComprobante(bFile);
                                   const motorizadoAuthUid = auth.currentUser?.uid ?? '';
                                   const { url, pathStorage } = await uploadDepositoBoucher(motorizadoAuthUid, depositoId, blob);
                                   boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motorizadoAuthUid };
@@ -1918,8 +1938,27 @@ export default function PanelMotorizadoPage() {
             {misDepositos.length > 0 && (
               <div style={{ marginTop: 20 }}>
                 <p style={{ fontSize: 12, fontWeight: 700, color: '#374151', margin: '0 0 10px', textTransform: 'uppercase' as const, letterSpacing: 0.5 }}>Mis depósitos</p>
+                {/* MOTORIZADO-UX-OPERATIVA-1 — pestañas y "Ver más" sobre las filas
+                    ya cargadas. "Por depositar" (arriba) no es una pestaña: sale de
+                    las órdenes, no de ordenes_deposito. */}
+                <div style={{ display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' as const }}>
+                  {PESTANAS_DEPOSITOS_MOTORIZADO.map((p) => {
+                    const activa = pestanaDepositos === p.clave;
+                    const n = filasPestanaDepositos(misDepositos, p.clave).length;
+                    return (
+                      <button key={p.clave} type="button"
+                        onClick={() => { setPestanaDepositos(p.clave); setLimiteDepositos(LIMITE_HISTORIAL_MOTORIZADO); }}
+                        style={{ padding: '6px 12px', borderRadius: 999, border: `1px solid ${activa ? '#004aad' : '#e5e7eb'}`, background: activa ? '#004aad' : '#fff', color: activa ? '#fff' : '#374151', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                        {p.texto} ({n})
+                      </button>
+                    );
+                  })}
+                </div>
+                {filasPestana.length === 0 && (
+                  <p style={{ fontSize: 12, color: '#9ca3af', margin: '4px 0 8px', textAlign: 'center' as const }}>Sin depósitos en esta pestaña.</p>
+                )}
                 <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
-                  {misDepositos.map((d) => {
+                  {filasPestana.slice(0, limiteDepositos).map((d) => {
                     const c = colorEstadoDeposito(d.estadoClave);
                     return (
                       <div key={d.id} style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '12px 14px' }}>
@@ -1942,26 +1981,45 @@ export default function PanelMotorizadoPage() {
                           </p>
                         )}
                         {d.comprobante && (
-                          <a href={d.comprobante} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', marginTop: 6, fontSize: 12, color: '#2563eb', fontWeight: 600 }}>
+                          <button type="button" onClick={() => setComprobanteAmpliado(d.comprobante)} style={{ display: 'inline-block', marginTop: 6, padding: 0, background: 'none', border: 'none', fontSize: 12, color: '#2563eb', fontWeight: 600, cursor: 'pointer' }}>
                             Ver comprobante
-                          </a>
+                          </button>
                         )}
                       </div>
                     );
                   })}
                 </div>
+                {filasPestana.length > limiteDepositos && (
+                  <button type="button" onClick={() => setLimiteDepositos((l) => siguienteLimiteDepositos(l, filasPestana.length))}
+                    style={{ width: '100%', marginTop: 10, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10, padding: '9px', fontSize: 13, color: '#374151', fontWeight: 700, cursor: 'pointer' }}>
+                    Ver más ({filasPestana.length - limiteDepositos} restantes)
+                  </button>
+                )}
+                {avisoTope && (
+                  <p style={{ fontSize: 11, color: '#9ca3af', margin: '8px 0 0', textAlign: 'center' as const }}>{avisoTope}</p>
+                )}
               </div>
             )}
           </>
         )}
       </div>
 
+      {/* El visor compartido usa z-50; el wrapper lo pone por encima del
+          BottomNav (zIndex 100). */}
+      {comprobanteAmpliado && (
+        <div style={{ position: 'relative', zIndex: 1000 }}>
+          <ImageLightbox url={comprobanteAmpliado} label="Comprobante del depósito" onClose={() => setComprobanteAmpliado(null)} />
+        </div>
+      )}
+
       {/* ── Hidden file input for group bouchers ── */}
+      {/* MOTORIZADO-UX-OPERATIVA-1 — sin capture: el comprobante puede ser una
+          captura de la app del banco o una foto ya tomada, no solo la cámara.
+          Retiro, entrega, terminal y Cargotrans siguen con cámara obligatoria. */}
       <input
         ref={groupBoucherRef}
         type="file"
         accept="image/*"
-        capture="environment"
         style={{ display: 'none' }}
         onChange={(e) => {
           const f = e.target.files?.[0];
@@ -2322,6 +2380,7 @@ function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
   // ("Delivery ya pagado por transferencia") y en Nuevas/En curso eso ni
   // siquiera era cierto todavía.
   const aviso = avisoNoCobrarMotorizado(o);
+  const etiquetaDelivery = etiquetaDeliveryMotorizado(o);
   const descripcion = descripcionCobroMotorizado(dep.descripcion, dep.deliveryPorTransferencia, 'operacion');
 
   // Con deducción: el cliente paga un solo monto (producto incluye delivery dentro)
@@ -2338,9 +2397,16 @@ function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
           <p style={{ fontSize: 12, fontWeight: 600, color: '#991b1b', margin: '3px 0 0' }}>{aviso.detalle}</p>
         </div>
       )}
+      {/* MOTORIZADO-UX-OPERATIVA-1 — con transferencia el monto queda
+          subordinado al aviso: no es algo que el motorizado cobre. */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>Delivery</span>
-        <span style={{ fontSize: 18, fontWeight: 900, color: '#111827' }}>{fmt(delivery)}</span>
+        <span style={{ display: 'flex', flexDirection: 'column' as const }}>
+          <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' as const }}>{etiquetaDelivery.etiqueta}</span>
+          {etiquetaDelivery.aclaracion && <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 600 }}>{etiquetaDelivery.aclaracion}</span>}
+        </span>
+        <span style={etiquetaDelivery.subordinado
+          ? { fontSize: 14, fontWeight: 700, color: '#9ca3af' }
+          : { fontSize: 18, fontWeight: 900, color: '#111827' }}>{fmt(delivery)}</span>
       </div>
       {ganancia !== null && delivery > 0 && (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>

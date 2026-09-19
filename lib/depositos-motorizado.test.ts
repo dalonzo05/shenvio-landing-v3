@@ -9,7 +9,16 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resumenDepositosMotorizado, historialDepositosMotorizado } from './depositos-motorizado'
+import {
+  resumenDepositosMotorizado,
+  historialDepositosMotorizado,
+  filasPestanaDepositos,
+  siguienteLimiteDepositos,
+  avisoTopeDepositos,
+  PASO_VER_MAS_DEPOSITOS,
+  TOPE_QUERY_HISTORIAL_MOTORIZADO,
+  MENSAJE_IMAGEN_ILEGIBLE,
+} from './depositos-motorizado'
 import type { EntradaDepositoOrden, DepositoRegistrado } from './deposito-orden'
 
 const SH_0001 = 'jTIJLEhGeACcymBAj0jY'
@@ -123,4 +132,62 @@ test('M10 · historial: más reciente primero y recortado al límite', () => {
   const deps = [1, 3, 2].map((n) => ({ ...DEP_0001, id: `d${n}`, codigo: `DEP-000${n}`, creadoAt: `2026-09-1${n}T12:00:00.000Z` }))
   const filas = historialDepositosMotorizado(deps, {}, 2)
   assert.deepEqual(filas.map((f) => f.identidad.texto), ['DEP-0003', 'DEP-0002'])
+})
+
+// ── MOTORIZADO-UX-OPERATIVA-1 · pestañas y "Ver más" ─────────────────────────
+
+function depEn(estado: string, i: number, tipo = 'recaudacion_motorizado_storkhub'): DepositoRegistrado {
+  return { ...DEP_0001, id: 'dep' + String(i).padStart(3, '0'), codigo: undefined, estado, tipo, creadoAt: new Date(Date.UTC(2026, 8, 1, 0, i)).toISOString() }
+}
+
+test('M11 · Por revisar = pendiente_boucher + en_revision; Confirmados = confirmado', () => {
+  const filas = historialDepositosMotorizado([
+    depEn('pendiente_boucher', 1), depEn('en_revision', 2), depEn('confirmado', 3),
+    depEn('convertido_en_deuda', 4), depEn('rechazado', 5),
+  ], {}, 100)
+  assert.deepEqual(filasPestanaDepositos(filas, 'por_revisar').map((f) => f.estadoClave).sort(), ['en_revision', 'pendiente_boucher'])
+  assert.deepEqual(filasPestanaDepositos(filas, 'confirmados').map((f) => f.estadoClave), ['confirmado'])
+  assert.equal(filasPestanaDepositos(filas, 'todos').length, 5)
+})
+
+test('M12 · convertido_en_deuda no entra en Confirmados; sí en Todos, con su propio estado', () => {
+  const filas = historialDepositosMotorizado([depEn('convertido_en_deuda', 1)], {}, 100)
+  assert.equal(filasPestanaDepositos(filas, 'confirmados').length, 0)
+  const [f] = filasPestanaDepositos(filas, 'todos')
+  assert.equal(f.estadoClave, 'convertido_en_deuda')
+  const confirmado = filasPestanaDepositos(historialDepositosMotorizado([depEn('confirmado', 2)], {}, 100), 'todos')[0]
+  assert.notEqual(f.estado, confirmado.estado)
+})
+
+test('M13 · el tipo C sigue excluido en todas las pestañas', () => {
+  const filas = historialDepositosMotorizado([depEn('confirmado', 1, 'pago_delivery_deposito'), depEn('confirmado', 2)], {}, 100)
+  for (const p of ['por_revisar', 'confirmados', 'todos'] as const) {
+    assert.ok(filasPestanaDepositos(filas, p).every((f) => f.id !== 'dep001'))
+  }
+  assert.equal(filasPestanaDepositos(filas, 'todos').length, 1)
+})
+
+test('M14 · Ver más: 30 → 60 → 90 → máximo disponible (≤ 100)', () => {
+  assert.equal(PASO_VER_MAS_DEPOSITOS, 30)
+  assert.equal(siguienteLimiteDepositos(30, 100), 60)
+  assert.equal(siguienteLimiteDepositos(60, 100), 90)
+  assert.equal(siguienteLimiteDepositos(90, 100), 100)
+  assert.equal(siguienteLimiteDepositos(30, 45), 45)
+  assert.equal(siguienteLimiteDepositos(100, 100), 100)
+  // Con el tope pasado a historialDepositosMotorizado se ven hasta 100, no 30.
+  const deps = Array.from({ length: 100 }, (_, i) => depEn('confirmado', i))
+  assert.equal(historialDepositosMotorizado(deps, {}, TOPE_QUERY_HISTORIAL_MOTORIZADO).length, 100)
+})
+
+test('M15 · aviso de tope: solo al llegar a 100 y sin afirmar que son los más recientes', () => {
+  assert.equal(avisoTopeDepositos(99), null)
+  const aviso = avisoTopeDepositos(100)
+  assert.equal(aviso, 'Mostrando los últimos registros cargados. El historial completo se habilitará próximamente.')
+  assert.ok(!/reciente/i.test(aviso!))
+  assert.ok(!/100/.test(aviso!))
+})
+
+test('M16 · mensaje de imagen ilegible: entendible y sin prometer PDF', () => {
+  assert.equal(MENSAJE_IMAGEN_ILEGIBLE, 'No se pudo leer la imagen. Probá con una captura o una imagen JPG.')
+  assert.ok(!/pdf/i.test(MENSAJE_IMAGEN_ILEGIBLE))
 })

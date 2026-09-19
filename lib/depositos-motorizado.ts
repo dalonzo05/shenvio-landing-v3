@@ -172,3 +172,53 @@ export function historialDepositosMotorizado(
       }
     })
 }
+
+// ─── Pestañas y "Ver más" (MOTORIZADO-UX-OPERATIVA-1) ────────────────────────
+//
+// Todo en el cliente, sobre las filas ya cargadas (≤ TOPE_QUERY): 0 reads.
+// "Por depositar" NO es una pestaña: sale de las órdenes (gruposDeposito), no
+// de ordenes_deposito, y mezclarlos haría parecer el mismo estado documental.
+
+export type PestanaDepositosMotorizado = 'por_revisar' | 'confirmados' | 'todos'
+
+export const PESTANAS_DEPOSITOS_MOTORIZADO: { clave: PestanaDepositosMotorizado; texto: string }[] = [
+  { clave: 'por_revisar', texto: 'Por revisar' },
+  { clave: 'confirmados', texto: 'Confirmados' },
+  { clave: 'todos', texto: 'Todos' },
+]
+
+const ESTADOS_POR_REVISAR = ['pendiente_boucher', 'en_revision']
+
+/**
+ * Filas de una pestaña. 'convertido_en_deuda' no es "Confirmado": solo aparece
+ * en Todos, con su propio estado. El tipo C ya viene excluido de las filas.
+ */
+export function filasPestanaDepositos(
+  filas: FilaDepositoMotorizado[],
+  pestana: PestanaDepositosMotorizado,
+): FilaDepositoMotorizado[] {
+  if (pestana === 'por_revisar') return filas.filter((f) => ESTADOS_POR_REVISAR.includes(f.estadoClave ?? ''))
+  if (pestana === 'confirmados') return filas.filter((f) => f.estadoClave === 'confirmado')
+  return filas
+}
+
+/** Cuántas se muestran al abrir y cuántas más suma cada "Ver más". */
+export const PASO_VER_MAS_DEPOSITOS = LIMITE_HISTORIAL_MOTORIZADO
+
+/** 30 → 60 → 90 → … sin pasar de lo que hay. */
+export function siguienteLimiteDepositos(actual: number, disponibles: number): number {
+  return Math.min(Math.max(0, actual) + PASO_VER_MAS_DEPOSITOS, Math.max(0, disponibles))
+}
+
+/**
+ * Aviso cuando la query llegó al tope. Sin orderBy la query no trae los más
+ * recientes sino los primeros por ID: el texto no afirma recencia.
+ */
+export function avisoTopeDepositos(cargados: number): string | null {
+  return cargados >= TOPE_QUERY_HISTORIAL_MOTORIZADO
+    ? 'Mostrando los últimos registros cargados. El historial completo se habilitará próximamente.'
+    : null
+}
+
+/** Mensaje cuando el navegador no puede decodificar la imagen elegida. */
+export const MENSAJE_IMAGEN_ILEGIBLE = 'No se pudo leer la imagen. Probá con una captura o una imagen JPG.'

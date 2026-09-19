@@ -92,6 +92,27 @@ export function avisoNoCobrarMotorizado(orden: {
   }
 }
 
+export interface EtiquetaDeliveryMotorizado {
+  etiqueta: string
+  /** Aclaración bajo la etiqueta; null cuando el motorizado sí lo cobra. */
+  aclaracion: string | null
+  /** true: el monto va subordinado al aviso (no es un monto a cobrar). */
+  subordinado: boolean
+}
+
+/**
+ * MOTORIZADO-UX-OPERATIVA-1 — cómo se rotula la fila "Delivery" de CobroBox.
+ * Con transferencia, "DELIVERY C$ 80" en grande debajo de "NO COBRAR" se leía
+ * como monto a cobrar. Solo cambia el rótulo: precio, ganancia y total a
+ * cobrar siguen saliendo de donde salían.
+ */
+export function etiquetaDeliveryMotorizado(orden: {
+  pagoDelivery?: { quienPaga?: string | null } | null
+}): EtiquetaDeliveryMotorizado {
+  if (esPlanTransferencia(orden)) return { etiqueta: 'Delivery', aclaracion: 'Lo paga el comercio', subordinado: true }
+  return { etiqueta: 'Delivery', aclaracion: null, subordinado: false }
+}
+
 /** Partes que escribe calcularDeposito() y que el aviso ya cubre. */
 const PARTE_TRANSFERENCIA = 'Delivery ya pagado por transferencia'
 const PARTE_SIN_EFECTIVO = 'No recaudó efectivo'

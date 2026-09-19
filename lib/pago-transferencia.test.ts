@@ -21,8 +21,10 @@ import {
   momentoCobro,
   resumenAtencionCobros,
   accionesAdminDeposito,
+  etiquetaDeliveryMotorizado,
 } from './pago-transferencia'
 import type { DepositoRegistrado } from './deposito-orden'
+import { calcularDeposito } from './calculo-deposito'
 
 const BOUCHER_AT = '2026-09-18T04:14:37.627Z'
 const CONFIRMADO_AT = '2026-09-18T04:20:53.728Z'
@@ -203,4 +205,21 @@ test('X19 · Historial tipo C: nunca usa creadoAt ni confirmadoAt del DEP como e
     assert.notEqual(v, DEP_0002.creadoAt)
     assert.notEqual(v, DEP_0002.confirmadoAt)
   }
+})
+
+// ── MOTORIZADO-UX-OPERATIVA-1 · CobroBox con transferencia ───────────────────
+
+test('X20 · transferencia: "Delivery · Lo paga el comercio", subordinado al aviso', () => {
+  assert.deepEqual(etiquetaDeliveryMotorizado(sh0003()), { etiqueta: 'Delivery', aclaracion: 'Lo paga el comercio', subordinado: true })
+  assert.deepEqual(etiquetaDeliveryMotorizado({ pagoDelivery: { quienPaga: 'entrega' } }), { etiqueta: 'Delivery', aclaracion: null, subordinado: false })
+})
+
+test('X21 · transferencia: el total a cobrar al cliente sigue sin el delivery', () => {
+  const c = calcularDeposito({ ...sh0003(), cobroContraEntrega: { aplica: true, monto: 500 } })
+  assert.equal(c.tieneDelivery, false)
+  // CobroBox: totalCliente = (tieneDelivery ? delivery : 0) + producto
+  assert.equal((c.tieneDelivery ? 80 : 0) + (c.tieneProducto ? c.montoProducto : 0), 500)
+  // Precio y aviso intactos
+  assert.equal(sh0003().confirmacion.precioFinalCordobas, 80)
+  assert.equal(avisoNoCobrarMotorizado(sh0003())?.titulo, 'NO COBRAR ESTE DELIVERY')
 })
