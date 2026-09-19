@@ -209,6 +209,27 @@ export function enviadoDeposito(
   return m ? m.valor : null
 }
 
+/**
+ * Columna "Enviado" del Historial de Depósitos, que no tiene la orden a mano
+ * sino las órdenes ya cargadas por la página (`buscarOrden`, sin reads nuevas).
+ *
+ *   A/B: el envío del motorizado, igual que enviadoDeposito.
+ *   C:   el instante en que el COMERCIO subió su comprobante
+ *        (cobroDelivery.boucherComercio.at). Solo con exactamente una orden:
+ *        con varias no hay un instante único que mostrar, y sin la orden o sin
+ *        ese timestamp tampoco. En esos casos null ("—"); nunca creadoAt ni
+ *        confirmadoAt del DEP, que son la confirmación.
+ */
+export function enviadoDepositoHistorial(
+  dep: Pick<DepositoRegistrado, 'tipo' | 'estado' | 'creadoAt' | 'confirmadoAt' | 'boucher' | 'solicitudIds'>,
+  buscarOrden: (id: string) => OrdenConCobro | null | undefined,
+): unknown {
+  if (claseDeposito(dep) !== 'transferencia_delivery') return enviadoDeposito(dep)
+  const ids = dep.solicitudIds ?? []
+  if (ids.length !== 1) return null
+  return buscarOrden(ids[0])?.cobroDelivery?.boucherComercio?.at ?? null
+}
+
 // ─── Cobros ───────────────────────────────────────────────────────────────────
 
 /**

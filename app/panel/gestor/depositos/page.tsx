@@ -50,7 +50,7 @@ import {
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
 import { puedeMutarBoucherDeposito, asegurarBoucherDepositoMutable } from '@/lib/cobro-integridad'
-import { enviadoDeposito, accionesAdminDeposito } from '@/lib/pago-transferencia'
+import { enviadoDepositoHistorial, accionesAdminDeposito } from '@/lib/pago-transferencia'
 import {
   camposEnlaceDigitacion,
   camposReaperturaRevision,
@@ -556,6 +556,10 @@ function DepositosPageContent() {
     }),
     [ordenes]
   )
+
+  // Órdenes ya escuchadas, por id: el "Enviado" de un DEP tipo C en el
+  // Historial sale de su orden sin reads nuevas.
+  const ordenesPorId = useMemo(() => new Map(ordenes.map((o) => [o.id, o])), [ordenes])
 
   // ── Mapa de gastos deducibles por motorizado (doc ID) ─────────────────────
 
@@ -2214,8 +2218,9 @@ function DepositosPageContent() {
                           })()}
                         </td>
                         {/* PAGO-TRANSFERENCIA-UX-1 — un DEP tipo C nace AL confirmar: su
-                            creadoAt no es un envío. Sin la orden no hay envío que mostrar. */}
-                        <td className={`${tdCls} whitespace-nowrap`}>{fechaHoraOperativa(enviadoDeposito(dep))}</td>
+                            creadoAt no es un envío: se muestra la subida del comprobante
+                            del comercio, tomada de la orden ya cargada. */}
+                        <td className={`${tdCls} whitespace-nowrap`}>{fechaHoraOperativa(enviadoDepositoHistorial(dep, (id) => ordenesPorId.get(id) as never))}</td>
                         <td className={`${tdCls} whitespace-nowrap`}>{fechaHoraOperativa(fechasDeposito(dep).confirmado)}</td>
                         <td className={tdCls}>
                           {/* Decide `tipo`: el pago del delivery por transferencia

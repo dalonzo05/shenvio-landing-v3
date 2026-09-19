@@ -17,6 +17,7 @@ import {
   montoAsociadoDeposito,
   momentosDeposito,
   enviadoDeposito,
+  enviadoDepositoHistorial,
   momentoCobro,
   resumenAtencionCobros,
   accionesAdminDeposito,
@@ -166,4 +167,40 @@ test('X14 · Rehacer / Eliminar: solo admin, nunca sobre un DEP tipo C', () => {
   assert.deepEqual(accionesAdminDeposito(DEP_0001, 'digitador'), { rehacer: false, eliminar: false })
   assert.deepEqual(accionesAdminDeposito(DEP_0002, 'admin'), { rehacer: false, eliminar: false })
   assert.deepEqual(accionesAdminDeposito({ ...DEP_0001, estado: 'convertido_en_deuda' }, 'admin'), { rehacer: false, eliminar: true })
+})
+
+// ── Historial de Depósitos: columna "Enviado" ────────────────────────────────
+
+const soloSH0003 = (id: string) => (id === 'OZmiYGHAlUBaAzY4yn9I' ? sh0003() : undefined)
+
+test('X15 · Historial tipo A: "Enviado" sigue siendo el envío del motorizado', () => {
+  assert.equal(enviadoDepositoHistorial(DEP_0001, () => undefined), '2026-09-17T23:24:40.777Z')
+  assert.equal(enviadoDepositoHistorial(DEP_0001, soloSH0003), enviadoDeposito(DEP_0001))
+})
+
+test('X16 · Historial tipo C con una orden: la subida del comprobante del comercio (DEP-0002 22:14)', () => {
+  assert.equal(enviadoDepositoHistorial(DEP_0002, soloSH0003), BOUCHER_AT)
+})
+
+test('X17 · Historial tipo C sin timestamp del comprobante, o sin la orden cargada: "—"', () => {
+  const sinAt = () => ({ ...sh0003(), cobroDelivery: { ...sh0003().cobroDelivery, boucherComercio: { at: undefined } } })
+  assert.equal(enviadoDepositoHistorial(DEP_0002, sinAt), null)
+  const sinBoucher = () => ({ ...sh0003(), cobroDelivery: { ...sh0003().cobroDelivery, boucherComercio: null } })
+  assert.equal(enviadoDepositoHistorial(DEP_0002, sinBoucher), null)
+  assert.equal(enviadoDepositoHistorial(DEP_0002, () => undefined), null)
+})
+
+test('X18 · Historial tipo C multiorden: sin instante único, "—" (no elige ninguno)', () => {
+  const multi = { ...DEP_0002, solicitudIds: ['OZmiYGHAlUBaAzY4yn9I', 'otra'] }
+  assert.equal(enviadoDepositoHistorial(multi, () => sh0003()), null)
+  assert.equal(enviadoDepositoHistorial({ ...DEP_0002, solicitudIds: [] }, () => sh0003()), null)
+})
+
+test('X19 · Historial tipo C: nunca usa creadoAt ni confirmadoAt del DEP como envío', () => {
+  const sinAt = () => ({ ...sh0003(), cobroDelivery: { ...sh0003().cobroDelivery, boucherComercio: null } })
+  for (const b of [soloSH0003, sinAt, () => undefined]) {
+    const v = enviadoDepositoHistorial(DEP_0002, b)
+    assert.notEqual(v, DEP_0002.creadoAt)
+    assert.notEqual(v, DEP_0002.confirmadoAt)
+  }
 })
