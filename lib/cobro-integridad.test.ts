@@ -110,6 +110,17 @@ test('I6 · P0 · el boucher de un depósito confirmado no se reemplaza', () => 
   }
 })
 
+test('I6b · STORAGE-EVIDENCIA-INTEGRIDAD-1 · convertido en deuda y anulado también sellan el comprobante', () => {
+  for (const e of ['confirmado', 'convertido_en_deuda', 'anulado']) {
+    assert.equal(puedeMutarBoucherDeposito(e), false, e)
+    assert.throws(() => asegurarBoucherDepositoMutable(e), { message: MSG_DEPOSITO_CONFIRMADO })
+  }
+  // Abiertos: siguen mutables (el gestor reemplaza en revisión).
+  for (const e of ['pendiente_boucher', 'en_revision', 'rechazado', null, undefined]) {
+    assert.equal(puedeMutarBoucherDeposito(e), true, String(e))
+  }
+})
+
 // ── Reversión tipo C ─────────────────────────────────────────────────────────
 
 test('I7 · revertir limpia el cobro: pendiente, sin fecha ni medio, con rastro del movimiento', () => {

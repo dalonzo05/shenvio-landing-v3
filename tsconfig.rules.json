@@ -16,5 +16,8 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["test"]
+  "include": ["test"],
+  // La suite de storage.rules importa lib/ y compila con su propio tsconfig
+  // (tsconfig.storage-rules.json, rootDir en la raíz).
+  "exclude": ["test/storage-rules.test.ts"]
 }

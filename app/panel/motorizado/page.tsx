@@ -27,6 +27,16 @@ import {
   type PestanaDepositosMotorizado,
 } from '@/lib/depositos-motorizado';
 import { resumenViajeHistorial } from '@/lib/historial-viaje-motorizado';
+import {
+  camposCreacionDepositoMotorizado,
+  camposEnvioBoucherMotorizado,
+  campoPunteroDepositoMotorizado,
+  envioReutilizable,
+  firmaEnvioDeposito,
+  pasosPendientesEnvio,
+  type DatosDepositoMotorizado,
+  type EnvioDepositoEnCurso,
+} from '@/lib/deposito-motorizado-envio';
 import { ImageLightbox } from '../_components/ImageLightbox';
 import { fechaHoraOperativa } from '@/lib/fecha-operativa';
 import { avisoNoCobrarMotorizado, descripcionCobroMotorizado, etiquetaDeliveryMotorizado } from '@/lib/pago-transferencia';
@@ -984,6 +994,35 @@ export default function PanelMotorizadoPage() {
     try { return await compressImage(f); } catch { throw new Error(MENSAJE_IMAGEN_ILEGIBLE); }
   };
 
+  // STORAGE-EVIDENCIA-INTEGRIDAD-1 — create-first (lib/deposito-motorizado-envio):
+  // 1) el depósito nace en 'pendiente_boucher' sin boucher, 2) se sube el
+  // comprobante (storage.rules lo acepta solo porque el depósito ya existe y
+  // espera comprobante), 3) boucher + 'en_revision' + punteros en un batch.
+  // El envío en curso se recuerda por grupo: un reintento reusa el mismo id
+  // y no crea un segundo depósito.
+  const enviosEnCurso = useRef<Record<string, EnvioDepositoEnCurso>>({});
+  const enviarDepositoGrupo = async (key: string, datos: DatosDepositoMotorizado, archivo: File) => {
+    // Primero la imagen: si no se puede leer, no queda ningún depósito vacío.
+    const blob = await comprimirComprobante(archivo);
+    const previo = enviosEnCurso.current[key];
+    const envio: EnvioDepositoEnCurso = envioReutilizable(previo, datos)
+      ? previo
+      : { depositoId: doc(collection(db, 'ordenes_deposito')).id, creado: false, firma: firmaEnvioDeposito(datos) };
+    enviosEnCurso.current[key] = envio;
+    const depositoRef = doc(db, 'ordenes_deposito', envio.depositoId);
+    if (pasosPendientesEnvio(envio).includes('crear')) {
+      await setDoc(depositoRef, camposCreacionDepositoMotorizado(datos, serverTimestamp()));
+      envio.creado = true;
+    }
+    const subida = await uploadDepositoBoucher(datos.motorizadoUid, envio.depositoId, blob);
+    const b = writeBatch(db);
+    b.update(depositoRef, camposEnvioBoucherMotorizado(subida, datos.motorizadoUid, serverTimestamp()));
+    const puntero = campoPunteroDepositoMotorizado(datos.tipo);
+    datos.solicitudIds.forEach((id) => b.update(doc(db, 'solicitudes_envio', id), { [puntero]: envio.depositoId }));
+    await b.commit();
+    delete enviosEnCurso.current[key];
+  };
+
   // Load comercio bank accounts and names for deposit orders
   const [comercioAccounts, setComercioAccounts] = useState<Record<string, BankAccount[]>>({});
   const [comercioNames, setComercioNames] = useState<Record<string, string>>({});
@@ -1748,20 +1787,10 @@ export default function PanelMotorizadoPage() {
                               setGroupError((prev) => ({ ...prev, [key]: '' }));
                               setGroupSubmitting((prev) => ({ ...prev, [key]: true }));
                               try {
-                                const depositoRef = doc(collection(db, 'ordenes_deposito'));
-                                const depositoId = depositoRef.id;
-                                let boucherData: { url: string; pathStorage: string; uploadedAt: ReturnType<typeof serverTimestamp>; motorizadoUid: string } | null = null;
                                 const bFile = groupBoucher[key];
-                                if (bFile) {
-                                  const blob = await comprimirComprobante(bFile);
-                                  const motorizadoAuthUid = auth.currentUser?.uid ?? '';
-                                  const { url, pathStorage } = await uploadDepositoBoucher(motorizadoAuthUid, depositoId, blob);
-                                  boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motorizadoAuthUid };
-                                }
-                                await setDoc(depositoRef, {
-                                  creadoAt: serverTimestamp(),
+                                if (!bFile) return;
+                                await enviarDepositoGrupo(key, {
                                   tipo: 'recaudacion_motorizado_storkhub',
-                                  estado: 'en_revision',
                                   destinatario: 'storkhub',
                                   destinatarioId: 'storkhub',
                                   destinatarioNombre: 'Storkhub',
@@ -1774,14 +1803,7 @@ export default function PanelMotorizadoPage() {
                                   montoBruto: resumenDepositos.aStorkhubBruto,
                                   gastosDescontados: totalGastosDeducibles,
                                   gastosIds: gastosNoLiquidados.map((g) => g.id),
-                                  boucher: boucherData,
-                                });
-                                // Marcar en solicitudes el ID del depósito creado.
-                                const b = writeBatch(db);
-                                g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
-                                  'registro.deposito.storkhubDepositoId': depositoId,
-                                }));
-                                await b.commit();
+                                }, bFile);
                                 // registrarMovimiento omitido: el motorizado no tiene permiso de escritura
                                 // en movimientos_financieros. El gestor registra el movimiento al confirmar.
                                 setGroupBoucher((prev) => ({ ...prev, [key]: null }));
@@ -1882,20 +1904,10 @@ export default function PanelMotorizadoPage() {
                               setGroupError((prev) => ({ ...prev, [key]: '' }));
                               setGroupSubmitting((prev) => ({ ...prev, [key]: true }));
                               try {
-                                const depositoRef = doc(collection(db, 'ordenes_deposito'));
-                                const depositoId = depositoRef.id;
-                                let boucherData: { url: string; pathStorage: string; uploadedAt: ReturnType<typeof serverTimestamp>; motorizadoUid: string } | null = null;
                                 const bFile = groupBoucher[key];
-                                if (bFile) {
-                                  const blob = await comprimirComprobante(bFile);
-                                  const motorizadoAuthUid = auth.currentUser?.uid ?? '';
-                                  const { url, pathStorage } = await uploadDepositoBoucher(motorizadoAuthUid, depositoId, blob);
-                                  boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motorizadoAuthUid };
-                                }
-                                await setDoc(depositoRef, {
-                                  creadoAt: serverTimestamp(),
+                                if (!bFile) return;
+                                await enviarDepositoGrupo(key, {
                                   tipo: 'recaudacion_motorizado_comercio',
-                                  estado: 'en_revision',
                                   destinatario: 'comercio',
                                   destinatarioId: g.uid,
                                   destinatarioNombre: g.nombre,
@@ -1905,14 +1917,7 @@ export default function PanelMotorizadoPage() {
                                   motorizadoNombre: nombreMotorizadoParaRegistro({ perfil: motorizadoNombrePerfil, displayName: user?.displayName }),
                                   solicitudIds: g.orders.map((o) => o.id),
                                   montoTotal: g.total,
-                                  boucher: boucherData,
-                                });
-                                // Marcar en solicitudes el ID del depósito creado.
-                                const b = writeBatch(db);
-                                g.orders.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), {
-                                  'registro.deposito.comercioDepositoId': depositoId,
-                                }));
-                                await b.commit();
+                                }, bFile);
                                 // registrarMovimiento omitido: el motorizado no tiene permiso de escritura
                                 // en movimientos_financieros. El gestor registra el movimiento al confirmar.
                                 setGroupBoucher((prev) => ({ ...prev, [key]: null }));

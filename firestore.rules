@@ -1299,6 +1299,34 @@ service cloud.firestore {
           && request.resource.data.digitadoAt == request.time;
       }
 
+      // STORAGE-EVIDENCIA-INTEGRIDAD-1 · MOTO-CREATE-DEPOSITO-CONFIRMADO — el
+      // motorizado creaba su depósito en CUALQUIER estado (solo se miraba
+      // motorizadoUid): podía nacer 'confirmado', con boucher, confirmadoAt o
+      // saldoId propios. Ahora solo nace como la app lo crea (create-first,
+      // lib/deposito-motorizado-envio): A o B, 'pendiente_boucher', SIN
+      // boucher, con su propio UID y la lista cerrada de campos de la
+      // creación. El boucher y 'en_revision' llegan en el update de abajo
+      // (sin cambios), después de que storage.rules aceptó la subida contra
+      // este mismo documento.
+      function creacionDepositoMotorizadoValida() {
+        let d = request.resource.data;
+        return d.keys().hasOnly([
+            'creadoAt', 'tipo', 'estado', 'destinatario', 'destinatarioId', 'destinatarioNombre',
+            'cuentasDestino', 'motorizadoUid', 'motorizadoNombre', 'solicitudIds',
+            'montoTotal', 'montoBruto', 'gastosDescontados', 'gastosIds'
+          ])
+          && d.get('motorizadoUid', '') == request.auth.uid
+          && d.get('estado', '') == 'pendiente_boucher'
+          && (
+            (d.get('tipo', '') == 'recaudacion_motorizado_storkhub' && d.get('destinatario', '') == 'storkhub')
+            || (d.get('tipo', '') == 'recaudacion_motorizado_comercio' && d.get('destinatario', '') == 'comercio')
+          )
+          && d.get('solicitudIds', null) is list
+          && d.solicitudIds.size() > 0
+          && d.get('montoTotal', null) is number
+          && d.montoTotal >= 0;
+      }
+
       // IDENTIDAD-HUMANA-1 — el OR va entre parentesis a proposito.
       //
       // && liga mas fuerte que ||, asi que sin este parentesis
@@ -1308,7 +1336,7 @@ service cloud.firestore {
       // codigo al crear. Lo detectaron los casos L y M de la suite de Rules.
       allow create: if (
           isAdminOrGestor()
-          || (isMotorizadoRole() && request.resource.data.motorizadoUid == request.auth.uid)
+          || (isMotorizadoRole() && creacionDepositoMotorizadoValida())
           || (
             isDigitador()
             && camposDigitacionDeposito()
@@ -1376,8 +1404,14 @@ service cloud.firestore {
       // corregirlo está Rehacer, que primero lo devuelve a revisión — en una
       // escritura aparte, sin tocar el boucher. Todo lo demás del gestor sigue
       // igual: confirmar (desde un estado abierto), anular, convertir.
-      function boucherDeConfirmadoIntacto() {
-        return resource.data.get('estado', '') != 'confirmado'
+      //
+      // STORAGE-EVIDENCIA-INTEGRIDAD-1 — antes solo 'confirmado'. Un depósito
+      // convertido en deuda o anulado también es evidencia cerrada: su
+      // comprobante no se reemplaza ni se quita por el update normal. Misma
+      // lista que ESTADOS_BOUCHER_DEPOSITO_SELLADO (lib/cobro-integridad.ts) y
+      // que el sellado de depositos/{uid}/{depId}/boucher.jpg en storage.rules.
+      function boucherSellado() {
+        return !(resource.data.get('estado', '') in ['confirmado', 'convertido_en_deuda', 'anulado'])
           || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['boucher', 'boucherUrl']);
       }
 
@@ -1395,7 +1429,7 @@ service cloud.firestore {
               && request.resource.data.get('estado', '') == 'anulado');
       }
 
-      allow update: if isAdminOrGestor() && noTocaCodigo() && boucherDeConfirmadoIntacto() && salidaDeConfirmadoAutorizada();
+      allow update: if isAdminOrGestor() && noTocaCodigo() && boucherSellado() && salidaDeConfirmadoAutorizada();
 
       // Motorizado: solo puede subir boucher y pasar a en_revision.
       // Mismo cambio que create/read — se exige rol motorizado activo. Los

@@ -26,7 +26,7 @@ export const MSG_COBRO_YA_PAGADO =
   'Este cobro ya está pagado. No se puede confirmar ni modificar desde aquí; si hay un error, usá Revertir.'
 
 export const MSG_DEPOSITO_CONFIRMADO =
-  'Este depósito ya está confirmado. Su comprobante es evidencia cerrada y no se puede reemplazar.'
+  'Este depósito ya está cerrado (confirmado, convertido en deuda o anulado). Su comprobante es evidencia cerrada y no se puede reemplazar.'
 
 // ─── Cobro ────────────────────────────────────────────────────────────────────
 
@@ -57,11 +57,20 @@ export function asegurarBoucherCobroMutable(cobro: CobroMinimo): void {
 // ─── Depósito ─────────────────────────────────────────────────────────────────
 
 /**
- * ¿Se puede reemplazar el comprobante de este depósito? No si está
- * confirmado. firestore.rules aplica la misma regla a gestor y admin.
+ * STORAGE-EVIDENCIA-INTEGRIDAD-1 — estados en los que el comprobante de un
+ * depósito es evidencia cerrada. Antes solo 'confirmado': un depósito
+ * convertido en deuda o anulado seguía aceptando otro comprobante. Es la
+ * misma lista que boucherSellado() en firestore.rules y el sellado de
+ * depositos/{uid}/{depId}/boucher.jpg en storage.rules.
+ */
+export const ESTADOS_BOUCHER_DEPOSITO_SELLADO: readonly string[] = ['confirmado', 'convertido_en_deuda', 'anulado']
+
+/**
+ * ¿Se puede reemplazar el comprobante de este depósito? No si está sellado.
+ * firestore.rules y storage.rules aplican la misma regla a gestor y admin.
  */
 export function puedeMutarBoucherDeposito(estado: string | null | undefined): boolean {
-  return estado !== 'confirmado'
+  return !ESTADOS_BOUCHER_DEPOSITO_SELLADO.includes(estado ?? '')
 }
 
 export function asegurarBoucherDepositoMutable(estado: string | null | undefined): void {

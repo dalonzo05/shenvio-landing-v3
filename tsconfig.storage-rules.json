@@ -1,0 +1,19 @@
+{
+  // STORAGE-EVIDENCIA-INTEGRIDAD-1 — compilación de los tests de storage.rules.
+  //
+  // Aparte de tsconfig.rules.json porque esta suite importa el helper del
+  // writer (lib/deposito-motorizado-envio.ts) para probar el MISMO flujo que
+  // corre en la app, y eso exige rootDir en la raíz. `outDir` propio.
+  "compilerOptions": {
+    "outDir": ".storage-rules-build",
+    "rootDir": ".",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "target": "es2022",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "files": ["test/storage-rules.test.ts", "lib/deposito-motorizado-envio.ts"]
+}

@@ -163,14 +163,19 @@ service firebase.storage {
         && perfilActivo(request.auth.uid)
         && (
           // Staff: modelo privilegiado, solo se le exige allowlist de nombre.
-          (esStaff(request.auth.uid) && nombreValidoEvidenciasStaff(filename))
+          // STORAGE-EVIDENCIA-INTEGRIDAD-1: su boucher de delivery tampoco se
+          // sobrescribe una vez pagado el cobro (ver boucherDeliveryAbierto).
+          (esStaff(request.auth.uid)
+            && nombreValidoEvidenciasStaff(filename)
+            && (filename != nombreBoucherGestor() || boucherDeliveryAbierto(solicitudId)))
           ||
           // Comercio: solo su propia orden, y SOLO su propio objeto. No puede
           // escribir el del gestor ni el nombre viejo compartido.
           (rolDe(request.auth.uid) == 'Comercio'
             && solicitudExiste(solicitudId)
             && esComercioPropietario(request.auth.uid, solicitudId)
-            && filename == nombreBoucherComercio())
+            && filename == nombreBoucherComercio()
+            && boucherDeliveryAbierto(solicitudId))
           ||
           // Motorizado: solo la orden que tiene asignada, solo sus nombres.
           (rolDe(request.auth.uid) == 'motorizado'
@@ -285,6 +290,58 @@ service firebase.storage {
         && depositoDigitadoPorMiYEditableExistente(motorizadoAuthUid, depositoId);
     }
 
+    // ── STORAGE-EVIDENCIA-INTEGRIDAD-1: la subida mira el depósito ─────────
+    // Antes el motorizado escribía boucher.jpg con solo que el segmento del
+    // path fuera su UID, y staff sin ninguna condición: los dos podían
+    // sobrescribir el comprobante de un depósito ya confirmado, convertido en
+    // deuda o anulado (el objeto cambiaba aunque Firestore no dejara tocar el
+    // puntero). Ahora el depósito tiene que EXISTIR —el motorizado lo crea
+    // primero, create-first en lib/deposito-motorizado-envio— y su estado
+    // decide:
+    //
+    //   motorizado  solo SU depósito A/B y solo mientras espera comprobante
+    //               ('pendiente_boucher'). En 'en_revision' ya no reemplaza:
+    //               eso llega con versionado (F2), no pisando el objeto.
+    //   staff       cualquier depósito cuyo titular sea el del path, salvo
+    //               los sellados. Conserva confirmar y reemplazar en revisión.
+    //
+    // Sellados (confirmado, convertido_en_deuda, anulado): nadie, admin
+    // incluido. Misma lista que boucherSellado() en firestore.rules y
+    // ESTADOS_BOUCHER_DEPOSITO_SELLADO en lib/cobro-integridad.ts. La
+    // corrección excepcional de un comprobante sellado será un flujo auditado
+    // (F2), no un bypass acá.
+    function depositoDe(depositoId) {
+      return firestore.get(/databases/(default)/documents/ordenes_deposito/$(depositoId)).data;
+    }
+
+    function depositoTitularDelPath(motorizadoAuthUid, depositoId) {
+      return firestore.exists(/databases/(default)/documents/ordenes_deposito/$(depositoId))
+        && depositoDe(depositoId).get('motorizadoUid', null) == motorizadoAuthUid;
+    }
+
+    function boucherDepositoSellado(depositoId) {
+      return depositoDe(depositoId).get('estado', '') in ['confirmado', 'convertido_en_deuda', 'anulado'];
+    }
+
+    function depositoEsperaComprobanteDelMotorizado(depositoId) {
+      let dep = depositoDe(depositoId);
+      return dep.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio']
+        && dep.get('estado', '') == 'pendiente_boucher';
+    }
+
+    // ── STORAGE-EVIDENCIA-INTEGRIDAD-1: boucher del pago del delivery ─────
+    // El comprobante del comercio (y el del gestor) respalda el DEP tipo C.
+    // Una vez 'pagado' el cobro es evidencia cerrada: firestore.rules ya no
+    // deja cambiar el cobro (cobroPagadoIntegro), pero el objeto se podía
+    // sobrescribir igual. Misma regla que puedeMutarBoucherCobro() en
+    // lib/cobro-integridad.ts. Sin documento: falla cerrado.
+    function boucherDeliveryAbierto(solicitudId) {
+      let sol = firestore.get(/databases/(default)/documents/solicitudes_envio/$(solicitudId)).data;
+      let cobro = sol.get('cobroDelivery', {});
+      return solicitudExiste(solicitudId)
+        && (!(cobro is map) || cobro.get('estado', '') != 'pagado');
+    }
+
     match /depositos/{motorizadoAuthUid}/{depositoId}/{filename} {
       // El motorizado no necesita lookup adicional: el segmento del path YA
       // establece pertenencia (mismo criterio que en la escritura de S2A).
@@ -304,14 +361,20 @@ service firebase.storage {
 
       // DIGITADOR V1: solo puede subir/reemplazar el boucher de UNA
       // digitación propia y todavía editable — ver funciones arriba.
+      // STORAGE-EVIDENCIA-INTEGRIDAD-1: staff y motorizado ahora también
+      // dependen del depósito y de su estado — ver funciones arriba.
       allow create, update: if signedIn()
         && perfilActivo(request.auth.uid)
         && filename == 'boucher.jpg'
         && (
-          esStaff(request.auth.uid)
+          (esStaff(request.auth.uid)
+            && depositoTitularDelPath(motorizadoAuthUid, depositoId)
+            && !boucherDepositoSellado(depositoId))
           ||
           (rolDe(request.auth.uid) == 'motorizado'
-            && request.auth.uid == motorizadoAuthUid)
+            && request.auth.uid == motorizadoAuthUid
+            && depositoTitularDelPath(motorizadoAuthUid, depositoId)
+            && depositoEsperaComprobanteDelMotorizado(depositoId))
           ||
           (rolDe(request.auth.uid) == 'digitador' && depositoEditablePorDigitador(motorizadoAuthUid, depositoId))
         )

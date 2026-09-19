@@ -836,3 +836,145 @@ test('AD7 · gestor sigue anulando un DEP tipo C confirmado (Revertir), pero no 
   await depositoEn('confirmado')
   await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { estado: 'anulado', anuladoAt: serverTimestamp() }))
 })
+
+// ─── STORAGE-EVIDENCIA-INTEGRIDAD-1 · create-first del motorizado ────────────
+//
+// MOTO-CREATE-DEPOSITO-CONFIRMADO: el motorizado creaba su depósito en
+// cualquier estado. Ahora solo nace como lo crea la app: A o B,
+// 'pendiente_boucher', sin boucher, con su propio UID.
+
+/** Lo que crea lib/deposito-motorizado-envio (paso 1), sin el boucher. */
+function creacionMotorizado(extra: Record<string, unknown> = {}) {
+  return {
+    ...depositoBase(),
+    cuentasDestino: [{ banco: 'LAFISE', numero: '000', titular: 'StorkHub', moneda: 'C$' }],
+    montoBruto: 110,
+    gastosDescontados: 0,
+    gastosIds: [],
+    ...extra,
+  }
+}
+const creacionMotorizadoB = (extra: Record<string, unknown> = {}) => creacionMotorizado({
+  tipo: 'recaudacion_motorizado_comercio',
+  destinatario: 'comercio',
+  destinatarioId: COMERCIO_ID,
+  destinatarioNombre: 'Mariposita',
+  montoBruto: undefined, gastosDescontados: undefined, gastosIds: undefined,
+  ...extra,
+})
+/** Sin las claves undefined (setDoc las rechaza). */
+const limpio = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined))
+
+test('F1 · motorizado crea un depósito A en pendiente_boucher, sin boucher ⇒ ALLOW', async () => {
+  await assertSucceeds(setDoc(doc(como(UID_MOTO), 'ordenes_deposito', 'depF1'), creacionMotorizado()))
+})
+
+test('F2 · motorizado crea un depósito B en pendiente_boucher, sin boucher ⇒ ALLOW', async () => {
+  await assertSucceeds(setDoc(doc(como(UID_MOTO), 'ordenes_deposito', 'depF2'), limpio(creacionMotorizadoB())))
+})
+
+test('F3 · motorizado crea directamente en_revision (con o sin boucher) ⇒ DENY', async () => {
+  const db = como(UID_MOTO)
+  await assertFails(setDoc(doc(db, 'ordenes_deposito', 'depF3a'), creacionMotorizado({ estado: 'en_revision' })))
+  await assertFails(setDoc(doc(db, 'ordenes_deposito', 'depF3b'), creacionMotorizado({
+    estado: 'en_revision',
+    boucher: { url: 'https://example.test/b.jpg', pathStorage: `depositos/${UID_MOTO}/depF3b/boucher.jpg`, motorizadoUid: UID_MOTO },
+  })))
+})
+
+test('F4 · motorizado crea confirmado ⇒ DENY', async () => {
+  await assertFails(setDoc(doc(como(UID_MOTO), 'ordenes_deposito', 'depF4'), creacionMotorizado({ estado: 'confirmado' })))
+  await assertFails(setDoc(doc(como(UID_MOTO), 'ordenes_deposito', 'depF4b'), creacionMotorizado({
+    estado: 'confirmado', confirmadoAt: serverTimestamp(), confirmadoPorUid: UID_MOTO,
+  })))
+})
+
+test('F5 · motorizado crea convertido_en_deuda ⇒ DENY', async () => {
+  await assertFails(setDoc(doc(como(UID_MOTO), 'ordenes_deposito', 'depF5'), creacionMotorizado({ estado: 'convertido_en_deuda', saldoId: 's1' })))
+})
+
+test('F6 · motorizado crea anulado ⇒ DENY', async () => {
+  await assertFails(setDoc(doc(como(UID_MOTO), 'ordenes_deposito', 'depF6'), creacionMotorizado({ estado: 'anulado', anuladoAt: serverTimestamp() })))
+})
+
+test('F7 · motorizado crea un depósito a nombre de otro motorizado ⇒ DENY', async () => {
+  await assertFails(setDoc(doc(como(UID_MOTO), 'ordenes_deposito', 'depF7'), creacionMotorizado({ motorizadoUid: 'otro_moto' })))
+})
+
+test('F8 · motorizado crea un DEP tipo C ⇒ DENY', async () => {
+  await assertFails(setDoc(doc(como(UID_MOTO), 'ordenes_deposito', 'depF8'), creacionMotorizado({ tipo: 'pago_delivery_deposito' })))
+})
+
+test('F9 · pendiente_boucher pero con boucher, confirmación, saldo, anulación, digitación o tipo/destino cruzados ⇒ DENY', async () => {
+  const db = como(UID_MOTO)
+  const casos: Record<string, unknown>[] = [
+    { boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x' } },
+    { boucherUrl: 'https://example.test/b.jpg' },
+    { confirmadoAt: serverTimestamp() },
+    { confirmadoPorUid: UID_MOTO },
+    { saldoId: 's1' },
+    { anuladoAt: serverTimestamp() },
+    { digitadoPorUid: UID_MOTO },
+    { destinatario: 'comercio' },
+    { solicitudIds: [] },
+    { montoTotal: -1 },
+    { montoTotal: '110' },
+  ]
+  for (const [i, extra] of casos.entries()) {
+    await assertFails(setDoc(doc(db, 'ordenes_deposito', 'depF9_' + i), creacionMotorizado(extra)))
+  }
+})
+
+test('F10 · flujo create-first completo: create → (upload) → batch boucher + en_revision + puntero ⇒ ALLOW', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordF10'), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0010', secuencia: 10,
+      asignacion: { motorizadoAuthUid: UID_MOTO },
+    })
+  })
+  const db = como(UID_MOTO)
+  const ref = doc(db, 'ordenes_deposito', 'depF10')
+  await assertSucceeds(setDoc(ref, creacionMotorizado({ solicitudIds: ['ordF10'] })))
+  const b = writeBatch(db)
+  b.update(ref, {
+    boucher: { url: 'https://example.test/b.jpg', pathStorage: `depositos/${UID_MOTO}/depF10/boucher.jpg`, uploadedAt: serverTimestamp(), motorizadoUid: UID_MOTO },
+    estado: 'en_revision',
+  })
+  b.update(doc(db, 'solicitudes_envio', 'ordF10'), { 'registro.deposito.storkhubDepositoId': 'depF10' })
+  await assertSucceeds(b.commit())
+  // Ya en revisión: el motorizado no vuelve a tocar el boucher (llega en F2).
+  await assertFails(updateDoc(ref, { boucher: { url: 'https://example.test/otro.jpg', pathStorage: 'x' } }))
+})
+
+// ─── STORAGE-EVIDENCIA-INTEGRIDAD-1 · sellado ampliado ───────────────────────
+
+test('SL1 · convertido_en_deuda: gestor ni admin cambian ni quitan el boucher ⇒ DENY', async () => {
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await depositoEn('convertido_en_deuda')
+    await assertFails(updateDoc(doc(como(uid), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+    await assertFails(updateDoc(doc(como(uid), 'ordenes_deposito', 'depI'), { boucher: deleteField() }))
+  }
+})
+
+test('SL2 · anulado: gestor ni admin cambian el boucher ni el boucherUrl del tipo C ⇒ DENY', async () => {
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await depositoEn('anulado')
+    await assertFails(updateDoc(doc(como(uid), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+    await depositoEn('anulado', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
+    await assertFails(updateDoc(doc(como(uid), 'ordenes_deposito', 'depI'), { boucherUrl: 'https://example.test/otro.jpg' }))
+  }
+})
+
+test('SL3 · sellados, lo que no es el boucher sigue como antes: saldoId tras convertir, notas ⇒ ALLOW', async () => {
+  await depositoEn('convertido_en_deuda')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { saldoId: 'saldo1' }))
+  await depositoEn('anulado')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { notaConversion: 'ok' }))
+})
+
+test('SL4 · abiertos siguen abiertos: gestor reemplaza en pendiente_boucher y rechazado ⇒ ALLOW', async () => {
+  await depositoEn('pendiente_boucher')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+  await depositoEn('rechazado')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+})
