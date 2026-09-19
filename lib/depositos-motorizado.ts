@@ -216,7 +216,7 @@ export function siguienteLimiteDepositos(actual: number, disponibles: number): n
  */
 export function avisoTopeDepositos(cargados: number): string | null {
   return cargados >= TOPE_QUERY_HISTORIAL_MOTORIZADO
-    ? 'Mostrando los últimos registros cargados. El historial completo se habilitará próximamente.'
+    ? 'Mostrando los registros cargados. El historial completo se habilitará próximamente.'
     : null
 }
 

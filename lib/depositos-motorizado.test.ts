@@ -182,8 +182,12 @@ test('M14 · Ver más: 30 → 60 → 90 → máximo disponible (≤ 100)', () =>
 test('M15 · aviso de tope: solo al llegar a 100 y sin afirmar que son los más recientes', () => {
   assert.equal(avisoTopeDepositos(99), null)
   const aviso = avisoTopeDepositos(100)
-  assert.equal(aviso, 'Mostrando los últimos registros cargados. El historial completo se habilitará próximamente.')
+  assert.equal(aviso, 'Mostrando los registros cargados. El historial completo se habilitará próximamente.')
+  assert.ok(aviso!.includes('Mostrando los registros cargados'))
+  // La query no tiene orderBy: nada que sugiera recencia.
+  assert.ok(!/[úu]ltim/i.test(aviso!))
   assert.ok(!/reciente/i.test(aviso!))
+  assert.ok(!/nuev|actual/i.test(aviso!))
   assert.ok(!/100/.test(aviso!))
 })
 
