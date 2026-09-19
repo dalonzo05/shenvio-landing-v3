@@ -107,6 +107,16 @@ service cloud.firestore {
         && userDoc().data.get('rol', '') == 'motorizado';
     }
 
+    // DEPOSITO-AUDITORIA-1 — el rol REAL, para poder exigir que un evento de
+    // auditoría lo persista tal cual. No se usa para decidir permisos (para
+    // eso están los helpers de arriba, uno por rol): se usa para comparar
+    // contra lo que el cliente escribe en `porRol`, de forma que un evento no
+    // pueda afirmar un rol que el perfil no respalda. Mismo default '' que el
+    // resto: un perfil sin rol no coincide con ningún valor del esquema.
+    function rolDelUsuario() {
+      return userDoc().data.get('rol', '');
+    }
+
     // DIGITADOR V1: helper focal, mismo patrón que isGestor()/isMotorizadoRole().
     // NO fusionar con isAdminOrGestor() — cada operación que el digitador
     // necesita se abre una por una, explícitamente, donde se use este helper.
@@ -1410,9 +1420,169 @@ service cloud.firestore {
       // comprobante no se reemplaza ni se quita por el update normal. Misma
       // lista que ESTADOS_BOUCHER_DEPOSITO_SELLADO (lib/cobro-integridad.ts) y
       // que el sellado de depositos/{uid}/{depId}/boucher.jpg en storage.rules.
+      // DEPOSITO-AUDITORIA-1 — el sellado cubre ahora TAMBIÉN los punteros de
+      // versión. Sin esto, un depósito sellado podía quedarse con el mismo
+      // objeto pero afirmando otra versión (o ninguna), y el historial dejaba
+      // de describir la evidencia que respalda el dinero ya recibido.
       function boucherSellado() {
         return !(resource.data.get('estado', '') in ['confirmado', 'convertido_en_deuda', 'anulado'])
-          || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['boucher', 'boucherUrl']);
+          || !request.resource.data.diff(resource.data).affectedKeys()
+               .hasAny(['boucher', 'boucherUrl', 'boucherVersion', 'boucherVersionId']);
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // DEPOSITO-AUDITORIA-1 — corregir sin borrar
+      //
+      // F1 dejaba corregir un depósito de una sola forma: BORRÁNDOLO. El
+      // gestor "devolvía al motorizado" con un delete y el admin "eliminaba"
+      // con otro, así que cada corrección se llevaba puesto el DEP-N, el
+      // comprobante anterior, las órdenes agrupadas y cualquier rastro de
+      // quién la pidió y por qué. Acá se cierra esa vía y se abren dos
+      // transiciones auditadas en su lugar.
+      //
+      // ─── Por qué existe `ultimoEventoId` ──────────────────────────────
+      //
+      // El bloque exige que ciertas transiciones viajen en el MISMO batch que
+      // su evento de auditoría. Rules no puede enumerar una subcolección: para
+      // hacer existsAfter() sobre el evento hay que poder NOMBRARLO. Se probó
+      // derivar el id de datos que la regla ya tiene (la versión, el
+      // versionId) y no cierra: 'rehacer' puede repetirse sobre la misma
+      // versión, así que cualquier esquema determinístico o colisiona (y
+      // bloquea una operación legítima, porque el create sobre un id ya
+      // existente es un update y update está DENY) o deja de ser
+      // determinístico. El campo explícito es la única forma honesta: el
+      // cliente dice qué evento escribió, y la regla va a leerlo y lo
+      // verifica entero.
+      //
+      // No es un campo de confianza: si apunta a un documento que no existe,
+      // existsAfter() falla y la transición muere; si apunta a uno que existe
+      // pero dice otra cosa, las comparaciones de abajo lo rechazan.
+      function motivoAuditable(m) {
+        return m is string && m.size() >= 3 && m.size() <= 300;
+      }
+
+      function eventoDeclarado() {
+        return request.resource.data.get('ultimoEventoId', '');
+      }
+
+      function eventoDelBatch() {
+        return getAfter(/databases/$(database)/documents/ordenes_deposito/$(depositoId)/eventos/$(eventoDeclarado())).data;
+      }
+
+      // Existe, se escribió en ESTE batch, es del tipo esperado y lo firma
+      // quien está haciendo la escritura, con la hora del servidor.
+      function eventoEnEsteBatch(tipo) {
+        return eventoDeclarado() is string
+          && eventoDeclarado().size() > 0
+          && existsAfter(/databases/$(database)/documents/ordenes_deposito/$(depositoId)/eventos/$(eventoDeclarado()))
+          && eventoDelBatch().get('tipo', '') == tipo
+          && eventoDelBatch().get('porUid', '') == request.auth.uid
+          && eventoDelBatch().get('at', null) == request.time;
+      }
+
+      function esDepositoAB() {
+        return resource.data.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio'];
+      }
+
+      // ─── A. Versionado del comprobante ────────────────────────────────
+      //
+      // La versión efectiva de un depósito nunca reemplazado es 1, sin que el
+      // campo exista: los históricos (DEP-0001, DEP-0003…) no se migran y su
+      // `boucher.jpg` ES la v1. Por eso el default del get() es 1 y no 0.
+      function versionEfectivaActual() {
+        return resource.data.get('boucherVersion', 1);
+      }
+
+      // +1 EXACTO. Esta sola condición es la que hace que dos reemplazos
+      // simultáneos no ganen los dos: el segundo batch evalúa contra el
+      // estado que ya commiteó el primero, le sale 2 != 3 y muere. No hay
+      // last-write-wins silencioso. También rechaza 1→3, que perdería una
+      // versión intermedia sin dejar rastro.
+      function versionSubeEnUno() {
+        return request.resource.data.get('boucherVersion', 0) == versionEfectivaActual() + 1;
+      }
+
+      // El puntero del depósito tiene que apuntar al objeto de ESTA versión,
+      // en el path versionado y bajo el UID del titular. Sin esto, un cliente
+      // podía declarar una versión nueva y dejar `boucher` apuntando a
+      // cualquier otra cosa — incluida la versión vieja.
+      function pathDeLaVersionDeclarada() {
+        return 'depositos/' + resource.data.get('motorizadoUid', '')
+          + '/' + depositoId
+          + '/bouchers/' + request.resource.data.get('boucherVersionId', '')
+          + '.jpg';
+      }
+
+      function versionIdNuevoYCoherente() {
+        return request.resource.data.get('boucherVersionId', '') is string
+          && request.resource.data.get('boucherVersionId', '').size() > 0
+          && request.resource.data.get('boucherVersionId', '') != resource.data.get('boucherVersionId', '')
+          && request.resource.data.get(['boucher', 'pathStorage'], '') == pathDeLaVersionDeclarada();
+      }
+
+      function eventoReemplazoValido() {
+        return eventoEnEsteBatch('BOUCHER_REEMPLAZADO')
+          && eventoDelBatch().get('version', 0) == request.resource.data.get('boucherVersion', -1)
+          && eventoDelBatch().get('versionId', '') == request.resource.data.get('boucherVersionId', '')
+          && motivoAuditable(eventoDelBatch().get('motivo', null));
+      }
+
+      // ─── B. Pedir corrección: en_revision → devuelto ──────────────────
+      //
+      // Lista cerrada de campos. Lo que NO puede cambiar acá es el punto del
+      // bloque: boucher, montoTotal, solicitudIds, motorizadoUid, tipo,
+      // destinatario y codigo siguen intactos, y los punteros de las órdenes
+      // ni se mencionan (son otro documento, y esta transición no los toca).
+      function devolucionValida() {
+        return isAdminOrGestor()
+          && esDepositoAB()
+          && resource.data.get('estado', '') == 'en_revision'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+               'estado', 'devueltoAt', 'devueltoPorUid', 'motivoDevolucion', 'updatedAt', 'ultimoEventoId'
+             ])
+          && request.resource.data.get('devueltoPorUid', '') == request.auth.uid
+          && request.resource.data.get('devueltoAt', null) == request.time
+          && motivoAuditable(request.resource.data.get('motivoDevolucion', null))
+          && eventoEnEsteBatch('DEPOSITO_DEVUELTO')
+          && motivoAuditable(eventoDelBatch().get('motivo', null));
+      }
+
+      // Entrar a 'devuelto' SOLO por la puerta de arriba. Sin esto la regla
+      // amplia de gestor/admin —que no tiene hasOnly— dejaría escribir
+      // estado:'devuelto' sin motivo, sin actor y sin evento, y "Pedir
+      // corrección" no probaría nada.
+      function entradaADevueltoAuditada() {
+        return request.resource.data.get('estado', '') != 'devuelto'
+          || resource.data.get('estado', '') == 'devuelto'
+          || devolucionValida();
+      }
+
+      // Salir de 'devuelto' es del MOTORIZADO, con una versión nueva (regla
+      // propia más abajo). Staff no confirma un depósito que sigue esperando
+      // comprobante (§28) ni lo devuelve a revisión por la puerta de atrás.
+      // Se le dejan las dos salidas que no son "dar por buena la evidencia":
+      // convertirlo en deuda, y anularlo — ambas ya auditadas por su lado.
+      function salidaDeDevueltoAutorizada() {
+        return resource.data.get('estado', '') != 'devuelto'
+          || request.resource.data.get('estado', '') == 'devuelto'
+          || request.resource.data.get('estado', '') == 'convertido_en_deuda'
+          || (isAdmin() && request.resource.data.get('estado', '') == 'anulado');
+      }
+
+      // ─── C. Anular: el reemplazo del delete físico ────────────────────
+      //
+      // Tipo C queda EXCLUIDO a propósito: su anulación es la de Revertir en
+      // Cobros (lib/cobro-integridad), que ya anula el DEP y el movimiento
+      // juntos y no pasa por este flujo. Meterlo acá rompería esa reversión
+      // sin agregar auditoría que ese camino no tenga ya.
+      function anulacionAuditada() {
+        return request.resource.data.get('estado', '') != 'anulado'
+          || resource.data.get('estado', '') == 'anulado'
+          || resource.data.get('tipo', '') == 'pago_delivery_deposito'
+          || (isAdmin()
+              && request.resource.data.get('anuladoPorUid', '') == request.auth.uid
+              && request.resource.data.get('anuladoAt', null) == request.time
+              && motivoAuditable(request.resource.data.get('motivoAnulacion', null)));
       }
 
       // PAGO-TRANSFERENCIA-UX-1 · DEP-ACCIONES-ADMIN-ONLY — sacar un depósito
@@ -1429,20 +1599,62 @@ service cloud.firestore {
               && request.resource.data.get('estado', '') == 'anulado');
       }
 
-      allow update: if isAdminOrGestor() && noTocaCodigo() && boucherSellado() && salidaDeConfirmadoAutorizada();
+      allow update: if isAdminOrGestor()
+        && noTocaCodigo()
+        && boucherSellado()
+        && salidaDeConfirmadoAutorizada()
+        // DEPOSITO-AUDITORIA-1 — tres puertas nuevas sobre la MISMA regla
+        // amplia de siempre. No le quitan nada al gestor salvo las formas
+        // deshonestas de las transiciones que este bloque introduce.
+        && entradaADevueltoAuditada()
+        && salidaDeDevueltoAutorizada()
+        && anulacionAuditada();
 
       // Motorizado: solo puede subir boucher y pasar a en_revision.
       // Mismo cambio que create/read — se exige rol motorizado activo. Los
       // campos y estados permitidos quedan exactamente como estaban.
+      //
+      // DEPOSITO-AUDITORIA-1 — 'rechazado' SALE de la lista. Reenviar sobre un
+      // rechazado era la única corrección que tenía el motorizado, y no era
+      // una: pisaba el objeto de Storage y el documento sin dejar versión ni
+      // motivo (deuda W4). La corrección ahora es 'devuelto' + versión nueva,
+      // en la regla de reemplazo de abajo. 'rechazado' vuelve a ser lo que
+      // dice ser: terminal.
       allow update: if isMotorizadoRole()
         && resource.data.motorizadoUid == request.auth.uid
-        && resource.data.estado in ['pendiente_boucher', 'rechazado']
+        && resource.data.estado == 'pendiente_boucher'
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'boucher',
           'estado',
           'updatedAt'
         ])
         && request.resource.data.estado == 'en_revision';
+
+      // DEPOSITO-AUDITORIA-1 — reemplazo versionado del comprobante.
+      //
+      // Es la ÚNICA forma en que el motorizado corrige evidencia, y no toca
+      // nada más: el DEP-N, el monto, el bruto, los gastos, las órdenes, el
+      // destinatario, el tipo y la confirmación anterior quedan fuera de la
+      // lista cerrada. El estado de destino es siempre 'en_revision' — desde
+      // 'en_revision' es un no-op que mantiene la escritura uniforme, y desde
+      // 'devuelto' es el retorno a la cola del gestor, con el MISMO DEP-N y
+      // sin liberar una sola orden.
+      allow update: if isMotorizadoRole()
+        && resource.data.get('motorizadoUid', '') == request.auth.uid
+        && esDepositoAB()
+        && resource.data.get('estado', '') in ['en_revision', 'devuelto']
+        && request.resource.data.get('estado', '') == 'en_revision'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'boucher',
+          'boucherVersion',
+          'boucherVersionId',
+          'estado',
+          'updatedAt',
+          'ultimoEventoId'
+        ])
+        && versionSubeEnUno()
+        && versionIdNuevoYCoherente()
+        && eventoReemplazoValido();
 
       // Digitador: adjunta el boucher y recién ahí pasa a 'en_revision' —
       // única transición permitida desde 'pendiente_boucher' (ver ÚLTIMA
@@ -1465,11 +1677,100 @@ service cloud.firestore {
         && request.resource.data.estado == 'en_revision'
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['boucher', 'updatedAt']);
 
-      // DEP-ACCIONES-ADMIN-ONLY — Eliminar un depósito cerrado es solo del
-      // admin. El gestor conserva "Devolver al motorizado", que borra un
-      // depósito todavía abierto para que el motorizado lo rehaga.
-      allow delete: if isAdmin()
-        || (isAdminOrGestor() && resource.data.get('estado', '') in ['pendiente_boucher', 'en_revision']);
+      // DEPOSITO-AUDITORIA-1 — NO hay delete físico de un depósito. Para
+      // nadie, en ningún estado, admin incluido.
+      //
+      // Antes: el admin borraba cualquiera ("Eliminar") y gestor/admin
+      // borraban los abiertos ("Devolver al motorizado"). Las dos vías
+      // destruían el DEP-N que el trigger reparte UNA sola vez, el
+      // comprobante, la lista de órdenes y el motivo — y dejaban a las
+      // órdenes apuntando a un documento inexistente hasta que se las
+      // liberaba en el mismo batch, lo que nunca fue una garantía, solo una
+      // costumbre del writer.
+      //
+      // Lo reemplazan dos transiciones de estado con actor, hora y motivo:
+      // 'devuelto' (Pedir corrección) y 'anulado' (Anular). Las órdenes se
+      // pueden seguir liberando en la anulación, con la MISMA semántica que
+      // tenía Eliminar; el documento, nunca.
+      allow delete: if false;
+
+      // ═══════════════════════════════════════════════════════════════════
+      // DEPOSITO-AUDITORIA-1 — historia append-only del depósito
+      //
+      // Un evento se escribe y no se toca más: update DENY, delete DENY, sin
+      // excepción de rol. Un historial que se puede editar no es un historial.
+      //
+      // Lo que el create NO deja hacer, y es el punto entero:
+      //   · firmar con otro UID        (porUid == request.auth.uid)
+      //   · inventar la hora           (at == request.time)
+      //   · inventar el rol            (porRol == usuarios/{uid}.rol)
+      //   · escribir un tipo cualquiera (lista cerrada)
+      //   · omitir el motivo donde hay una decisión humana detrás
+      //
+      // `porRol` merece la nota: el ledger persiste `creadoPorRol` con lo que
+      // el writer le pase —por eso una acción de admin queda registrada como
+      // 'gestor' y Auditoría tiene que presentarlo como "rol registrado" y no
+      // como identidad (deuda AUD-ROL-NO-DISCRIMINA-ADMIN)—. Acá el rol se
+      // ata al perfil real, así que SÍ se puede afirmar quién actuó y como qué.
+      match /eventos/{eventoId} {
+        function deposito() {
+          return get(/databases/$(database)/documents/ordenes_deposito/$(depositoId)).data;
+        }
+
+        function existeDeposito() {
+          return exists(/databases/$(database)/documents/ordenes_deposito/$(depositoId));
+        }
+
+        function motivoDeEvento(m) {
+          return m is string && m.size() >= 3 && m.size() <= 300;
+        }
+
+        function tipoEvento() {
+          return request.resource.data.get('tipo', '');
+        }
+
+        // Mismo criterio de lectura que el propio depósito: quien puede ver
+        // el DEP puede ver su historia. Cuesta un get() del padre por
+        // evaluación, y por eso la UI los carga SOLO al abrir el detalle —
+        // nunca en un listado (§40, sin N+1).
+        allow read: if existeDeposito() && (
+          isAdminOrGestor()
+          || (isMotorizadoRole() && deposito().get('motorizadoUid', '') == request.auth.uid)
+          || (isComercioRole()
+              && deposito().get('destinatario', '') == 'comercio'
+              && deposito().get('destinatarioId', null) == comercioIdDelUsuario())
+          || (isDigitador() && deposito().get('digitadoPorUid', null) == request.auth.uid)
+        );
+
+        allow create: if existeDeposito()
+          && hasKnownActiveRole()
+          && tipoEvento() in [
+               'BOUCHER_SUBIDO', 'BOUCHER_REEMPLAZADO', 'DEPOSITO_DEVUELTO',
+               'DEPOSITO_CONFIRMADO', 'DEPOSITO_REHECHO', 'DEPOSITO_ANULADO'
+             ]
+          && request.resource.data.get('at', null) == request.time
+          && request.resource.data.get('porUid', '') == request.auth.uid
+          && request.resource.data.get('porRol', '') == rolDelUsuario()
+          && (
+            !(tipoEvento() in ['BOUCHER_REEMPLAZADO', 'DEPOSITO_DEVUELTO', 'DEPOSITO_REHECHO', 'DEPOSITO_ANULADO'])
+            || motivoDeEvento(request.resource.data.get('motivo', null))
+          )
+          && (
+            // El motorizado solo narra lo suyo, y solo sobre SU depósito.
+            (isMotorizadoRole()
+              && tipoEvento() in ['BOUCHER_SUBIDO', 'BOUCHER_REEMPLAZADO']
+              && deposito().get('motorizadoUid', '') == request.auth.uid)
+            ||
+            // Gestor y admin: revisar el depósito y pedir corrección.
+            (isAdminOrGestor() && tipoEvento() in ['DEPOSITO_DEVUELTO', 'DEPOSITO_CONFIRMADO'])
+            ||
+            // Rehacer y Anular siguen siendo del admin, acá también: el
+            // evento no puede quedar por encima de la acción que narra.
+            (isAdmin() && tipoEvento() in ['DEPOSITO_REHECHO', 'DEPOSITO_ANULADO'])
+          );
+
+        allow update, delete: if false;
+      }
     }
 
     // Ledger financiero — solo gestor/admin puede leer o escribir.

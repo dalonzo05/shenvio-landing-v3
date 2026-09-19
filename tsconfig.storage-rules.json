@@ -15,5 +15,10 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "files": ["test/storage-rules.test.ts", "lib/deposito-motorizado-envio.ts"]
+  "files": [
+    "test/storage-rules.test.ts",
+    "lib/deposito-motorizado-envio.ts",
+    "lib/deposito-boucher-version.ts",
+    "lib/deposito-correccion.ts"
+  ]
 }

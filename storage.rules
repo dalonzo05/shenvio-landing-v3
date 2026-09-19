@@ -385,6 +385,86 @@ service firebase.storage {
       allow delete: if false;
     }
 
+    // ── DEPOSITO-AUDITORIA-1: versiones del comprobante ───────────────────
+    //
+    //     depositos/{uid}/{depId}/bouchers/{versionId}.jpg
+    //
+    // CREATE ONLY. `update` y `delete` están DENY para TODOS —motorizado,
+    // gestor, admin— sin una sola excepción: una versión escrita es evidencia
+    // y no se toca nunca más. Ese es el punto entero del bloque. Corregir un
+    // comprobante ya no significa pisar un objeto ni borrar el depósito: se
+    // sube una versión NUEVA y la anterior se queda donde está.
+    //
+    // El path viejo (`boucher.jpg`, un objeto por depósito) NO se toca y NO
+    // se migra: sigue siendo la v1 efectiva de todo depósito histórico, con
+    // su bloque de reglas de F1 intacto —el flujo inicial create-first no se
+    // duplica acá—. Este match es de 5 segmentos y aquel de 4, así que no se
+    // solapan: un objeto cae en uno o en el otro, nunca en los dos.
+    //
+    // Estados: solo 'en_revision' y 'devuelto'. 'pendiente_boucher' es la
+    // primera subida (flujo de F1, path legacy) y los sellados —confirmado,
+    // convertido_en_deuda, anulado— no admiten evidencia nueva ni siquiera de
+    // admin, igual que ya pasaba con boucher.jpg. Staff entra por el mismo
+    // par de estados: su corrección también es versionada y auditada, no un
+    // bypass.
+    //
+    // El nombre se valida por FORMA, no contra Firestore: el objeto se sube
+    // ANTES del batch que declara la versión en el documento (mismo orden que
+    // el create-first de F1), así que en este instante el depósito todavía no
+    // conoce este versionId. Quien ata las dos cosas es firestore.rules, que
+    // exige que `boucher.pathStorage` sea exactamente el path de la versión
+    // declarada. Un upload que nunca llega a su batch queda huérfano y NO se
+    // borra automáticamente (delete es DENY): deuda
+    // MOTO-DEP-BOUCHER-VERSION-HUERFANA.
+    function depositoAbiertoParaVersion(depositoId) {
+      let dep = depositoDe(depositoId);
+      return dep.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio']
+        && dep.get('estado', '') in ['en_revision', 'devuelto'];
+    }
+
+    match /depositos/{motorizadoAuthUid}/{depositoId}/bouchers/{filename} {
+      // Mismos lectores que el comprobante vigente: una versión anterior es
+      // evidencia del mismo depósito, no de otro.
+      allow get: if signedIn()
+        && perfilActivo(request.auth.uid)
+        && (
+          esStaff(request.auth.uid)
+          ||
+          (rolDe(request.auth.uid) == 'motorizado' && request.auth.uid == motorizadoAuthUid)
+          ||
+          (rolDe(request.auth.uid) == 'Comercio' && esComercioDestinatarioDeDeposito(request.auth.uid, depositoId))
+          ||
+          (rolDe(request.auth.uid) == 'digitador' && depositoDigitadoPorMi(motorizadoAuthUid, depositoId))
+        );
+
+      allow list: if false;
+
+      allow create: if signedIn()
+        && perfilActivo(request.auth.uid)
+        // `resource == null` es la garantía de inmutabilidad, y NO es
+        // redundante con `allow update: if false`: el emulador de Storage
+        // clasifica una subida sobre un objeto existente como create, no como
+        // update, así que sin esta condición el motorizado podía pisar una
+        // versión ya escrita y el versionado dejaba de serlo. Se verificó
+        // empíricamente (SV7) antes de escribirla.
+        && resource == null
+        && filename.matches('[A-Za-z0-9_-]{8,64}\\.jpg')
+        && depositoTitularDelPath(motorizadoAuthUid, depositoId)
+        && depositoAbiertoParaVersion(depositoId)
+        && (
+          (rolDe(request.auth.uid) == 'motorizado' && request.auth.uid == motorizadoAuthUid)
+          ||
+          esStaff(request.auth.uid)
+        )
+        && request.resource.contentType == 'image/jpeg'
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024;
+
+      // Inmutable. No hay "reemplazar una versión": eso es una versión nueva.
+      allow update: if false;
+      allow delete: if false;
+    }
+
     // Fotos de perfil de motorizados (las sube gestor/admin, no el propio motorizado)
     match /motorizados/{motorizadoId}/{filename} {
       // P1-S3: solo staff. motorizadoId es el ID interno del doc, no el Auth

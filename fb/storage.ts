@@ -87,6 +87,33 @@ export async function uploadDepositoBoucher(
 }
 
 /**
+ * DEPOSITO-AUDITORIA-1 — sube una VERSIÓN nueva del comprobante:
+ *
+ *     depositos/{motorizadoAuthUid}/{depositoId}/bouchers/{versionId}.jpg
+ *
+ * Función aparte de uploadDepositoBoucher() a propósito: aquella escribe
+ * SIEMPRE el mismo objeto, y esta no puede sobrescribir nunca —storage.rules
+ * la deja create-only, con update y delete en DENY para todos—. Fundirlas
+ * haría que un llamador se equivocara de path y el reemplazo terminara
+ * pisando la evidencia anterior, que es exactamente lo que el versionado
+ * existe para impedir.
+ *
+ * El `path` lo calcula lib/deposito-boucher-version y llega ya armado: la
+ * forma del versionId se valida allí con la misma expresión que aplica
+ * storage.rules, así que un id mal formado falla con un error legible en vez
+ * de un permission-denied opaco.
+ */
+export async function uploadVersionBoucherDeposito(
+  path: string,
+  blob: Blob,
+): Promise<{ url: string; pathStorage: string }> {
+  const storageRef = ref(storage, path)
+  await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' })
+  const url = await getDownloadURL(storageRef)
+  return { url, pathStorage: path }
+}
+
+/**
  * Actor que sube el comprobante de pago del delivery. Es un tipo cerrado a
  * propósito: el actor determina el objeto físico y, por tanto, quién puede
  * sobrescribirlo. Nunca debe derivarse de un input del usuario.

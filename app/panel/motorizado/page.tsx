@@ -9,7 +9,7 @@ import {
 } from 'firebase/firestore';
 import { auth, db, functions } from '@/fb/config';
 import { httpsCallable } from 'firebase/functions';
-import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBoucher, type TipoEvidencia } from '@/fb/storage'
+import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBoucher, uploadVersionBoucherDeposito, type TipoEvidencia } from '@/fb/storage'
 import { registrarMovimiento } from '@/lib/financial-writes';
 import { calcularDeposito } from '@/lib/calculo-deposito';
 import { mostrarCodigo } from '@/lib/codigo-humano';
@@ -37,6 +37,22 @@ import {
   type DatosDepositoMotorizado,
   type EnvioDepositoEnCurso,
 } from '@/lib/deposito-motorizado-envio';
+// DEPOSITO-AUDITORIA-1 — corregir el comprobante sin perder el depósito.
+import {
+  AVISO_REEMPLAZO_BOUCHER,
+  camposReemplazoBoucher,
+  eventoReemplazoBoucher,
+  motorizadoPuedeReemplazarBoucher,
+  planReemplazoBoucher,
+} from '@/lib/deposito-boucher-version';
+import { SUBCOLECCION_EVENTOS_DEPOSITO } from '@/lib/deposito-eventos';
+import {
+  BOTON_CORREGIR_COMPROBANTE,
+  BOTON_SUBIR_CORRECCION,
+  ESTADO_DEVUELTO,
+  ETIQUETA_DEVUELTO,
+  TEXTO_ESPERANDO_CORRECCION,
+} from '@/lib/deposito-correccion';
 import { ImageLightbox } from '../_components/ImageLightbox';
 import { fechaHoraOperativa } from '@/lib/fecha-operativa';
 import { avisoNoCobrarMotorizado, descripcionCobroMotorizado, etiquetaDeliveryMotorizado } from '@/lib/pago-transferencia';
@@ -1023,6 +1039,90 @@ export default function PanelMotorizadoPage() {
     delete enviosEnCurso.current[key];
   };
 
+  // ── DEPOSITO-AUDITORIA-1: corregir el comprobante ──────────────────────────
+  //
+  // Antes esto no existía. Si el comprobante salía mal, el gestor "devolvía el
+  // depósito" —que en realidad lo BORRABA— y el motorizado volvía a ver sus
+  // órdenes en "Por depositar", sin DEP-N y sin saber por qué. Ahora el
+  // depósito se queda donde está y solo se le agrega una versión.
+  //
+  // Mismo orden que el create-first de F1, y por la misma razón: todo lo que
+  // puede fallar sin dejar rastro va PRIMERO. El plan valida motivo y
+  // versionId antes de comprimir; la compresión va antes de subir; y el objeto
+  // se sube antes del batch. Si el batch falla, el objeto queda huérfano y
+  // NO se borra automáticamente —delete está DENY para todos— : el reintento
+  // genera una versión nueva y la huérfana queda como deuda
+  // MOTO-DEP-BOUCHER-VERSION-HUERFANA. Borrarla sería darle a alguien el
+  // permiso de borrar evidencia, que es justo lo que este bloque cierra.
+  const rolPropio = useRef<string | null>(null);
+  /**
+   * El rol REAL del perfil, para firmar el evento.
+   *
+   * Se lee una sola vez y SOLO cuando hace falta corregir: los listados
+   * siguen costando cero reads nuevas. No se asume 'motorizado' por estar en
+   * este panel — firestore.rules compara `porRol` contra usuarios/{uid}.rol,
+   * así que un valor inventado denegaría el batch entero.
+   */
+  const resolverRolPropio = async (): Promise<string> => {
+    if (rolPropio.current) return rolPropio.current;
+    const uid = auth.currentUser?.uid ?? '';
+    const snap = await getDoc(doc(db, 'usuarios', uid));
+    const rol = snap.exists() ? (snap.data()?.rol as string | undefined) ?? '' : '';
+    if (!rol) throw new Error('No pudimos verificar tu perfil. Cerrá sesión y volvé a entrar.');
+    rolPropio.current = rol;
+    return rol;
+  };
+
+  const [correccionDepId, setCorreccionDepId] = useState<string | null>(null);
+  const [correccionFile, setCorreccionFile] = useState<File | null>(null);
+  const [correccionMotivo, setCorreccionMotivo] = useState('');
+  const [correccionEnviando, setCorreccionEnviando] = useState(false);
+  const [correccionError, setCorreccionError] = useState<string | null>(null);
+  const correccionRef = useRef<HTMLInputElement>(null);
+
+  const cerrarCorreccion = () => {
+    setCorreccionDepId(null);
+    setCorreccionFile(null);
+    setCorreccionMotivo('');
+    setCorreccionError(null);
+  };
+
+  const enviarCorreccion = async (depId: string) => {
+    const dep = depositosPropios.find((d) => d.id === depId);
+    const uid = auth.currentUser?.uid ?? '';
+    if (!dep || !correccionFile) return;
+    if (!motorizadoPuedeReemplazarBoucher(dep, uid)) {
+      setCorreccionError('Este depósito ya no admite correcciones.');
+      return;
+    }
+    setCorreccionEnviando(true);
+    setCorreccionError(null);
+    try {
+      const rol = await resolverRolPropio();
+      const versionId = doc(collection(db, 'ordenes_deposito')).id;
+      const plan = planReemplazoBoucher(dep, versionId, correccionMotivo);
+      const blob = await comprimirComprobante(correccionFile);
+      const subida = await uploadVersionBoucherDeposito(plan.path, blob);
+      const eventoId = doc(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id;
+      const b = writeBatch(db);
+      b.set(
+        doc(db, 'ordenes_deposito', dep.id),
+        camposReemplazoBoucher(plan, subida, dep.motorizadoUid ?? uid, serverTimestamp(), eventoId),
+        { merge: true },
+      );
+      b.set(
+        doc(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
+        eventoReemplazoBoucher(plan, { uid, rol }, serverTimestamp()),
+      );
+      await b.commit();
+      cerrarCorreccion();
+    } catch (e) {
+      setCorreccionError(e instanceof Error ? e.message : 'No se pudo enviar la corrección.');
+    } finally {
+      setCorreccionEnviando(false);
+    }
+  };
+
   // Load comercio bank accounts and names for deposit orders
   const [comercioAccounts, setComercioAccounts] = useState<Record<string, BankAccount[]>>({});
   const [comercioNames, setComercioNames] = useState<Record<string, string>>({});
@@ -1987,8 +2087,69 @@ export default function PanelMotorizadoPage() {
                         )}
                         {d.comprobante && (
                           <button type="button" onClick={() => setComprobanteAmpliado(d.comprobante)} style={{ display: 'inline-block', marginTop: 6, padding: 0, background: 'none', border: 'none', fontSize: 12, color: '#2563eb', fontWeight: 600, cursor: 'pointer' }}>
-                            Ver comprobante
+                            Ver comprobante{d.versionBoucher != null ? ` (versión ${d.versionBoucher})` : ''}
                           </button>
+                        )}
+
+                        {/* DEPOSITO-AUDITORIA-1 — StorkHub pidió una corrección.
+                            Se dice QUÉ falta y por qué, no "rechazado": el
+                            depósito sigue vivo, con su DEP-N y sus órdenes. */}
+                        {d.estadoClave === ESTADO_DEVUELTO && (
+                          <div style={{ marginTop: 8, background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10, padding: '8px 10px' }}>
+                            <p style={{ fontSize: 12, fontWeight: 800, color: '#c2410c', margin: 0 }}>{ETIQUETA_DEVUELTO}</p>
+                            {d.motivoCorreccion && (
+                              <p style={{ fontSize: 12, color: '#7c2d12', margin: '3px 0 0' }}>{d.motivoCorreccion}</p>
+                            )}
+                            {d.correccionAt != null && (
+                              <p style={{ fontSize: 11, color: '#9a3412', margin: '3px 0 0' }}>
+                                Solicitada por StorkHub · {fechaHoraOperativa(d.correccionAt)}
+                              </p>
+                            )}
+                            <p style={{ fontSize: 11, color: '#9a3412', margin: '3px 0 0' }}>{TEXTO_ESPERANDO_CORRECCION}</p>
+                          </div>
+                        )}
+
+                        {d.puedeCorregir && correccionDepId !== d.id && (
+                          <button type="button" onClick={() => { cerrarCorreccion(); setCorreccionDepId(d.id); }}
+                            style={{ display: 'block', width: '100%', marginTop: 8, background: d.estadoClave === ESTADO_DEVUELTO ? '#ea580c' : '#fff', border: `1px solid ${d.estadoClave === ESTADO_DEVUELTO ? '#ea580c' : '#e5e7eb'}`, color: d.estadoClave === ESTADO_DEVUELTO ? '#fff' : '#374151', borderRadius: 10, padding: '9px', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                            {d.estadoClave === ESTADO_DEVUELTO ? BOTON_SUBIR_CORRECCION : BOTON_CORREGIR_COMPROBANTE}
+                          </button>
+                        )}
+
+                        {correccionDepId === d.id && (
+                          <div style={{ marginTop: 8, background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 10, padding: '10px' }}>
+                            {/* El aviso es la promesa del bloque: nada se
+                                pierde. Si dijera "se reemplazará", el
+                                motorizado creería que borra el anterior. */}
+                            <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 8px' }}>{AVISO_REEMPLAZO_BOUCHER}</p>
+                            <button type="button" onClick={() => correccionRef.current?.click()}
+                              style={{ width: '100%', background: '#fff', border: '1px dashed #d1d5db', borderRadius: 8, padding: '9px', fontSize: 12, color: '#374151', fontWeight: 700, cursor: 'pointer' }}>
+                              {correccionFile ? `Foto elegida: ${correccionFile.name}` : 'Elegir el comprobante nuevo'}
+                            </button>
+                            <textarea
+                              value={correccionMotivo}
+                              onChange={(e) => setCorreccionMotivo(e.target.value)}
+                              placeholder="¿Qué estabas corrigiendo? (mínimo 3 caracteres)"
+                              maxLength={300}
+                              rows={2}
+                              style={{ width: '100%', marginTop: 8, border: '1px solid #e5e7eb', borderRadius: 8, padding: '8px', fontSize: 12, resize: 'vertical' as const }}
+                            />
+                            {correccionError && (
+                              <p style={{ fontSize: 12, color: '#b91c1c', margin: '6px 0 0' }}>{correccionError}</p>
+                            )}
+                            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                              <button type="button" onClick={cerrarCorreccion} disabled={correccionEnviando}
+                                style={{ flex: 1, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, padding: '9px', fontSize: 12, color: '#374151', fontWeight: 700, cursor: 'pointer' }}>
+                                Cancelar
+                              </button>
+                              <button type="button"
+                                onClick={() => enviarCorreccion(d.id)}
+                                disabled={correccionEnviando || !correccionFile || correccionMotivo.trim().length < 3}
+                                style={{ flex: 2, background: correccionEnviando || !correccionFile || correccionMotivo.trim().length < 3 ? '#d1d5db' : '#004aad', border: 'none', borderRadius: 8, padding: '9px', fontSize: 12, color: '#fff', fontWeight: 700, cursor: 'pointer' }}>
+                                {correccionEnviando ? 'Enviando…' : 'Enviar corrección'}
+                              </button>
+                            </div>
+                          </div>
                         )}
                       </div>
                     );
@@ -2016,6 +2177,20 @@ export default function PanelMotorizadoPage() {
           <ImageLightbox url={comprobanteAmpliado} label="Comprobante del depósito" onClose={() => setComprobanteAmpliado(null)} />
         </div>
       )}
+
+      {/* DEPOSITO-AUDITORIA-1 — input propio para la corrección: reutilizar el
+          de grupos mezclaría un depósito ya enviado con uno por enviar. */}
+      <input
+        ref={correccionRef}
+        type="file"
+        accept="image/*"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) { setCorreccionFile(f); setCorreccionError(null); }
+          if (correccionRef.current) correccionRef.current.value = '';
+        }}
+      />
 
       {/* ── Hidden file input for group bouchers ── */}
       {/* MOTORIZADO-UX-OPERATIVA-1 — sin capture: el comprobante puede ser una
@@ -2446,6 +2621,9 @@ function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
 function colorEstadoDeposito(estado: string | null): { bg: string; fg: string; borde: string } {
   if (estado === 'confirmado') return { bg: '#f0fdf4', fg: '#15803d', borde: '#bbf7d0' };
   if (estado === 'en_revision' || estado === 'pendiente_boucher') return { bg: '#fffbeb', fg: '#b45309', borde: '#fde68a' };
+  // DEPOSITO-AUDITORIA-1 — 'devuelto' pide acción del motorizado, pero NO es
+  // un rechazo: naranja de "te toca a vos", no el rojo de rechazado/deuda.
+  if (estado === 'devuelto') return { bg: '#fff7ed', fg: '#c2410c', borde: '#fed7aa' };
   if (estado === 'rechazado' || estado === 'convertido_en_deuda') return { bg: '#fef2f2', fg: '#b91c1c', borde: '#fecaca' };
   return { bg: '#f9fafb', fg: '#4b5563', borde: '#e5e7eb' };
 }

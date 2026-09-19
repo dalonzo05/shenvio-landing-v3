@@ -73,7 +73,15 @@ function fmtMotorizadoNombre(raw: string): string {
   return raw
 }
 
-type DepStatus = 'confirmado' | 'en_revision' | 'pendiente_boucher' | 'rechazado' | 'convertido_en_deuda'
+// DEPOSITO-AUDITORIA-1 — 'devuelto' y 'anulado' faltaban en el mapa.
+//
+// 'anulado' ya podía llegar (reversión de un cobro) y STATUS_CONFIG[status]
+// devolvía undefined: la tarjeta reventaba al leer cfg.border. Hasta ahora el
+// caso era raro porque "Eliminar" BORRABA el depósito y desaparecía de la
+// lista; con Anular el documento se queda, así que deja de ser teórico.
+// 'devuelto' es nuevo y le llega al comercio en cuanto se pide una corrección
+// sobre un depósito B.
+type DepStatus = 'confirmado' | 'en_revision' | 'devuelto' | 'pendiente_boucher' | 'rechazado' | 'convertido_en_deuda' | 'anulado'
 
 function getStatus(dep: DepositoDoc): DepStatus {
   return getDepositoEstado(dep)
@@ -89,6 +97,18 @@ const STATUS_CONFIG: Record<DepStatus, { label: string; bg: string; text: string
     label: 'En revisión',
     bg: '#eff6ff', text: '#2563eb', border: '#bfdbfe', accent: '#2563eb',
     icon: <Search size={13} />,
+  },
+  devuelto: {
+    // El comercio no ve el motivo: es una conversación entre StorkHub y el
+    // motorizado. Lo que sí tiene que saber es que el depósito sigue abierto.
+    label: 'Corrección solicitada',
+    bg: '#fff7ed', text: '#c2410c', border: '#fed7aa', accent: '#c2410c',
+    icon: <Clock size={13} />,
+  },
+  anulado: {
+    label: 'Anulado',
+    bg: '#fafafa', text: '#6b7280', border: '#e5e7eb', accent: '#6b7280',
+    icon: <Lock size={13} />,
   },
   pendiente_boucher: {
     label: 'Pendiente',

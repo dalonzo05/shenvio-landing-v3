@@ -22,8 +22,8 @@ import {
   assertFails,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing'
-import { doc, setDoc, writeBatch, serverTimestamp } from 'firebase/firestore'
-import { ref, uploadBytes } from 'firebase/storage'
+import { doc, setDoc, deleteDoc, writeBatch, serverTimestamp } from 'firebase/firestore'
+import { ref, uploadBytes, deleteObject, getBytes } from 'firebase/storage'
 import {
   camposCreacionDepositoMotorizado,
   camposEnvioBoucherMotorizado,
@@ -31,6 +31,24 @@ import {
   pathBoucherDepositoMotorizado,
   type DatosDepositoMotorizado,
 } from '../lib/deposito-motorizado-envio'
+import assert from 'node:assert/strict'
+import {
+  camposReemplazoBoucher,
+  eventoReemplazoBoucher,
+  pathVersionBoucher,
+  planReemplazoBoucher,
+} from '../lib/deposito-boucher-version'
+import {
+  camposEventoDepositoAnulado,
+  camposEventoDepositoConfirmado,
+  camposEventoDepositoDevuelto,
+  camposEventoDepositoRehecho,
+} from '../lib/deposito-eventos'
+import {
+  camposAnularDeposito,
+  camposPedirCorreccion,
+  camposRehacerDeposito,
+} from '../lib/deposito-correccion'
 
 const PROJECT_ID = 'demo-storage-evidencia'
 const BASE_DIR = process.env.REGLAS_BASE_DIR || ''
@@ -356,4 +374,461 @@ test('WC3 · writer viejo upload-first (sube sin depósito y crea en_revision) �
     estado: 'en_revision',
     boucher: { url: 'https://example.test/x', pathStorage: path, motorizadoUid: UID_MOTO },
   }))
+})
+
+// ─── DEPOSITO-AUDITORIA-1 · versiones del comprobante ────────────────────────
+//
+// depositos/{uid}/{depId}/bouchers/{versionId}.jpg — CREATE ONLY.
+//
+// Lo que estos casos tienen que demostrar no es solo quién puede subir: es que
+// una versión ya escrita NO se puede tocar. Si SV7/SV8 se pusieran verdes por
+// accidente, el versionado dejaría de ser versionado — sería el mismo
+// sobrescribir de F1 con más pasos.
+
+// Un versionId por caso, y no uno compartido: `clearStorage()` NO deja el
+// bucket vacío entre tests en esta combinación de emuladores (se comprobó
+// empíricamente — con un path común, el segundo ALLOW pasaba a ser una
+// sobrescritura y moría contra `resource == null`). Además es lo que pasa de
+// verdad: cada versión tiene su propio id, nunca se reutiliza.
+let contadorVersion = 0
+const nuevoVersionId = () => `verCaso${String(++contadorVersion).padStart(4, '0')}AA`
+const pathNuevaVersion = (uid = UID_MOTO, dep = DEP) => pathVersionBoucher(uid, dep, nuevoVersionId())
+
+/** Siembra un objeto de versión sin pasar por reglas, para update/delete. */
+async function sembrarVersion(): Promise<string> {
+  const path = pathNuevaVersion()
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await uploadBytes(ref(ctx.storage(), path), jpeg(), META_JPEG)
+  })
+  return path
+}
+
+test('SV1 · motorizado dueño + DEP en_revision ⇒ sube una versión ALLOW', soloNuevas, async () => {
+  await deposito('en_revision')
+  await assertSucceeds(subir(UID_MOTO, pathNuevaVersion()))
+})
+
+test('SV1b · lo mismo con un DEP B (al comercio) ⇒ ALLOW', soloNuevas, async () => {
+  await deposito('en_revision', { tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio', destinatarioId: COMERCIO_ID })
+  await assertSucceeds(subir(UID_MOTO, pathNuevaVersion()))
+})
+
+test('SV2 · motorizado dueño + DEP devuelto ⇒ sube la corrección ALLOW', soloNuevas, async () => {
+  await deposito('devuelto', { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'No se lee el monto' })
+  await assertSucceeds(subir(UID_MOTO, pathNuevaVersion()))
+})
+
+test('SV3 · DEP confirmado ⇒ DENY (motorizado y staff)', soloNuevas, async () => {
+  await deposito('confirmado')
+  await assertFails(subir(UID_MOTO, pathNuevaVersion()))
+  await assertFails(subir(UID_GESTOR, pathNuevaVersion()))
+  await assertFails(subir(UID_ADMIN, pathNuevaVersion()))
+})
+
+test('SV4 · DEP convertido_en_deuda ⇒ DENY (motorizado y staff)', soloNuevas, async () => {
+  await deposito('convertido_en_deuda')
+  await assertFails(subir(UID_MOTO, pathNuevaVersion()))
+  await assertFails(subir(UID_GESTOR, pathNuevaVersion()))
+})
+
+test('SV5 · DEP anulado ⇒ DENY (motorizado y staff)', soloNuevas, async () => {
+  await deposito('anulado')
+  await assertFails(subir(UID_MOTO, pathNuevaVersion()))
+  await assertFails(subir(UID_ADMIN, pathNuevaVersion()))
+})
+
+test('SV6 · otro motorizado sobre el path o el DEP ajeno ⇒ DENY', soloNuevas, async () => {
+  await deposito('en_revision')
+  await assertFails(subir(UID_MOTO_2, pathNuevaVersion()))
+  await assertFails(subir(UID_MOTO_2, pathNuevaVersion(UID_MOTO_2)))
+})
+
+test('SV7 · sobrescribir una versión ya escrita ⇒ DENY, para todos', soloNuevas, async () => {
+  await deposito('en_revision')
+  const path = await sembrarVersion()
+  for (const uid of [UID_MOTO, UID_GESTOR, UID_ADMIN, UID_DIGITADOR]) {
+    await assertFails(subir(uid, path, jpeg(2048)))
+  }
+})
+
+test('SV8 · borrar una versión ⇒ DENY, para todos', soloNuevas, async () => {
+  await deposito('en_revision')
+  const path = await sembrarVersion()
+  for (const uid of [UID_MOTO, UID_GESTOR, UID_ADMIN]) {
+    await assertFails(deleteObject(ref(storageDe(uid), path)))
+  }
+})
+
+test('SV9 · staff sube una versión en un DEP abierto ⇒ ALLOW', soloNuevas, async () => {
+  await deposito('en_revision')
+  await assertSucceeds(subir(UID_GESTOR, pathNuevaVersion()))
+  await deposito('devuelto')
+  await assertSucceeds(subir(UID_ADMIN, pathNuevaVersion()))
+})
+
+test('SV10 · staff sobre un DEP sellado ⇒ DENY, sin bypass de admin', soloNuevas, async () => {
+  for (const estado of ['confirmado', 'convertido_en_deuda', 'anulado']) {
+    await deposito(estado)
+    await assertFails(subir(UID_GESTOR, pathNuevaVersion()))
+    await assertFails(subir(UID_ADMIN, pathNuevaVersion()))
+  }
+})
+
+test('SV11 · pendiente_boucher NO admite versión: el flujo inicial de F1 no se duplica ⇒ DENY', soloNuevas, async () => {
+  await deposito('pendiente_boucher')
+  await assertFails(subir(UID_MOTO, pathNuevaVersion()))
+  await assertFails(subir(UID_GESTOR, pathNuevaVersion()))
+})
+
+test('SV12 · DEP inexistente, tipo C, o con otro titular ⇒ DENY', soloNuevas, async () => {
+  await assertFails(subir(UID_MOTO, pathNuevaVersion()))
+  await deposito('en_revision', { tipo: 'pago_delivery_deposito' })
+  await assertFails(subir(UID_MOTO, pathNuevaVersion()))
+  await deposito('en_revision', { motorizadoUid: UID_MOTO_2 })
+  await assertFails(subir(UID_MOTO, pathNuevaVersion()))
+})
+
+test('SV13 · nombre de archivo fuera de forma ⇒ DENY', soloNuevas, async () => {
+  await deposito('en_revision')
+  await assertFails(subir(UID_MOTO, `depositos/${UID_MOTO}/${DEP}/bouchers/boucher.png`))
+  await assertFails(subir(UID_MOTO, `depositos/${UID_MOTO}/${DEP}/bouchers/ab.jpg`))
+  await assertFails(subir(UID_MOTO, `depositos/${UID_MOTO}/${DEP}/bouchers/con espacio.jpg`))
+})
+
+test('SV14 · no-JPEG y más de 5 MB ⇒ DENY; exactamente 5 MB ⇒ ALLOW', soloNuevas, async () => {
+  await deposito('en_revision')
+  await assertFails(subir(UID_MOTO, pathNuevaVersion(), jpeg(), { contentType: 'image/png' }))
+  await assertFails(subir(UID_MOTO, pathNuevaVersion(), jpeg(5 * MB + 1)))
+  await assertSucceeds(subir(UID_MOTO, pathNuevaVersion(), jpeg(5 * MB)))
+})
+
+test('SV15 · el comprobante legacy sigue sellado: F1 intacto ⇒ DENY en revisión para el motorizado', soloNuevas, async () => {
+  await deposito('en_revision')
+  await assertFails(subir(UID_MOTO, PATH_DEP))
+  await deposito('devuelto')
+  await assertFails(subir(UID_MOTO, PATH_DEP))
+})
+
+test('SV16 · lectura de una versión: dueño, staff y comercio destinatario ⇒ ALLOW; ajeno ⇒ DENY', soloNuevas, async () => {
+  await deposito('en_revision', { destinatario: 'comercio', destinatarioId: COMERCIO_ID })
+  const path = await sembrarVersion()
+  const leer = (uid: string) => getBytes(ref(storageDe(uid), path))
+  await assertSucceeds(leer(UID_MOTO))
+  await assertSucceeds(leer(UID_GESTOR))
+  await assertSucceeds(leer(UID_COMERCIO))
+  await assertFails(leer(UID_MOTO_2))
+  await assertFails(leer(UID_COMERCIO_2))
+})
+
+// ─── DEPOSITO-AUDITORIA-1 · flujos completos del writer (R.37) ───────────────
+//
+// Los casos SV/V/D/A prueban reglas sueltas. Estos prueban el RECORRIDO, con
+// los mismos helpers puros que usa la app: es la única forma de demostrar que
+// una corrección real —Storage y Firestore, en orden, con sus dos emuladores—
+// termina donde tiene que terminar y sin perder nada por el camino.
+
+const DEP_F = 'depFlujo'
+const ORDEN_F = 'ordFlujo'
+
+async function depositoDeFlujo(estado: string, extra: Record<string, unknown> = {}) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    await setDoc(doc(db, 'ordenes_deposito', DEP_F), {
+      tipo: 'recaudacion_motorizado_storkhub',
+      estado,
+      destinatario: 'storkhub',
+      destinatarioId: 'storkhub',
+      motorizadoUid: UID_MOTO,
+      solicitudIds: [ORDEN_F],
+      montoTotal: 110,
+      codigo: 'DEP-0009',
+      secuencia: 9,
+      boucher: { url: 'https://example.test/v1.jpg', pathStorage: `depositos/${UID_MOTO}/${DEP_F}/boucher.jpg` },
+      ...extra,
+    })
+    await setDoc(doc(db, 'solicitudes_envio', ORDEN_F), {
+      comercioUid: COMERCIO_ID, userId: COMERCIO_ID, estado: 'entregado',
+      asignacion: { motorizadoAuthUid: UID_MOTO }, codigo: 'SH-0009', secuencia: 9,
+      registro: { deposito: { storkhubDepositoId: DEP_F } },
+    })
+  })
+}
+
+async function depActual(): Promise<Record<string, unknown>> {
+  let data: Record<string, unknown> = {}
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const { getDoc } = await import('firebase/firestore')
+    data = ((await getDoc(doc(ctx.firestore(), 'ordenes_deposito', DEP_F))).data() ?? {}) as Record<string, unknown>
+  })
+  return data
+}
+
+/** El writer de corrección del motorizado, paso por paso, como en la app. */
+async function corregirComoMotorizado(motivo = 'La foto salió movida', uid = UID_MOTO) {
+  const db = firestoreDe(uid)
+  const dep = await depActual()
+  const versionId = nuevoVersionId()
+  const plan = planReemplazoBoucher(
+    { id: DEP_F, motorizadoUid: UID_MOTO, boucherVersion: dep.boucherVersion as number, boucherVersionId: dep.boucherVersionId as string },
+    versionId,
+    motivo,
+  )
+  await uploadBytes(ref(storageDe(uid), plan.path), jpeg(), META_JPEG)
+  const eventoId = versionId
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_F),
+    camposReemplazoBoucher(plan, { url: 'https://example.test/nuevo.jpg', pathStorage: plan.path }, UID_MOTO, serverTimestamp(), eventoId),
+    { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_F, 'eventos', eventoId),
+    eventoReemplazoBoucher(plan, { uid, rol: 'motorizado' }, serverTimestamp()))
+  await b.commit()
+  return plan
+}
+
+test('WF1 · legacy v1 → v2: sube la versión y el objeto viejo sigue ahí', soloNuevas, async () => {
+  await depositoDeFlujo('en_revision')
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await uploadBytes(ref(ctx.storage(), `depositos/${UID_MOTO}/${DEP_F}/boucher.jpg`), jpeg(), META_JPEG)
+  })
+  const plan = await assertSucceeds(corregirComoMotorizado())
+  const dep = await depActual()
+  assert.equal(dep.boucherVersion, 2)
+  assert.equal((dep.boucher as { pathStorage: string }).pathStorage, plan.path)
+  // El legacy no se tocó: sigue siendo legible, que es todo el punto de no migrar.
+  await assertSucceeds(getBytes(ref(storageDe(UID_MOTO), `depositos/${UID_MOTO}/${DEP_F}/boucher.jpg`)))
+})
+
+test('WF2 · en_revision → reemplazar: el DEP-N, el monto y las órdenes sobreviven', soloNuevas, async () => {
+  await depositoDeFlujo('en_revision')
+  await assertSucceeds(corregirComoMotorizado())
+  const dep = await depActual()
+  assert.equal(dep.codigo, 'DEP-0009')
+  assert.equal(dep.montoTotal, 110)
+  assert.deepEqual(dep.solicitudIds, [ORDEN_F])
+  assert.equal(dep.estado, 'en_revision')
+})
+
+test('WF3 · ciclo completo: en_revision → devuelto → nueva versión → en_revision → confirmado', soloNuevas, async () => {
+  await depositoDeFlujo('en_revision')
+
+  // 1. El gestor pide corrección (depósito + evento, mismo batch).
+  const dbG = firestoreDe(UID_GESTOR)
+  const bDev = writeBatch(dbG)
+  bDev.set(doc(dbG, 'ordenes_deposito', DEP_F),
+    camposPedirCorreccion(UID_GESTOR, serverTimestamp(), 'No se lee el monto', 'evDevF'), { merge: true })
+  bDev.set(doc(dbG, 'ordenes_deposito', DEP_F, 'eventos', 'evDevF'),
+    camposEventoDepositoDevuelto({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp(), 'No se lee el monto'))
+  await assertSucceeds(bDev.commit())
+  let dep = await depActual()
+  assert.equal(dep.estado, 'devuelto')
+  assert.equal(dep.codigo, 'DEP-0009')
+
+  // 2. El motorizado manda la foto nueva: MISMO depósito, sin liberar órdenes.
+  await assertSucceeds(corregirComoMotorizado('Ahora se ve el monto'))
+  dep = await depActual()
+  assert.equal(dep.estado, 'en_revision')
+  assert.equal(dep.boucherVersion, 2)
+  assert.equal(dep.codigo, 'DEP-0009')
+
+  // 3. El gestor confirma, con su evento.
+  const bConf = writeBatch(dbG)
+  bConf.set(doc(dbG, 'ordenes_deposito', DEP_F), {
+    estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
+  }, { merge: true })
+  bConf.set(doc(dbG, 'ordenes_deposito', DEP_F, 'eventos', 'evConfF'),
+    camposEventoDepositoConfirmado({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp()))
+  await assertSucceeds(bConf.commit())
+  assert.equal((await depActual()).estado, 'confirmado')
+
+  // 4. Y una vez confirmado, el comprobante queda sellado también en Storage.
+  await assertFails(subir(UID_MOTO, pathVersionBoucher(UID_MOTO, DEP_F, nuevoVersionId())))
+})
+
+test('WF4 · dos reemplazos concurrentes: gana uno, el otro muere en Rules', soloNuevas, async () => {
+  await depositoDeFlujo('en_revision')
+  // El segundo parte de la MISMA lectura (versión efectiva 1) y pide la 2.
+  const dbA = firestoreDe(UID_MOTO)
+  const planA = planReemplazoBoucher({ id: DEP_F, motorizadoUid: UID_MOTO }, 'verConcurrA1', 'Primera corrección')
+  const planB = planReemplazoBoucher({ id: DEP_F, motorizadoUid: UID_MOTO }, 'verConcurrB1', 'Segunda corrección')
+  await uploadBytes(ref(storageDe(UID_MOTO), planA.path), jpeg(), META_JPEG)
+  await uploadBytes(ref(storageDe(UID_MOTO), planB.path), jpeg(), META_JPEG)
+
+  const batchDe = (plan: typeof planA, eventoId: string) => {
+    const b = writeBatch(dbA)
+    b.set(doc(dbA, 'ordenes_deposito', DEP_F),
+      camposReemplazoBoucher(plan, { url: 'u', pathStorage: plan.path }, UID_MOTO, serverTimestamp(), eventoId), { merge: true })
+    b.set(doc(dbA, 'ordenes_deposito', DEP_F, 'eventos', eventoId),
+      eventoReemplazoBoucher(plan, { uid: UID_MOTO, rol: 'motorizado' }, serverTimestamp()))
+    return b.commit()
+  }
+  await assertSucceeds(batchDe(planA, 'verConcurrA1'))
+  await assertFails(batchDe(planB, 'verConcurrB1'))
+  const dep = await depActual()
+  assert.equal(dep.boucherVersion, 2)
+  assert.equal(dep.boucherVersionId, 'verConcurrA1')
+})
+
+test('WF5 · upload OK + batch fallido: el objeto queda huérfano y NO se borra', soloNuevas, async () => {
+  await depositoDeFlujo('en_revision')
+  const plan = planReemplazoBoucher({ id: DEP_F, motorizadoUid: UID_MOTO }, 'verHuerfanaA1', 'Corrección que no llega')
+  await assertSucceeds(uploadBytes(ref(storageDe(UID_MOTO), plan.path), jpeg(), META_JPEG))
+  // El batch falla (acá: sin evento). El depósito no se movió…
+  const db = firestoreDe(UID_MOTO)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_F),
+    camposReemplazoBoucher(plan, { url: 'u', pathStorage: plan.path }, UID_MOTO, serverTimestamp(), 'verHuerfanaA1'), { merge: true })
+  await assertFails(b.commit())
+  const dep = await depActual()
+  assert.equal(dep.boucherVersion, undefined)
+  // …y la huérfana no se puede limpiar desde el cliente: delete es DENY para
+  // todos. Es la deuda MOTO-DEP-BOUCHER-VERSION-HUERFANA, no un descuido.
+  await assertFails(deleteObject(ref(storageDe(UID_MOTO), plan.path)))
+  await assertFails(deleteObject(ref(storageDe(UID_ADMIN), plan.path)))
+  // El reintento usa una versión nueva y sí llega.
+  await assertSucceeds(corregirComoMotorizado('Reintento'))
+  assert.equal((await depActual()).boucherVersion, 2)
+})
+
+test('WF6 · anular y liberar órdenes en un batch: el DEP queda como rastro', soloNuevas, async () => {
+  await depositoDeFlujo('confirmado')
+  const db = firestoreDe(UID_ADMIN)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_F),
+    camposAnularDeposito(UID_ADMIN, serverTimestamp(), 'Depósito armado sobre órdenes equivocadas', 'evAnulF'), { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_F, 'eventos', 'evAnulF'),
+    camposEventoDepositoAnulado({ uid: UID_ADMIN, rol: 'admin' }, serverTimestamp(), 'Depósito armado sobre órdenes equivocadas'))
+  b.update(doc(db, 'solicitudes_envio', ORDEN_F), {
+    'registro.deposito.storkhubDepositoId': null,
+    'registro.deposito.confirmadoStorkhub': false,
+    'registro.deposito.confirmadoStorkhubAt': null,
+  })
+  await assertSucceeds(b.commit())
+  const dep = await depActual()
+  assert.equal(dep.estado, 'anulado')
+  assert.equal(dep.codigo, 'DEP-0009')
+  assert.ok(dep.boucher)
+  assert.deepEqual(dep.solicitudIds, [ORDEN_F])
+})
+
+test('WF7 · rehacer con evento: vuelve a revisión y deja el motivo', soloNuevas, async () => {
+  await depositoDeFlujo('confirmado', { confirmadoPorUid: UID_GESTOR })
+  const db = firestoreDe(UID_ADMIN)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_F),
+    camposRehacerDeposito(UID_ADMIN, serverTimestamp(), 'El comprobante era de otro depósito', 'evRehF'), { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_F, 'eventos', 'evRehF'),
+    camposEventoDepositoRehecho({ uid: UID_ADMIN, rol: 'admin' }, serverTimestamp(), 'El comprobante era de otro depósito'))
+  await assertSucceeds(b.commit())
+  const dep = await depActual()
+  assert.equal(dep.estado, 'en_revision')
+  assert.equal(dep.motivoRehacer, 'El comprobante era de otro depósito')
+  // Y ahora que está abierto, el motorizado puede corregir.
+  await assertSucceeds(corregirComoMotorizado('Ahora sí el correcto'))
+})
+
+test('WF8 · el tipo C no entra en ninguno de estos flujos', soloNuevas, async () => {
+  await depositoDeFlujo('en_revision', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
+  await assertFails(corregirComoMotorizado())
+  const dbG = firestoreDe(UID_GESTOR)
+  const b = writeBatch(dbG)
+  b.set(doc(dbG, 'ordenes_deposito', DEP_F),
+    camposPedirCorreccion(UID_GESTOR, serverTimestamp(), 'No se lee el monto', 'evDevC'), { merge: true })
+  b.set(doc(dbG, 'ordenes_deposito', DEP_F, 'eventos', 'evDevC'),
+    camposEventoDepositoDevuelto({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp(), 'No se lee el monto'))
+  await assertFails(b.commit())
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DEPOSITO-AUDITORIA-1 · S.38 — COMPATIBILIDAD DE DEPLOY
+//
+// Esta feature toca web, firestore.rules y storage.rules a la vez, así que hay
+// que saber qué pasa en los dos órdenes posibles. Estos casos corren dos veces
+// —una con las reglas de este branch, otra con REGLAS_BASE_DIR apuntando a las
+// de staging— y afirman un resultado distinto en cada modo. Esa asimetría ES
+// el hallazgo: si los dos modos dieran lo mismo, no habría nada que coordinar.
+//
+//     npm run test:storage-rules     reglas nuevas
+//     npm run test:compat-rules      reglas de origin/staging (F1)
+//
+// Resultado (ver el reporte del bloque):
+//
+//   A. web nueva + Rules F1   ROTO — el reemplazo versionado y "Pedir
+//                             corrección" mueren contra reglas que no conocen
+//                             ni bouchers/* ni la subcolección eventos.
+//   B. Rules nuevas + web F1  ROTO — "Devolver al motorizado" y "Eliminar" del
+//                             web viejo hacen delete, y delete pasó a DENY.
+//
+// Como ningún orden simple funciona, el rollout necesita un paso puente. NO se
+// deploya nada acá: esto solo demuestra cuál es.
+// ═════════════════════════════════════════════════════════════════════════════
+
+const DEP_DC = 'depCompat'
+
+async function depositoCompat(estado = 'en_revision') {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'ordenes_deposito', DEP_DC), {
+      tipo: 'recaudacion_motorizado_storkhub',
+      estado,
+      destinatario: 'storkhub',
+      destinatarioId: 'storkhub',
+      motorizadoUid: UID_MOTO,
+      solicitudIds: ['ordCompat'],
+      montoTotal: 110,
+      codigo: 'DEP-0010',
+      secuencia: 10,
+      boucher: { url: 'https://example.test/v1.jpg', pathStorage: `depositos/${UID_MOTO}/${DEP_DC}/boucher.jpg` },
+    })
+  })
+}
+
+/** ALLOW con reglas nuevas, DENY con las de staging — o al revés. */
+const segunModo = (promesa: Promise<unknown>, enBase: 'allow' | 'deny') =>
+  (MODO_BASE ? enBase === 'allow' : enBase === 'deny')
+    ? assertSucceeds(promesa)
+    : assertFails(promesa)
+
+test('DC1 · dirección A: el upload versionado del web nuevo contra Rules F1 ⇒ DENY', async () => {
+  await depositoCompat()
+  // storage.rules de F1 no tiene match de 5 segmentos: cae en el catch-all.
+  await segunModo(subir(UID_MOTO, pathVersionBoucher(UID_MOTO, DEP_DC, 'verCompatAA1')), 'deny')
+})
+
+test('DC2 · dirección A: "Pedir corrección" del web nuevo contra Rules F1 ⇒ DENY', async () => {
+  await depositoCompat()
+  const db = firestoreDe(UID_GESTOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_DC),
+    camposPedirCorreccion(UID_GESTOR, serverTimestamp(), 'No se lee el monto', 'evCompat1'), { merge: true })
+  // La subcolección `eventos` no existe en las reglas de F1: sin match, deny.
+  b.set(doc(db, 'ordenes_deposito', DEP_DC, 'eventos', 'evCompat1'),
+    camposEventoDepositoDevuelto({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp(), 'No se lee el monto'))
+  await segunModo(b.commit(), 'deny')
+})
+
+test('DC3 · dirección B: el delete del web viejo ("Devolver"/"Eliminar") contra Rules nuevas ⇒ DENY', async () => {
+  await depositoCompat()
+  // Con las reglas de F1 el gestor borra un depósito abierto; con las nuevas,
+  // delete es DENY para todos. Un web viejo contra reglas nuevas se queda sin
+  // su única forma de devolver un depósito.
+  await segunModo(deleteDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_DC)), 'allow')
+})
+
+test('DC3b · y el "Eliminar" del admin sobre un confirmado, igual', async () => {
+  await depositoCompat('confirmado')
+  await segunModo(deleteDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_DC)), 'allow')
+})
+
+test('DC4 · lo que SÍ es compatible en los dos sentidos: confirmar un depósito en revisión', async () => {
+  await depositoCompat()
+  // Sin evento, tal como lo escribe el web de F1: las reglas nuevas no lo
+  // exigen para confirmar (ver la nota de alcance en firestore.rules), así
+  // que este flujo cruza el rollout en cualquier orden.
+  await assertSucceeds(setDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_DC), {
+    estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
+  }, { merge: true }))
+})
+
+test('DC5 · y el boucher legacy del flujo inicial: F1 intacto en los dos sentidos', async () => {
+  await depositoCompat('pendiente_boucher')
+  await assertSucceeds(subir(UID_MOTO, `depositos/${UID_MOTO}/${DEP_DC}/boucher.jpg`))
 })

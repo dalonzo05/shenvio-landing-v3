@@ -18,8 +18,15 @@ export type EstadoDeposito =
   | 'en_revision'         // boucher subido, esperando al gestor
   | 'confirmado'          // gestor confirmó
   | 'rechazado'           // gestor rechazó
+  | 'devuelto'            // DEPOSITO-AUDITORIA-1: StorkHub pidió una corrección
+                          // del comprobante. NO es rechazo ni deuda ni
+                          // anulación: el depósito sigue vivo, con su DEP-N,
+                          // sus órdenes y su comprobante anterior, esperando
+                          // una versión nueva.
   | 'convertido_en_deuda' // gestor convirtió el pendiente en saldo a cargo del motorizado
-  | 'anulado'             // revertido por error (creado desde Pendientes, sin boucher real)
+  | 'anulado'             // revertido por error, o cerrado por el admin sin
+                          // borrarlo (DEPOSITO-AUDITORIA-1: reemplaza al
+                          // delete físico del viejo "Eliminar")
 
 // ─── Tipos de cartera comercial ───────────────────────────────────────────────
 // Más flexible que solo 'contado' | 'crédito', permite convenios futuros.

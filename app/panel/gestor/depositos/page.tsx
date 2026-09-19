@@ -10,14 +10,13 @@ import {
   doc,
   getDoc,
   setDoc,
-  updateDoc,
   writeBatch,
   serverTimestamp,
   Timestamp,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
-import { compressImage, uploadDepositoBoucher } from '@/fb/storage'
+import { compressImage, uploadDepositoBoucher, uploadVersionBoucherDeposito } from '@/fb/storage'
 import { registrarMovimiento, convertirDepositoEnDeuda } from '@/lib/financial-writes'
 import { getDepositoEstado, cuentas } from '@/lib/financial-types'
 import { calcularDeposito } from '@/lib/calculo-deposito'
@@ -51,6 +50,40 @@ import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
 import { puedeMutarBoucherDeposito, asegurarBoucherDepositoMutable } from '@/lib/cobro-integridad'
 import { enviadoDepositoHistorial, accionesAdminDeposito } from '@/lib/pago-transferencia'
+import { normalizarFecha } from '@/lib/timeline-orden'
+// ── DEPOSITO-AUDITORIA-1 ─────────────────────────────────────────────────────
+import {
+  AVISO_REEMPLAZO_BOUCHER,
+  camposReemplazoBoucher,
+  esBoucherLegacy,
+  etiquetaVersionBoucher,
+  eventoReemplazoBoucher,
+  planReemplazoBoucher,
+  staffPuedeReemplazarBoucher,
+} from '@/lib/deposito-boucher-version'
+import {
+  MOTIVO_EVENTO_MAX,
+  SUBCOLECCION_EVENTOS_DEPOSITO,
+  camposEventoDepositoAnulado,
+  camposEventoDepositoConfirmado,
+  camposEventoDepositoDevuelto,
+  camposEventoDepositoRehecho,
+  filasEventosDeposito,
+  motivoEventoValido,
+  type EventoDepositoDoc,
+} from '@/lib/deposito-eventos'
+import {
+  BOTON_PEDIR_CORRECCION,
+  ESTADO_DEVUELTO,
+  ETIQUETA_DEVUELTO,
+  TEXTO_ESPERANDO_CORRECCION,
+  camposAnularDeposito,
+  camposPedirCorreccion,
+  camposRehacerDeposito,
+  correccionSolicitada,
+  puedeConfirmarDeposito,
+  puedePedirCorreccion,
+} from '@/lib/deposito-correccion'
 import {
   camposEnlaceDigitacion,
   camposReaperturaRevision,
@@ -337,11 +370,52 @@ function DepositosPageContent() {
   const [motivoConversion, setMotivoConversion] = useState<string>('')
   const [editingBoucherId, setEditingBoucherId] = useState<string | null>(null)
   const [replacingBoucherId, setReplacingBoucherId] = useState<string | null>(null)
+  // DEPOSITO-AUDITORIA-1 — Rehacer, Anular y el reemplazo del gestor pasan a
+  // exigir motivo, así que cada uno necesita su propio formulario abierto.
+  // Antes Rehacer y Eliminar eran un window.confirm() y no guardaban nada.
+  const [rehaciendoId, setRehaciendoId] = useState<string | null>(null)
+  const [motivoRehacer, setMotivoRehacer] = useState<string>('')
+  const [anulandoId, setAnulandoId] = useState<string | null>(null)
+  const [motivoAnulacion, setMotivoAnulacion] = useState<string>('')
+  const [motivoReemplazoBoucher, setMotivoReemplazoBoucher] = useState<string>('')
+  const [errorAccion, setErrorAccion] = useState<string | null>(null)
+  // Eventos de auditoría, SOLO de los depósitos ya expandidos: cargarlos en el
+  // listado sería una query por fila (N+1) sobre una pantalla que hoy cuesta
+  // cero reads extra.
+  const [eventosPorDeposito, setEventosPorDeposito] = useState<Record<string, EventoDepositoDoc[]>>({})
+  const eventosCargados = useRef<Set<string>>(new Set())
   const boucherReplaceRef = useRef<HTMLInputElement>(null)
   const [boucherModalUrl, setBoucherModalUrl] = useState<string | null>(null)
   const [expandedPorRevisar, setExpandedPorRevisar] = useState<Set<string>>(new Set())
-  const toggleExpandPorRevisar = (id: string) =>
+  const toggleExpandPorRevisar = (id: string) => {
     setExpandedPorRevisar((prev) => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s })
+    // DEPOSITO-AUDITORIA-1 — la historia se pide acá y no en el listado: una
+    // query por fila visible sería un N+1 sobre una pantalla que hoy no gasta
+    // ninguna lectura extra. Se carga una sola vez por depósito abierto; al
+    // cerrarlo y reabrirlo ya está en memoria.
+    cargarEventosDeposito(id)
+  }
+
+  /** Eventos de UN depósito, on-demand. Silencioso: la historia es accesoria. */
+  async function cargarEventosDeposito(depositoId: string) {
+    if (eventosCargados.current.has(depositoId)) return
+    eventosCargados.current.add(depositoId)
+    try {
+      const snap = await getDocs(collection(db, 'ordenes_deposito', depositoId, SUBCOLECCION_EVENTOS_DEPOSITO))
+      setEventosPorDeposito((prev) => ({
+        ...prev,
+        [depositoId]: snap.docs.map((d) => ({ id: d.id, ...(d.data() as EventoDepositoDoc) })),
+      }))
+    } catch {
+      // Sin historia legible no se rompe la pantalla ni se inventa una vacía:
+      // se permite reintentar en la próxima apertura.
+      eventosCargados.current.delete(depositoId)
+    }
+  }
+
+  /** Solo los depósitos del motorizado (A/B) llevan eventos y versionado. */
+  const esDepositoAB = (dep: { tipo?: string | null }) =>
+    dep.tipo === 'recaudacion_motorizado_storkhub' || dep.tipo === 'recaudacion_motorizado_comercio'
 
   // Historial: ordenes_deposito confirmados por gestor
   const [historialDepositos, setHistorialDepositos] = useState<DepositoOrderDoc[]>([])
@@ -886,7 +960,12 @@ function DepositosPageContent() {
       // 3) Boucher y transición a 'confirmado' en la MISMA escritura.
       // DEPOSITOS-UX-TRAZABILIDAD-1 — este flujo deja el depósito confirmado
       // por el gestor, pero no decía quién ni cuándo. Solo hacia adelante.
-      await updateDoc(depositoRef, {
+      //
+      // DEPOSITO-AUDITORIA-1 — de updateDoc a un batch de dos escrituras, para
+      // que el evento DEPOSITO_CONFIRMADO entre junto con la confirmación. Los
+      // pasos 1 y 2 no se reordenan: son los que sostienen la garantía de
+      // Storage (el documento existe antes de que se suba el objeto).
+      await escribirConfirmacionConEvento(depositoRef, {
         boucher: boucherData,
         estado: 'confirmado',
         ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
@@ -952,7 +1031,8 @@ function DepositosPageContent() {
 
       // DEPOSITOS-UX-TRAZABILIDAD-1 — este flujo deja el depósito confirmado
       // por el gestor, pero no decía quién ni cuándo. Solo hacia adelante.
-      await updateDoc(depositoRef, {
+      // DEPOSITO-AUDITORIA-1 — con su evento, en el mismo batch (ver arriba).
+      await escribirConfirmacionConEvento(depositoRef, {
         boucher: boucherData,
         estado: 'confirmado',
         ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
@@ -1145,6 +1225,31 @@ function DepositosPageContent() {
     await b.commit()
   }
 
+  /**
+   * DEPOSITO-AUDITORIA-1 — confirmación + evento en una sola escritura atómica.
+   *
+   * Los dos flujos en los que el gestor registra Y confirma de una
+   * (confirmarStorkhub / confirmarComercio) usaban un updateDoc suelto. Un
+   * batch de dos operaciones es el cambio mínimo que impide que el evento
+   * quede sin su confirmación, o al revés.
+   */
+  async function escribirConfirmacionConEvento(
+    depositoRef: ReturnType<typeof doc>,
+    campos: Record<string, unknown>,
+  ) {
+    const uid = auth.currentUser?.uid ?? ''
+    const b = writeBatch(db)
+    b.set(depositoRef, campos, { merge: true })
+    if (uid && userRol) {
+      const eventoId = doc(collection(db, depositoRef.path, SUBCOLECCION_EVENTOS_DEPOSITO)).id
+      b.set(
+        doc(db, depositoRef.path, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
+        camposEventoDepositoConfirmado({ uid, rol: userRol }, serverTimestamp()),
+      )
+    }
+    await b.commit()
+  }
+
   // ── Confirmar depósito existente (creado por motorizado o digitador) ──────
 
   async function confirmarDepositoExistente(dep: DepositoOrderDoc) {
@@ -1157,6 +1262,17 @@ function DepositosPageContent() {
       const { doc: docRef } = await import('firebase/firestore')
       const ref = docRef(db, 'ordenes_deposito', dep.id)
       const b = writeBatch(db)
+      // DEPOSITO-AUDITORIA-1 — el evento viaja en el MISMO batch que el cambio
+      // de estado: o quedan los dos, o no queda ninguno. Un depósito
+      // confirmado sin su evento sería un agujero en la historia justo en el
+      // momento en el que el dinero se da por recibido.
+      if (userRol && esDepositoAB(dep)) {
+        const eventoId = docRef(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id
+        b.set(
+          docRef(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
+          camposEventoDepositoConfirmado({ uid, rol: userRol }, serverTimestamp()),
+        )
+      }
       b.update(ref, {
         estado: 'confirmado',
         // Trazabilidad DIGITADOR V1 (sección 11): si dep.digitadoPorUid ya
@@ -1203,33 +1319,48 @@ function DepositosPageContent() {
     }
   }
 
-  // ── Devolver depósito al motorizado (lo elimina y resetea las órdenes) ──────
-
-  async function devolverAlMotorizado(dep: DepositoOrderDoc, motivo: string) {
+  // ── DEPOSITO-AUDITORIA-1: Pedir corrección ────────────────────────────────
+  //
+  // Reemplaza a devolverAlMotorizado(), que hacía esto:
+  //
+  //     b.delete(ordenes_deposito/{id})
+  //     punteros de las órdenes = null
+  //
+  // Es decir: para pedir otra foto, destruía el DEP-N que el trigger reparte
+  // una sola vez, el comprobante que el motorizado ya había mandado, la lista
+  // de órdenes, el monto y el motivo mismo — que se escribía en un input y no
+  // se guardaba en ninguna parte. El motorizado veía desaparecer el depósito
+  // y sus órdenes volver a "Por depositar", sin una línea que lo explicara.
+  //
+  // Ahora es una transición de estado con actor, hora y motivo, más el evento
+  // de auditoría en el MISMO batch (firestore.rules exige los dos juntos). El
+  // depósito no se toca en nada más: ni el boucher, ni el monto, ni las
+  // órdenes, ni sus punteros. Solo pasa a 'devuelto' y dice por qué.
+  async function pedirCorreccionDeposito(dep: DepositoOrderDoc, motivo: string) {
+    const uid = auth.currentUser?.uid ?? ''
+    if (!uid || !userRol) return
     setDevolviendoId(dep.id)
+    setErrorAccion(null)
     try {
+      const eventoId = doc(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id
       const b = writeBatch(db)
-      // Eliminar el doc de ordenes_deposito — el motorizado creará uno nuevo al re-subir
-      b.delete(doc(db, 'ordenes_deposito', dep.id))
-      // Resetear las solicitudes para que el motorizado las vea como pendientes.
-      const esStorkhub = dep.destinatario === 'storkhub'
-      dep.solicitudIds.forEach((sid) => {
-        b.update(doc(db, 'solicitudes_envio', sid), esStorkhub ? {
-          'registro.deposito.confirmadoStorkhub': false,
-          'registro.deposito.confirmadoStorkhubAt': null,
-          'registro.deposito.storkhubDepositoId': null,
-        } : {
-          'registro.deposito.confirmadoComercio': false,
-          'registro.deposito.confirmadoComercioAt': null,
-          'registro.deposito.comercioDepositoId': null,
-        })
-      })
+      b.set(
+        doc(db, 'ordenes_deposito', dep.id),
+        camposPedirCorreccion(uid, serverTimestamp(), motivo, eventoId),
+        { merge: true },
+      )
+      b.set(
+        doc(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
+        camposEventoDepositoDevuelto({ uid, rol: userRol }, serverTimestamp(), motivo),
+      )
       await b.commit()
-      // No se registra movimiento financiero: el rechazo por boucher incorrecto
-      // no representa movimiento real de dinero — es solo un evento operativo.
-    } finally {
+      // No se registra movimiento financiero: pedir otra foto no mueve dinero.
+      // El ledger sigue siendo ledger; la evidencia vive en los eventos.
       setDevolviendoId(null)
       setMotivoDevolucion('')
+    } catch (e) {
+      setErrorAccion(e instanceof Error ? e.message : 'No se pudo pedir la corrección.')
+      setDevolviendoId(null)
     }
   }
 
@@ -1342,22 +1473,47 @@ function DepositosPageContent() {
 
   // ── Reemplazar boucher de un depósito en "Por revisar" ────────────────────
 
-  async function reemplazarBoucher(dep: DepositoOrderDoc, file: File) {
+  //
+  // DEPOSITO-AUDITORIA-1 — el reemplazo del gestor también es VERSIONADO.
+  //
+  // Antes subía al path fijo `boucher.jpg`: el objeto anterior dejaba de
+  // existir y el documento no registraba que hubiera habido un cambio. Ahora
+  // escribe una versión nueva (create-only en Storage) y el evento
+  // BOUCHER_REEMPLAZADO con su motivo, igual que el motorizado. El sellado de
+  // F1 sigue cortando antes de subir nada.
+  async function reemplazarBoucher(dep: DepositoOrderDoc, file: File, motivo: string) {
+    const uid = auth.currentUser?.uid ?? ''
+    if (!uid || !userRol) return
     setReplacingBoucherId(dep.id)
+    setErrorAccion(null)
     try {
       // COBROS-PAGO-INTEGRIDAD-1 — el comprobante de un depósito confirmado es
-      // evidencia de dinero ya recibido, y el upload sobrescribe el mismo
-      // objeto de Storage. Se corta ANTES de subir; firestore.rules deniega
-      // igual el update. Para corregirlo existe Rehacer (vuelve a revisión).
+      // evidencia de dinero ya recibido. Se corta ANTES de subir; Rules y
+      // storage.rules deniegan igual. Para corregirlo existe Rehacer.
       asegurarBoucherDepositoMutable(dep.estado)
+      if (!staffPuedeReemplazarBoucher(dep)) {
+        throw new Error('Este depósito ya no admite un comprobante nuevo.')
+      }
+      const versionId = doc(collection(db, 'ordenes_deposito')).id
+      const plan = planReemplazoBoucher(dep, versionId, motivo)
       const blob = await compressImage(file)
-      // El reemplazo conserva el namespace del motorizado dueño del depósito,
-      // que ya está guardado en el propio documento.
-      const { url, pathStorage } = await uploadDepositoBoucher(dep.motorizadoUid, dep.id, blob)
-      await setDoc(doc(db, 'ordenes_deposito', dep.id), { boucher: { url, pathStorage } }, { merge: true })
+      const subida = await uploadVersionBoucherDeposito(plan.path, blob)
+      const eventoId = doc(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id
+      const b = writeBatch(db)
+      b.set(
+        doc(db, 'ordenes_deposito', dep.id),
+        camposReemplazoBoucher(plan, subida, dep.motorizadoUid, serverTimestamp(), eventoId),
+        { merge: true },
+      )
+      b.set(
+        doc(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
+        eventoReemplazoBoucher(plan, { uid, rol: userRol }, serverTimestamp()),
+      )
+      await b.commit()
       setEditingBoucherId(null)
-    } catch (e: any) {
-      console.error('Error reemplazando boucher:', e)
+      setMotivoReemplazoBoucher('')
+    } catch (e) {
+      setErrorAccion(e instanceof Error ? e.message : 'No se pudo reemplazar el comprobante.')
     } finally {
       setReplacingBoucherId(null)
     }
@@ -1388,53 +1544,85 @@ function DepositosPageContent() {
 
   // ── Rehacer depósito: vuelve a "Por revisar" para que el motorizado reenvíe ──
 
-  async function rehacerDeposito(dep: DepositoOrderDoc) {
-    const ok = window.confirm(
-      `¿Rehacer este depósito?\n\nMonto: ${fmt(dep.montoTotal)}\nMotorizado: ${dep.motorizadoNombre}\n\nEl depósito volverá a "Por revisar" para que se corrija.\nSe anularán los movimientos financieros asociados.`
-    )
-    if (!ok) return
-    // 1. Anular movimientos del ledger — el depósito no está más confirmado
-    await anularMovimientosDeDeposito(dep.id, 'Depósito revertido a revisión por gestor')
-    // 2. Resetear estado operativo.
-    //
-    // DEPOSITOS-UX-TRAZABILIDAD-1 — en el mismo batch, las órdenes dejan de
-    // afirmar la confirmación: quedaban con confirmadoX = true mientras el
-    // depósito volvía a revisión, y el motorizado lo veía cerrado. El puntero
-    // se conserva (el depósito sigue existiendo y siendo de estas órdenes);
-    // el documento guarda su confirmación anterior como historial.
-    const ref = doc(db, 'ordenes_deposito', dep.id)
-    const destino = dep.destinatario === 'storkhub' ? 'storkhub' : 'comercio'
-    const b = writeBatch(db)
-    b.set(ref, {
-      estado: 'en_revision',
-    }, { merge: true })
-    ;(dep.solicitudIds ?? []).forEach((sid) => b.update(doc(db, 'solicitudes_envio', sid), camposReaperturaRevision(destino, dep.id)))
-    await b.commit()
+  // DEPOSITO-AUDITORIA-1 — Rehacer ahora pide MOTIVO y deja evento.
+  // Seguía siendo admin-only y volvía el depósito a revisión, pero sin decir
+  // por qué: el documento cambiaba de estado y nadie podía reconstruir quién
+  // lo había decidido ni con qué argumento.
+  async function rehacerDeposito(dep: DepositoOrderDoc, motivo: string) {
+    const uid = auth.currentUser?.uid ?? ''
+    if (!uid || !userRol) return
+    setErrorAccion(null)
+    try {
+      // 1. Anular movimientos del ledger — el depósito no está más confirmado
+      await anularMovimientosDeDeposito(dep.id, 'Depósito revertido a revisión por gestor')
+      // 2. Resetear estado operativo.
+      //
+      // DEPOSITOS-UX-TRAZABILIDAD-1 — en el mismo batch, las órdenes dejan de
+      // afirmar la confirmación: quedaban con confirmadoX = true mientras el
+      // depósito volvía a revisión, y el motorizado lo veía cerrado. El
+      // puntero se conserva (el depósito sigue existiendo y siendo de estas
+      // órdenes); el documento guarda su confirmación anterior como historial.
+      const destino = dep.destinatario === 'storkhub' ? 'storkhub' : 'comercio'
+      const eventoId = doc(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id
+      const b = writeBatch(db)
+      b.set(
+        doc(db, 'ordenes_deposito', dep.id),
+        camposRehacerDeposito(uid, serverTimestamp(), motivo, eventoId),
+        { merge: true },
+      )
+      b.set(
+        doc(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
+        camposEventoDepositoRehecho({ uid, rol: userRol }, serverTimestamp(), motivo),
+      )
+      ;(dep.solicitudIds ?? []).forEach((sid) => b.update(doc(db, 'solicitudes_envio', sid), camposReaperturaRevision(destino, dep.id)))
+      await b.commit()
+      setRehaciendoId(null)
+      setMotivoRehacer('')
+    } catch (e) {
+      setErrorAccion(e instanceof Error ? e.message : 'No se pudo rehacer el depósito.')
+    }
   }
 
-  // ── Eliminar depósito (solo admin) ────────────────────────────────────────
-
-  async function eliminarDeposito(dep: DepositoOrderDoc) {
-    const ok = window.confirm(
-      `¿Eliminar este depósito?\n\nMonto: ${fmt(dep.montoTotal)}\nMotorizado: ${dep.motorizadoNombre}\nÓrdenes: ${dep.solicitudIds.join(', ')}\n\nEsta acción no se puede deshacer.`
-    )
-    if (!ok) return
-    // Anular movimientos del ledger antes de eliminar el doc
-    await anularMovimientosDeDeposito(dep.id, 'Depósito eliminado por gestor')
-    // DEPOSITOS-UX-TRAZABILIDAD-1 — borrar el documento dejaba a las órdenes
-    // apuntando a un depósito inexistente y marcadas como confirmadas. Ahora
-    // se liberan en el mismo batch, igual que devolverAlMotorizado: si la
-    // obligación sigue viva, vuelve a pendiente. Excepción: un depósito
-    // convertido en deuda tiene su saldo en saldos_cargo_motorizado, que esto
-    // no anula — liberar las órdenes cobraría el mismo dinero dos veces. Ese
-    // caso queda como estaba (deuda DEPOSITO-BORRADO-FISICO).
-    const b = writeBatch(db)
-    b.delete(doc(db, 'ordenes_deposito', dep.id))
-    if (eliminarLiberaOrdenes(dep.estado)) {
-      const destino = dep.destinatario === 'storkhub' ? 'storkhub' : 'comercio'
-      ;(dep.solicitudIds ?? []).forEach((sid) => b.update(doc(db, 'solicitudes_envio', sid), camposLiberacionDeposito(destino)))
+  // ── DEPOSITO-AUDITORIA-1: Anular (reemplaza a Eliminar) ───────────────────
+  //
+  // El viejo "Eliminar" hacía `b.delete(ordenes_deposito/{id})`. Un depósito
+  // borrado no deja nada: ni el DEP-N, ni el comprobante que respaldaba el
+  // dinero, ni las órdenes que agrupaba, ni quién lo borró. Y el aviso decía
+  // la verdad — "esta acción no se puede deshacer"—, que es exactamente el
+  // problema.
+  //
+  // Anular conserva TODO y cambia el estado. Lo único que se mantiene del
+  // comportamiento anterior es la liberación de las órdenes, con la misma
+  // excepción de siempre: un convertido en deuda no las libera, porque su
+  // saldo vive en saldos_cargo_motorizado y esto no lo anula — liberar
+  // cobraría el mismo dinero dos veces (eliminarLiberaOrdenes).
+  async function anularDeposito(dep: DepositoOrderDoc, motivo: string) {
+    const uid = auth.currentUser?.uid ?? ''
+    if (!uid || !userRol) return
+    setErrorAccion(null)
+    try {
+      await anularMovimientosDeDeposito(dep.id, 'Depósito anulado por administrador')
+      const eventoId = doc(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id
+      const b = writeBatch(db)
+      b.set(
+        doc(db, 'ordenes_deposito', dep.id),
+        camposAnularDeposito(uid, serverTimestamp(), motivo, eventoId),
+        { merge: true },
+      )
+      b.set(
+        doc(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
+        camposEventoDepositoAnulado({ uid, rol: userRol }, serverTimestamp(), motivo),
+      )
+      if (eliminarLiberaOrdenes(dep.estado)) {
+        const destino = dep.destinatario === 'storkhub' ? 'storkhub' : 'comercio'
+        ;(dep.solicitudIds ?? []).forEach((sid) => b.update(doc(db, 'solicitudes_envio', sid), camposLiberacionDeposito(destino)))
+      }
+      await b.commit()
+      setAnulandoId(null)
+      setMotivoAnulacion('')
+    } catch (e) {
+      setErrorAccion(e instanceof Error ? e.message : 'No se pudo anular el depósito.')
     }
-    await b.commit()
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -1451,6 +1639,17 @@ function DepositosPageContent() {
           Seguimiento de depósitos generados por motorizados · Storkhub y comercios.
         </p>
       </div>
+
+      {/* DEPOSITO-AUDITORIA-1 — Pedir corrección, Rehacer, Anular y el reemplazo
+          versionado pueden ser denegados por Rules (motivo corto, estado que ya
+          cambió, versión tomada por otra pestaña). Antes esos flujos hacían
+          console.error y la pantalla no decía nada. */}
+      {errorAccion && (
+        <div className="flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+          <p className="text-xs font-semibold text-red-700">{errorAccion}</p>
+          <button onClick={() => setErrorAccion(null)} className="text-xs font-semibold text-red-400 hover:text-red-600">✕</button>
+        </div>
+      )}
 
       {/* KPIs */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
@@ -1896,17 +2095,23 @@ function DepositosPageContent() {
                               </div>
                             ) : (
                             <div className="flex items-center justify-end gap-1">
-                              {/* Devolver (motorizado) / Rechazar con trazabilidad (digitador) */}
-                              {devolviendoId !== dep.id && convirtiendo !== dep.id && rechazandoId !== dep.id && (
+                              {/* Pedir corrección (motorizado) / Rechazar con trazabilidad (digitador).
+                                  DEPOSITO-AUDITORIA-1 — solo desde 'en_revision': un
+                                  depósito ya devuelto está esperando la foto nueva,
+                                  no hace falta volver a pedirla. */}
+                              {devolviendoId !== dep.id && convirtiendo !== dep.id && rechazandoId !== dep.id
+                                && (esDeDigitador || puedePedirCorreccion(dep)) && (
                                 <button
                                   onClick={() => esDeDigitador ? setRechazandoId(dep.id) : setDevolviendoId(dep.id)}
                                   disabled={isBusy}
                                   className="text-[11px] font-semibold px-2 py-1 rounded-lg border border-orange-200 text-orange-500 hover:bg-orange-50 transition disabled:opacity-40"
-                                  title={esDeDigitador ? 'Rechazar digitación' : 'Devolver al motorizado'}
+                                  title={esDeDigitador ? 'Rechazar digitación' : BOTON_PEDIR_CORRECCION}
                                 >↩</button>
                               )}
-                              {/* Confirmar */}
-                              {devolviendoId !== dep.id && convirtiendo !== dep.id && rechazandoId !== dep.id && (
+                              {/* Confirmar. Un depósito devuelto NO se confirma:
+                                  está esperando comprobante (Rules lo deniega igual). */}
+                              {devolviendoId !== dep.id && convirtiendo !== dep.id && rechazandoId !== dep.id
+                                && puedeConfirmarDeposito(dep) && (
                                 <button
                                   onClick={() => confirmarDepositoExistente(dep)}
                                   disabled={isBusy}
@@ -1982,8 +2187,18 @@ function DepositosPageContent() {
                                           <img src={dep.boucher.url} alt="boucher" className="h-8 w-8 rounded object-cover border border-gray-200" />
                                           Ver comprobante
                                         </button>
-                                        {(!esDigitadorSesion || dep.estado === 'en_revision') && puedeMutarBoucherDeposito(dep.estado) && (
-                                          <button onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
+                                        {/* DEPOSITO-AUDITORIA-1 — la versión vigente se
+                                            nombra solo si hubo reemplazo: un depósito
+                                            que nunca se corrigió no dice "Versión 1",
+                                            que sugeriría un historial inexistente. */}
+                                        {!esBoucherLegacy(dep) && (
+                                          <span className="text-[10px] font-semibold text-gray-500 bg-gray-100 border border-gray-200 px-1.5 py-0.5 rounded">
+                                            {etiquetaVersionBoucher(dep)}
+                                          </span>
+                                        )}
+                                        {(!esDigitadorSesion || dep.estado === 'en_revision') && puedeMutarBoucherDeposito(dep.estado)
+                                          && (esDigitadorSesion || staffPuedeReemplazarBoucher(dep)) && (
+                                          <button onClick={() => { setEditingBoucherId(dep.id); setMotivoReemplazoBoucher('') }}
                                             disabled={replacingBoucherId === dep.id}
                                             className="text-[11px] text-blue-500 hover:text-blue-700 hover:underline transition disabled:opacity-40">
                                             {replacingBoucherId === dep.id ? '⏳ Subiendo…' : '📷 Reemplazar'}
@@ -1998,6 +2213,74 @@ function DepositosPageContent() {
                                       </button>
                                     )}
                                     <p className="text-[10px] text-gray-400 font-mono select-all" title="Referencia técnica del documento">ID técnico: {dep.id}</p>
+                                  </div>
+                                )}
+
+                                {/* DEPOSITO-AUDITORIA-1 — el reemplazo del gestor
+                                    también es una versión auditada: pide motivo antes
+                                    de abrir el selector de archivo. */}
+                                {isExp && editingBoucherId === dep.id && (
+                                  <div className="flex flex-col gap-2 max-w-lg">
+                                    <p className="text-[11px] text-gray-500">{AVISO_REEMPLAZO_BOUCHER}</p>
+                                    <input value={motivoReemplazoBoucher} onChange={(e) => setMotivoReemplazoBoucher(e.target.value)}
+                                      placeholder="Motivo del reemplazo (mínimo 3 caracteres)"
+                                      maxLength={MOTIVO_EVENTO_MAX}
+                                      className="text-xs border border-blue-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-blue-300"
+                                      autoFocus />
+                                    <div className="flex gap-2">
+                                      <button onClick={() => { setEditingBoucherId(null); setMotivoReemplazoBoucher('') }}
+                                        className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition">
+                                        Cancelar
+                                      </button>
+                                      <button onClick={() => boucherReplaceRef.current?.click()}
+                                        disabled={!motivoEventoValido(motivoReemplazoBoucher) || replacingBoucherId === dep.id}
+                                        className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-40 disabled:cursor-not-allowed">
+                                        {replacingBoucherId === dep.id ? 'Subiendo…' : 'Elegir comprobante'}
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* DEPOSITO-AUDITORIA-1 — corrección solicitada: qué se
+                                    pidió, quién lo pidió y cuándo. Mientras siga
+                                    'devuelto', el depósito espera comprobante. */}
+                                {isExp && dep.estado === ESTADO_DEVUELTO && (() => {
+                                  // Sin mapa de nombres: el actor es staff, y `motorizadoNames` indexa
+                                  // motorizados. El nombre lo resuelve nombreInterno() abajo.
+                                  const c = correccionSolicitada(dep, {})
+                                  return c && (
+                                    <div className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 max-w-lg">
+                                      <p className="text-[11px] font-bold text-orange-700">{ETIQUETA_DEVUELTO}</p>
+                                      {c.motivo && <p className="text-xs text-orange-900 mt-0.5">{c.motivo}</p>}
+                                      <p className="text-[10px] text-orange-700 mt-0.5">
+                                        Solicitada por {c.actor ? nombreInterno(c.actor.uid) : 'un usuario interno'} · {fechaHoraOperativa(c.at)}
+                                      </p>
+                                      <p className="text-[10px] text-orange-700 mt-0.5">{TEXTO_ESPERANDO_CORRECCION}</p>
+                                    </div>
+                                  )
+                                })()}
+
+                                {/* DEPOSITO-AUDITORIA-1 — historia del depósito. Se
+                                    carga al expandir (ver cargarEventosDeposito): en
+                                    el listado sería una query por fila. */}
+                                {isExp && esDepositoAB(dep) && (eventosPorDeposito[dep.id]?.length ?? 0) > 0 && (
+                                  <div>
+                                    <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Historial del depósito</p>
+                                    <div className="flex flex-col gap-1">
+                                      {filasEventosDeposito(eventosPorDeposito[dep.id] ?? [], {}, (v) => normalizarFecha(v)?.getTime() ?? 0).map((ev) => (
+                                        <div key={ev.id} className="flex flex-wrap items-baseline gap-x-2 text-[11px] text-gray-600">
+                                          <span className="font-semibold text-gray-800">{ev.titulo}</span>
+                                          {ev.version != null && <span className="text-gray-400">v{ev.version}</span>}
+                                          <span className="text-gray-400">{fechaHoraOperativa(ev.at)}</span>
+                                          {ev.actor && (
+                                            <span title={ev.actor.uid}>
+                                              · {nombreInterno(ev.actor.uid)}{ev.rol ? ` (${ev.rol})` : ''}
+                                            </span>
+                                          )}
+                                          {ev.motivo && <span className="text-gray-500">· {ev.motivo}</span>}
+                                        </div>
+                                      ))}
+                                    </div>
                                   </div>
                                 )}
 
@@ -2016,11 +2299,20 @@ function DepositosPageContent() {
                                   </div>
                                 )}
 
-                                {/* Form devolver (motorizado) */}
+                                {/* DEPOSITO-AUDITORIA-1 — Form "Pedir corrección".
+                                    Antes el motivo se escribía acá y NO se guardaba
+                                    en ninguna parte: el depósito se borraba y el
+                                    texto moría con el componente. Ahora es
+                                    obligatorio (3–300) y queda en el documento y en
+                                    el evento. */}
                                 {devolviendoId === dep.id && (
                                   <div className="flex flex-col gap-2 max-w-lg">
+                                    <p className="text-[11px] text-orange-700 bg-orange-50 border border-orange-200 rounded-lg px-3 py-2">
+                                      El depósito <strong>no se borra</strong>: conserva su código, su comprobante y sus órdenes, y queda esperando uno nuevo. El motivo lo verá el motorizado.
+                                    </p>
                                     <input value={motivoDevolucion} onChange={(e) => setMotivoDevolucion(e.target.value)}
-                                      placeholder="Motivo de devolución…"
+                                      placeholder="¿Qué hay que corregir? (mínimo 3 caracteres)"
+                                      maxLength={MOTIVO_EVENTO_MAX}
                                       className="text-xs border border-orange-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-orange-300"
                                       autoFocus />
                                     <div className="flex gap-2">
@@ -2028,10 +2320,10 @@ function DepositosPageContent() {
                                         className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition">
                                         Cancelar
                                       </button>
-                                      <button onClick={() => devolverAlMotorizado(dep, motivoDevolucion)}
-                                        disabled={!motivoDevolucion.trim()}
+                                      <button onClick={() => pedirCorreccionDeposito(dep, motivoDevolucion)}
+                                        disabled={!motivoEventoValido(motivoDevolucion)}
                                         className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-orange-500 text-white hover:bg-orange-600 transition disabled:opacity-40 disabled:cursor-not-allowed">
-                                        Confirmar devolución
+                                        {BOTON_PEDIR_CORRECCION}
                                       </button>
                                     </div>
                                   </div>
@@ -2103,7 +2395,7 @@ function DepositosPageContent() {
             const f = e.target.files?.[0]
             if (f && editingBoucherId) {
               const dep = porRevisar.find((d) => d.id === editingBoucherId)
-              if (dep) await reemplazarBoucher(dep, f)
+              if (dep) await reemplazarBoucher(dep, f, motivoReemplazoBoucher)
             }
             if (boucherReplaceRef.current) boucherReplaceRef.current.value = ''
           }}
@@ -2287,24 +2579,50 @@ function DepositosPageContent() {
                               </span>
                             )}
                             {/* DEP-ACCIONES-ADMIN-ONLY — solo admin, y nunca sobre un
-                                tipo C (se corrige con Revertir en Cobros). Rules igual. */}
-                            {accionesAdminDeposito(dep, userRol).rehacer && (
+                                tipo C (se corrige con Revertir en Cobros). Rules igual.
+                                DEPOSITO-AUDITORIA-1 — "Eliminar" pasó a ser "Anular":
+                                mismo efecto operativo, sin delete físico. Las dos
+                                acciones piden motivo en vez de un window.confirm(). */}
+                            {rehaciendoId !== dep.id && anulandoId !== dep.id && accionesAdminDeposito(dep, userRol).rehacer && (
                               <button
-                                onClick={() => rehacerDeposito(dep)}
+                                onClick={() => { setMotivoRehacer(''); setAnulandoId(null); setRehaciendoId(dep.id) }}
                                 title="Rehacer depósito — vuelve a Por revisar"
                                 className="text-orange-500 hover:text-orange-700 transition text-[11px] font-semibold px-1.5 py-0.5 rounded hover:bg-orange-50"
                               >
                                 Rehacer
                               </button>
                             )}
-                            {accionesAdminDeposito(dep, userRol).eliminar && (
+                            {rehaciendoId !== dep.id && anulandoId !== dep.id && accionesAdminDeposito(dep, userRol).anular && (
                               <button
-                                onClick={() => eliminarDeposito(dep)}
-                                title="Eliminar depósito (solo admin)"
+                                onClick={() => { setMotivoAnulacion(''); setRehaciendoId(null); setAnulandoId(dep.id) }}
+                                title="Anular depósito (solo admin) — conserva el DEP-N, el comprobante y las órdenes"
                                 className="text-red-400 hover:text-red-600 transition text-[11px] font-semibold px-1.5 py-0.5 rounded hover:bg-red-50"
                               >
-                                Eliminar
+                                Anular
                               </button>
+                            )}
+                            {(rehaciendoId === dep.id || anulandoId === dep.id) && (
+                              <div className="flex items-center gap-1">
+                                <input
+                                  value={rehaciendoId === dep.id ? motivoRehacer : motivoAnulacion}
+                                  onChange={(e) => (rehaciendoId === dep.id ? setMotivoRehacer(e.target.value) : setMotivoAnulacion(e.target.value))}
+                                  placeholder={rehaciendoId === dep.id ? 'Motivo para rehacer…' : 'Motivo de la anulación…'}
+                                  maxLength={MOTIVO_EVENTO_MAX}
+                                  autoFocus
+                                  className="text-[11px] border border-gray-200 rounded-lg px-2 py-1 w-52 focus:outline-none focus:ring-1 focus:ring-orange-300"
+                                />
+                                <button
+                                  onClick={() => { setRehaciendoId(null); setAnulandoId(null); setMotivoRehacer(''); setMotivoAnulacion('') }}
+                                  className="text-[11px] font-semibold px-1.5 py-0.5 rounded border border-gray-200 text-gray-500 hover:bg-gray-50"
+                                >✕</button>
+                                <button
+                                  onClick={() => (rehaciendoId === dep.id ? rehacerDeposito(dep, motivoRehacer) : anularDeposito(dep, motivoAnulacion))}
+                                  disabled={!motivoEventoValido(rehaciendoId === dep.id ? motivoRehacer : motivoAnulacion)}
+                                  className={`text-[11px] font-semibold px-2 py-0.5 rounded text-white transition disabled:opacity-40 disabled:cursor-not-allowed ${rehaciendoId === dep.id ? 'bg-orange-500 hover:bg-orange-600' : 'bg-red-500 hover:bg-red-600'}`}
+                                >
+                                  {rehaciendoId === dep.id ? 'Rehacer' : 'Anular'}
+                                </button>
+                              </div>
                             )}
                           </div>
                         </td>

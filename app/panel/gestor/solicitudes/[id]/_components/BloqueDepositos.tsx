@@ -50,6 +50,10 @@ const Dato = ({ label, children }: { label: string; children: React.ReactNode })
 const COLOR_ESTADO: Record<string, string> = {
   confirmado: 'bg-green-50 text-green-700 border-green-200',
   en_revision: 'bg-blue-50 text-blue-700 border-blue-200',
+  // DEPOSITO-AUDITORIA-1 — naranja de "falta algo", no el rojo de rechazado:
+  // el depósito sigue vivo y solo espera un comprobante mejor. (El fallback
+  // del lookup ya evitaba que reventara, pero lo pintaba de gris neutro.)
+  devuelto: 'bg-orange-50 text-orange-700 border-orange-200',
   pendiente_boucher: 'bg-amber-50 text-amber-700 border-amber-200',
   rechazado: 'bg-red-50 text-red-600 border-red-200',
   convertido_en_deuda: 'bg-red-50 text-red-600 border-red-200',

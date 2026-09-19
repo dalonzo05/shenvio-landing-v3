@@ -30,6 +30,13 @@ import {
   fechasDeposito,
   type IdentidadDeposito,
 } from './presentacion-deposito'
+import { ESTADO_DEVUELTO } from './deposito-correccion'
+import { normalizarMotivoEvento } from './deposito-eventos'
+import {
+  depositoAdmiteVersionBoucher,
+  esBoucherLegacy,
+  versionEfectivaBoucher,
+} from './deposito-boucher-version'
 
 // ─── Resumen ──────────────────────────────────────────────────────────────────
 
@@ -132,6 +139,19 @@ export interface FilaDepositoMotorizado {
    * intenta la lectura. Lo que sí sabe es que lo confirmó StorkHub.
    */
   confirmadoPor: string | null
+  // ── DEPOSITO-AUDITORIA-1 ────────────────────────────────────────────────
+  /**
+   * Motivo de la corrección VIGENTE, o null. Se muestra sin actor: el
+   * motorizado no puede leer `usuarios` (misma razón que confirmadoPor), así
+   * que quien la pidió es "StorkHub" y punto.
+   */
+  motivoCorreccion: string | null
+  /** `devueltoAt` crudo; la página lo formatea. */
+  correccionAt: unknown
+  /** ¿Puede subir hoy una versión nueva del comprobante? */
+  puedeCorregir: boolean
+  /** Versión vigente del comprobante, o null si nunca se reemplazó. */
+  versionBoucher: number | null
 }
 
 const ms = (v: unknown) => normalizarFecha(v)?.getTime() ?? 0
@@ -169,6 +189,16 @@ export function historialDepositosMotorizado(
         estadoClave: d.estado ?? null,
         comprobante: comprobanteDeposito(d),
         confirmadoPor: d.estado === 'confirmado' ? 'StorkHub' : null,
+        motivoCorreccion: d.estado === ESTADO_DEVUELTO
+          ? (normalizarMotivoEvento(d.motivoDevolucion) || null)
+          : null,
+        correccionAt: d.estado === ESTADO_DEVUELTO ? (d.devueltoAt ?? null) : null,
+        // El UID no se pasa acá: la fila se construye desde el historial del
+        // propio motorizado, así que la pertenencia ya está garantizada por la
+        // query (where motorizadoUid == su uid). Quien llama pasa el suyo si
+        // quiere ser explícito; sin él, se decide solo por tipo y estado.
+        puedeCorregir: depositoAdmiteVersionBoucher(d),
+        versionBoucher: esBoucherLegacy(d) ? null : versionEfectivaBoucher(d),
       }
     })
 }
@@ -187,7 +217,13 @@ export const PESTANAS_DEPOSITOS_MOTORIZADO: { clave: PestanaDepositosMotorizado;
   { clave: 'todos', texto: 'Todos' },
 ]
 
-const ESTADOS_POR_REVISAR = ['pendiente_boucher', 'en_revision']
+// DEPOSITO-AUDITORIA-1 — 'devuelto' entra en "Por revisar", no en una pestaña
+// nueva ni en "Todos" a secas. Es el estado en el que la pelota está del lado
+// del motorizado: StorkHub ya miró el comprobante y le pidió otro. Dejarlo
+// fuera lo escondería detrás de "Todos" justo cuando hay que actuar, y
+// mandarlo a "Por depositar" sería mentir: el dinero ya se depositó y el
+// depósito existe, con su DEP-N y sus órdenes enlazadas.
+const ESTADOS_POR_REVISAR = ['pendiente_boucher', 'en_revision', 'devuelto']
 
 /**
  * Filas de una pestaña. 'convertido_en_deuda' no es "Confirmado": solo aparece

@@ -163,12 +163,19 @@ test('X13 · alerta de Cobros: en revisión y esperando comprobante, con monto',
 
 // ── Acciones de admin ────────────────────────────────────────────────────────
 
-test('X14 · Rehacer / Eliminar: solo admin, nunca sobre un DEP tipo C', () => {
-  assert.deepEqual(accionesAdminDeposito(DEP_0001, 'admin'), { rehacer: true, eliminar: true })
-  assert.deepEqual(accionesAdminDeposito(DEP_0001, 'gestor'), { rehacer: false, eliminar: false })
-  assert.deepEqual(accionesAdminDeposito(DEP_0001, 'digitador'), { rehacer: false, eliminar: false })
-  assert.deepEqual(accionesAdminDeposito(DEP_0002, 'admin'), { rehacer: false, eliminar: false })
-  assert.deepEqual(accionesAdminDeposito({ ...DEP_0001, estado: 'convertido_en_deuda' }, 'admin'), { rehacer: false, eliminar: true })
+test('X14 · Rehacer / Anular: solo admin, nunca sobre un DEP tipo C', () => {
+  assert.deepEqual(accionesAdminDeposito(DEP_0001, 'admin'), { rehacer: true, anular: true })
+  assert.deepEqual(accionesAdminDeposito(DEP_0001, 'gestor'), { rehacer: false, anular: false })
+  assert.deepEqual(accionesAdminDeposito(DEP_0001, 'digitador'), { rehacer: false, anular: false })
+  assert.deepEqual(accionesAdminDeposito(DEP_0002, 'admin'), { rehacer: false, anular: false })
+  assert.deepEqual(accionesAdminDeposito({ ...DEP_0001, estado: 'convertido_en_deuda' }, 'admin'), { rehacer: false, anular: true })
+})
+
+// DEPOSITO-AUDITORIA-1 — un DEP ya anulado es terminal: no se rehace ni se
+// vuelve a anular. Antes `eliminar` decía true para cualquier estado, porque
+// borrar un documento siempre "se puede".
+test('X14b · un depósito ya anulado no ofrece ninguna de las dos', () => {
+  assert.deepEqual(accionesAdminDeposito({ ...DEP_0001, estado: 'anulado' }, 'admin'), { rehacer: false, anular: false })
 })
 
 // ── Historial de Depósitos: columna "Enviado" ────────────────────────────────

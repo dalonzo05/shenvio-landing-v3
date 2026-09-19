@@ -306,15 +306,24 @@ export function resumenAtencionCobros(ordenes: Array<{
 // ─── Depósitos: acciones de administrador ─────────────────────────────────────
 
 /**
- * Rehacer y Eliminar son solo del administrador, y nunca sobre un DEP tipo C:
+ * Rehacer y Anular son solo del administrador, y nunca sobre un DEP tipo C:
  * ese documento es el registro del pago de una orden pagada, y su corrección
  * es Revertir en Cobros (que anula el DEP y el movimiento juntos).
  * firestore.rules aplica lo mismo del lado del servidor.
+ *
+ * DEPOSITO-AUDITORIA-1 — la segunda acción era `eliminar` y hacía un delete
+ * físico del documento. Ya no existe: el delete está DENY para todos en
+ * firestore.rules, y lo que queda es `anular`, que deja el DEP-N, el
+ * comprobante, las órdenes históricas y el motivo como rastro. Un depósito ya
+ * anulado no se vuelve a anular — no hay nada que cerrar dos veces.
  */
 export function accionesAdminDeposito(
   dep: Pick<DepositoRegistrado, 'tipo' | 'estado'>,
   rol: string | null | undefined,
-): { rehacer: boolean; eliminar: boolean } {
-  if (rol !== 'admin' || claseDeposito(dep) === 'transferencia_delivery') return { rehacer: false, eliminar: false }
-  return { rehacer: dep.estado !== 'convertido_en_deuda', eliminar: true }
+): { rehacer: boolean; anular: boolean } {
+  if (rol !== 'admin' || claseDeposito(dep) === 'transferencia_delivery') return { rehacer: false, anular: false }
+  return {
+    rehacer: dep.estado !== 'convertido_en_deuda' && dep.estado !== 'anulado',
+    anular: dep.estado !== 'anulado',
+  }
 }

@@ -7,7 +7,13 @@
   // de `.test-build` siga siendo plano e idempotente.
   "compilerOptions": {
     "outDir": ".rules-build",
-    "rootDir": "test",
+    // DEPOSITO-AUDITORIA-1 — rootDir pasa a la raíz, igual que
+    // tsconfig.storage-rules.json y por el mismo motivo: la suite importa los
+    // helpers puros del writer (lib/deposito-eventos,
+    // lib/deposito-boucher-version, lib/deposito-correccion) para probar el
+    // MISMO payload que escribe la app. Duplicarlo a mano haría que un test
+    // verde no demostrara nada sobre el writer real.
+    "rootDir": ".",
     "module": "commonjs",
     "moduleResolution": "node",
     "target": "es2022",

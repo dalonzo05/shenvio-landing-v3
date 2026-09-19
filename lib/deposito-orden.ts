@@ -41,6 +41,26 @@ export interface DepositoRegistrado {
   boucher?: { url?: string | null; pathStorage?: string | null; uploadedAt?: unknown } | null
   /** Forma plana del pago del delivery por transferencia (tipo C). */
   boucherUrl?: string | null
+  // ── DEPOSITO-AUDITORIA-1 · versionado del comprobante ───────────────────
+  // Ausentes en todo depósito nunca reemplazado, históricos incluidos: se
+  // leen como VERSIÓN 1 IMPLÍCITA (ver lib/deposito-boucher-version.ts). No
+  // se exigen jamás, ni se rellenan con un backfill.
+  boucherVersion?: number | null
+  boucherVersionId?: string | null
+  /** Evento de la subcolección que acompaña a la última transición auditada. */
+  ultimoEventoId?: string | null
+  // ── DEPOSITO-AUDITORIA-1 · corrección solicitada ────────────────────────
+  devueltoAt?: unknown
+  devueltoPorUid?: string | null
+  motivoDevolucion?: string | null
+  // ── DEPOSITO-AUDITORIA-1 · Rehacer auditado ─────────────────────────────
+  rehechoAt?: unknown
+  rehechoPorUid?: string | null
+  motivoRehacer?: string | null
+  anuladoAt?: unknown
+  anuladoPorUid?: string | null
+  motivoAnulacion?: string | null
+  updatedAt?: unknown
   creadoAt?: unknown
   confirmadoAt?: unknown
   confirmadoPorUid?: string | null
@@ -95,6 +115,11 @@ export function etiquetaEstadoDeposito(estado: string | null | undefined): strin
   switch (estado) {
     case 'pendiente_boucher': return 'Esperando comprobante'
     case 'en_revision': return 'En revisión'
+    // DEPOSITO-AUDITORIA-1 — 'devuelto' NO es un rechazo: el depósito sigue
+    // vivo, con su DEP-N y su comprobante anterior, esperando una foto mejor.
+    // Decirle "Devuelto" o "Rechazado" al motorizado sugeriría que perdió el
+    // depósito, que es justo lo que este bloque vino a dejar de hacer.
+    case 'devuelto': return 'Corrección solicitada'
     case 'confirmado': return 'Confirmado'
     case 'rechazado': return 'Rechazado'
     case 'convertido_en_deuda': return 'Convertido en deuda'
@@ -225,6 +250,7 @@ export const ETIQUETAS_RESUMEN_DEPOSITO: readonly string[] = [
   'Pendiente de depósito',
   'Esperando comprobante',
   'En revisión',
+  'Corrección solicitada',
   'Confirmado',
   'Convertido en deuda',
   'Rechazado',
