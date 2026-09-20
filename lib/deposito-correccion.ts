@@ -144,6 +144,35 @@ export function camposAnularDeposito<T>(
   }
 }
 
+/**
+ * Campos de una confirmación AUDITADA.
+ *
+ * HARDENING — `ultimoEventoId` es lo que permite a firestore.rules exigir el
+ * evento DEPOSITO_CONFIRMADO en el mismo batch. Sin él la regla no puede
+ * nombrar el documento del evento y la auditoría volvería a depender de que
+ * el writer quiera escribirla.
+ *
+ * No lleva motivo: confirmar no deshace nada, es el flujo normal. Lo que sí
+ * tiene que quedar es quién y cuándo.
+ */
+export function camposConfirmarDeposito<T>(
+  uid: string | null | undefined,
+  ahora: T,
+  eventoId: string,
+): Record<string, unknown> {
+  const actor = typeof uid === 'string' ? uid.trim() : ''
+  if (!actor) throw new Error('camposConfirmarDeposito: falta el UID de quien confirma')
+  if (typeof eventoId !== 'string' || eventoId.trim() === '') {
+    throw new Error('camposConfirmarDeposito: falta el id del evento de auditoría')
+  }
+  return {
+    estado: 'confirmado',
+    confirmadoPorUid: actor,
+    confirmadoAt: ahora,
+    ultimoEventoId: eventoId,
+  }
+}
+
 /** Campos del Rehacer auditado: el estado ya lo escribía F1; el motivo no. */
 export function camposRehacerDeposito<T>(
   uid: string | null | undefined,

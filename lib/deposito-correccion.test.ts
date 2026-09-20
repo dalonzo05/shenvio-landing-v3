@@ -15,6 +15,7 @@ import {
   TEXTO_ESPERANDO_CORRECCION,
   accionesDeposito,
   camposAnularDeposito,
+  camposConfirmarDeposito,
   camposPedirCorreccion,
   camposRehacerDeposito,
   correccionSolicitada,
@@ -87,6 +88,20 @@ test('CO7 · anular deja estado, actor, hora y motivo — y no borra nada', () =
   assert.equal(campos.motivoAnulacion, 'Órdenes equivocadas')
   assert.equal('boucher' in campos, false)
   assert.equal('solicitudIds' in campos, false)
+})
+
+test('CO7b · confirmar escribe el puntero al evento: sin él Rules no puede exigirlo', () => {
+  // HARDENING — `ultimoEventoId` es lo único que permite a firestore.rules
+  // nombrar el evento DEPOSITO_CONFIRMADO y hacerle existsAfter(). Sin el
+  // campo, la auditoría de la confirmación volvería a depender del writer.
+  const campos = camposConfirmarDeposito(UID_GESTOR, AHORA, 'ev1')
+  assert.deepEqual(Object.keys(campos).sort(), ['confirmadoAt', 'confirmadoPorUid', 'estado', 'ultimoEventoId'])
+  assert.equal(campos.estado, 'confirmado')
+  assert.equal(campos.ultimoEventoId, 'ev1')
+  // Confirmar no deshace nada: no lleva motivo.
+  assert.equal('motivo' in campos, false)
+  assert.throws(() => camposConfirmarDeposito('', AHORA, 'ev1'), /UID/)
+  assert.throws(() => camposConfirmarDeposito(UID_GESTOR, AHORA, ''), /evento de auditoría/)
 })
 
 test('CO8 · rehacer ahora exige motivo: antes era un cambio de estado mudo', () => {

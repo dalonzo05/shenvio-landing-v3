@@ -29,6 +29,7 @@ import {
 import {
   camposEventoBoucherReemplazado,
   camposEventoDepositoAnulado,
+  camposEventoDepositoConfirmado,
   camposEventoDepositoDevuelto,
   camposEventoDepositoRehecho,
 } from '../lib/deposito-eventos'
@@ -37,7 +38,12 @@ import {
   planReemplazoBoucher,
   pathVersionBoucher,
 } from '../lib/deposito-boucher-version'
-import { camposPedirCorreccion, camposAnularDeposito } from '../lib/deposito-correccion'
+import {
+  camposAnularDeposito,
+  camposConfirmarDeposito,
+  camposPedirCorreccion,
+  camposRehacerDeposito,
+} from '../lib/deposito-correccion'
 
 // Identidades del arnés. El rol de comercio es 'Comercio' con mayúscula: así
 // está en las reglas y así se escribe en `usuarios`.
@@ -117,6 +123,39 @@ function depositoBase(extra: Record<string, unknown> = {}) {
     montoTotal: 110,
     ...extra,
   }
+}
+
+// ── HARDENING · confirmar, rehacer y anular exigen su evento ────────────────
+//
+// Estos tres helpers existen para que los casos de F1 que YA probaban esas
+// transiciones sigan probando lo mismo, ahora con la forma que Rules exige.
+// Construyen el batch completo (documento + evento) con los mismos helpers
+// puros que usa el writer de la app.
+
+/** Confirmación auditada de un A/B: documento + DEPOSITO_CONFIRMADO. */
+function batchConfirmar(uid: string, depId: string, extra: Record<string, unknown> = {}, eventoId = nuevoEventoId()) {
+  const db = como(uid)
+  const rol = uid === UID_ADMIN ? 'admin' : 'gestor'
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', depId), {
+    ...camposConfirmarDeposito(uid, serverTimestamp(), eventoId),
+    ...extra,
+  }, { merge: true })
+  b.set(doc(db, 'ordenes_deposito', depId, 'eventos', eventoId),
+    camposEventoDepositoConfirmado({ uid, rol }, serverTimestamp()))
+  return { db, b }
+}
+
+/** Rehacer auditado: documento + DEPOSITO_REHECHO con motivo. */
+function batchRehacer(uid: string, depId: string, motivo = 'El comprobante era de otro depósito', eventoId = nuevoEventoId()) {
+  const db = como(uid)
+  const rol = uid === UID_ADMIN ? 'admin' : 'gestor'
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', depId),
+    camposRehacerDeposito(uid, serverTimestamp(), motivo, eventoId), { merge: true })
+  b.set(doc(db, 'ordenes_deposito', depId, 'eventos', eventoId),
+    camposEventoDepositoRehecho({ uid, rol }, serverTimestamp(), motivo))
+  return { db, b }
 }
 
 // ─── solicitudes_envio · CREATE ──────────────────────────────────────────────
@@ -286,11 +325,14 @@ async function depositoConCodigo(id = 'depU', extra: Record<string, unknown> = {
 }
 
 test('N · gestor confirma un depósito sin tocar la identidad ⇒ ALLOW', async () => {
-  const id = await depositoConCodigo()
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', id), {
-    estado: 'confirmado',
+  // HARDENING — confirmar exige su evento. El depósito nace sin boucher
+  // (pendiente_boucher), así que adjuntarlo acá es la PRIMERA subida del
+  // flujo inicial, no un reemplazo: sigue permitida sin versionar.
+  const id = await depositoConCodigo('depN', { estado: 'pendiente_boucher' })
+  const { b } = batchConfirmar(UID_GESTOR, id, {
     boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x' },
-  }))
+  })
+  await assertSucceeds(b.commit())
 })
 
 test('O · gestor intenta cambiar el codigo del depósito ⇒ DENY', async () => {
@@ -354,12 +396,11 @@ test('R-U2 · un contador nuevo tampoco se puede crear desde el cliente', async 
 
 test('W1 · gestor confirma un depósito registrado en nombre del motorizado, con quién y cuándo ⇒ ALLOW', async () => {
   const id = await depositoConCodigo('depW1', { estado: 'pendiente_boucher' })
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', id), {
+  // HARDENING — mismo payload de siempre más el evento obligatorio.
+  const { b } = batchConfirmar(UID_GESTOR, id, {
     boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x' },
-    estado: 'confirmado',
-    confirmadoPorUid: UID_GESTOR,
-    confirmadoAt: serverTimestamp(),
-  }))
+  })
+  await assertSucceeds(b.commit())
 })
 
 test('W2 · gestor registra el pago del delivery por transferencia junto con la confirmación del cobro ⇒ ALLOW', async () => {
@@ -494,9 +535,8 @@ test('Z1 · admin rehace: depósito a en_revision y la orden pierde la confirmac
     depEstado: 'confirmado',
     registro: { deposito: { storkhubDepositoId: 'depD', confirmadoStorkhub: true, confirmadoStorkhubAt: new Date() } },
   })
-  const db = como(UID_ADMIN)
-  const b = writeBatch(db)
-  b.set(doc(db, 'ordenes_deposito', 'depD'), { estado: 'en_revision' }, { merge: true })
+  // HARDENING — Rehacer exige DEPOSITO_REHECHO con motivo, en el mismo batch.
+  const { db, b } = batchRehacer(UID_ADMIN, 'depD')
   b.update(doc(db, 'solicitudes_envio', ORDEN_D), {
     'registro.deposito.storkhubDepositoId': 'depD',
     'registro.deposito.confirmadoStorkhub': false,
@@ -575,9 +615,13 @@ test('BI3 · ni quitarlo, ni tocar boucherUrl (tipo C), ni cambiar estado y bouc
   await assertFails(updateDoc(doc(db, 'ordenes_deposito', 'depI'), { estado: 'en_revision', ...NUEVO_BOUCHER }))
 })
 
-test('BI4 · gestor reemplaza el boucher de un depósito en revisión ⇒ ALLOW (sin regresión)', async () => {
+// HARDENING — BI4 afirmaba lo contrario: el gestor podía mutar el puntero
+// `boucher` de un depósito en revisión con un update suelto. Esa era la
+// última vía NO versionada de cambiar evidencia, y se cierra: la corrección
+// de staff va por bouchers/{versionId} con evento y motivo (ver ST1-ST4).
+test('BI4 · gestor reemplaza el boucher de un depósito en revisión por la vía directa ⇒ DENY', async () => {
   await depositoEn('en_revision')
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
 })
 
 test('BI5 · gestor anula un DEP tipo C confirmado sin tocar su comprobante ⇒ ALLOW', async () => {
@@ -590,11 +634,12 @@ test('BI5 · gestor anula un DEP tipo C confirmado sin tocar su comprobante ⇒ 
   }))
 })
 
-test('BI6 · admin rehace un confirmado (solo estado) ⇒ ALLOW; después sí puede reemplazar ⇒ ALLOW', async () => {
+// HARDENING — las dos mitades cambian: Rehacer exige evento, y una vez
+// abierto el depósito el reemplazo ya no es un update suelto sino una versión.
+test('BI6 · admin rehace un confirmado con evento ⇒ ALLOW; el reemplazo directo posterior ⇒ DENY', async () => {
   await depositoEn('confirmado')
-  const db = como(UID_ADMIN)
-  await assertSucceeds(setDoc(doc(db, 'ordenes_deposito', 'depI'), { estado: 'en_revision' }, { merge: true }))
-  await assertSucceeds(updateDoc(doc(db, 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+  await assertSucceeds(batchRehacer(UID_ADMIN, 'depI').b.commit())
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
 })
 
 test('BI7 · digitador sigue corrigiendo su depósito en revisión ⇒ ALLOW', async () => {
@@ -800,9 +845,9 @@ test('H11 · efectivo (tipo A): confirmar el depósito del motorizado sobre una 
     })
     await setDoc(doc(db, 'ordenes_deposito', 'depA'), { ...depositoBase({ estado: 'en_revision', solicitudIds: ['ordE'] }), codigo: 'DEP-0001', secuencia: 1 })
   })
-  const db = como(UID_GESTOR)
-  const b = writeBatch(db)
-  b.update(doc(db, 'ordenes_deposito', 'depA'), { estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp() })
+  // HARDENING — la confirmación viaja con su evento; el resto del batch
+  // (los flags de la orden) queda igual que en F1.
+  const { db, b } = batchConfirmar(UID_GESTOR, 'depA')
   b.update(doc(db, 'solicitudes_envio', 'ordE'), {
     'registro.deposito.confirmadoStorkhub': true,
     'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
@@ -835,9 +880,9 @@ test('H12 · revertir un cobro en efectivo con depósito del motorizado: legíti
 // admin. El gestor conserva confirmar, devolver un depósito abierto y anular
 // el DEP tipo C al revertir su cobro.
 
-test('AD1 · admin rehace un depósito confirmado ⇒ ALLOW', async () => {
+test('AD1 · admin rehace un depósito confirmado, con evento y motivo ⇒ ALLOW', async () => {
   await depositoEn('confirmado')
-  await assertSucceeds(setDoc(doc(como(UID_ADMIN), 'ordenes_deposito', 'depI'), { estado: 'en_revision' }, { merge: true }))
+  await assertSucceeds(batchRehacer(UID_ADMIN, 'depI').b.commit())
 })
 
 test('AD2 · gestor intenta rehacer un depósito confirmado ⇒ DENY', async () => {
@@ -870,11 +915,9 @@ test('AD5 · gestor intenta borrar un depósito en revisión (viejo "Devolver") 
   await assertFails(deleteDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI')))
 })
 
-test('AD6 · gestor confirma un depósito en revisión ⇒ ALLOW (sin regresión)', async () => {
+test('AD6 · gestor confirma un depósito en revisión, con evento ⇒ ALLOW (sin regresión)', async () => {
   await depositoEn('en_revision')
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), {
-    estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
-  }))
+  await assertSucceeds(batchConfirmar(UID_GESTOR, 'depI').b.commit())
 })
 
 test('AD7 · gestor sigue anulando un DEP tipo C confirmado (Revertir), pero no un tipo A ⇒ ALLOW / DENY', async () => {
@@ -1039,7 +1082,21 @@ test('SL4 · abiertos siguen abiertos: gestor reemplaza en pendiente_boucher y r
 const DEP_V = 'depV'
 const ORDEN_V = 'ordV'
 
-/** Depósito A del motorizado, sembrado sin reglas en el estado del caso. */
+/** Un versionId por escritura: ver la nota de nuevoEventoId(). */
+let contadorVersion = 0
+
+/**
+ * Depósito A del motorizado, sembrado sin reglas en el estado del caso.
+ *
+ * OJO: re-sembrar el documento NO borra su subcolección `eventos`. Un caso con
+ * varios sub-escenarios que reutilizara el mismo id de evento haría que el
+ * segundo `create` cayera sobre un documento ya existente —o sea, un update,
+ * que está DENY— y el fallo se leería como un problema de la transición y no
+ * del arnés. Por eso cada escritura pide su id con `nuevoEventoId()`.
+ */
+let contadorEvento = 0
+const nuevoEventoId = () => `ev${String(++contadorEvento).padStart(4, '0')}`
+
 async function depositoAB(estado: string, extra: Record<string, unknown> = {}) {
   await env.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore()
@@ -1097,7 +1154,7 @@ interface OpcionesReemplazo {
 async function reemplazar(o: OpcionesReemplazo = {}) {
   const uid = o.uid ?? UID_MOTO
   const rol = o.rol ?? 'motorizado'
-  const versionId = o.versionId ?? 'verSegundaAAA1'
+  const versionId = o.versionId ?? `verCaso${String(++contadorVersion).padStart(4, '0')}AA`
   const eventoId = o.eventoId ?? versionId
   const motivo = o.motivo ?? 'La foto salió movida'
   const actual = await leerDep()
@@ -1132,7 +1189,7 @@ async function reemplazar(o: OpcionesReemplazo = {}) {
 
 test('V1 · legacy sin boucherVersion: la efectiva es 1, así que el primer reemplazo escribe la 2 ⇒ ALLOW', async () => {
   await depositoAB('en_revision')
-  await assertSucceeds(reemplazar())
+  await assertSucceeds(reemplazar({ versionId: 'verSegundaAAA1' }))
   const dep = await leerDep()
   assert.equal(dep.boucherVersion, 2)
   assert.equal(dep.boucherVersionId, 'verSegundaAAA1')
@@ -1273,14 +1330,15 @@ function pedirCorreccion(o: OpcionesDevolucion = {}) {
   const uid = o.uid ?? UID_GESTOR
   const rol = o.rol ?? (uid === UID_ADMIN ? 'admin' : uid === UID_MOTO ? 'motorizado' : 'gestor')
   const motivo = o.motivo ?? 'El comprobante no muestra el monto'
+  const eventoId = nuevoEventoId()
   const db = como(uid)
   const b = writeBatch(db)
   b.set(doc(db, 'ordenes_deposito', DEP_V), {
-    ...camposPedirCorreccion(uid, serverTimestamp(), motivo, 'evDev1'),
+    ...camposPedirCorreccion(uid, serverTimestamp(), motivo, eventoId),
     ...(o.extraDeposito ?? {}),
   }, { merge: true })
   if (!o.sinEvento) {
-    b.set(doc(db, 'ordenes_deposito', DEP_V, 'eventos', 'evDev1'), {
+    b.set(doc(db, 'ordenes_deposito', DEP_V, 'eventos', eventoId), {
       ...camposEventoDepositoDevuelto({ uid, rol }, serverTimestamp(), motivo),
       ...(o.extraEvento ?? {}),
     })
@@ -1384,15 +1442,16 @@ test('D8 · un DEP tipo C no admite "Pedir corrección" ⇒ DENY', async () => {
 
 // ─── Anulación (Q.35) ────────────────────────────────────────────────────────
 
-function anular(o: { uid?: string; rol?: string; motivo?: string; sinEvento?: boolean; liberarOrden?: boolean } = {}) {
+function anular(o: { uid?: string; rol?: string; motivo?: string; sinEvento?: boolean; liberarOrden?: boolean; eventoId?: string } = {}) {
   const uid = o.uid ?? UID_ADMIN
   const rol = o.rol ?? (uid === UID_ADMIN ? 'admin' : 'gestor')
   const motivo = o.motivo ?? 'Depósito armado sobre las órdenes equivocadas'
+  const eventoId = o.eventoId ?? nuevoEventoId()
   const db = como(uid)
   const b = writeBatch(db)
-  b.set(doc(db, 'ordenes_deposito', DEP_V), camposAnularDeposito(uid, serverTimestamp(), motivo, 'evAnul1'), { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_V), camposAnularDeposito(uid, serverTimestamp(), motivo, eventoId), { merge: true })
   if (!o.sinEvento) {
-    b.set(doc(db, 'ordenes_deposito', DEP_V, 'eventos', 'evAnul1'),
+    b.set(doc(db, 'ordenes_deposito', DEP_V, 'eventos', eventoId),
       camposEventoDepositoAnulado({ uid, rol }, serverTimestamp(), motivo))
   }
   if (o.liberarOrden) {
@@ -1452,7 +1511,7 @@ test('A4 · delete físico del admin, en cualquier estado ⇒ DENY', async () =>
 
 test('A5 · el anulado conserva DEP-N, comprobante, órdenes y eventos', async () => {
   await depositoAB('en_revision')
-  await assertSucceeds(anular())
+  await assertSucceeds(anular({ eventoId: 'evAnul1' }))
   const dep = await leerDep()
   assert.equal(dep.codigo, 'DEP-0007')
   assert.equal(dep.secuencia, 7)
@@ -1575,4 +1634,342 @@ test('E12 · el motorizado lee la historia de SU depósito, no la de otro', asyn
   await assertSucceeds(getDoc(refEvento(UID_GESTOR)))
   await depositoAB('en_revision', { motorizadoUid: 'uid_otro' })
   await assertFails(getDoc(refEvento(UID_MOTO)))
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HARDENING · AU — la auditoría es AUTORITATIVA, no cortesía del writer
+//
+// Antes, confirmar / rehacer / anular escribían su evento desde el cliente y
+// Rules no lo exigía: un cliente modificado podía hacer la transición y
+// saltarse la subcolección entera. La historia de un depósito no puede
+// depender de que quien escribe quiera contarla.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** Confirmación con el evento sustituido/omitido, para los casos negativos. */
+function confirmarCon(opts: {
+  uid?: string
+  rol?: string
+  sinEvento?: boolean
+  eventoIdDeclarado?: string
+  extraEvento?: Record<string, unknown>
+  depId?: string
+} = {}) {
+  const uid = opts.uid ?? UID_GESTOR
+  const rol = opts.rol ?? (uid === UID_ADMIN ? 'admin' : 'gestor')
+  const depId = opts.depId ?? DEP_V
+  const eventoId = nuevoEventoId()
+  const db = como(uid)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', depId),
+    camposConfirmarDeposito(uid, serverTimestamp(), opts.eventoIdDeclarado ?? eventoId), { merge: true })
+  if (!opts.sinEvento) {
+    b.set(doc(db, 'ordenes_deposito', depId, 'eventos', eventoId), {
+      ...camposEventoDepositoConfirmado({ uid, rol }, serverTimestamp()),
+      ...(opts.extraEvento ?? {}),
+    })
+  }
+  return b.commit()
+}
+
+function rehacerCon(opts: {
+  uid?: string
+  rol?: string
+  motivo?: string
+  sinEvento?: boolean
+  extraEvento?: Record<string, unknown>
+} = {}) {
+  const uid = opts.uid ?? UID_ADMIN
+  const rol = opts.rol ?? (uid === UID_ADMIN ? 'admin' : 'gestor')
+  const motivo = opts.motivo ?? 'El comprobante era de otro depósito'
+  const eventoId = nuevoEventoId()
+  const db = como(uid)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_V),
+    camposRehacerDeposito(uid, serverTimestamp(), motivo, eventoId), { merge: true })
+  if (!opts.sinEvento) {
+    b.set(doc(db, 'ordenes_deposito', DEP_V, 'eventos', eventoId), {
+      ...camposEventoDepositoRehecho({ uid, rol }, serverTimestamp(), motivo),
+      ...(opts.extraEvento ?? {}),
+    })
+  }
+  return b.commit()
+}
+
+test('AU1 · confirmar un A sin DEPOSITO_CONFIRMADO ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  await assertFails(confirmarCon({ sinEvento: true }))
+  // Y tampoco por la vía cruda, sin ultimoEventoId siquiera.
+  await depositoAB('en_revision')
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
+  }))
+})
+
+test('AU1b · lo mismo sobre un depósito B ⇒ DENY', async () => {
+  await depositoAB('en_revision', { tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio' })
+  await assertFails(confirmarCon({ sinEvento: true }))
+})
+
+test('AU2 · confirmar con evento válido ⇒ ALLOW (A y B, gestor y admin)', async () => {
+  await depositoAB('en_revision')
+  await assertSucceeds(confirmarCon())
+  await depositoAB('en_revision')
+  await assertSucceeds(confirmarCon({ uid: UID_ADMIN }))
+  await depositoAB('en_revision', { tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio' })
+  await assertSucceeds(confirmarCon())
+  // Y desde pendiente_boucher, que es el flujo del gestor que registra.
+  await depositoAB('pendiente_boucher')
+  await assertSucceeds(confirmarCon())
+})
+
+test('AU3 · rehacer sin DEPOSITO_REHECHO ⇒ DENY', async () => {
+  await depositoAB('confirmado')
+  await assertFails(rehacerCon({ sinEvento: true }))
+  await depositoAB('confirmado')
+  await assertFails(setDoc(doc(como(UID_ADMIN), 'ordenes_deposito', DEP_V), { estado: 'en_revision' }, { merge: true }))
+})
+
+test('AU4 · rehacer con evento válido ⇒ ALLOW (A y B)', async () => {
+  await depositoAB('confirmado')
+  await assertSucceeds(rehacerCon())
+  await depositoAB('confirmado', { tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio' })
+  await assertSucceeds(rehacerCon())
+})
+
+test('AU4b · rehacer sigue siendo admin-only, con evento y todo ⇒ DENY para gestor', async () => {
+  await depositoAB('confirmado')
+  await assertFails(rehacerCon({ uid: UID_GESTOR }))
+})
+
+test('AU4c · rehacer con motivo fuera de 3-300 en el evento ⇒ DENY', async () => {
+  await depositoAB('confirmado')
+  await assertFails(rehacerCon({ extraEvento: { motivo: 'no' } }))
+  await depositoAB('confirmado')
+  await assertFails(rehacerCon({ extraEvento: { motivo: 'x'.repeat(301) } }))
+})
+
+test('AU5 · anular sin DEPOSITO_ANULADO ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  await assertFails(anular({ sinEvento: true }))
+  await depositoAB('confirmado')
+  await assertFails(anular({ sinEvento: true }))
+})
+
+test('AU6 · anular con evento válido ⇒ ALLOW (A y B)', async () => {
+  await depositoAB('en_revision')
+  await assertSucceeds(anular())
+  await depositoAB('confirmado', { tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio' })
+  await assertSucceeds(anular())
+})
+
+test('AU7 · evento del tipo equivocado para la transición ⇒ DENY', async () => {
+  // Confirmar acompañado de un DEPOSITO_DEVUELTO.
+  await depositoAB('en_revision')
+  const db = como(UID_GESTOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_V),
+    camposConfirmarDeposito(UID_GESTOR, serverTimestamp(), 'evAU'), { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_V, 'eventos', 'evAU'),
+    camposEventoDepositoDevuelto({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp(), 'motivo suficiente'))
+  await assertFails(b.commit())
+  // Rehacer acompañado de un DEPOSITO_ANULADO.
+  await depositoAB('confirmado')
+  const dbA = como(UID_ADMIN)
+  const b2 = writeBatch(dbA)
+  b2.set(doc(dbA, 'ordenes_deposito', DEP_V),
+    camposRehacerDeposito(UID_ADMIN, serverTimestamp(), 'motivo suficiente', 'evAU'), { merge: true })
+  b2.set(doc(dbA, 'ordenes_deposito', DEP_V, 'eventos', 'evAU'),
+    camposEventoDepositoAnulado({ uid: UID_ADMIN, rol: 'admin' }, serverTimestamp(), 'motivo suficiente'))
+  await assertFails(b2.commit())
+})
+
+test('AU8 · ultimoEventoId apunta a un evento que no existe ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  await assertFails(confirmarCon({ eventoIdDeclarado: 'evQueNoExiste' }))
+  // Tampoco sirve apuntar a uno viejo ya escrito: tiene que ser de ESTE batch.
+  await depositoAB('en_revision')
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'ordenes_deposito', DEP_V, 'eventos', 'evViejo'), {
+      tipo: 'DEPOSITO_CONFIRMADO', at: new Date('2020-01-01T00:00:00Z'), porUid: UID_GESTOR, porRol: 'gestor',
+    })
+  })
+  await assertFails(confirmarCon({ eventoIdDeclarado: 'evViejo', sinEvento: true }))
+  // Y el vacío tampoco: el helper puro ni siquiera deja construirlo, así que
+  // el payload se arma a mano para que sea Rules quien lo rechace.
+  await depositoAB('en_revision')
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(), ultimoEventoId: '',
+  }))
+})
+
+test('AU9 · evento firmado por otro actor ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  await assertFails(confirmarCon({ extraEvento: { porUid: UID_ADMIN } }))
+  await depositoAB('confirmado')
+  await assertFails(rehacerCon({ extraEvento: { porUid: UID_GESTOR } }))
+  await depositoAB('en_revision')
+  await assertFails(anular({ uid: UID_ADMIN, rol: 'gestor' }))
+})
+
+test('AU10 · evento con timestamp distinto de request.time ⇒ DENY', async () => {
+  const antes = new Date('2020-01-01T00:00:00Z')
+  await depositoAB('en_revision')
+  await assertFails(confirmarCon({ extraEvento: { at: antes } }))
+  await depositoAB('confirmado')
+  await assertFails(rehacerCon({ extraEvento: { at: antes } }))
+})
+
+test('AU11 · el tipo C no entra en ninguna de las tres exigencias (regresión intacta)', async () => {
+  // Su DEP nace ya confirmado junto al cobro y se revierte desde Cobros.
+  await depositoAB('en_revision', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
+  }))
+  await depositoAB('confirmado', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    estado: 'anulado', anuladoAt: serverTimestamp(), anuladoPorUid: UID_GESTOR,
+    motivoAnulacion: 'Reversión de cobro contado por gestor',
+  }))
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HARDENING · ST — staff no se salta el versionado
+//
+// El puntero `boucher` de un A/B abierto era lo último que gestor y admin
+// podían cambiar con un update suelto, heredado del modelo privilegiado de
+// P1-S2. Después de F2 eso es una vía no versionada de reemplazar evidencia:
+// el objeto anterior deja de estar referenciado, sin versión, sin motivo y
+// sin evento. Se cierra para los tres roles, sin bypass de admin.
+// ═════════════════════════════════════════════════════════════════════════════
+
+test('ST1 · gestor cambia el boucher directo en en_revision, sin versión ni evento ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  const ref = doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V)
+  await assertFails(updateDoc(ref, { boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' } }))
+  await assertFails(updateDoc(ref, { boucherUrl: 'https://example.test/x.jpg' }))
+  await assertFails(updateDoc(ref, { boucherVersion: 7 }))
+  await assertFails(updateDoc(ref, { boucherVersionId: 'inventado' }))
+  await assertFails(updateDoc(ref, { boucher: deleteField() }))
+})
+
+test('ST1b · y en devuelto, igual ⇒ DENY', async () => {
+  await depositoAB('devuelto', { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' })
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' },
+  }))
+})
+
+test('ST2 · admin cambia el boucher directo ⇒ DENY (sin bypass)', async () => {
+  for (const estado of ['en_revision', 'devuelto']) {
+    await depositoAB(estado)
+    await assertFails(updateDoc(doc(como(UID_ADMIN), 'ordenes_deposito', DEP_V), {
+      boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' },
+    }))
+  }
+})
+
+test('ST3 · gestor reemplaza versionado, con evento y motivo ⇒ ALLOW', async () => {
+  await depositoAB('en_revision')
+  await assertSucceeds(reemplazar({ uid: UID_GESTOR, rol: 'gestor' }))
+  const dep = await leerDep()
+  assert.equal(dep.boucherVersion, 2)
+  assert.equal(dep.codigo, 'DEP-0007')
+})
+
+test('ST3b · y desde devuelto, devolviéndolo a revisión ⇒ ALLOW', async () => {
+  await depositoAB('devuelto', { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' })
+  await assertSucceeds(reemplazar({ uid: UID_GESTOR, rol: 'gestor' }))
+  assert.equal((await leerDep()).estado, 'en_revision')
+})
+
+test('ST4 · admin reemplaza versionado, con evento y motivo ⇒ ALLOW', async () => {
+  await depositoAB('en_revision')
+  await assertSucceeds(reemplazar({ uid: UID_ADMIN, rol: 'admin' }))
+})
+
+test('ST5 · staff intenta saltar v1 → v3 ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  await assertFails(reemplazar({ uid: UID_GESTOR, rol: 'gestor', version: 3 }))
+})
+
+test('ST6 · staff sin evento en el batch ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  await assertFails(reemplazar({ uid: UID_GESTOR, rol: 'gestor', sinEvento: true }))
+  await depositoAB('en_revision')
+  await assertFails(reemplazar({ uid: UID_ADMIN, rol: 'admin', sinEvento: true }))
+})
+
+test('ST7 · staff con motivo ausente o fuera de rango ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  await assertFails(reemplazar({ uid: UID_GESTOR, rol: 'gestor', extraEvento: { motivo: 'no' } }))
+  await depositoAB('en_revision')
+  await assertFails(reemplazar({ uid: UID_ADMIN, rol: 'admin', extraEvento: { motivo: 'x'.repeat(301) } }))
+})
+
+test('ST7b · staff con el puntero apuntando a otro objeto, o con rol falso ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  await assertFails(reemplazar({ uid: UID_GESTOR, rol: 'gestor', pathStorage: `depositos/${UID_MOTO}/${DEP_V}/boucher.jpg` }))
+  await depositoAB('en_revision')
+  await assertFails(reemplazar({ uid: UID_GESTOR, rol: 'admin' }))
+})
+
+test('ST9 · sobre un confirmado, cualquier reemplazo de staff ⇒ DENY', async () => {
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await depositoAB('confirmado')
+    await assertFails(updateDoc(doc(como(uid), 'ordenes_deposito', DEP_V), {
+      boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' },
+    }))
+    await depositoAB('confirmado')
+    await assertFails(reemplazar({ uid, rol: uid === UID_ADMIN ? 'admin' : 'gestor' }))
+  }
+})
+
+test('ST10 · convertido_en_deuda y anulado ⇒ DENY', async () => {
+  for (const estado of ['convertido_en_deuda', 'anulado']) {
+    for (const uid of [UID_GESTOR, UID_ADMIN]) {
+      await depositoAB(estado)
+      await assertFails(updateDoc(doc(como(uid), 'ordenes_deposito', DEP_V), {
+        boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' },
+      }))
+    }
+  }
+})
+
+test('ST11 · lo que NO es el comprobante sigue funcionando para staff', async () => {
+  // El guard mira solo los cuatro campos del puntero: confirmar, pedir
+  // corrección, convertir en deuda y anotar notas no lo tocan.
+  await depositoAB('en_revision')
+  await assertSucceeds(pedirCorreccion())
+  await depositoAB('en_revision')
+  await assertSucceeds(confirmarCon())
+  await depositoAB('en_revision')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    estado: 'convertido_en_deuda', saldoId: 'saldo1',
+  }))
+  await depositoAB('en_revision')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    notaConversion: 'revisado con el motorizado', updatedAt: serverTimestamp(),
+  }))
+})
+
+test('ST12 · el flujo inicial no se rompe: adjuntar el PRIMER boucher sigue permitido', async () => {
+  // pendiente_boucher es la primera subida (create-first del motorizado,
+  // confirmarStorkhub/Comercio del gestor, digitación), no un reemplazo.
+  await depositoAB('pendiente_boucher')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    boucher: { url: 'https://example.test/primero.jpg', pathStorage: 'x' },
+  }))
+  // Y el digitador conserva su corrección en revisión (D2, BI7) — deuda
+  // DIGITADOR-BOUCHER-NO-VERSIONADO, explícitamente fuera de este bloque.
+  await depositoAB('en_revision', { digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date() })
+  await assertSucceeds(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V), {
+    boucher: { url: 'https://example.test/dig.jpg', pathStorage: 'x' }, updatedAt: serverTimestamp(),
+  }))
+})
+
+test('ST13 · el tipo C no queda atrapado por el guard de versionado', async () => {
+  await depositoAB('en_revision', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    boucherUrl: 'https://example.test/c2.jpg',
+  }))
 })

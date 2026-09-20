@@ -1431,21 +1431,21 @@ service cloud.firestore {
       }
 
       // ═══════════════════════════════════════════════════════════════════
-      // DEPOSITO-AUDITORIA-1 — corregir sin borrar
+      // DEPOSITO-AUDITORIA-1 — corregir sin borrar, y que quede narrado
       //
       // F1 dejaba corregir un depósito de una sola forma: BORRÁNDOLO. El
       // gestor "devolvía al motorizado" con un delete y el admin "eliminaba"
       // con otro, así que cada corrección se llevaba puesto el DEP-N, el
       // comprobante anterior, las órdenes agrupadas y cualquier rastro de
-      // quién la pidió y por qué. Acá se cierra esa vía y se abren dos
+      // quién la pidió y por qué. Acá se cierra esa vía y se abren
       // transiciones auditadas en su lugar.
       //
       // ─── Por qué existe `ultimoEventoId` ──────────────────────────────
       //
-      // El bloque exige que ciertas transiciones viajen en el MISMO batch que
-      // su evento de auditoría. Rules no puede enumerar una subcolección: para
-      // hacer existsAfter() sobre el evento hay que poder NOMBRARLO. Se probó
-      // derivar el id de datos que la regla ya tiene (la versión, el
+      // El bloque exige que cada transición auditable viaje en el MISMO
+      // batch que su evento. Rules no puede enumerar una subcolección: para
+      // hacer existsAfter() sobre el evento hay que poder NOMBRARLO. Se
+      // probó derivar el id de datos que la regla ya tiene (la versión, el
       // versionId) y no cierra: 'rehacer' puede repetirse sobre la misma
       // versión, así que cualquier esquema determinístico o colisiona (y
       // bloquea una operación legítima, porque el create sobre un id ya
@@ -1456,32 +1456,60 @@ service cloud.firestore {
       //
       // No es un campo de confianza: si apunta a un documento que no existe,
       // existsAfter() falla y la transición muere; si apunta a uno que existe
-      // pero dice otra cosa, las comparaciones de abajo lo rechazan.
+      // pero dice otra cosa, las comparaciones de abajo lo rechazan; y si
+      // apunta a uno viejo, `at == request.time` lo descarta.
+      //
+      // ─── Presupuesto de expresiones ───────────────────────────────────
+      //
+      // Este bloque se escribió primero con una función por garantía, cada
+      // una releyendo `resource.data`, el diff y el evento. Con las tres
+      // exigencias nuevas (confirmar, rehacer, anular) esa forma superó el
+      // techo REAL de Firestore: "maximum of 1000 expressions to evaluate
+      // has been reached", reproducible en AU2/AU4/AU6/ST3. No es un límite
+      // teórico ni un margen: es el error que devolvió el emulador.
+      //
+      // La forma actual es la respuesta a ese límite, y hay que mantenerla:
+      //
+      //   · UNA sola función de entrada para la rama de staff
+      //     (updateStaffAuditado), con todos los `let` hoisteados arriba:
+      //     un único diff(), un único par de estados, un único `ab`.
+      //   · el evento se lee UNA vez y se pasa como MAPA a los predicados,
+      //     en vez de reconstruir getAfter().data.get() en cada condición.
+      //   · los cortocircuitos baratos van primero en cada `||`.
+      //
+      // Volver a "una función por garantía" vuelve a romper el techo.
       function motivoAuditable(m) {
         return m is string && m.size() >= 3 && m.size() <= 300;
       }
 
-      function eventoDeclarado() {
-        return request.resource.data.get('ultimoEventoId', '');
+      function eventoDelBatch(evId) {
+        return getAfter(/databases/$(database)/documents/ordenes_deposito/$(depositoId)/eventos/$(evId)).data;
       }
 
-      function eventoDelBatch() {
-        return getAfter(/databases/$(database)/documents/ordenes_deposito/$(depositoId)/eventos/$(eventoDeclarado())).data;
+      // Firma verificable contra el servidor: ni el actor, ni la hora, ni el
+      // tipo pueden ser lo que el cliente quiera. `ev` llega ya leído.
+      function eventoCoincide(tipo, ev) {
+        return ev.get('tipo', '') == tipo
+          && ev.get('porUid', '') == request.auth.uid
+          && ev.get('at', null) == request.time;
       }
 
-      // Existe, se escribió en ESTE batch, es del tipo esperado y lo firma
-      // quien está haciendo la escritura, con la hora del servidor.
-      function eventoEnEsteBatch(tipo) {
-        return eventoDeclarado() is string
-          && eventoDeclarado().size() > 0
-          && existsAfter(/databases/$(database)/documents/ordenes_deposito/$(depositoId)/eventos/$(eventoDeclarado()))
-          && eventoDelBatch().get('tipo', '') == tipo
-          && eventoDelBatch().get('porUid', '') == request.auth.uid
-          && eventoDelBatch().get('at', null) == request.time;
+      function eventoCoincideConMotivo(tipo, ev) {
+        return eventoCoincide(tipo, ev) && motivoAuditable(ev.get('motivo', null));
       }
 
-      function esDepositoAB() {
-        return resource.data.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio'];
+      /** Evento del tipo pedido, escrito en ESTE batch. Sin motivo. */
+      function eventoEnEsteBatch(tipo, evId) {
+        return evId is string && evId.size() > 0
+          && existsAfter(/databases/$(database)/documents/ordenes_deposito/$(depositoId)/eventos/$(evId))
+          && eventoCoincide(tipo, eventoDelBatch(evId));
+      }
+
+      /** Ídem, exigiendo motivo 3–300. */
+      function eventoConMotivo(tipo, evId) {
+        return evId is string && evId.size() > 0
+          && existsAfter(/databases/$(database)/documents/ordenes_deposito/$(depositoId)/eventos/$(evId))
+          && eventoCoincideConMotivo(tipo, eventoDelBatch(evId));
       }
 
       // ─── A. Versionado del comprobante ────────────────────────────────
@@ -1489,42 +1517,58 @@ service cloud.firestore {
       // La versión efectiva de un depósito nunca reemplazado es 1, sin que el
       // campo exista: los históricos (DEP-0001, DEP-0003…) no se migran y su
       // `boucher.jpg` ES la v1. Por eso el default del get() es 1 y no 0.
-      function versionEfectivaActual() {
-        return resource.data.get('boucherVersion', 1);
-      }
-
+      //
       // +1 EXACTO. Esta sola condición es la que hace que dos reemplazos
       // simultáneos no ganen los dos: el segundo batch evalúa contra el
       // estado que ya commiteó el primero, le sale 2 != 3 y muere. No hay
       // last-write-wins silencioso. También rechaza 1→3, que perdería una
       // versión intermedia sin dejar rastro.
       function versionSubeEnUno() {
-        return request.resource.data.get('boucherVersion', 0) == versionEfectivaActual() + 1;
+        return request.resource.data.get('boucherVersion', 0) == resource.data.get('boucherVersion', 1) + 1;
       }
 
       // El puntero del depósito tiene que apuntar al objeto de ESTA versión,
       // en el path versionado y bajo el UID del titular. Sin esto, un cliente
       // podía declarar una versión nueva y dejar `boucher` apuntando a
       // cualquier otra cosa — incluida la versión vieja.
-      function pathDeLaVersionDeclarada() {
-        return 'depositos/' + resource.data.get('motorizadoUid', '')
-          + '/' + depositoId
-          + '/bouchers/' + request.resource.data.get('boucherVersionId', '')
-          + '.jpg';
-      }
-
       function versionIdNuevoYCoherente() {
-        return request.resource.data.get('boucherVersionId', '') is string
-          && request.resource.data.get('boucherVersionId', '').size() > 0
-          && request.resource.data.get('boucherVersionId', '') != resource.data.get('boucherVersionId', '')
-          && request.resource.data.get(['boucher', 'pathStorage'], '') == pathDeLaVersionDeclarada();
+        let nuevo = request.resource.data.get('boucherVersionId', '');
+        return nuevo is string
+          && nuevo.size() > 0
+          && nuevo != resource.data.get('boucherVersionId', '')
+          && request.resource.data.get(['boucher', 'pathStorage'], '')
+             == 'depositos/' + resource.data.get('motorizadoUid', '') + '/' + depositoId + '/bouchers/' + nuevo + '.jpg';
       }
 
-      function eventoReemplazoValido() {
-        return eventoEnEsteBatch('BOUCHER_REEMPLAZADO')
-          && eventoDelBatch().get('version', 0) == request.resource.data.get('boucherVersion', -1)
-          && eventoDelBatch().get('versionId', '') == request.resource.data.get('boucherVersionId', '')
-          && motivoAuditable(eventoDelBatch().get('motivo', null));
+      function eventoReemplazoCoincide(ev) {
+        return eventoCoincideConMotivo('BOUCHER_REEMPLAZADO', ev)
+          && ev.get('version', 0) == request.resource.data.get('boucherVersion', -1)
+          && ev.get('versionId', '') == request.resource.data.get('boucherVersionId', '');
+      }
+
+      function eventoReemplazo(evId) {
+        return evId is string && evId.size() > 0
+          && existsAfter(/databases/$(database)/documents/ordenes_deposito/$(depositoId)/eventos/$(evId))
+          && eventoReemplazoCoincide(eventoDelBatch(evId));
+      }
+
+      // El protocolo completo de reemplazo versionado. Lo usan las DOS ramas
+      // —motorizado y staff— para que no puedan divergir: una sola
+      // definición de "reemplazar el comprobante correctamente".
+      //
+      // El estado de destino es siempre 'en_revision' — desde 'en_revision'
+      // es un no-op que mantiene la escritura uniforme, y desde 'devuelto' es
+      // el retorno a la cola del gestor, con el MISMO DEP-N y sin liberar una
+      // sola orden. La lista cerrada deja fuera monto, bruto, gastos,
+      // órdenes, destinatario, tipo, código y la confirmación anterior.
+      function reemplazoVersionado(cambios, eDespues, evId) {
+        return eDespues == 'en_revision'
+          && cambios.hasOnly([
+               'boucher', 'boucherVersion', 'boucherVersionId', 'estado', 'updatedAt', 'ultimoEventoId'
+             ])
+          && versionSubeEnUno()
+          && versionIdNuevoYCoherente()
+          && eventoReemplazo(evId);
       }
 
       // ─── B. Pedir corrección: en_revision → devuelto ──────────────────
@@ -1533,82 +1577,177 @@ service cloud.firestore {
       // bloque: boucher, montoTotal, solicitudIds, motorizadoUid, tipo,
       // destinatario y codigo siguen intactos, y los punteros de las órdenes
       // ni se mencionan (son otro documento, y esta transición no los toca).
-      function devolucionValida() {
-        return isAdminOrGestor()
-          && esDepositoAB()
-          && resource.data.get('estado', '') == 'en_revision'
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+      function devolucionValida(cambios, evId) {
+        return cambios.hasOnly([
                'estado', 'devueltoAt', 'devueltoPorUid', 'motivoDevolucion', 'updatedAt', 'ultimoEventoId'
              ])
           && request.resource.data.get('devueltoPorUid', '') == request.auth.uid
           && request.resource.data.get('devueltoAt', null) == request.time
           && motivoAuditable(request.resource.data.get('motivoDevolucion', null))
-          && eventoEnEsteBatch('DEPOSITO_DEVUELTO')
-          && motivoAuditable(eventoDelBatch().get('motivo', null));
-      }
-
-      // Entrar a 'devuelto' SOLO por la puerta de arriba. Sin esto la regla
-      // amplia de gestor/admin —que no tiene hasOnly— dejaría escribir
-      // estado:'devuelto' sin motivo, sin actor y sin evento, y "Pedir
-      // corrección" no probaría nada.
-      function entradaADevueltoAuditada() {
-        return request.resource.data.get('estado', '') != 'devuelto'
-          || resource.data.get('estado', '') == 'devuelto'
-          || devolucionValida();
-      }
-
-      // Salir de 'devuelto' es del MOTORIZADO, con una versión nueva (regla
-      // propia más abajo). Staff no confirma un depósito que sigue esperando
-      // comprobante (§28) ni lo devuelve a revisión por la puerta de atrás.
-      // Se le dejan las dos salidas que no son "dar por buena la evidencia":
-      // convertirlo en deuda, y anularlo — ambas ya auditadas por su lado.
-      function salidaDeDevueltoAutorizada() {
-        return resource.data.get('estado', '') != 'devuelto'
-          || request.resource.data.get('estado', '') == 'devuelto'
-          || request.resource.data.get('estado', '') == 'convertido_en_deuda'
-          || (isAdmin() && request.resource.data.get('estado', '') == 'anulado');
+          && eventoConMotivo('DEPOSITO_DEVUELTO', evId);
       }
 
       // ─── C. Anular: el reemplazo del delete físico ────────────────────
       //
-      // Tipo C queda EXCLUIDO a propósito: su anulación es la de Revertir en
-      // Cobros (lib/cobro-integridad), que ya anula el DEP y el movimiento
-      // juntos y no pasa por este flujo. Meterlo acá rompería esa reversión
-      // sin agregar auditoría que ese camino no tenga ya.
-      function anulacionAuditada() {
-        return request.resource.data.get('estado', '') != 'anulado'
-          || resource.data.get('estado', '') == 'anulado'
-          || resource.data.get('tipo', '') == 'pago_delivery_deposito'
-          || (isAdmin()
-              && request.resource.data.get('anuladoPorUid', '') == request.auth.uid
-              && request.resource.data.get('anuladoAt', null) == request.time
-              && motivoAuditable(request.resource.data.get('motivoAnulacion', null)));
+      // Tipo C queda EXCLUIDO a propósito (vía `ab`): su anulación es la de
+      // Revertir en Cobros (lib/cobro-integridad), que ya anula el DEP y el
+      // movimiento juntos y no pasa por este flujo. Meterlo acá rompería esa
+      // reversión sin agregar auditoría que ese camino no tenga ya.
+      function anulacionValida(evId) {
+        return isAdmin()
+          && request.resource.data.get('anuladoPorUid', '') == request.auth.uid
+          && request.resource.data.get('anuladoAt', null) == request.time
+          && motivoAuditable(request.resource.data.get('motivoAnulacion', null))
+          && eventoConMotivo('DEPOSITO_ANULADO', evId);
       }
 
-      // PAGO-TRANSFERENCIA-UX-1 · DEP-ACCIONES-ADMIN-ONLY — sacar un depósito
-      // de 'confirmado' (Rehacer lo devuelve a revisión) es solo del admin.
-      // Única excepción del gestor: anular un DEP tipo C al revertir su cobro
-      // (revertirPagada), que cobroPagadoIntegro() valida del lado de la orden.
-      // Confirmar desde un estado abierto no cambia: el estado previo no es
-      // 'confirmado'.
-      function salidaDeConfirmadoAutorizada() {
-        return resource.data.get('estado', '') != 'confirmado'
-          || request.resource.data.get('estado', '') == 'confirmado'
-          || isAdmin()
-          || (resource.data.get('tipo', '') == 'pago_delivery_deposito'
-              && request.resource.data.get('estado', '') == 'anulado');
+      // ─── Guard del reemplazo del motorizado ───────────────────────────
+      //
+      // Mismos `let` hoisteados y el MISMO reemplazoVersionado() que usa la
+      // rama de staff: una sola definición de "reemplazar el comprobante
+      // correctamente", más la pertenencia que a staff no se le exige.
+      function reemplazoDelMotorizadoValido() {
+        let antes = resource.data;
+        let despues = request.resource.data;
+        let cambios = despues.diff(antes).affectedKeys();
+        return antes.get('motorizadoUid', '') == request.auth.uid
+          && antes.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio']
+          && antes.get('estado', '') in ['en_revision', 'devuelto']
+          && reemplazoVersionado(cambios, despues.get('estado', ''), despues.get('ultimoEventoId', ''));
       }
 
-      allow update: if isAdminOrGestor()
-        && noTocaCodigo()
-        && boucherSellado()
-        && salidaDeConfirmadoAutorizada()
-        // DEPOSITO-AUDITORIA-1 — tres puertas nuevas sobre la MISMA regla
-        // amplia de siempre. No le quitan nada al gestor salvo las formas
-        // deshonestas de las transiciones que este bloque introduce.
-        && entradaADevueltoAuditada()
-        && salidaDeDevueltoAutorizada()
-        && anulacionAuditada();
+      // ─── Guard de la rama amplia de gestor/admin ──────────────────────
+      //
+      // Forma de ÁRBOL, no de lista de garantías, y eso no es estilo: es el
+      // presupuesto de expresiones (ver la nota de la cabecera). Una lista
+      // plana de ocho condiciones releía el estado, el diff y el tipo en cada
+      // una y reventaba el techo de 1000 expresiones — medido, no supuesto.
+      //
+      // Acá cada pregunta cara se hace SOLO si la anterior dice que hace
+      // falta:
+      //
+      //   · ¿cambió el estado?        si no, no hay transición que auditar
+      //   · ¿tocó el comprobante?     si no, no hay versionado que exigir
+      //
+      // La abrumadora mayoría de los updates de staff (notas, saldoId,
+      // punteros) no hacen ninguna de las dos cosas y salen por el camino
+      // barato.
+      function updateStaffAuditado() {
+        return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['codigo', 'secuencia'])
+          // STORAGE-EVIDENCIA-INTEGRIDAD-1 — el sellado de F1 vale SIEMPRE,
+          // con interruptor o sin él: un depósito cerrado no cambia de
+          // comprobante ni durante el rollout.
+          && boucherSelladoF1()
+          && estadoStaffAuditado()
+          && boucherStaffVersionado();
+      }
+
+      function estadoStaffAuditado() {
+        let eAntes = resource.data.get('estado', '');
+        let eDespues = request.resource.data.get('estado', '');
+        return eAntes == eDespues || transicionStaffAuditada(eAntes, eDespues);
+      }
+
+      // Solo se llega acá cuando el estado REALMENTE cambia.
+      function transicionStaffAuditada(eAntes, eDespues) {
+        let despues = request.resource.data;
+        let evId = despues.get('ultimoEventoId', '');
+        let ab = resource.data.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio'];
+        return
+          // DEP-ACCIONES-ADMIN-ONLY — sacar un depósito de 'confirmado' es del
+          // admin. Única excepción del gestor: anular un DEP tipo C al
+          // revertir su cobro (que no es A/B, de ahí el `!ab`).
+          (eAntes != 'confirmado' || isAdmin() || (!ab && eDespues == 'anulado'))
+
+          // Salir de 'devuelto' es del MOTORIZADO, con una versión nueva
+          // (regla propia más abajo). Staff no confirma un depósito que sigue
+          // esperando comprobante ni lo reabre por la puerta de atrás. Se le
+          // dejan las dos salidas que no son "dar por buena la evidencia":
+          // convertirlo en deuda, y anularlo — ambas auditadas por su lado.
+          && (eAntes != 'devuelto'
+              || eDespues == 'convertido_en_deuda'
+              || (isAdmin() && eDespues == 'anulado')
+              // El reemplazo versionado de staff también sale de 'devuelto':
+              // subir el comprobante corregido devuelve el DEP a la cola del
+              // gestor. No se revalida el protocolo acá —sería pagarlo dos
+              // veces—: si el update toca el puntero, boucherStaffVersionado()
+              // lo exige entero, y si no lo toca no es un reemplazo y esta
+              // rama no lo deja pasar.
+              || (eDespues == 'en_revision'
+                  && request.resource.data.diff(resource.data).affectedKeys().hasAny(['boucher'])))
+
+          // Entrar a 'devuelto' SOLO por "Pedir corrección". Sin esto, esta
+          // misma rama —que no tiene hasOnly— dejaría escribir
+          // estado:'devuelto' sin motivo, sin actor y sin evento.
+          && (eDespues != 'devuelto'
+              || (ab && eAntes == 'en_revision'
+                  && devolucionValida(request.resource.data.diff(resource.data).affectedKeys(), evId)))
+
+          // HARDENING — anular exige su evento. Un cliente modificado podía
+          // escribir solo los campos planos y saltarse la subcolección.
+          && (eDespues != 'anulado' || !ab || anulacionValida(evId))
+
+          // HARDENING — confirmar también. No se le pide motivo (no deshace
+          // nada), pero sí que quede quién y cuándo. Tipo C fuera: su
+          // documento nace ya 'confirmado' junto al cobro, no por esta vía.
+          && (eDespues != 'confirmado' || !ab || eventoEnEsteBatch('DEPOSITO_CONFIRMADO', evId))
+
+          // HARDENING — Rehacer es la ÚNICA transición que saca un A/B de
+          // 'confirmado' hacia 'en_revision'. Ya era admin-only; ahora además
+          // tiene que narrarse, con motivo. NO resuelve
+          // REHACER-ANULA-ANTES-DEL-BATCH: la anulación de los movimientos del
+          // ledger sigue siendo una escritura aparte y esa deuda de atomicidad
+          // financiera queda abierta. Lo que se vuelve obligatorio es la
+          // auditoría de la transición que sí llega a Firestore.
+          && (eAntes != 'confirmado' || eDespues != 'en_revision' || !ab
+              || (isAdmin() && eventoConMotivo('DEPOSITO_REHECHO', evId)));
+      }
+
+      // HARDENING — el comprobante vigente SOLO cambia por versión.
+      //
+      // F1 le dejaba a gestor/admin mutar el puntero `boucher` de un depósito
+      // abierto con un setDoc suelto (modelo privilegiado, Decisión 2 de
+      // P1-S2). Después de F2 eso es una vía no versionada de cambiar
+      // evidencia: el objeto anterior deja de estar referenciado, sin versión,
+      // sin motivo y sin evento. No hay bypass de admin.
+      function boucherStaffVersionado() {
+        return !request.resource.data.diff(resource.data).affectedKeys()
+                 .hasAny(['boucher', 'boucherUrl', 'boucherVersion', 'boucherVersionId'])
+          || cambioDeBoucherPermitido();
+      }
+
+      // Solo se llega acá cuando el update SÍ toca el puntero.
+      //
+      //   sellados           nadie, ni admin (STORAGE-EVIDENCIA-INTEGRIDAD-1,
+      //                      ampliado a los punteros de versión: en un estado
+      //                      cerrado el comprobante no se toca, ni siquiera
+      //                      para "corregir" cuál versión dice ser).
+      //   en_revision        hay evidencia vigente que corregir: versionado.
+      //   devuelto           ídem.
+      //   pendiente_boucher  flujo INICIAL (create-first del motorizado,
+      //                      confirmarStorkhub/Comercio del gestor,
+      //                      digitación). Ahí el boucher se adjunta por
+      //                      primera vez y el reintento reescribe el mismo
+      //                      path: no es reemplazo de evidencia.
+      //   rechazado          terminal; F1 ya lo trataba así.
+      function boucherSelladoF1() {
+        return !(resource.data.get('estado', '') in ['confirmado', 'convertido_en_deuda', 'anulado'])
+          || !request.resource.data.diff(resource.data).affectedKeys()
+               .hasAny(['boucher', 'boucherUrl', 'boucherVersion', 'boucherVersionId']);
+      }
+
+      function cambioDeBoucherPermitido() {
+        let eAntes = resource.data.get('estado', '');
+        return !(eAntes in ['confirmado', 'convertido_en_deuda', 'anulado'])
+          && (!(eAntes in ['en_revision', 'devuelto'])
+              || !(resource.data.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio'])
+              || reemplazoVersionado(
+                   request.resource.data.diff(resource.data).affectedKeys(),
+                   request.resource.data.get('estado', ''),
+                   request.resource.data.get('ultimoEventoId', '')));
+      }
+
+      allow update: if isAdminOrGestor() && updateStaffAuditado();
 
       // Motorizado: solo puede subir boucher y pasar a en_revision.
       // Mismo cambio que create/read — se exige rol motorizado activo. Los
@@ -1639,22 +1778,7 @@ service cloud.firestore {
       // 'en_revision' es un no-op que mantiene la escritura uniforme, y desde
       // 'devuelto' es el retorno a la cola del gestor, con el MISMO DEP-N y
       // sin liberar una sola orden.
-      allow update: if isMotorizadoRole()
-        && resource.data.get('motorizadoUid', '') == request.auth.uid
-        && esDepositoAB()
-        && resource.data.get('estado', '') in ['en_revision', 'devuelto']
-        && request.resource.data.get('estado', '') == 'en_revision'
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'boucher',
-          'boucherVersion',
-          'boucherVersionId',
-          'estado',
-          'updatedAt',
-          'ultimoEventoId'
-        ])
-        && versionSubeEnUno()
-        && versionIdNuevoYCoherente()
-        && eventoReemplazoValido();
+      allow update: if isMotorizadoRole() && reemplazoDelMotorizadoValido();
 
       // Digitador: adjunta el boucher y recién ahí pasa a 'en_revision' —
       // única transición permitida desde 'pendiente_boucher' (ver ÚLTIMA
@@ -1761,8 +1885,12 @@ service cloud.firestore {
               && tipoEvento() in ['BOUCHER_SUBIDO', 'BOUCHER_REEMPLAZADO']
               && deposito().get('motorizadoUid', '') == request.auth.uid)
             ||
-            // Gestor y admin: revisar el depósito y pedir corrección.
-            (isAdminOrGestor() && tipoEvento() in ['DEPOSITO_DEVUELTO', 'DEPOSITO_CONFIRMADO'])
+            // Gestor y admin: revisar el depósito, pedir corrección y —desde
+            // el HARDENING— narrar SU propio reemplazo versionado. Sin
+            // BOUCHER_REEMPLAZADO acá, cerrar la vía directa del puntero
+            // dejaba a staff sin NINGUNA forma de corregir un comprobante:
+            // el update exigía el evento y el evento no se le permitía.
+            (isAdminOrGestor() && tipoEvento() in ['BOUCHER_REEMPLAZADO', 'DEPOSITO_DEVUELTO', 'DEPOSITO_CONFIRMADO'])
             ||
             // Rehacer y Anular siguen siendo del admin, acá también: el
             // evento no puede quedar por encima de la acción que narra.

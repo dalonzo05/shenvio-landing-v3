@@ -329,6 +329,38 @@ service firebase.storage {
         && dep.get('estado', '') == 'pendiente_boucher';
     }
 
+    // ── HARDENING: el legacy deja de ser vía de REEMPLAZO ─────────────────
+    //
+    // `boucher.jpg` es un objeto por depósito: escribirlo encima borra el
+    // anterior sin dejar rastro. Mientras no hubo alternativa, F2 lo toleraba;
+    // ahora que existe bouchers/{versionId} (create-only, inmutable), el
+    // legacy se reduce a lo estrictamente necesario, separando la PRIMERA
+    // subida de la sobrescritura.
+    //
+    // Se conservan exactamente dos sobrescrituras, las dos demostradas por
+    // flujos reales de F1:
+    //
+    //   pendiente_boucher   reintento del flujo inicial. El motorizado
+    //                       (create-first) y confirmarStorkhub/Comercio del
+    //                       gestor suben al MISMO path cuando un intento
+    //                       anterior murió después del upload. Ahí no hay
+    //                       evidencia vigente que pisar: el depósito todavía
+    //                       no entró en revisión.
+    //   digitador           su corrección sobre su propia digitación en
+    //                       revisión (D2), que no cambia en este bloque.
+    //                       Queda como deuda DIGITADOR-BOUCHER-NO-VERSIONADO.
+    //
+    // Todo lo demás —gestor, admin y motorizado sobre un DEP en 'en_revision'
+    // o 'devuelto'— tiene que ir por el path versionado. Sin excepción de rol.
+    //
+    // La comprobación es `resource == null` y no `allow create` a secas: se
+    // verificó empíricamente que el emulador clasifica una subida sobre un
+    // objeto existente como create, no como update (caso SV7).
+    function sobrescrituraLegacyPermitida(depositoId) {
+      return depositoDe(depositoId).get('estado', '') == 'pendiente_boucher'
+        || rolDe(request.auth.uid) == 'digitador';
+    }
+
     // ── STORAGE-EVIDENCIA-INTEGRIDAD-1: boucher del pago del delivery ─────
     // El comprobante del comercio (y el del gestor) respalda el DEP tipo C.
     // Una vez 'pagado' el cobro es evidencia cerrada: firestore.rules ya no
@@ -378,6 +410,9 @@ service firebase.storage {
           ||
           (rolDe(request.auth.uid) == 'digitador' && depositoEditablePorDigitador(motorizadoAuthUid, depositoId))
         )
+        // HARDENING — primera subida siempre; sobrescritura solo donde un
+        // flujo de F1 la necesita de verdad (ver la nota de arriba).
+        && (resource == null || sobrescrituraLegacyPermitida(depositoId))
         && request.resource.contentType == 'image/jpeg'
         && request.resource.size > 0
         && request.resource.size <= 5 * 1024 * 1024;

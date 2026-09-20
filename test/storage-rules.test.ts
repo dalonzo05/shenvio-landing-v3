@@ -46,6 +46,7 @@ import {
 } from '../lib/deposito-eventos'
 import {
   camposAnularDeposito,
+  camposConfirmarDeposito,
   camposPedirCorreccion,
   camposRehacerDeposito,
 } from '../lib/deposito-correccion'
@@ -55,7 +56,7 @@ const BASE_DIR = process.env.REGLAS_BASE_DIR || ''
 const MODO_BASE = BASE_DIR !== ''
 const archivoReglas = (nombre: string) => readFileSync(MODO_BASE ? join(BASE_DIR, nombre) : nombre, 'utf8')
 /** Casos que solo tienen sentido contra las reglas nuevas. */
-const soloNuevas = { skip: MODO_BASE ? 'modo compatibilidad: solo WC' : false }
+const soloNuevas = { skip: MODO_BASE ? 'modo compatibilidad: solo WC/DC' : false }
 
 const UID_MOTO = 'uid_moto'
 const UID_MOTO_2 = 'uid_moto_2'
@@ -204,12 +205,38 @@ test('S12 · uid del path distinto del motorizadoUid del DEP ⇒ DENY (motorizad
   await assertFails(subir(UID_GESTOR, PATH_DEP))
 })
 
-test('S13 · staff sigue subiendo en abiertos: confirmar (pendiente_boucher) y reemplazar en revisión ⇒ ALLOW', soloNuevas, async () => {
-  for (const estado of ['pendiente_boucher', 'en_revision', 'rechazado']) {
-    await deposito(estado)
-    await assertSucceeds(subir(UID_GESTOR, PATH_DEP))
-    await assertSucceeds(subir(UID_ADMIN, PATH_DEP))
-  }
+// HARDENING — la segunda mitad de S13 afirmaba que staff podía sobrescribir
+// `boucher.jpg` en 'en_revision'. Esa era la última vía no versionada de
+// reemplazar evidencia en Storage y se cierra (ver ST8). Lo que queda es el
+// flujo INICIAL, que sí necesita escribir ese objeto.
+test('S13 · staff sube el comprobante inicial en pendiente_boucher ⇒ ALLOW', soloNuevas, async () => {
+  await deposito('pendiente_boucher')
+  await assertSucceeds(subir(UID_GESTOR, PATH_DEP))
+  // Y el reintento del mismo flujo, que reescribe el MISMO path.
+  await assertSucceeds(subir(UID_GESTOR, PATH_DEP, jpeg(2048)))
+})
+
+test('ST8 · staff sobrescribe el legacy boucher.jpg de un DEP ya abierto ⇒ DENY', soloNuevas, async () => {
+  // Primero existe el objeto (subida inicial legítima), después el depósito
+  // entra en revisión: a partir de ahí la corrección es versionada.
+  await deposito('pendiente_boucher')
+  await assertSucceeds(subir(UID_GESTOR, PATH_DEP))
+  await deposito('en_revision')
+  await assertFails(subir(UID_GESTOR, PATH_DEP, jpeg(2048)))
+  await assertFails(subir(UID_ADMIN, PATH_DEP, jpeg(2048)))
+  await deposito('devuelto')
+  await assertFails(subir(UID_GESTOR, PATH_DEP, jpeg(2048)))
+  // El motorizado tampoco, que ya lo cerraba F1 (S3).
+  await assertFails(subir(UID_MOTO, PATH_DEP, jpeg(2048)))
+})
+
+test('ST8b · el digitador conserva su corrección en revisión (D2, sin cambios)', soloNuevas, async () => {
+  // Deuda explícita DIGITADOR-BOUCHER-NO-VERSIONADO: fuera del alcance de
+  // este bloque, que cubre motorizado, gestor y admin.
+  await deposito('pendiente_boucher', { digitadoPorUid: UID_DIGITADOR })
+  await assertSucceeds(subir(UID_DIGITADOR, PATH_DEP))
+  await deposito('en_revision', { digitadoPorUid: UID_DIGITADOR })
+  await assertSucceeds(subir(UID_DIGITADOR, PATH_DEP, jpeg(2048)))
 })
 
 test('S14 · digitador sin cambios: su digitación en pendiente/en_revision ALLOW; confirmada o ajena DENY', soloNuevas, async () => {
@@ -632,9 +659,8 @@ test('WF3 · ciclo completo: en_revision → devuelto → nueva versión → en_
 
   // 3. El gestor confirma, con su evento.
   const bConf = writeBatch(dbG)
-  bConf.set(doc(dbG, 'ordenes_deposito', DEP_F), {
-    estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
-  }, { merge: true })
+  bConf.set(doc(dbG, 'ordenes_deposito', DEP_F),
+    camposConfirmarDeposito(UID_GESTOR, serverTimestamp(), 'evConfF'), { merge: true })
   bConf.set(doc(dbG, 'ordenes_deposito', DEP_F, 'eventos', 'evConfF'),
     camposEventoDepositoConfirmado({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp()))
   await assertSucceeds(bConf.commit())
@@ -818,17 +844,17 @@ test('DC3b · y el "Eliminar" del admin sobre un confirmado, igual', async () =>
   await segunModo(deleteDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_DC)), 'allow')
 })
 
-test('DC4 · lo que SÍ es compatible en los dos sentidos: confirmar un depósito en revisión', async () => {
+test('DC4 · dirección A: confirmar SIN evento, como lo hace el web F1 ⇒ DENY contra las Rules finales', async () => {
+  // Antes del HARDENING este caso era "compatible en los dos sentidos". Ya no:
+  // confirmar exige su evento, así que también cae del lado del puente.
   await depositoCompat()
-  // Sin evento, tal como lo escribe el web de F1: las reglas nuevas no lo
-  // exigen para confirmar (ver la nota de alcance en firestore.rules), así
-  // que este flujo cruza el rollout en cualquier orden.
-  await assertSucceeds(setDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_DC), {
+  await segunModo(setDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_DC), {
     estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
-  }, { merge: true }))
+  }, { merge: true }), 'allow')
 })
 
 test('DC5 · y el boucher legacy del flujo inicial: F1 intacto en los dos sentidos', async () => {
   await depositoCompat('pendiente_boucher')
   await assertSucceeds(subir(UID_MOTO, `depositos/${UID_MOTO}/${DEP_DC}/boucher.jpg`))
 })
+

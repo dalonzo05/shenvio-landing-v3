@@ -42,7 +42,6 @@ import {
   estadoDeposito,
   fechasDeposito,
   confirmadorDeposito,
-  camposConfirmacionDeposito,
   claseDeposito,
   comprobanteDeposito,
 } from '@/lib/presentacion-deposito'
@@ -78,6 +77,7 @@ import {
   ETIQUETA_DEVUELTO,
   TEXTO_ESPERANDO_CORRECCION,
   camposAnularDeposito,
+  camposConfirmarDeposito,
   camposPedirCorreccion,
   camposRehacerDeposito,
   correccionSolicitada,
@@ -965,11 +965,7 @@ function DepositosPageContent() {
       // que el evento DEPOSITO_CONFIRMADO entre junto con la confirmación. Los
       // pasos 1 y 2 no se reordenan: son los que sostienen la garantía de
       // Storage (el documento existe antes de que se suba el objeto).
-      await escribirConfirmacionConEvento(depositoRef, {
-        boucher: boucherData,
-        estado: 'confirmado',
-        ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
-      })
+      await escribirConfirmacionConEvento(depositoRef, { boucher: boucherData })
     } else {
       montoTotal = existente.data()?.montoTotal ?? 0
     }
@@ -1032,11 +1028,7 @@ function DepositosPageContent() {
       // DEPOSITOS-UX-TRAZABILIDAD-1 — este flujo deja el depósito confirmado
       // por el gestor, pero no decía quién ni cuándo. Solo hacia adelante.
       // DEPOSITO-AUDITORIA-1 — con su evento, en el mismo batch (ver arriba).
-      await escribirConfirmacionConEvento(depositoRef, {
-        boucher: boucherData,
-        estado: 'confirmado',
-        ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
-      })
+      await escribirConfirmacionConEvento(depositoRef, { boucher: boucherData })
     } else {
       montoTotal = existente.data()?.montoTotal ?? 0
     }
@@ -1235,18 +1227,21 @@ function DepositosPageContent() {
    */
   async function escribirConfirmacionConEvento(
     depositoRef: ReturnType<typeof doc>,
-    campos: Record<string, unknown>,
+    camposExtra: Record<string, unknown>,
   ) {
     const uid = auth.currentUser?.uid ?? ''
+    if (!uid || !userRol) throw new Error('No pudimos verificar tu sesión. Volvé a entrar.')
+    const eventoId = doc(collection(db, depositoRef.path, SUBCOLECCION_EVENTOS_DEPOSITO)).id
     const b = writeBatch(db)
-    b.set(depositoRef, campos, { merge: true })
-    if (uid && userRol) {
-      const eventoId = doc(collection(db, depositoRef.path, SUBCOLECCION_EVENTOS_DEPOSITO)).id
-      b.set(
-        doc(db, depositoRef.path, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
-        camposEventoDepositoConfirmado({ uid, rol: userRol }, serverTimestamp()),
-      )
-    }
+    b.set(
+      depositoRef,
+      { ...camposExtra, ...camposConfirmarDeposito(uid, serverTimestamp(), eventoId) },
+      { merge: true },
+    )
+    b.set(
+      doc(db, depositoRef.path, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
+      camposEventoDepositoConfirmado({ uid, rol: userRol }, serverTimestamp()),
+    )
     await b.commit()
   }
 
@@ -1261,27 +1256,22 @@ function DepositosPageContent() {
 
       const { doc: docRef } = await import('firebase/firestore')
       const ref = docRef(db, 'ordenes_deposito', dep.id)
+      if (!userRol) throw new Error('No pudimos verificar tu sesión. Volvé a entrar.')
       const b = writeBatch(db)
-      // DEPOSITO-AUDITORIA-1 — el evento viaja en el MISMO batch que el cambio
-      // de estado: o quedan los dos, o no queda ninguno. Un depósito
-      // confirmado sin su evento sería un agujero en la historia justo en el
-      // momento en el que el dinero se da por recibido.
-      if (userRol && esDepositoAB(dep)) {
-        const eventoId = docRef(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id
-        b.set(
-          docRef(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
-          camposEventoDepositoConfirmado({ uid, rol: userRol }, serverTimestamp()),
-        )
-      }
-      b.update(ref, {
-        estado: 'confirmado',
-        // Trazabilidad DIGITADOR V1 (sección 11): si dep.digitadoPorUid ya
-        // existe, queda junto a confirmadoPorUid — ambos identifican actores
-        // distintos. Si el depósito lo subió el motorizado directamente,
-        // esto solo agrega quién confirmó, sin cambiar nada más.
-        confirmadoPorUid: uid,
-        confirmadoAt: serverTimestamp(),
-      })
+      // HARDENING — el evento viaja en el MISMO batch que el cambio de estado
+      // y firestore.rules lo EXIGE: o quedan los dos, o no queda ninguno. Un
+      // depósito confirmado sin su evento sería un agujero en la historia
+      // justo en el momento en el que el dinero se da por recibido.
+      //
+      // Trazabilidad DIGITADOR V1 (sección 11): si dep.digitadoPorUid ya
+      // existe, queda junto a confirmadoPorUid — actores distintos. Si el
+      // depósito lo subió el motorizado, esto solo agrega quién confirmó.
+      const eventoId = docRef(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id
+      b.set(
+        docRef(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
+        camposEventoDepositoConfirmado({ uid, rol: userRol }, serverTimestamp()),
+      )
+      b.set(ref, camposConfirmarDeposito(uid, serverTimestamp(), eventoId), { merge: true })
       const fieldKey = dep.destinatario === 'storkhub'
         ? 'registro.deposito.confirmadoStorkhub'
         : 'registro.deposito.confirmadoComercio'
