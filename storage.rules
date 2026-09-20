@@ -356,8 +356,18 @@ service firebase.storage {
     // La comprobación es `resource == null` y no `allow create` a secas: se
     // verificó empíricamente que el emulador clasifica una subida sobre un
     // objeto existente como create, no como update (caso SV7).
+    // ROLLOUT — mismo interruptor que firestore.rules, misma razón: el web F1
+    // desplegado sube la corrección de staff a `boucher.jpg`. El puente lo
+    // pone en false (scripts/reglas-puente.mjs) y el deploy final lo devuelve
+    // a true. No afecta a nada más: el path versionado, su inmutabilidad y el
+    // sellado de estados cerrados valen igual en las dos versiones.
+    function versionadoF2Obligatorio() {
+      return true;
+    }
+
     function sobrescrituraLegacyPermitida(depositoId) {
-      return depositoDe(depositoId).get('estado', '') == 'pendiente_boucher'
+      return !versionadoF2Obligatorio()
+        || depositoDe(depositoId).get('estado', '') == 'pendiente_boucher'
         || rolDe(request.auth.uid) == 'digitador';
     }
 

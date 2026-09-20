@@ -59,3 +59,4 @@ ui-debug.log
 # DEPOSITO-AUDITORIA-1 — Rules desplegadas, materializadas desde git para
 # los tests de compatibilidad de deploy (scripts/reglas-base.mjs).
 .reglas-base/
+.reglas-puente/

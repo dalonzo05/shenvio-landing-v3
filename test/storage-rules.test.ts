@@ -22,7 +22,7 @@ import {
   assertFails,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing'
-import { doc, setDoc, deleteDoc, writeBatch, serverTimestamp } from 'firebase/firestore'
+import { doc, setDoc, updateDoc, deleteDoc, writeBatch, serverTimestamp } from 'firebase/firestore'
 import { ref, uploadBytes, deleteObject, getBytes } from 'firebase/storage'
 import {
   camposCreacionDepositoMotorizado,
@@ -54,9 +54,32 @@ import {
 const PROJECT_ID = 'demo-storage-evidencia'
 const BASE_DIR = process.env.REGLAS_BASE_DIR || ''
 const MODO_BASE = BASE_DIR !== ''
+/**
+ * ROLLOUT — la suite corre contra TRES rulesets, y el mismo caso puede
+ * esperar cosas distintas en cada uno. Esa asimetría es el resultado.
+ *
+ *   npm run test:storage-rules   FINAL   las Rules de este branch
+ *   npm run test:puente-rules    PUENTE  .reglas-puente (derivadas de las
+ *                                        finales, scripts/reglas-puente.mjs)
+ *   npm run test:compat-rules    F1      .reglas-base (origin/staging)
+ */
+const MODO_PUENTE = BASE_DIR.includes('puente')
+const MODO_F1 = MODO_BASE && !MODO_PUENTE
 const archivoReglas = (nombre: string) => readFileSync(MODO_BASE ? join(BASE_DIR, nombre) : nombre, 'utf8')
 /** Casos que solo tienen sentido contra las reglas nuevas. */
-const soloNuevas = { skip: MODO_BASE ? 'modo compatibilidad: solo WC/DC' : false }
+const soloNuevas = { skip: MODO_BASE ? 'modo compatibilidad: solo WC/DC/PB' : false }
+/** Flujos del web F2: válidos con las Rules finales y con el puente. */
+const finalesYPuente = { skip: MODO_F1 ? 'flujo F2: no aplica contra Rules F1' : false }
+/** Flujos del web F1: válidos con las Rules de F1 y con el puente. */
+const f1YPuente = { skip: (!MODO_BASE) ? 'flujo F1: cerrado en las Rules finales' : false }
+/** Solo contra las Rules finales, para probar que el cierre sí ocurre. */
+const soloFinales = { skip: MODO_BASE ? 'solo contra las Rules finales' : false }
+/**
+ * Los casos DC comparan FINAL contra F1 para demostrar que ningún orden
+ * simple de deploy funciona. El puente es precisamente la respuesta a eso, así
+ * que ahí no aplican: sus flujos los cubren los casos P1/P2/P3.
+ */
+const finalesYF1 = { skip: MODO_PUENTE ? 'dirección A/B: el puente es la respuesta, ver P1-P3' : false }
 
 const UID_MOTO = 'uid_moto'
 const UID_MOTO_2 = 'uid_moto_2'
@@ -813,13 +836,13 @@ const segunModo = (promesa: Promise<unknown>, enBase: 'allow' | 'deny') =>
     ? assertSucceeds(promesa)
     : assertFails(promesa)
 
-test('DC1 · dirección A: el upload versionado del web nuevo contra Rules F1 ⇒ DENY', async () => {
+test('DC1 · dirección A: el upload versionado del web nuevo contra Rules F1 ⇒ DENY', finalesYF1, async () => {
   await depositoCompat()
   // storage.rules de F1 no tiene match de 5 segmentos: cae en el catch-all.
   await segunModo(subir(UID_MOTO, pathVersionBoucher(UID_MOTO, DEP_DC, 'verCompatAA1')), 'deny')
 })
 
-test('DC2 · dirección A: "Pedir corrección" del web nuevo contra Rules F1 ⇒ DENY', async () => {
+test('DC2 · dirección A: "Pedir corrección" del web nuevo contra Rules F1 ⇒ DENY', finalesYF1, async () => {
   await depositoCompat()
   const db = firestoreDe(UID_GESTOR)
   const b = writeBatch(db)
@@ -831,7 +854,7 @@ test('DC2 · dirección A: "Pedir corrección" del web nuevo contra Rules F1 ⇒
   await segunModo(b.commit(), 'deny')
 })
 
-test('DC3 · dirección B: el delete del web viejo ("Devolver"/"Eliminar") contra Rules nuevas ⇒ DENY', async () => {
+test('DC3 · dirección B: el delete del web viejo ("Devolver"/"Eliminar") contra Rules nuevas ⇒ DENY', finalesYF1, async () => {
   await depositoCompat()
   // Con las reglas de F1 el gestor borra un depósito abierto; con las nuevas,
   // delete es DENY para todos. Un web viejo contra reglas nuevas se queda sin
@@ -839,12 +862,12 @@ test('DC3 · dirección B: el delete del web viejo ("Devolver"/"Eliminar") contr
   await segunModo(deleteDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_DC)), 'allow')
 })
 
-test('DC3b · y el "Eliminar" del admin sobre un confirmado, igual', async () => {
+test('DC3b · y el "Eliminar" del admin sobre un confirmado, igual', finalesYF1, async () => {
   await depositoCompat('confirmado')
   await segunModo(deleteDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_DC)), 'allow')
 })
 
-test('DC4 · dirección A: confirmar SIN evento, como lo hace el web F1 ⇒ DENY contra las Rules finales', async () => {
+test('DC4 · dirección A: confirmar SIN evento, como lo hace el web F1 ⇒ DENY contra las Rules finales', finalesYF1, async () => {
   // Antes del HARDENING este caso era "compatible en los dos sentidos". Ya no:
   // confirmar exige su evento, así que también cae del lado del puente.
   await depositoCompat()
@@ -853,8 +876,233 @@ test('DC4 · dirección A: confirmar SIN evento, como lo hace el web F1 ⇒ DENY
   }, { merge: true }), 'allow')
 })
 
-test('DC5 · y el boucher legacy del flujo inicial: F1 intacto en los dos sentidos', async () => {
+test('DC5 · y el boucher legacy del flujo inicial: F1 intacto en los dos sentidos', finalesYF1, async () => {
   await depositoCompat('pendiente_boucher')
   await assertSucceeds(subir(UID_MOTO, `depositos/${UID_MOTO}/${DEP_DC}/boucher.jpg`))
 })
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ROLLOUT · PB — matriz de compatibilidad del PUENTE
+//
+// Tres rulesets, tres corridas, el mismo archivo de tests:
+//
+//   P1  web F1 + Rules puente    todos los flujos de F1 siguen funcionando
+//   P2  web F2 + Rules puente    todos los flujos nuevos ya funcionan
+//   P3  web F2 + Rules finales   ídem, con el cierre puesto
+//
+// P2 y P3 son el MISMO conjunto de casos corriendo en dos modos (finalesYPuente);
+// P1 corre en puente y en F1 (f1YPuente). Los casos `soloFinales` demuestran
+// que el cierre sí ocurre al final del rollout, y no antes.
+//
+// Ninguno de estos casos deploya nada: leen ruleset de disco.
+// ═════════════════════════════════════════════════════════════════════════════
+
+const DEP_PB = 'depPuente'
+const ORDEN_PB = 'ordPuente'
+
+async function depositoPuente(estado = 'en_revision', extra: Record<string, unknown> = {}) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    await setDoc(doc(db, 'ordenes_deposito', DEP_PB), {
+      tipo: 'recaudacion_motorizado_storkhub',
+      estado,
+      destinatario: 'storkhub',
+      destinatarioId: 'storkhub',
+      motorizadoUid: UID_MOTO,
+      solicitudIds: [ORDEN_PB],
+      montoTotal: 110,
+      codigo: 'DEP-0011',
+      secuencia: 11,
+      boucher: { url: 'https://example.test/v1.jpg', pathStorage: `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg` },
+      ...extra,
+    })
+    await setDoc(doc(db, 'solicitudes_envio', ORDEN_PB), {
+      comercioUid: COMERCIO_ID, userId: COMERCIO_ID, estado: 'entregado',
+      asignacion: { motorizadoAuthUid: UID_MOTO }, codigo: 'SH-0011', secuencia: 11,
+      registro: { deposito: { storkhubDepositoId: DEP_PB } },
+    })
+  })
+}
+
+// ─── P1 · el web F1 sigue funcionando bajo el puente ─────────────────────────
+
+test('P1a · "Devolver al motorizado" del web F1 (delete + liberar órdenes) ⇒ ALLOW', f1YPuente, async () => {
+  await depositoPuente('en_revision')
+  const db = firestoreDe(UID_GESTOR)
+  const b = writeBatch(db)
+  b.delete(doc(db, 'ordenes_deposito', DEP_PB))
+  b.update(doc(db, 'solicitudes_envio', ORDEN_PB), {
+    'registro.deposito.storkhubDepositoId': null,
+    'registro.deposito.confirmadoStorkhub': false,
+    'registro.deposito.confirmadoStorkhubAt': null,
+  })
+  await assertSucceeds(b.commit())
+})
+
+test('P1b · "Eliminar" del admin sobre un confirmado ⇒ ALLOW', f1YPuente, async () => {
+  await depositoPuente('confirmado')
+  await assertSucceeds(deleteDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_PB)))
+})
+
+test('P1c · confirmar SIN evento, como lo escribe el web F1 ⇒ ALLOW', f1YPuente, async () => {
+  await depositoPuente('en_revision')
+  await assertSucceeds(setDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_PB), {
+    estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
+  }, { merge: true }))
+})
+
+test('P1d · rehacer SIN evento (admin) ⇒ ALLOW', f1YPuente, async () => {
+  await depositoPuente('confirmado')
+  await assertSucceeds(setDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_PB), {
+    estado: 'en_revision',
+  }, { merge: true }))
+})
+
+test('P1e · reemplazar el boucher directo en revisión (Firestore + Storage legacy) ⇒ ALLOW', f1YPuente, async () => {
+  await depositoPuente('en_revision')
+  await assertSucceeds(subir(UID_GESTOR, `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg`))
+  await assertSucceeds(setDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_PB), {
+    boucher: { url: 'https://example.test/nuevo.jpg', pathStorage: `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg` },
+  }, { merge: true }))
+})
+
+test('P1f · el create-first del motorizado sigue intacto ⇒ ALLOW (los tres rulesets)', async () => {
+  await ordenEntregadaDelMotorizado()
+  await assertSucceeds(writerCreateFirst())
+})
+
+// ─── P2/P3 · el web F2 funciona bajo el puente Y bajo las finales ────────────
+
+test('P2a · pedir corrección (documento + evento, mismo batch) ⇒ ALLOW', finalesYPuente, async () => {
+  await depositoPuente('en_revision')
+  const db = firestoreDe(UID_GESTOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_PB),
+    camposPedirCorreccion(UID_GESTOR, serverTimestamp(), 'No se lee el monto', 'evPB1'), { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_PB, 'eventos', 'evPB1'),
+    camposEventoDepositoDevuelto({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp(), 'No se lee el monto'))
+  await assertSucceeds(b.commit())
+})
+
+test('P2b · reemplazo versionado del motorizado (upload + batch) ⇒ ALLOW', finalesYPuente, async () => {
+  await depositoPuente('devuelto', { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' })
+  const plan = planReemplazoBoucher({ id: DEP_PB, motorizadoUid: UID_MOTO }, 'verPuenteAAA1', 'Ahora se ve el monto')
+  await assertSucceeds(uploadBytes(ref(storageDe(UID_MOTO), plan.path), jpeg(), META_JPEG))
+  const db = firestoreDe(UID_MOTO)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_PB),
+    camposReemplazoBoucher(plan, { url: 'https://example.test/v2.jpg', pathStorage: plan.path }, UID_MOTO, serverTimestamp(), 'verPuenteAAA1'),
+    { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_PB, 'eventos', 'verPuenteAAA1'),
+    eventoReemplazoBoucher(plan, { uid: UID_MOTO, rol: 'motorizado' }, serverTimestamp()))
+  await assertSucceeds(b.commit())
+})
+
+test('P2c · reemplazo versionado de staff ⇒ ALLOW', finalesYPuente, async () => {
+  await depositoPuente('en_revision')
+  const plan = planReemplazoBoucher({ id: DEP_PB, motorizadoUid: UID_MOTO }, 'verPuenteBBB1', 'El monto estaba tapado')
+  await assertSucceeds(uploadBytes(ref(storageDe(UID_GESTOR), plan.path), jpeg(), META_JPEG))
+  const db = firestoreDe(UID_GESTOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_PB),
+    camposReemplazoBoucher(plan, { url: 'https://example.test/v2.jpg', pathStorage: plan.path }, UID_MOTO, serverTimestamp(), 'verPuenteBBB1'),
+    { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_PB, 'eventos', 'verPuenteBBB1'),
+    eventoReemplazoBoucher(plan, { uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp()))
+  await assertSucceeds(b.commit())
+})
+
+test('P2d · confirmar CON evento ⇒ ALLOW', finalesYPuente, async () => {
+  await depositoPuente('en_revision')
+  const db = firestoreDe(UID_GESTOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_PB),
+    camposConfirmarDeposito(UID_GESTOR, serverTimestamp(), 'evPB2'), { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_PB, 'eventos', 'evPB2'),
+    camposEventoDepositoConfirmado({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp()))
+  await assertSucceeds(b.commit())
+})
+
+test('P2e · rehacer auditado ⇒ ALLOW', finalesYPuente, async () => {
+  await depositoPuente('confirmado')
+  const db = firestoreDe(UID_ADMIN)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_PB),
+    camposRehacerDeposito(UID_ADMIN, serverTimestamp(), 'El comprobante era de otro depósito', 'evPB3'), { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_PB, 'eventos', 'evPB3'),
+    camposEventoDepositoRehecho({ uid: UID_ADMIN, rol: 'admin' }, serverTimestamp(), 'El comprobante era de otro depósito'))
+  await assertSucceeds(b.commit())
+})
+
+test('P2f · anular auditado, con liberación de órdenes ⇒ ALLOW', finalesYPuente, async () => {
+  await depositoPuente('confirmado')
+  const db = firestoreDe(UID_ADMIN)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_PB),
+    camposAnularDeposito(UID_ADMIN, serverTimestamp(), 'Órdenes equivocadas', 'evPB4'), { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_PB, 'eventos', 'evPB4'),
+    camposEventoDepositoAnulado({ uid: UID_ADMIN, rol: 'admin' }, serverTimestamp(), 'Órdenes equivocadas'))
+  b.update(doc(db, 'solicitudes_envio', ORDEN_PB), { 'registro.deposito.storkhubDepositoId': null })
+  await assertSucceeds(b.commit())
+})
+
+// ─── El puente no abre de más ───────────────────────────────────────────────
+
+test('P2g · el puente NO relaja el sellado de F1 ni el path versionado', finalesYPuente, async () => {
+  // Un depósito confirmado sigue sin admitir comprobante nuevo, y una versión
+  // escrita sigue sin poder sobrescribirse ni borrarse.
+  await depositoPuente('confirmado')
+  await assertFails(updateDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_PB), {
+    boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' },
+  }))
+  await assertFails(subir(UID_ADMIN, pathVersionBoucher(UID_MOTO, DEP_PB, 'verSelladaAA1')))
+  await depositoPuente('en_revision')
+  const path = pathVersionBoucher(UID_MOTO, DEP_PB, 'verInmutableA1')
+  await env.withSecurityRulesDisabled(async (ctx) => { await uploadBytes(ref(ctx.storage(), path), jpeg(), META_JPEG) })
+  await assertFails(subir(UID_GESTOR, path, jpeg(2048)))
+  await assertFails(deleteObject(ref(storageDe(UID_ADMIN), path)))
+})
+
+test('P2h · el puente NO relaja "Pedir corrección": sin motivo ni evento ⇒ DENY', finalesYPuente, async () => {
+  await depositoPuente('en_revision')
+  await assertFails(updateDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_PB), { estado: 'devuelto' }))
+})
+
+test('P2i · el puente NO relaja la anulación auditada de un A/B ⇒ DENY sin evento', finalesYPuente, async () => {
+  await depositoPuente('en_revision')
+  await assertFails(updateDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_PB), {
+    estado: 'anulado', anuladoAt: serverTimestamp(), anuladoPorUid: UID_ADMIN, motivoAnulacion: 'motivo suficiente',
+  }))
+})
+
+// ─── El cierre final sí ocurre ──────────────────────────────────────────────
+
+test('P3a · Rules finales + delete legacy ⇒ DENY (el cierre ocurre)', soloFinales, async () => {
+  for (const estado of ['pendiente_boucher', 'en_revision', 'confirmado']) {
+    await depositoPuente(estado)
+    await assertFails(deleteDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_PB)))
+    await assertFails(deleteDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_PB)))
+  }
+})
+
+test('P3b · Rules finales + confirmar/rehacer sin evento ⇒ DENY', soloFinales, async () => {
+  await depositoPuente('en_revision')
+  await assertFails(setDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_PB), {
+    estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
+  }, { merge: true }))
+  await depositoPuente('confirmado')
+  await assertFails(setDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_PB), {
+    estado: 'en_revision',
+  }, { merge: true }))
+})
+
+test('P3c · Rules finales + reemplazo directo de staff ⇒ DENY (Firestore y Storage)', soloFinales, async () => {
+  await depositoPuente('en_revision')
+  await assertFails(setDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_PB), {
+    boucher: { url: 'https://example.test/nuevo.jpg', pathStorage: 'x' },
+  }, { merge: true }))
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await uploadBytes(ref(ctx.storage(), `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg`), jpeg(), META_JPEG)
+  })
+  await assertFails(subir(UID_GESTOR, `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg`, jpeg(2048)))
+})

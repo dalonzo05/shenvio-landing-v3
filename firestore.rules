@@ -1478,6 +1478,31 @@ service cloud.firestore {
       //   · los cortocircuitos baratos van primero en cada `||`.
       //
       // Volver a "una función por garantía" vuelve a romper el techo.
+      // ─── Interruptor del rollout ──────────────────────────────────────
+      //
+      // En las Rules FINALES vale true, y ahí termina su historia.
+      //
+      // Existe porque esta feature cambia web y Rules a la vez, y ningún
+      // orden simple de deploy funciona: la web F2 muere contra las Rules de
+      // F1 (no conocen bouchers/* ni la subcolección eventos) y la web F1
+      // muere contra las Rules finales (su "Devolver"/"Eliminar" hacen delete,
+      // y confirmar/reemplazar ya no pasan sin evento). Hace falta un paso
+      // puente, y el puente tiene que ser un ARTEFACTO REPRODUCIBLE, no una
+      // edición a mano durante la integración.
+      //
+      // scripts/reglas-puente.mjs genera ese artefacto a partir de ESTE
+      // archivo poniendo el valor en false, y nada más. Así la diferencia
+      // entre puente y final se lee entera en un renglón, y el puente no
+      // puede quedar desincronizado de las Rules finales: se deriva de ellas.
+      //
+      // Lo que el interruptor NO afecta —y por eso el puente no abre de más—:
+      // la subcolección de eventos append-only, el path versionado, el estado
+      // 'devuelto' y su motivo obligatorio, el sellado de F1, el tipo C
+      // pagado, el create-first y los permisos de cualquier otro usuario.
+      function auditoriaF2Obligatoria() {
+        return true;
+      }
+
       function motivoAuditable(m) {
         return m is string && m.size() >= 3 && m.size() <= 300;
       }
@@ -1690,7 +1715,8 @@ service cloud.firestore {
           // HARDENING — confirmar también. No se le pide motivo (no deshace
           // nada), pero sí que quede quién y cuándo. Tipo C fuera: su
           // documento nace ya 'confirmado' junto al cobro, no por esta vía.
-          && (eDespues != 'confirmado' || !ab || eventoEnEsteBatch('DEPOSITO_CONFIRMADO', evId))
+          && (eDespues != 'confirmado' || !ab || !auditoriaF2Obligatoria()
+              || eventoEnEsteBatch('DEPOSITO_CONFIRMADO', evId))
 
           // HARDENING — Rehacer es la ÚNICA transición que saca un A/B de
           // 'confirmado' hacia 'en_revision'. Ya era admin-only; ahora además
@@ -1700,6 +1726,7 @@ service cloud.firestore {
           // financiera queda abierta. Lo que se vuelve obligatorio es la
           // auditoría de la transición que sí llega a Firestore.
           && (eAntes != 'confirmado' || eDespues != 'en_revision' || !ab
+              || !auditoriaF2Obligatoria()
               || (isAdmin() && eventoConMotivo('DEPOSITO_REHECHO', evId)));
       }
 
@@ -1713,6 +1740,11 @@ service cloud.firestore {
       function boucherStaffVersionado() {
         return !request.resource.data.diff(resource.data).affectedKeys()
                  .hasAny(['boucher', 'boucherUrl', 'boucherVersion', 'boucherVersionId'])
+          // Durante el puente, el reemplazo directo del web F1 sigue vivo.
+          // El sellado de estados cerrados NO depende del interruptor: eso lo
+          // cierra la primera condición de cambioDeBoucherPermitido() y vale
+          // igual en las dos versiones.
+          || !auditoriaF2Obligatoria()
           || cambioDeBoucherPermitido();
       }
 
@@ -1816,7 +1848,12 @@ service cloud.firestore {
       // 'devuelto' (Pedir corrección) y 'anulado' (Anular). Las órdenes se
       // pueden seguir liberando en la anulación, con la MISMA semántica que
       // tenía Eliminar; el documento, nunca.
-      allow delete: if false;
+      //
+      // ROLLOUT — esta es la otra línea que toca scripts/reglas-puente.mjs:
+      // mientras el web F1 siga desplegado, su "Devolver al motorizado" y su
+      // "Eliminar" hacen delete y se quedarían sin funcionar. El puente le
+      // devuelve la regla de F1; el deploy final vuelve a esta.
+      allow delete: if false;  // #puente:delete-deposito
 
       // ═══════════════════════════════════════════════════════════════════
       // DEPOSITO-AUDITORIA-1 — historia append-only del depósito
