@@ -642,9 +642,14 @@ test('BI6 · admin rehace un confirmado con evento ⇒ ALLOW; el reemplazo direc
   await assertFails(updateDoc(doc(como(UID_ADMIN), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
 })
 
-test('BI7 · digitador sigue corrigiendo su depósito en revisión ⇒ ALLOW', async () => {
+// HARDENING FINAL — BI7 afirmaba que el digitador corregía escribiendo
+// `boucher` a secas. Esa era la ÚLTIMA vía no versionada de cambiar evidencia
+// (deuda DIGITADOR-BOUCHER-NO-VERSIONADO). NO se le quita la corrección: se
+// le pide el mismo protocolo que a todos (ver DG3). Acá queda el DENY de la
+// vía vieja, que es lo que este caso tiene que seguir cubriendo.
+test('BI7 · digitador corrige su depósito en revisión por la vía directa ⇒ DENY', async () => {
   await depositoEn('en_revision', { digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date() })
-  await assertSucceeds(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', 'depI'), { ...NUEVO_BOUCHER, updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', 'depI'), { ...NUEVO_BOUCHER, updatedAt: serverTimestamp() }))
 })
 
 // DEPOSITO-AUDITORIA-1 — la primera mitad de BI8 afirmaba la deuda W4:
@@ -1959,11 +1964,13 @@ test('ST12 · el flujo inicial no se rompe: adjuntar el PRIMER boucher sigue per
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
     boucher: { url: 'https://example.test/primero.jpg', pathStorage: 'x' },
   }))
-  // Y el digitador conserva su corrección en revisión (D2, BI7) — deuda
-  // DIGITADOR-BOUCHER-NO-VERSIONADO, explícitamente fuera de este bloque.
-  await depositoAB('en_revision', { digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date() })
+  // Y el digitador completa su digitación desde 'pendiente_boucher' —primera
+  // carga, no reemplazo— igual que antes.
+  await depositoAB('pendiente_boucher', { digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date() })
   await assertSucceeds(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V), {
-    boucher: { url: 'https://example.test/dig.jpg', pathStorage: 'x' }, updatedAt: serverTimestamp(),
+    boucher: { url: 'https://example.test/dig.jpg', pathStorage: 'x' },
+    estado: 'en_revision',
+    updatedAt: serverTimestamp(),
   }))
 })
 
@@ -1972,4 +1979,146 @@ test('ST13 · el tipo C no queda atrapado por el guard de versionado', async () 
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
     boucherUrl: 'https://example.test/c2.jpg',
   }))
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HARDENING FINAL · DG — el digitador tampoco se salta el versionado
+//
+// Era el último actor con una vía de corrección sin versión, sin evento, sin
+// motivo y sin historial: escribía `boucher` a secas y pisaba el objeto legacy
+// (deuda DIGITADOR-BOUCHER-NO-VERSIONADO). No se le quita la corrección — se
+// le pide el MISMO protocolo que a motorizado, gestor y admin.
+//
+// Dos diferencias, ninguna arbitraria: la pertenencia es `digitadoPorUid` (la
+// fuente autoritativa que ya existía, D2) y SOLO desde 'en_revision'.
+// 'devuelto' queda fuera porque el modelo actual no le da al digitador ninguna
+// operación sobre ese estado — ver DG12.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** Depósito digitado por UID_DIGITADOR, en el estado del caso. */
+const depositoDigitado = (estado: string, extra: Record<string, unknown> = {}) =>
+  depositoAB(estado, { digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date(), ...extra })
+
+test('DG1 · primera carga legítima: pendiente_boucher → en_revision con el boucher ⇒ ALLOW', async () => {
+  await depositoDigitado('pendiente_boucher')
+  await assertSucceeds(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V), {
+    boucher: { url: 'https://example.test/primera.jpg', pathStorage: 'x' },
+    estado: 'en_revision',
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('DG2 · sobrescribir el boucher vigente por la vía directa ⇒ DENY', async () => {
+  await depositoDigitado('en_revision')
+  const ref = doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V)
+  await assertFails(updateDoc(ref, { boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' } }))
+  await assertFails(updateDoc(ref, { boucherUrl: 'https://example.test/x.jpg' }))
+  await assertFails(updateDoc(ref, { boucherVersion: 7 }))
+  await assertFails(updateDoc(ref, { boucher: deleteField() }))
+})
+
+test('DG3 · reemplazo versionado en en_revision, con evento y motivo ⇒ ALLOW', async () => {
+  await depositoDigitado('en_revision')
+  await assertSucceeds(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador' }))
+  const dep = await leerDep()
+  assert.equal(dep.boucherVersion, 2)
+  // Y no tocó nada más: DEP-N, monto y órdenes siguen iguales.
+  assert.equal(dep.codigo, 'DEP-0007')
+  assert.equal(dep.montoTotal, 110)
+  assert.deepEqual(dep.solicitudIds, [ORDEN_V])
+})
+
+test('DG4 · reemplazo sin evento en el batch ⇒ DENY', async () => {
+  await depositoDigitado('en_revision')
+  await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador', sinEvento: true }))
+})
+
+test('DG5 · reemplazo sin motivo, o con motivo fuera de 3-300 ⇒ DENY', async () => {
+  await depositoDigitado('en_revision')
+  await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador', extraEvento: { motivo: 'no' } }))
+  await depositoDigitado('en_revision')
+  await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador', extraEvento: { motivo: 'x'.repeat(301) } }))
+})
+
+test('DG6 · salto de versión (1 → 3) ⇒ DENY', async () => {
+  await depositoDigitado('en_revision')
+  await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador', version: 3 }))
+})
+
+test('DG7 · otro digitador sobre una digitación ajena ⇒ DENY', async () => {
+  await depositoAB('en_revision', { digitadoPorUid: 'uid_otro_digitador', digitadoAt: new Date() })
+  await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador' }))
+  await assertFails(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V), {
+    boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' },
+  }))
+  // Y sobre un depósito sin digitar (del motorizado), tampoco.
+  await depositoAB('en_revision')
+  await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador' }))
+})
+
+test('DG8 · confirmado ⇒ DENY (vía directa y versionada)', async () => {
+  await depositoDigitado('confirmado')
+  await assertFails(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V), {
+    boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' },
+  }))
+  await depositoDigitado('confirmado')
+  await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador' }))
+})
+
+test('DG9 · convertido_en_deuda ⇒ DENY', async () => {
+  await depositoDigitado('convertido_en_deuda')
+  await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador' }))
+  await depositoDigitado('convertido_en_deuda')
+  await assertFails(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V), {
+    boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' },
+  }))
+})
+
+test('DG10 · anulado y rechazado ⇒ DENY', async () => {
+  for (const estado of ['anulado', 'rechazado']) {
+    await depositoDigitado(estado)
+    await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador' }))
+    await assertFails(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V), {
+      boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' },
+    }))
+  }
+})
+
+test('DG11 · el evento del digitador es append-only y acotado a su reemplazo', async () => {
+  await depositoDigitado('en_revision')
+  await assertSucceeds(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador', versionId: 'verDigitAAA1' }))
+  const ref = doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V, 'eventos', 'verDigitAAA1')
+  await assertFails(updateDoc(ref, { motivo: 'otra cosa' }))
+  await assertFails(deleteDoc(ref))
+  // Y no puede narrar acciones que no son suyas.
+  await depositoDigitado('en_revision')
+  for (const tipo of ['DEPOSITO_DEVUELTO', 'DEPOSITO_CONFIRMADO', 'DEPOSITO_REHECHO', 'DEPOSITO_ANULADO']) {
+    await assertFails(setDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V, 'eventos', `evDG${tipo}`), {
+      tipo, at: serverTimestamp(), porUid: UID_DIGITADOR, porRol: 'digitador', motivo: 'motivo suficiente',
+    }))
+  }
+})
+
+test('DG12 · devuelto queda FUERA: el modelo actual no le da esa operación al digitador ⇒ DENY', async () => {
+  // No se inventa el permiso. 'devuelto' es una corrección que StorkHub le
+  // pide al MOTORIZADO titular, y ni firestore.rules ni storage.rules le daban
+  // al digitador ninguna operación sobre ese estado antes de este bloque.
+  await depositoDigitado('devuelto', { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' })
+  await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador' }))
+  // El motorizado titular sí puede, como siempre.
+  await depositoDigitado('devuelto', { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' })
+  await assertSucceeds(reemplazar())
+})
+
+test('DG13 · el reemplazo del digitador no puede tocar monto, órdenes, tipo ni identidad', async () => {
+  for (const extra of [
+    { montoTotal: 9999 },
+    { solicitudIds: ['otra'] },
+    { tipo: 'recaudacion_motorizado_comercio' },
+    { motorizadoUid: 'uid_otro' },
+    { confirmadoPorUid: UID_DIGITADOR },
+  ]) {
+    await depositoDigitado('en_revision')
+    await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador', extraDeposito: extra }))
+  }
 })

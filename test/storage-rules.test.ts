@@ -253,20 +253,24 @@ test('ST8 · staff sobrescribe el legacy boucher.jpg de un DEP ya abierto ⇒ DE
   await assertFails(subir(UID_MOTO, PATH_DEP, jpeg(2048)))
 })
 
-test('ST8b · el digitador conserva su corrección en revisión (D2, sin cambios)', soloNuevas, async () => {
-  // Deuda explícita DIGITADOR-BOUCHER-NO-VERSIONADO: fuera del alcance de
-  // este bloque, que cubre motorizado, gestor y admin.
+// HARDENING FINAL — ST8b afirmaba la deuda DIGITADOR-BOUCHER-NO-VERSIONADO.
+// Queda CERRADA: el digitador tampoco pisa el legacy en revisión.
+test('ST8b · el digitador tampoco sobrescribe el legacy en revisión ⇒ DENY', soloNuevas, async () => {
   await deposito('pendiente_boucher', { digitadoPorUid: UID_DIGITADOR })
   await assertSucceeds(subir(UID_DIGITADOR, PATH_DEP))
   await deposito('en_revision', { digitadoPorUid: UID_DIGITADOR })
-  await assertSucceeds(subir(UID_DIGITADOR, PATH_DEP, jpeg(2048)))
+  await assertFails(subir(UID_DIGITADOR, PATH_DEP, jpeg(2048)))
 })
 
-test('S14 · digitador sin cambios: su digitación en pendiente/en_revision ALLOW; confirmada o ajena DENY', soloNuevas, async () => {
+// HARDENING FINAL — la segunda linea de S14 afirmaba que el digitador subia
+// al legacy estando en 'en_revision'. Esa era la ultima via no versionada de
+// reemplazar evidencia. Lo que conserva es la PRIMERA carga y su reintento,
+// que ocurren en 'pendiente_boucher'; la correccion va por bouchers/ (DG3s).
+test('S14 · digitador: primera carga en pendiente_boucher ALLOW; confirmada o ajena DENY', soloNuevas, async () => {
   await deposito('pendiente_boucher', { digitadoPorUid: UID_DIGITADOR })
   await assertSucceeds(subir(UID_DIGITADOR, PATH_DEP))
-  await deposito('en_revision', { digitadoPorUid: UID_DIGITADOR })
-  await assertSucceeds(subir(UID_DIGITADOR, PATH_DEP))
+  // Reintento del mismo flujo inicial, sobre el mismo objeto.
+  await assertSucceeds(subir(UID_DIGITADOR, PATH_DEP, jpeg(2048)))
   await deposito('confirmado', { digitadoPorUid: UID_DIGITADOR })
   await assertFails(subir(UID_DIGITADOR, PATH_DEP))
   await deposito('pendiente_boucher')
@@ -1105,4 +1109,99 @@ test('P3c · Rules finales + reemplazo directo de staff ⇒ DENY (Firestore y St
     await uploadBytes(ref(ctx.storage(), `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg`), jpeg(), META_JPEG)
   })
   await assertFails(subir(UID_GESTOR, `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg`, jpeg(2048)))
+})
+
+// ─── HARDENING FINAL · DG en Storage ─────────────────────────────────────────
+//
+// El digitador versiona igual que todos, con su propia pertenencia
+// (`digitadoPorUid`) y solo desde 'en_revision'.
+
+const depDigitado = (estado: string, extra: Record<string, unknown> = {}) =>
+  deposito(estado, { digitadoPorUid: UID_DIGITADOR, ...extra })
+
+test('DG3s · digitador sube una versión de SU digitación en revisión ⇒ ALLOW', soloNuevas, async () => {
+  await depDigitado('en_revision')
+  await assertSucceeds(subir(UID_DIGITADOR, pathNuevaVersion()))
+})
+
+test('DG7s · digitación ajena, o depósito sin digitar ⇒ DENY', soloNuevas, async () => {
+  await depDigitado('en_revision', { digitadoPorUid: 'uid_otro_digitador' })
+  await assertFails(subir(UID_DIGITADOR, pathNuevaVersion()))
+  await deposito('en_revision')
+  await assertFails(subir(UID_DIGITADOR, pathNuevaVersion()))
+})
+
+test('DG8s-DG10s · confirmado, convertido, anulado y rechazado ⇒ DENY', soloNuevas, async () => {
+  for (const estado of ['confirmado', 'convertido_en_deuda', 'anulado', 'rechazado']) {
+    await depDigitado(estado)
+    await assertFails(subir(UID_DIGITADOR, pathNuevaVersion()))
+  }
+})
+
+test('DG11s · update y delete de una versión del digitador ⇒ DENY', soloNuevas, async () => {
+  await depDigitado('en_revision')
+  const path = await sembrarVersion()
+  await assertFails(subir(UID_DIGITADOR, path, jpeg(2048)))
+  await assertFails(deleteObject(ref(storageDe(UID_DIGITADOR), path)))
+})
+
+test('DG12s · devuelto y pendiente_boucher quedan fuera del versionado del digitador ⇒ DENY', soloNuevas, async () => {
+  // 'devuelto' es del motorizado titular; 'pendiente_boucher' es primera carga.
+  for (const estado of ['devuelto', 'pendiente_boucher']) {
+    await depDigitado(estado)
+    await assertFails(subir(UID_DIGITADOR, pathNuevaVersion()))
+  }
+})
+
+test('DG14s · el digitador tampoco versiona un tipo C ⇒ DENY', soloNuevas, async () => {
+  await depDigitado('en_revision', { tipo: 'pago_delivery_deposito' })
+  await assertFails(subir(UID_DIGITADOR, pathNuevaVersion()))
+})
+
+// ─── ROLLOUT · el digitador en las tres matrices ─────────────────────────────
+
+test('P1g · web F1 digitador: corrección legacy en revisión ⇒ ALLOW bajo el puente', f1YPuente, async () => {
+  await depositoPuente('en_revision', { digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date() })
+  // Storage: pisa boucher.jpg, como lo hace el web viejo.
+  await assertSucceeds(subir(UID_DIGITADOR, `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg`))
+  // Firestore: escribe `boucher` a secas, sin versión ni evento.
+  await assertSucceeds(setDoc(doc(firestoreDe(UID_DIGITADOR), 'ordenes_deposito', DEP_PB), {
+    boucher: { url: 'https://example.test/dig.jpg', pathStorage: `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg` },
+    updatedAt: serverTimestamp(),
+  }, { merge: true }))
+})
+
+test('P2j · web F2 digitador: reemplazo versionado ⇒ ALLOW bajo el puente y las finales', finalesYPuente, async () => {
+  await depositoPuente('en_revision', { digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date() })
+  const plan = planReemplazoBoucher({ id: DEP_PB, motorizadoUid: UID_MOTO }, 'verDigPuente1', 'El monto estaba tapado')
+  await assertSucceeds(uploadBytes(ref(storageDe(UID_DIGITADOR), plan.path), jpeg(), META_JPEG))
+  const db = firestoreDe(UID_DIGITADOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_PB),
+    camposReemplazoBoucher(plan, { url: 'https://example.test/v2.jpg', pathStorage: plan.path }, UID_MOTO, serverTimestamp(), 'verDigPuente1'),
+    { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_PB, 'eventos', 'verDigPuente1'),
+    eventoReemplazoBoucher(plan, { uid: UID_DIGITADOR, rol: 'digitador' }, serverTimestamp()))
+  await assertSucceeds(b.commit())
+})
+
+test('P3d · Rules finales: el overwrite legacy del digitador ⇒ DENY', soloFinales, async () => {
+  await depositoPuente('en_revision', { digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date() })
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await uploadBytes(ref(ctx.storage(), `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg`), jpeg(), META_JPEG)
+  })
+  await assertFails(subir(UID_DIGITADOR, `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg`, jpeg(2048)))
+  await assertFails(setDoc(doc(firestoreDe(UID_DIGITADOR), 'ordenes_deposito', DEP_PB), {
+    boucher: { url: 'https://example.test/dig.jpg', pathStorage: 'x' }, updatedAt: serverTimestamp(),
+  }, { merge: true }))
+})
+
+test('P1h · la primera carga del digitador cruza el rollout en cualquier orden ⇒ ALLOW', async () => {
+  await depositoPuente('pendiente_boucher', { digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date(), boucher: null })
+  await assertSucceeds(subir(UID_DIGITADOR, `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg`))
+  await assertSucceeds(setDoc(doc(firestoreDe(UID_DIGITADOR), 'ordenes_deposito', DEP_PB), {
+    boucher: { url: 'https://example.test/dig.jpg', pathStorage: `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg` },
+    estado: 'en_revision',
+    updatedAt: serverTimestamp(),
+  }, { merge: true }))
 })

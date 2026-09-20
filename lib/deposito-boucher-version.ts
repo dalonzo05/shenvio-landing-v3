@@ -182,6 +182,87 @@ export function staffPuedeReemplazarBoucher(dep: DepReemplazable | null | undefi
   return depositoAdmiteVersionBoucher(dep)
 }
 
+// ─── Digitador ────────────────────────────────────────────────────────────────
+//
+// El digitador conservaba la ÚNICA vía de corrección que quedaba fuera del
+// versionado: pisaba `boucher.jpg` en 'en_revision' (deuda
+// DIGITADOR-BOUCHER-NO-VERSIONADO). Con eso podía cambiar evidencia financiera
+// sin versión, sin evento, sin motivo y sin historial — exactamente lo que el
+// bloque cerró para todos los demás.
+//
+// No se le quita la capacidad de corregir: se le pide el MISMO protocolo.
+//
+// Dos diferencias respecto de motorizado y staff, y ninguna es arbitraria:
+//
+//   · la pertenencia es `digitadoPorUid`, no `motorizadoUid`. El path del
+//     objeto sigue bajo el UID del motorizado TITULAR —el namespace es del
+//     depósito, no de quien sube— igual que en F1.
+//
+//   · 'devuelto' queda FUERA. El modelo actual no le da al digitador ninguna
+//     operación sobre ese estado: ni firestore.rules ni storage.rules lo
+//     mencionaban antes de este bloque, y 'devuelto' es una corrección que
+//     StorkHub le pide al MOTORIZADO titular, no a quien digitó. Dárselo sería
+//     inventar un permiso, no cerrar una deuda.
+
+// ─── Primera carga vs reemplazo ───────────────────────────────────────────────
+//
+// La distinción es el eje del bloque, y hay que poder hacerla desde la UI y
+// desde el writer, no solo desde las reglas:
+//
+//   PRIMERA CARGA  el depósito todavía no tiene comprobante y está esperando
+//                  uno ('pendiente_boucher'). Va al path legacy, igual que en
+//                  F1, para motorizado, staff y digitador. No hay evidencia
+//                  vigente que pisar, y el reintento reescribe el mismo objeto.
+//
+//   REEMPLAZO      ya hay un comprobante vigente. Va SIEMPRE por una versión
+//                  nueva, inmutable, con evento y motivo.
+//
+// Mezclarlas fue un error real: el writer del panel del gestor mandaba las dos
+// por la ruta versionada, así que "Subir boucher" sobre un DEP en
+// 'pendiente_boucher' moría contra Rules.
+
+/** ¿Este depósito está esperando su PRIMER comprobante? */
+export function esPrimeraCargaBoucher(dep: DepReemplazable | null | undefined): boolean {
+  const url = dep?.boucher?.url
+  const tieneBoucher = typeof url === 'string' && url.trim() !== ''
+  return !tieneBoucher && dep?.estado === 'pendiente_boucher'
+}
+
+/** Estados en los que el digitador corrige: solo mientras nadie lo revisó. */
+export const ESTADOS_REEMPLAZO_BOUCHER_DIGITADOR: readonly string[] = ['en_revision']
+
+/**
+ * ¿Puede este digitador reemplazar el comprobante de este depósito?
+ *
+ * `digitadoPorUid` es la fuente autoritativa que ya existía (D2): no se
+ * inventa una nueva ni se amplía a "cualquier digitador".
+ */
+export function digitadorPuedeReemplazarBoucher(
+  dep: DepReemplazable | null | undefined,
+  uid: string | null | undefined,
+): boolean {
+  const limpio = typeof uid === 'string' ? uid.trim() : ''
+  return limpio !== ''
+    && dep?.digitadoPorUid === limpio
+    && TIPOS_DEPOSITO_VERSIONABLE.includes(dep?.tipo ?? '')
+    && ESTADOS_REEMPLAZO_BOUCHER_DIGITADOR.includes(dep?.estado ?? '')
+}
+
+/**
+ * Quién puede reemplazar hoy, resuelto por rol. Una sola puerta para la UI y
+ * el writer, para que no vuelvan a divergir de las reglas.
+ */
+export function puedeReemplazarBoucher(
+  dep: DepReemplazable | null | undefined,
+  uid: string | null | undefined,
+  rol: string | null | undefined,
+): boolean {
+  if (rol === 'digitador') return digitadorPuedeReemplazarBoucher(dep, uid)
+  if (rol === 'admin' || rol === 'gestor') return staffPuedeReemplazarBoucher(dep)
+  if (rol === 'motorizado') return motorizadoPuedeReemplazarBoucher(dep, uid)
+  return false
+}
+
 // ─── Plan de reemplazo ────────────────────────────────────────────────────────
 
 export interface PlanReemplazoBoucher {

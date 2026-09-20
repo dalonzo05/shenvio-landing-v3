@@ -34,9 +34,9 @@ Tres parches, todos explícitos en el script, cada uno con su motivo:
 
 | Archivo | Qué devuelve | Flujo del web F1 que lo necesita |
 |---|---|---|
-| `firestore.rules` | `auditoriaF2Obligatoria()` → `false` | confirmar, rehacer y reemplazar el comprobante **sin evento** |
+| `firestore.rules` | `auditoriaF2Obligatoria()` → `false` | confirmar, rehacer y reemplazar el comprobante **sin evento**, incluida la corrección legacy del **digitador** |
 | `firestore.rules` | `allow delete` de F1 | "Devolver al motorizado" y "Eliminar" |
-| `storage.rules` | `versionadoF2Obligatorio()` → `false` | subir la corrección de staff al `boucher.jpg` legacy |
+| `storage.rules` | `versionadoF2Obligatorio()` → `false` | subir la corrección de **staff y digitador** al `boucher.jpg` legacy |
 
 Cada parche exige que su ancla aparezca **exactamente una vez**. Si las Rules
 finales cambian y un ancla desaparece, el script **falla** en vez de generar
@@ -109,9 +109,12 @@ Con una cuenta de gestor y una de motorizado, sobre un depósito de prueba —
    "En revisión" con el **mismo DEP-N** y `boucherVersion: 2`;
 4. gestor expande el depósito → el **historial** muestra los eventos con
    actor, rol, hora y motivo;
-5. gestor **Confirmar** → queda confirmado;
-6. admin **Rehacer** con motivo → vuelve a revisión, evento nuevo;
-7. admin **Anular** con motivo → estado `anulado`, el documento **sigue
+5. con una cuenta de **digitador**: digita un depósito (primera carga) y
+   después corrige SU digitación en revisión → versión nueva con motivo, y el
+   objeto anterior sigue legible;
+6. gestor **Confirmar** → queda confirmado;
+7. admin **Rehacer** con motivo → vuelve a revisión, evento nuevo;
+8. admin **Anular** con motivo → estado `anulado`, el documento **sigue
    existiendo** con su DEP-N y su comprobante.
 
 **Si algo de esto falla:** rollback de la web (redeploy del build anterior).
@@ -185,6 +188,8 @@ bloque vino a cerrar.
   sigue siendo una escritura aparte del batch que rehace el depósito.
 - `MOTO-DEP-BOUCHER-VERSION-HUERFANA` — un upload cuyo batch falla deja el
   objeto sin referencia, y no se borra automáticamente.
-- `DIGITADOR-BOUCHER-NO-VERSIONADO` — el digitador conserva su corrección
-  sobre `boucher.jpg` en revisión (D2). Fuera del alcance de este bloque, que
-  cubre motorizado, gestor y admin.
+**CERRADA** en el hardening final: `DIGITADOR-BOUCHER-NO-VERSIONADO`. La
+corrección del digitador va por `bouchers/{versionId}` con evento y motivo,
+igual que la de motorizado, gestor y admin (`DG1`–`DG13`, `DG3s`–`DG14s`).
+Conserva solo la PRIMERA carga sobre el legacy, que ocurre en
+'pendiente_boucher' y no pisa ninguna evidencia vigente.

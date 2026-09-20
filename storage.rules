@@ -341,17 +341,21 @@ service firebase.storage {
     // flujos reales de F1:
     //
     //   pendiente_boucher   reintento del flujo inicial. El motorizado
-    //                       (create-first) y confirmarStorkhub/Comercio del
-    //                       gestor suben al MISMO path cuando un intento
-    //                       anterior murió después del upload. Ahí no hay
-    //                       evidencia vigente que pisar: el depósito todavía
-    //                       no entró en revisión.
-    //   digitador           su corrección sobre su propia digitación en
-    //                       revisión (D2), que no cambia en este bloque.
-    //                       Queda como deuda DIGITADOR-BOUCHER-NO-VERSIONADO.
+    //                       (create-first), confirmarStorkhub/Comercio del
+    //                       gestor y la digitación suben al MISMO path cuando
+    //                       un intento anterior murió después del upload. Ahí
+    //                       no hay evidencia vigente que pisar: el depósito
+    //                       todavía no entró en revisión.
     //
-    // Todo lo demás —gestor, admin y motorizado sobre un DEP en 'en_revision'
-    // o 'devuelto'— tiene que ir por el path versionado. Sin excepción de rol.
+    // HARDENING — el digitador tenía acá una excepción por rol que le dejaba
+    // pisar el legacy en 'en_revision' (deuda DIGITADOR-BOUCHER-NO-VERSIONADO).
+    // Se elimina: su corrección va por bouchers/{versionId}, igual que la de
+    // todos. Lo único que conserva del legacy es la PRIMERA carga y su
+    // reintento, que ocurren en 'pendiente_boucher' y ya entran por la
+    // condición de arriba — sin ninguna regla especial.
+    //
+    // Sin excepción de rol: ni gestor, ni admin, ni motorizado, ni digitador
+    // sobre un DEP en 'en_revision' o 'devuelto'.
     //
     // La comprobación es `resource == null` y no `allow create` a secas: se
     // verificó empíricamente que el emulador clasifica una subida sobre un
@@ -367,8 +371,7 @@ service firebase.storage {
 
     function sobrescrituraLegacyPermitida(depositoId) {
       return !versionadoF2Obligatorio()
-        || depositoDe(depositoId).get('estado', '') == 'pendiente_boucher'
-        || rolDe(request.auth.uid) == 'digitador';
+        || depositoDe(depositoId).get('estado', '') == 'pendiente_boucher';
     }
 
     // ── STORAGE-EVIDENCIA-INTEGRIDAD-1: boucher del pago del delivery ─────
@@ -467,6 +470,23 @@ service firebase.storage {
         && dep.get('estado', '') in ['en_revision', 'devuelto'];
     }
 
+    // HARDENING — el digitador también versiona, con DOS diferencias que no
+    // son arbitrarias: la pertenencia es `digitadoPorUid` (la fuente
+    // autoritativa que ya existía, D2) y solo desde 'en_revision'.
+    //
+    // 'devuelto' queda fuera: el modelo actual no le da al digitador ninguna
+    // operación sobre ese estado, y 'devuelto' es una corrección que StorkHub
+    // le pide al MOTORIZADO titular. Ver la nota de firestore.rules.
+    // 'pendiente_boucher' tampoco: esa es la primera carga, que sigue yendo
+    // al legacy como el resto de los flujos iniciales.
+    function digitadorPuedeVersionar(motorizadoAuthUid, depositoId) {
+      let dep = depositoDe(depositoId);
+      return dep.get('digitadoPorUid', null) == request.auth.uid
+        && dep.get('motorizadoUid', null) == motorizadoAuthUid
+        && dep.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio']
+        && dep.get('estado', '') == 'en_revision';
+    }
+
     match /depositos/{motorizadoAuthUid}/{depositoId}/bouchers/{filename} {
       // Mismos lectores que el comprobante vigente: una versión anterior es
       // evidencia del mismo depósito, no de otro.
@@ -495,11 +515,17 @@ service firebase.storage {
         && resource == null
         && filename.matches('[A-Za-z0-9_-]{8,64}\\.jpg')
         && depositoTitularDelPath(motorizadoAuthUid, depositoId)
-        && depositoAbiertoParaVersion(depositoId)
         && (
-          (rolDe(request.auth.uid) == 'motorizado' && request.auth.uid == motorizadoAuthUid)
+          (
+            depositoAbiertoParaVersion(depositoId)
+            && (
+              (rolDe(request.auth.uid) == 'motorizado' && request.auth.uid == motorizadoAuthUid)
+              ||
+              esStaff(request.auth.uid)
+            )
+          )
           ||
-          esStaff(request.auth.uid)
+          (rolDe(request.auth.uid) == 'digitador' && digitadorPuedeVersionar(motorizadoAuthUid, depositoId))
         )
         && request.resource.contentType == 'image/jpeg'
         && request.resource.size > 0

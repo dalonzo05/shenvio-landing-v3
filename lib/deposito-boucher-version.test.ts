@@ -14,14 +14,18 @@ import {
   VERSION_BOUCHER_LEGACY,
   asegurarVersionId,
   camposReemplazoBoucher,
+  ESTADOS_REEMPLAZO_BOUCHER_DIGITADOR,
   depositoAdmiteVersionBoucher,
+  digitadorPuedeReemplazarBoucher,
   esBoucherLegacy,
+  esPrimeraCargaBoucher,
   etiquetaVersionBoucher,
   eventoReemplazoBoucher,
   motorizadoPuedeReemplazarBoucher,
   pathBoucherLegacy,
   pathVersionBoucher,
   planReemplazoBoucher,
+  puedeReemplazarBoucher,
   siguienteVersionBoucher,
   staffPuedeReemplazarBoucher,
   versionEfectivaBoucher,
@@ -108,6 +112,50 @@ test('BV9 · el motorizado solo corrige lo suyo, por UID', () => {
   assert.equal(motorizadoPuedeReemplazarBoucher(legacy, ''), false)
   assert.equal(motorizadoPuedeReemplazarBoucher(legacy, null), false)
   assert.equal(motorizadoPuedeReemplazarBoucher({ ...legacy, estado: 'confirmado' }, UID), false)
+})
+
+// ── Digitador ────────────────────────────────────────────────────────────────
+
+test('BV9b · el digitador corrige SU digitación, y solo en revisión', () => {
+  const digitado = { ...legacy, digitadoPorUid: 'uid_dig' }
+  assert.deepEqual([...ESTADOS_REEMPLAZO_BOUCHER_DIGITADOR], ['en_revision'])
+  assert.equal(digitadorPuedeReemplazarBoucher(digitado, 'uid_dig'), true)
+  assert.equal(digitadorPuedeReemplazarBoucher(digitado, 'uid_otro'), false)
+  assert.equal(digitadorPuedeReemplazarBoucher(digitado, ''), false)
+  // Un depósito sin digitar (del motorizado) no es suyo.
+  assert.equal(digitadorPuedeReemplazarBoucher(legacy, 'uid_dig'), false)
+  // 'devuelto' queda FUERA: es una corrección que StorkHub le pide al
+  // motorizado titular, y el modelo actual no le da esa operación al digitador.
+  assert.equal(digitadorPuedeReemplazarBoucher({ ...digitado, estado: 'devuelto' }, 'uid_dig'), false)
+  // 'pendiente_boucher' tampoco: eso es primera carga, no reemplazo.
+  assert.equal(digitadorPuedeReemplazarBoucher({ ...digitado, estado: 'pendiente_boucher' }, 'uid_dig'), false)
+  for (const estado of ['confirmado', 'convertido_en_deuda', 'anulado', 'rechazado']) {
+    assert.equal(digitadorPuedeReemplazarBoucher({ ...digitado, estado }, 'uid_dig'), false, estado)
+  }
+})
+
+test('BV9c · una sola puerta por rol, para que UI y writer no diverjan de Rules', () => {
+  const digitado = { ...legacy, digitadoPorUid: 'uid_dig' }
+  assert.equal(puedeReemplazarBoucher(digitado, 'uid_dig', 'digitador'), true)
+  assert.equal(puedeReemplazarBoucher(digitado, 'uid_dig', 'gestor'), true)
+  assert.equal(puedeReemplazarBoucher(legacy, UID, 'motorizado'), true)
+  assert.equal(puedeReemplazarBoucher(legacy, UID, 'digitador'), false)
+  assert.equal(puedeReemplazarBoucher(legacy, UID, 'Comercio'), false)
+  assert.equal(puedeReemplazarBoucher(legacy, UID, null), false)
+  // El motorizado sobre un depósito ajeno, no.
+  assert.equal(puedeReemplazarBoucher(legacy, 'uid_otro', 'motorizado'), false)
+})
+
+test('BV9d · primera carga y reemplazo son dos cosas distintas', () => {
+  // El writer del panel mandaba las dos por la ruta versionada, y "Subir
+  // boucher" sobre un pendiente_boucher moría contra Rules.
+  assert.equal(esPrimeraCargaBoucher({ ...legacy, estado: 'pendiente_boucher', boucher: null }), true)
+  assert.equal(esPrimeraCargaBoucher({ ...legacy, estado: 'pendiente_boucher' }), true)
+  assert.equal(esPrimeraCargaBoucher({ ...legacy, estado: 'pendiente_boucher', boucher: { url: '  ' } }), true)
+  // Ya hay comprobante vigente: es reemplazo, aunque el estado engañe.
+  assert.equal(esPrimeraCargaBoucher({ ...legacy, estado: 'pendiente_boucher', boucher: { url: 'https://x/y.jpg' } }), false)
+  // Y en revisión nunca es primera carga.
+  assert.equal(esPrimeraCargaBoucher({ ...legacy, estado: 'en_revision', boucher: null }), false)
 })
 
 // ── Plan ─────────────────────────────────────────────────────────────────────

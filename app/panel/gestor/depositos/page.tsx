@@ -55,10 +55,11 @@ import {
   AVISO_REEMPLAZO_BOUCHER,
   camposReemplazoBoucher,
   esBoucherLegacy,
+  esPrimeraCargaBoucher,
   etiquetaVersionBoucher,
   eventoReemplazoBoucher,
   planReemplazoBoucher,
-  staffPuedeReemplazarBoucher,
+  puedeReemplazarBoucher,
 } from '@/lib/deposito-boucher-version'
 import {
   MOTIVO_EVENTO_MAX,
@@ -1471,6 +1472,39 @@ function DepositosPageContent() {
   // escribe una versión nueva (create-only en Storage) y el evento
   // BOUCHER_REEMPLAZADO con su motivo, igual que el motorizado. El sellado de
   // F1 sigue cortando antes de subir nada.
+  /**
+   * HARDENING — PRIMERA carga del comprobante, separada del reemplazo.
+   *
+   * Un depósito en 'pendiente_boucher' sin comprobante no tiene evidencia
+   * vigente que pisar: su primera subida va al path legacy, igual que en F1 y
+   * que el create-first del motorizado, y el reintento reescribe el mismo
+   * objeto. Mandarla por la ruta versionada —como hacía este panel desde que
+   * reemplazarBoucher() se migró— la dejaba muerta contra Rules, porque el
+   * versionado exige 'en_revision' o 'devuelto'.
+   */
+  async function subirBoucherInicial(dep: DepositoOrderDoc, file: File) {
+    if (!esPrimeraCargaBoucher(dep)) {
+      setErrorAccion('Este depósito ya tiene comprobante: la corrección va por una versión nueva.')
+      return
+    }
+    setReplacingBoucherId(dep.id)
+    setErrorAccion(null)
+    try {
+      const blob = await compressImage(file)
+      const subida = await uploadDepositoBoucher(dep.motorizadoUid, dep.id, blob)
+      await setDoc(doc(db, 'ordenes_deposito', dep.id), {
+        boucher: { ...subida, uploadedAt: serverTimestamp(), motorizadoUid: dep.motorizadoUid },
+        estado: 'en_revision',
+        updatedAt: serverTimestamp(),
+      }, { merge: true })
+      setEditingBoucherId(null)
+    } catch (e) {
+      setErrorAccion(e instanceof Error ? e.message : 'No se pudo subir el comprobante.')
+    } finally {
+      setReplacingBoucherId(null)
+    }
+  }
+
   async function reemplazarBoucher(dep: DepositoOrderDoc, file: File, motivo: string) {
     const uid = auth.currentUser?.uid ?? ''
     if (!uid || !userRol) return
@@ -1481,7 +1515,12 @@ function DepositosPageContent() {
       // evidencia de dinero ya recibido. Se corta ANTES de subir; Rules y
       // storage.rules deniegan igual. Para corregirlo existe Rehacer.
       asegurarBoucherDepositoMutable(dep.estado)
-      if (!staffPuedeReemplazarBoucher(dep)) {
+      // HARDENING — una sola puerta por rol (lib/deposito-boucher-version).
+      // El digitador entra por acá desde que su corrección también es
+      // versionada: antes el writer lo dejaba pasar por `staffPuede…` y las
+      // Rules lo denegaban, porque el payload ya era versionado y su regla
+      // todavía era la de F1.
+      if (!puedeReemplazarBoucher(dep, uid, userRol)) {
         throw new Error('Este depósito ya no admite un comprobante nuevo.')
       }
       const versionId = doc(collection(db, 'ordenes_deposito')).id
@@ -2186,8 +2225,7 @@ function DepositosPageContent() {
                                             {etiquetaVersionBoucher(dep)}
                                           </span>
                                         )}
-                                        {(!esDigitadorSesion || dep.estado === 'en_revision') && puedeMutarBoucherDeposito(dep.estado)
-                                          && (esDigitadorSesion || staffPuedeReemplazarBoucher(dep)) && (
+                                        {puedeReemplazarBoucher(dep, auth.currentUser?.uid, userRol) && (
                                           <button onClick={() => { setEditingBoucherId(dep.id); setMotivoReemplazoBoucher('') }}
                                             disabled={replacingBoucherId === dep.id}
                                             className="text-[11px] text-blue-500 hover:text-blue-700 hover:underline transition disabled:opacity-40">
@@ -2195,7 +2233,7 @@ function DepositosPageContent() {
                                           </button>
                                         )}
                                       </>
-                                    ) : (!esDigitadorSesion || dep.estado === 'en_revision') && puedeMutarBoucherDeposito(dep.estado) && (
+                                    ) : esPrimeraCargaBoucher(dep) && (esDigitadorSesion ? dep.digitadoPorUid === auth.currentUser?.uid : true) && (
                                       <button onClick={() => { setEditingBoucherId(dep.id); boucherReplaceRef.current?.click() }}
                                         disabled={replacingBoucherId === dep.id}
                                         className="text-[11px] font-semibold text-blue-500 hover:text-blue-700 transition border border-blue-200 bg-blue-50 px-3 py-1.5 rounded-lg disabled:opacity-40">
@@ -2209,7 +2247,7 @@ function DepositosPageContent() {
                                 {/* DEPOSITO-AUDITORIA-1 — el reemplazo del gestor
                                     también es una versión auditada: pide motivo antes
                                     de abrir el selector de archivo. */}
-                                {isExp && editingBoucherId === dep.id && (
+                                {isExp && editingBoucherId === dep.id && !esPrimeraCargaBoucher(dep) && (
                                   <div className="flex flex-col gap-2 max-w-lg">
                                     <p className="text-[11px] text-gray-500">{AVISO_REEMPLAZO_BOUCHER}</p>
                                     <input value={motivoReemplazoBoucher} onChange={(e) => setMotivoReemplazoBoucher(e.target.value)}
@@ -2385,7 +2423,10 @@ function DepositosPageContent() {
             const f = e.target.files?.[0]
             if (f && editingBoucherId) {
               const dep = porRevisar.find((d) => d.id === editingBoucherId)
-              if (dep) await reemplazarBoucher(dep, f, motivoReemplazoBoucher)
+              // Primera carga y reemplazo son dos escrituras distintas, no la
+              // misma con otro estado: una va al legacy, la otra versiona.
+              if (dep && esPrimeraCargaBoucher(dep)) await subirBoucherInicial(dep, f)
+              else if (dep) await reemplazarBoucher(dep, f, motivoReemplazoBoucher)
             }
             if (boucherReplaceRef.current) boucherReplaceRef.current.value = ''
           }}

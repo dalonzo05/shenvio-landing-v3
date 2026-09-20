@@ -1641,6 +1641,40 @@ service cloud.firestore {
           && reemplazoVersionado(cambios, despues.get('estado', ''), despues.get('ultimoEventoId', ''));
       }
 
+      // ─── Guard del reemplazo del digitador ────────────────────────────
+      //
+      // El digitador era el ÚLTIMO actor que podía cambiar el comprobante sin
+      // versionar: su corrección en 'en_revision' escribía `boucher` directo y
+      // pisaba el objeto legacy (deuda DIGITADOR-BOUCHER-NO-VERSIONADO). No se
+      // le quita la corrección; se le pide el MISMO protocolo que a todos, con
+      // el MISMO reemplazoVersionado() que usan motorizado y staff.
+      //
+      // Dos diferencias, ninguna arbitraria:
+      //
+      //   · la pertenencia es `digitadoPorUid` —la fuente autoritativa que ya
+      //     existía (D2)—, no `motorizadoUid`. El path del objeto sigue bajo el
+      //     UID del motorizado TITULAR: el namespace es del depósito, no de
+      //     quien sube, igual que en F1.
+      //
+      //   · SOLO desde 'en_revision'. 'pendiente_boucher' es la primera carga
+      //     (el documento nace así y el boucher se adjunta junto con el paso a
+      //     revisión, regla de abajo) y 'devuelto' queda fuera: el modelo
+      //     actual no le da al digitador ninguna operación sobre ese estado
+      //     —ni estas reglas ni storage.rules lo mencionaban— y 'devuelto' es
+      //     una corrección que StorkHub le pide al MOTORIZADO titular. Dárselo
+      //     sería inventar un permiso, no cerrar una deuda.
+      function reemplazoDelDigitadorValido() {
+        let antes = resource.data;
+        let despues = request.resource.data;
+        return antes.get('digitadoPorUid', null) == request.auth.uid
+          && antes.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio']
+          && antes.get('estado', '') == 'en_revision'
+          && reemplazoVersionado(
+               despues.diff(antes).affectedKeys(),
+               despues.get('estado', ''),
+               despues.get('ultimoEventoId', ''));
+      }
+
       // ─── Guard de la rama amplia de gestor/admin ──────────────────────
       //
       // Forma de ÁRBOL, no de lista de garantías, y eso no es estilo: es el
@@ -1822,12 +1856,24 @@ service cloud.firestore {
         && request.resource.data.estado == 'en_revision'
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['boucher', 'estado', 'updatedAt']);
 
-      // Digitador: solo puede corregir el COMPROBANTE de su propia
-      // digitación mientras el gestor todavía no la revisó (D2). Una vez
-      // 'confirmado' o 'rechazado' (terminal, igual que pagos_comercio) esto
-      // deniega: si se equivocó en el monto o las órdenes, la corrección es
-      // una digitación nueva, no editar la rechazada.
+      // Digitador: solo puede corregir el COMPROBANTE de su propia digitación
+      // mientras el gestor todavía no la revisó (D2). Una vez 'confirmado' o
+      // 'rechazado' (terminal, igual que pagos_comercio) esto deniega: si se
+      // equivocó en el monto o las órdenes, la corrección es una digitación
+      // nueva, no editar la rechazada.
+      //
+      // HARDENING — esa corrección pasa a ser VERSIONADA, igual que la de
+      // motorizado y staff: versión +1, versionId nuevo, puntero al objeto de
+      // esa versión y evento BOUCHER_REEMPLAZADO con motivo. Cierra
+      // DIGITADOR-BOUCHER-NO-VERSIONADO.
+      allow update: if isDigitador() && reemplazoDelDigitadorValido();
+
+      // ROLLOUT — la corrección tal como la escribe el web F1: `boucher` a
+      // secas, sin versión ni evento. Muere en cuanto el interruptor vale true
+      // (Rules finales); vive solo mientras el puente esté desplegado y el web
+      // viejo siga en el aire. Ver scripts/reglas-puente.mjs.
       allow update: if isDigitador()
+        && !auditoriaF2Obligatoria()
         && resource.data.get('digitadoPorUid', null) == request.auth.uid
         && resource.data.estado == 'en_revision'
         && request.resource.data.estado == 'en_revision'
@@ -1932,6 +1978,14 @@ service cloud.firestore {
             // Rehacer y Anular siguen siendo del admin, acá también: el
             // evento no puede quedar por encima de la acción que narra.
             (isAdmin() && tipoEvento() in ['DEPOSITO_REHECHO', 'DEPOSITO_ANULADO'])
+            ||
+            // HARDENING — el digitador narra el reemplazo de SU digitación, y
+            // solo eso. Sin esto, exigirle el evento lo dejaría sin ninguna
+            // forma de corregir: el update pide el evento y el evento no se le
+            // permite. Misma pertenencia que su regla de update.
+            (isDigitador()
+              && tipoEvento() == 'BOUCHER_REEMPLAZADO'
+              && deposito().get('digitadoPorUid', null) == request.auth.uid)
           );
 
         allow update, delete: if false;
