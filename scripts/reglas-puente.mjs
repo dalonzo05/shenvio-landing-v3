@@ -30,6 +30,17 @@
 //
 //     node scripts/reglas-puente.mjs [destino]     (por defecto .reglas-puente)
 //
+// ─── Fin de línea ─────────────────────────────────────────────────────────
+//
+// Las anclas están escritas con \n, pero en un checkout de Windows con
+// core.autocrlf=true los .rules están en el working tree con CRLF: las dos
+// anclas multilínea daban 0 coincidencias y el generador fallaba pidiendo
+// "actualizá el ancla", cuando las Rules estaban perfectas. Por eso todo lo
+// que entra se normaliza a LF y el puente se escribe siempre en LF —que es
+// además lo que guarda git y lo que consume el deploy—. El artefacto es
+// byte a byte el mismo se genere desde un checkout LF o CRLF
+// (scripts/reglas-puente.test.mjs, casos G1–G3).
+//
 // El puente NO relaja: el sellado de F1, el tipo C pagado, el create-first,
 // la subcolección append-only, la inmutabilidad del path versionado, el
 // estado 'devuelto' con su motivo obligatorio y los permisos de cualquier
@@ -38,14 +49,14 @@
 // NO deploya nada. Solo escribe los dos archivos.
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-
-const destino = process.argv[2] || '.reglas-puente'
+import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 
 /**
  * Cada parche dice QUÉ vuelve a permitir y POR QUÉ, con el flujo del web F1
  * que lo necesita. Si un `buscar` deja de estar, el script se detiene.
  */
-const PARCHES = [
+export const PARCHES = [
   {
     archivo: 'firestore.rules',
     porque:
@@ -86,33 +97,81 @@ const PARCHES = [
   },
 ]
 
-mkdirSync(destino, { recursive: true })
+/** CRLF y CR solitario → LF. Todo lo que entra al generador pasa por acá. */
+export const aLF = (contenido) => contenido.replace(/\r\n?/g, '\n')
 
-const porArchivo = new Map()
-for (const p of PARCHES) {
-  if (!porArchivo.has(p.archivo)) porArchivo.set(p.archivo, readFileSync(p.archivo, 'utf8'))
-}
-
-for (const parche of PARCHES) {
-  const actual = porArchivo.get(parche.archivo)
-  const veces = actual.split(parche.buscar).length - 1
-  if (veces !== 1) {
-    console.error(
+/** Falla del generador: un ancla que no aparece exactamente una vez. */
+export class AnclaPuenteInvalida extends Error {
+  constructor(parche, veces) {
+    super(
       `\n✗ ${parche.archivo}: el ancla del puente aparece ${veces} veces, se esperaba 1.\n` +
       `  Parche: ${parche.porque}\n` +
       `  Ancla:\n${parche.buscar}\n\n` +
       `  Las Rules finales cambiaron y el puente NO se puede derivar de ellas.\n` +
       `  Actualizá el ancla en scripts/reglas-puente.mjs antes de seguir.\n`,
     )
-    process.exit(1)
+    this.name = 'AnclaPuenteInvalida'
+    this.archivo = parche.archivo
+    this.veces = veces
   }
-  porArchivo.set(parche.archivo, actual.replace(parche.buscar, parche.reemplazar))
 }
 
-for (const [archivo, contenido] of porArchivo) {
-  writeFileSync(`${destino}/${archivo}`, contenido)
-  console.log(`${destino}/${archivo}  ←  ${archivo} + ${PARCHES.filter((p) => p.archivo === archivo).length} parche(s)`)
+/**
+ * Deriva el puente de las Rules finales. Puro: recibe el contenido, no lee
+ * disco.
+ *
+ * @param fuentes  objeto o Map con { 'firestore.rules': contenido, ... },
+ *                 en LF o CRLF, indistinto
+ * @param parches  por defecto PARCHES; el test usa listas propias
+ * @returns Map archivo → contenido del puente, siempre en LF
+ * @throws AnclaPuenteInvalida si un ancla aparece 0 veces o más de una
+ */
+export function derivarPuente(fuentes, parches = PARCHES) {
+  const leer = (archivo) => (fuentes instanceof Map ? fuentes.get(archivo) : fuentes[archivo])
+  const porArchivo = new Map()
+  for (const p of parches) {
+    if (porArchivo.has(p.archivo)) continue
+    const contenido = leer(p.archivo)
+    if (typeof contenido !== 'string') throw new Error(`derivarPuente: falta el contenido de ${p.archivo}`)
+    porArchivo.set(p.archivo, aLF(contenido))
+  }
+  for (const parche of parches) {
+    const actual = porArchivo.get(parche.archivo)
+    const veces = actual.split(parche.buscar).length - 1
+    if (veces !== 1) throw new AnclaPuenteInvalida(parche, veces)
+    porArchivo.set(parche.archivo, actual.replace(parche.buscar, parche.reemplazar))
+  }
+  return porArchivo
 }
-console.log('\nParches aplicados:')
-for (const p of PARCHES) console.log(`  · ${p.archivo}: ${p.porque}`)
-console.log('\nEsto NO deploya nada.')
+
+/** Lee las Rules finales del disco (cualquier fin de línea) y escribe el puente en LF. */
+export function generarPuente(destino, parches = PARCHES) {
+  const fuentes = new Map()
+  for (const p of parches) {
+    if (!fuentes.has(p.archivo)) fuentes.set(p.archivo, readFileSync(p.archivo, 'utf8'))
+  }
+  const puente = derivarPuente(fuentes, parches)
+  mkdirSync(destino, { recursive: true })
+  for (const [archivo, contenido] of puente) writeFileSync(`${destino}/${archivo}`, contenido)
+  return puente
+}
+
+// ─── CLI ──────────────────────────────────────────────────────────────────
+
+const ejecutadoDirecto = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
+if (ejecutadoDirecto) {
+  const destino = process.argv[2] || '.reglas-puente'
+  let puente
+  try {
+    puente = generarPuente(destino)
+  } catch (e) {
+    console.error(e instanceof AnclaPuenteInvalida ? e.message : e)
+    process.exit(1)
+  }
+  for (const archivo of puente.keys()) {
+    console.log(`${destino}/${archivo}  ←  ${archivo} + ${PARCHES.filter((p) => p.archivo === archivo).length} parche(s)`)
+  }
+  console.log('\nParches aplicados:')
+  for (const p of PARCHES) console.log(`  · ${p.archivo}: ${p.porque}`)
+  console.log('\nEsto NO deploya nada.')
+}
