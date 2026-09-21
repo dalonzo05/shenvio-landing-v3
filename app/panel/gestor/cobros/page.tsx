@@ -56,6 +56,7 @@ import {
 } from '@/lib/cobro-integridad'
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { momentoCobro, resumenAtencionCobros } from '@/lib/pago-transferencia'
+import { montoDeliveryCobrado } from '@/lib/monto-delivery'
 import { normalizarFecha } from '@/lib/timeline-orden'
 import { ImageLightbox } from '../../_components/ImageLightbox'
 import {
@@ -2246,7 +2247,10 @@ function CobrosPageContent() {
                             }
                           </td>
                           <td className={`${tdCls} text-right font-semibold text-green-700`}>
-                            {fmt(s.cobroDelivery?.monto ?? (s as any).confirmacion?.precioFinalCordobas)}
+                            {/* FIN-TRAZABILIDAD-UX-2 — lo COBRADO, no el pendiente:
+                                cobroDelivery.monto es el faltante y con el delivery
+                                deducido del CE vale 0 aunque se haya cobrado. */}
+                            {fmt(montoDeliveryCobrado(s as never).monto ?? undefined)}
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-2">

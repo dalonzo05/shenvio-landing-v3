@@ -44,6 +44,7 @@ import {
 } from '@/lib/presentacion-deposito'
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { montoAsociadoDeposito, momentosDeposito } from '@/lib/pago-transferencia'
+import { montoDeliveryCobrado, deliveryCubiertoPorCobroProducto } from '@/lib/monto-delivery'
 import { trazabilidadPago, type EntradaTrazabilidad } from '@/lib/trazabilidad-pago'
 import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
 import { mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
@@ -125,6 +126,9 @@ export type SolicitudDetalle = {
   }
   cobroDelivery?: {
     estado?: string; formaPago?: string; notaPago?: string; pagadoAt?: any; monto?: number
+    // FIN-TRAZABILIDAD-UX-2: con el delivery deducido del CE, `monto` es el
+    // pendiente; el precio y la parte cubierta los escribe la Function aparte.
+    montoDelivery?: number; cubiertoPorDeposito?: number
     // FIN-SEMANTICA-UX-1: quién y cuándo confirmó el cobro. Ya los escriben
     // BoucherModal y PagoContadoModal; hasta ahora el drawer no los declaraba.
     confirmadoPor?: string; confirmadoAt?: Timestamp
@@ -1173,7 +1177,26 @@ export function SolicitudDrawer({
                       {/* Estado frente al CLIENTE. No dice si ShEnvíos ya
                           recibió el dinero: eso son los destinos, más abajo. */}
                       <InfoRow label="Estado" value={traza?.estadoCliente.etiqueta} />
-                      <InfoRow label="Monto" value={solicitud.cobroDelivery?.monto != null ? money(solicitud.cobroDelivery.monto) : solicitud.confirmacion?.precioFinalCordobas != null ? money(solicitud.confirmacion.precioFinalCordobas) : undefined} />
+                      {/* FIN-TRAZABILIDAD-UX-2 — el monto del delivery, no el
+                          pendiente (cobroDelivery.monto, que con el delivery
+                          deducido del CE vale 0). Lo pendiente y lo cubierto
+                          van en sus propias filas, cuando existen. */}
+                      {(() => {
+                        const m = montoDeliveryCobrado(solicitud as never).monto
+                        return <InfoRow label="Monto" value={m != null ? money(m) : undefined} />
+                      })()}
+                      {(() => {
+                        const cubierto = deliveryCubiertoPorCobroProducto(solicitud as never)
+                        return cubierto != null
+                          ? <InfoRow label="Cubierto con el cobro del producto" value={money(cubierto)} />
+                          : null
+                      })()}
+                      {typeof solicitud.cobroDelivery?.montoDelivery === 'number'
+                        && typeof solicitud.cobroDelivery?.monto === 'number'
+                        && solicitud.cobroDelivery.monto > 0
+                        && solicitud.cobroDelivery.estado !== 'pagado' && (
+                        <InfoRow label="Pendiente de cobro" value={money(solicitud.cobroDelivery.monto)} />
+                      )}
                       {/* Medio REAL. `traza.medioPago` solo tiene valor si un
                           gestor lo confirmó (formaPago + pagadoAt); nunca se
                           deriva de quienPaga. Sin confirmar se enuncia como
