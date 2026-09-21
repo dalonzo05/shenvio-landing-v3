@@ -19,6 +19,15 @@ import { detalleIncidencia, etiquetaResolucion, resolucionPrincipal, type Resolu
 import { lineasDeposito, type EntradaDepositoOrden, type DepositoRegistrado, type DestinoDeposito } from './deposito-orden'
 import { nombreDeposito, origenDestinoDeposito, esDepositoDelMotorizado } from './presentacion-deposito'
 import { montoAsociadoDeposito } from './pago-transferencia'
+import { montoDeliveryCobrado } from './monto-delivery'
+import {
+  EVENTO_BOUCHER_SUBIDO,
+  EVENTO_BOUCHER_REEMPLAZADO,
+  EVENTO_DEPOSITO_DEVUELTO,
+  EVENTO_DEPOSITO_CONFIRMADO,
+  EVENTO_DEPOSITO_REHECHO,
+  EVENTO_DEPOSITO_ANULADO,
+} from './deposito-eventos'
 
 export type TipoEvento = 'operativo' | 'cobro' | 'deposito' | 'administrativo'
 
@@ -43,8 +52,35 @@ export interface TimelineEvento {
   at: Date
   /** UID a resolver con el mecanismo de B2.2. Ausente = no hay actor persistido. */
   actorUid?: string
+  /**
+   * FIN-TRAZABILIDAD-UX-2 — qué hizo el actor: "Confirmado por", "Corrección
+   * solicitada por"… Un nombre suelto ("Admin Staging") no decía si esa
+   * persona confirmó, pidió o subió algo. Sale del evento, nunca del rol.
+   */
+  actorEtiqueta?: string
   /** Nombre ya conocido sin resolver nada (ej. el motorizado de la asignación). */
   detalle?: string
+}
+
+/**
+ * FIN-TRAZABILIDAD-UX-2 — un evento de `ordenes_deposito/{id}/eventos` tal
+ * como se leyó. Solo lo que la timeline presenta; todo opcional porque viene
+ * crudo de Firestore.
+ */
+export interface EventoDepositoLeido {
+  id: string
+  tipo?: string | null
+  at?: unknown
+  porUid?: string | null
+  motivo?: string | null
+  version?: number | null
+  reemplazaA?: string | null
+}
+
+/** Un depósito asociado a la orden y los eventos de su subcolección. */
+export interface HistoriaDeposito {
+  deposito: DepositoRegistrado
+  eventos: EventoDepositoLeido[]
 }
 
 /**
@@ -175,7 +211,13 @@ const RANGO: Record<string, number> = {
   delivery_pagado: 100,
   incidencia_resuelta: 110,
   deposito_registrado: 120,
+  deposito_boucher: 121,
+  deposito_devuelto: 122,
+  deposito_corregido: 123,
   deposito_confirmado: 130,
+  deposito_confirmado_ev: 130,
+  deposito_rehecho: 131,
+  deposito_anulado: 132,
   rechazada: 200,
 }
 
@@ -203,7 +245,25 @@ const GRUPO: Record<string, GrupoEvento> = {
   delivery_pagado: 'cambio',
   deposito_registrado: 'cambio',
   deposito_confirmado: 'cambio',
+  deposito_boucher: 'cambio',
+  deposito_devuelto: 'cambio',
+  deposito_corregido: 'cambio',
+  deposito_confirmado_ev: 'cambio',
+  deposito_rehecho: 'cambio',
+  deposito_anulado: 'cambio',
 }
+
+/**
+ * "Versión 1 → 2". Las Rules exigen que cada versión nueva sea exactamente la
+ * anterior + 1 (no se puede saltar), así que la anterior está demostrada por
+ * la propia versión. Sin una versión válida no se afirma ninguna transición.
+ */
+function transicionVersion(v: unknown): string | null {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 2 ? `Versión ${v - 1} → ${v}` : null
+}
+
+const motivoDe = (m: unknown): string | null =>
+  typeof m === 'string' && m.trim() !== '' ? `Motivo: ${m.trim()}` : null
 
 const grupoDe = (id: string): GrupoEvento => GRUPO[id.split(':')[0]] ?? 'cambio'
 
@@ -213,13 +273,18 @@ const grupoDe = (id: string): GrupoEvento => GRUPO[id.split(':')[0]] ?? 'cambio'
  * @param orden      documento de solicitudes_envio
  * @param depositos  documentos de ordenes_deposito que la ficha YA cargó en
  *                   B2.3, indexados por destino. No se consulta nada nuevo.
+ * @param historias  FIN-TRAZABILIDAD-UX-2 — los depósitos asociados con los
+ *                   eventos de su subcolección (corrección, reemplazo del
+ *                   comprobante, confirmación, rehecho, anulación). Opcional:
+ *                   sin ellos la timeline es la de siempre.
  */
 export function construirTimeline(
   orden: EntradaTimeline,
   depositos: Partial<Record<DestinoDeposito, DepositoRegistrado | null>> = {},
+  historias: HistoriaDeposito[] = [],
 ): TimelineEvento[] {
   const ev: TimelineEvento[] = []
-  const push = (id: string, tipo: TipoEvento, titulo: string, raw: unknown, extra: { actorUid?: string | null; detalle?: string | null } = {}) => {
+  const push = (id: string, tipo: TipoEvento, titulo: string, raw: unknown, extra: { actorUid?: string | null; actorEtiqueta?: string; detalle?: string | null } = {}) => {
     const at = normalizarFecha(raw)
     if (!at) return // sin fecha confiable no hay evento
     ev.push({
@@ -229,6 +294,7 @@ export function construirTimeline(
       titulo,
       at,
       ...(extra.actorUid ? { actorUid: extra.actorUid } : {}),
+      ...(extra.actorUid && extra.actorEtiqueta ? { actorEtiqueta: extra.actorEtiqueta } : {}),
       ...(extra.detalle ? { detalle: extra.detalle } : {}),
     })
   }
@@ -238,11 +304,13 @@ export function construirTimeline(
   // un comercio no hay UID interno: se muestra el evento sin actor.
   push('creada', 'administrativo', 'Orden creada', orden.createdAt, {
     actorUid: orden.creadoInternamente === true ? orden.creadoPorGestorUid : null,
+    actorEtiqueta: 'Creada por',
   })
 
   // ── Confirmación ──────────────────────────────────────────────────────────
   push('confirmada', 'administrativo', 'Orden confirmada', orden.confirmacion?.confirmadoAt, {
     actorUid: orden.confirmacion?.confirmadoPorUid,
+    actorEtiqueta: 'Confirmada por',
     detalle: typeof orden.confirmacion?.precioFinalCordobas === 'number'
       ? `Delivery ${money(orden.confirmacion.precioFinalCordobas)}`
       : null,
@@ -252,6 +320,7 @@ export function construirTimeline(
   const moto = orden.asignacion?.motorizadoNombre || null
   push('asignada', 'operativo', 'Motorizado asignado', orden.asignacion?.asignadoAt, {
     actorUid: orden.asignacion?.asignadoPorUid,
+    actorEtiqueta: 'Asignado por',
     detalle: moto,
   })
   // Aceptar es del motorizado por definición —la Function valida su identidad—
@@ -271,6 +340,7 @@ export function construirTimeline(
   // ── Orden rechazada ───────────────────────────────────────────────────────
   push('rechazada', 'administrativo', 'Orden rechazada', orden.rechazo?.rechazadoAt, {
     actorUid: orden.rechazo?.rechazadoPorUid,
+    actorEtiqueta: 'Rechazada por',
     detalle: orden.rechazo?.motivoTexto || null,
   })
 
@@ -292,19 +362,25 @@ export function construirTimeline(
   if (res) {
     push('incidencia_resuelta', 'cobro', 'Incidencia resuelta', res.at, {
       actorUid: res.resueltoPor,
+      actorEtiqueta: 'Resuelta por',
       detalle: etiquetaResolucion(res),
     })
   }
 
   // ── Delivery cobrado ──────────────────────────────────────────────────────
   const cd = orden.cobroDelivery
-  const montoCd = typeof cd?.monto === 'number' ? money(cd.monto) : null
+  // FIN-TRAZABILIDAD-UX-2 — el monto del delivery COBRADO. cobroDelivery.monto
+  // es el pendiente: con el delivery deducido del CE vale 0 y el evento decía
+  // "Delivery cobrado en efectivo · C$ 0".
+  const montoCobrado = cd ? montoDeliveryCobrado(orden).monto : null
+  const montoCd = montoCobrado != null ? money(montoCobrado) : null
   if (cd?.pagadoAt != null) {
     // Pago confirmado por un gestor. `pagadoAt` se BORRA al revertir el cobro,
     // así que su presencia es la señal fiable; `confirmadoAt` sobrevive a la
     // reversión y por eso no se usa como fuente.
     push('delivery_pagado', 'cobro', 'Delivery pagado', cd.pagadoAt, {
       actorUid: cd.confirmadoPor,
+      actorEtiqueta: 'Pago confirmado por',
       detalle: [montoCd, cd.formaPago].filter(Boolean).join(' · ') || null,
     })
   } else if (cd?.estado === 'pagado') {
@@ -329,6 +405,16 @@ export function construirTimeline(
   // ── Depósitos ─────────────────────────────────────────────────────────────
   const lineas = lineasDeposito(orden, depositos)
   const reg = orden.registro?.deposito
+  // Un depósito con DEPOSITO_CONFIRMADO en su historia se narra desde esos
+  // eventos (uno por confirmación, con quién y cuándo, también después de un
+  // Rehacer). Para él no se deriva además el "confirmado" de confirmadoXAt:
+  // sería el mismo hecho dos veces.
+  const confirmadoPorEvento = new Set(
+    historias
+      .filter((h) => h.eventos.some((e) => e.tipo === EVENTO_DEPOSITO_CONFIRMADO))
+      .map((h) => h.deposito.id),
+  )
+  const obligacionDe = new Map(lineas.filter((l) => l.deposito).map((l) => [l.deposito!.id, l.obligacion]))
   for (const l of lineas) {
     const dep = l.deposito
     if (dep) {
@@ -348,11 +434,13 @@ export function construirTimeline(
       // habla solo del aporte de ESTA orden.
       push(`deposito_registrado:${l.destino}`, 'deposito', titulo, dep.creadoAt, {
         actorUid: delMotorizado ? dep.motorizadoUid : null,
+        actorEtiqueta: 'Enviado por',
         detalle: detalleAporte(dep, orden, l.obligacion),
       })
     }
     const confirmadoAt = l.destino === 'storkhub' ? reg?.confirmadoStorkhubAt : reg?.confirmadoComercioAt
     if (confirmadoAt == null) continue
+    if (dep && confirmadoPorEvento.has(dep.id)) continue
     // Convertir un depósito en deuda escribe el MISMO campo confirmadoXAt que
     // una confirmación normal. El título sale del estado real del documento,
     // no del nombre del campo.
@@ -369,9 +457,63 @@ export function construirTimeline(
       {
         // La conversión en deuda no persiste actor. → B2-TIMELINE-DEPOSITO-ACTOR.
         actorUid: convertido ? null : dep?.confirmadoPorUid,
+        actorEtiqueta: 'Confirmado por',
         detalle: convertido ? dep?.notaConversion || null : dep ? detalleAporte(dep, orden, l.obligacion) : `Esta orden aporta ${money(l.obligacion)}`,
       },
     )
+  }
+
+  // ── Historia de cada depósito asociado (DEPOSITO-AUDITORIA-1) ────────────
+  // Sale de ordenes_deposito/{id}/eventos: la auditoría que F2 ya persiste.
+  // No se copia al ledger ni se reconstruye nada; un depósito legacy sin
+  // subcolección simplemente no aporta eventos. Un tipo que la timeline no
+  // conoce no se presenta: no se inventa un texto para él.
+  for (const h of historias) {
+    const dep = h.deposito
+    const codigo = nombreDeposito(dep)
+    for (const e of h.eventos) {
+      const id = `${dep.id}:${e.id}`
+      const actorUid = typeof e.porUid === 'string' ? e.porUid : null
+      switch (e.tipo) {
+        case EVENTO_DEPOSITO_DEVUELTO:
+          push(`deposito_devuelto:${id}`, 'deposito', `${codigo} · Corrección solicitada`, e.at, {
+            actorUid, actorEtiqueta: 'Corrección solicitada por', detalle: motivoDe(e.motivo),
+          })
+          break
+        case EVENTO_BOUCHER_SUBIDO:
+          push(`deposito_boucher:${id}`, 'deposito', `${codigo} · Comprobante subido`, e.at, {
+            actorUid, actorEtiqueta: 'Subido por',
+            detalle: typeof e.version === 'number' && Number.isInteger(e.version) ? `Versión ${e.version}` : null,
+          })
+          break
+        case EVENTO_BOUCHER_REEMPLAZADO:
+          push(`deposito_corregido:${id}`, 'deposito', `${codigo} · Comprobante corregido`, e.at, {
+            actorUid, actorEtiqueta: 'Comprobante corregido por',
+            detalle: [transicionVersion(e.version), motivoDe(e.motivo)].filter(Boolean).join(' · ') || null,
+          })
+          break
+        case EVENTO_DEPOSITO_CONFIRMADO: {
+          const ob = obligacionDe.get(dep.id)
+          push(`deposito_confirmado_ev:${id}`, 'deposito', `${codigo} confirmado`, e.at, {
+            actorUid, actorEtiqueta: 'Confirmado por',
+            detalle: ob != null ? detalleAporte(dep, orden, ob) : null,
+          })
+          break
+        }
+        case EVENTO_DEPOSITO_REHECHO:
+          push(`deposito_rehecho:${id}`, 'deposito', `${codigo} · Vuelve a revisión`, e.at, {
+            actorUid, actorEtiqueta: 'Rehecho por', detalle: motivoDe(e.motivo),
+          })
+          break
+        case EVENTO_DEPOSITO_ANULADO:
+          push(`deposito_anulado:${id}`, 'deposito', `${codigo} · Anulado`, e.at, {
+            actorUid, actorEtiqueta: 'Anulado por', detalle: motivoDe(e.motivo),
+          })
+          break
+        default:
+          break
+      }
+    }
   }
 
   // Orden cronológico ascendente. Ante timestamps idénticos —que en los datos

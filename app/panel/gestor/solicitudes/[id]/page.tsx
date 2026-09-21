@@ -26,7 +26,9 @@ import { BloqueDepositos } from './_components/BloqueDepositos'
 import { BloqueTimeline } from './_components/BloqueTimeline'
 import { ResumenOrden, IndiceFicha } from './_components/ResumenOrden'
 import { detalleIncidencia } from '@/lib/incidencia-cobro'
-import { construirTimeline, uidsDeTimeline } from '@/lib/timeline-orden'
+import { construirTimeline, uidsDeTimeline, type HistoriaDeposito, type EventoDepositoLeido } from '@/lib/timeline-orden'
+import { filasDepositosAsociados, uidsDepositosAsociados } from '@/lib/depositos-asociados'
+import { DepositosAsociados } from './_components/DepositosAsociados'
 import { ImageLightbox } from '../../../_components/ImageLightbox'
 import { nombreDeUsuario } from '@/lib/actor-resolucion'
 import { mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
@@ -36,6 +38,7 @@ import {
   origenDestinoDeposito,
   estadoDeposito,
   comprobanteDeposito,
+  nombreMotorizadoDeposito,
 } from '@/lib/presentacion-deposito'
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { momentosDeposito } from '@/lib/pago-transferencia'
@@ -637,6 +640,12 @@ function GestorSolicitudDetallePageContent() {
   const [depositosOrden, setDepositosOrden] = useState<
     Partial<Record<DestinoDeposito, DepositoRegistrado | null>>
   >({})
+  // FIN-TRAZABILIDAD-UX-2 — TODOS los depósitos cuyo solicitudIds incluye la
+  // orden (también un anulado cuyo puntero ya se liberó), y la historia de
+  // cada uno. null = todavía no se leyó (o la lectura se denegó y se usan
+  // los punteros de arriba).
+  const [depositosAsociados, setDepositosAsociados] = useState<DepositoRegistrado[] | null>(null)
+  const [historiasDeposito, setHistoriasDeposito] = useState<HistoriaDeposito[]>([])
   const [showRechazarModal, setShowRechazarModal] = useState(false)
   const [motivoCodigo, setMotivoCodigo] = useState('')
   const [motivoTexto, setMotivoTexto] = useState('')
@@ -754,15 +763,69 @@ function GestorSolicitudDetallePageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [claveDepositos])
 
+  // FIN-TRAZABILIDAD-UX-2 — depósitos asociados: UNA query por ficha
+  // (solicitudIds array-contains, índice de campo simple que Firestore crea
+  // solo), no una por depósito. Es la única forma de ver también un depósito
+  // anulado o reemplazado, cuyo puntero en registro.deposito ya no existe.
+  // Si las Rules la deniegan (un rol que solo lee depósitos propios), se cae
+  // a los punteros que la ficha ya leyó en B2.3: nunca se inventa uno.
+  useEffect(() => {
+    if (!id) return
+    let vivo = true
+    getDocs(query(collection(db, 'ordenes_deposito'), where('solicitudIds', 'array-contains', id)))
+      .then((snap) => {
+        if (!vivo) return
+        setDepositosAsociados(snap.docs.map((d) => ({ id: d.id, ...(d.data() as object) } as DepositoRegistrado)))
+      })
+      .catch(() => { if (vivo) setDepositosAsociados(null) })
+    return () => { vivo = false }
+    // Se relee cuando cambian los punteros (se registró o se anuló uno).
+  }, [id, claveDepositos])
+
+  const depositosDeLaOrden = useMemo<DepositoRegistrado[]>(
+    () => depositosAsociados
+      ?? Object.values(depositosOrden).filter((d): d is DepositoRegistrado => !!d),
+    [depositosAsociados, depositosOrden]
+  )
+  const claveAsociados = depositosDeLaOrden.map((d) => d.id).sort().join('|')
+
+  // La historia de cada depósito (DEPOSITO-AUDITORIA-1): una lectura de su
+  // subcolección `eventos` por depósito asociado, deduplicada, solo en esta
+  // vista puntual — nunca en listados. Un depósito legacy sin subcolección
+  // devuelve 0 eventos; un permiso denegado, también: la timeline sigue.
+  useEffect(() => {
+    const deps = depositosDeLaOrden
+    if (deps.length === 0) { setHistoriasDeposito([]); return }
+    let vivo = true
+    Promise.all(
+      deps.map((dep) =>
+        getDocs(collection(db, 'ordenes_deposito', dep.id, 'eventos'))
+          .then((snap) => ({
+            deposito: dep,
+            eventos: snap.docs.map((d) => ({ id: d.id, ...(d.data() as object) } as EventoDepositoLeido)),
+          }))
+          .catch(() => ({ deposito: dep, eventos: [] as EventoDepositoLeido[] }))
+      )
+    ).then((hs) => { if (vivo) setHistoriasDeposito(hs) })
+    return () => { vivo = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [claveAsociados])
+
   // B2.2 — nombre legible de quien resolvió una incidencia. La ficha mostraba
   // el UID crudo porque B2.1 no agregaba queries; acá se resuelve con una
   // única lectura por UID —no un listener— y se cachea en estado, así que un
   // mismo actor en varias incidencias se lee una sola vez.
   // B2.4 — historial autoritativo. Se deriva de lo ya cargado (la orden y los
-  // depósitos de B2.3): no agrega ninguna query.
+  // depósitos de B2.3) y, desde FIN-TRAZABILIDAD-UX-2, de la historia de los
+  // depósitos asociados.
   const eventosTimeline = useMemo(
-    () => (solicitud ? construirTimeline(solicitud as never, depositosOrden) : []),
-    [solicitud, depositosOrden]
+    () => (solicitud ? construirTimeline(solicitud as never, depositosOrden, historiasDeposito) : []),
+    [solicitud, depositosOrden, historiasDeposito]
+  )
+
+  const filasAsociados = useMemo(
+    () => filasDepositosAsociados(depositosDeLaOrden, solicitud as never, (d) => nombreMotorizadoDeposito(d, nombresActores)),
+    [depositosDeLaOrden, solicitud, nombresActores]
   )
 
   const uidsActores = useMemo(() => {
@@ -779,9 +842,11 @@ function GestorSolicitudDetallePageContent() {
       // rechazo, pago del delivery). Se juntan acá para que el efecto haga UNA
       // lectura por UID distinto, no una por evento.
       ...uidsDeTimeline(eventosTimeline),
+      // FIN-TRAZABILIDAD-UX-2 — quienes confirmaron los depósitos asociados.
+      ...uidsDepositosAsociados(filasAsociados),
     ]
     return [...new Set(uids.filter((u): u is string => typeof u === 'string' && u.length > 0))]
-  }, [solicitud?.cobrosMotorizado, depositosOrden, eventosTimeline])
+  }, [solicitud?.cobrosMotorizado, depositosOrden, eventosTimeline, filasAsociados])
 
   useEffect(() => {
     const faltantes = uidsActores.filter((uid) => !(uid in nombresActores))
@@ -1783,6 +1848,15 @@ function GestorSolicitudDetallePageContent() {
             depositos={depositosOrden}
             nombresActores={nombresActores}
             onVerBoucher={(url, label) => setEvidenciaAmpliada({ url, label })}
+          />
+
+          {/* FIN-TRAZABILIDAD-UX-2 — registro de todos los depósitos de la
+              orden. Sin imágenes: los comprobantes van en Evidencias
+              financieras, más abajo. */}
+          <DepositosAsociados
+            filas={filasAsociados}
+            nombresActores={nombresActores}
+            cargando={depositosAsociados === null && claveDepositos !== ''}
           />
 
           {/* Evidencias fotográficas — B2.6 añade solo el anchor del índice. */}

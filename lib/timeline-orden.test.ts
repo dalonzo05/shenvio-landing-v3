@@ -647,3 +647,172 @@ test('T23 · tipo C: se registra como pago por transferencia, sin actor motoriza
   assert.equal(e.titulo, 'DEP-0003 · pago del delivery por transferencia registrado')
   assert.equal(e.actorUid, undefined)
 })
+
+// ─── FIN-TRAZABILIDAD-UX-2 · historia de los depósitos y etiquetas de actor ──
+//
+// SH-0005 real: DEP-0004 (StorkHub, C$90) pasó por corrección y comprobante
+// v2 antes de confirmarse; DEP-0005 (Mariposita, C$910) se confirmó directo.
+
+const SH_0005_ID = 'UgQP6v3w4qnyyU0fO64l'
+const MOTO_JP2 = 'juAOhfxi96dlLv8LV3mZwA3cK362'
+
+function sh0005(): EntradaTimeline {
+  return {
+    createdAt: '2026-09-19T21:05:00.000Z',
+    tipoCliente: 'contado',
+    pagoDelivery: { quienPaga: 'entrega', montoSugerido: 90, deducirDelCobroContraEntrega: true, tipo: 'contado' },
+    confirmacion: { precioFinalCordobas: 90, confirmadoAt: '2026-09-19T21:09:35.278Z', confirmadoPorUid: ADMIN },
+    cobroContraEntrega: { aplica: true, monto: 1000 },
+    cobrosMotorizado: {
+      delivery: { monto: 90, recibio: true, at: '2026-09-19T21:37:59.131Z' },
+      producto: { monto: 1000, recibio: true, at: '2026-09-19T21:37:59.131Z' },
+    },
+    cobroDelivery: {
+      estado: 'pagado', formaPago: 'efectivo', quienPaga: 'entrega', registradoAt: '2026-09-19T21:37:59.131Z',
+      monto: 0, montoDelivery: 90, cubiertoPorDeposito: 90,
+    } as EntradaTimeline['cobroDelivery'],
+    historial: { entregadoAt: '2026-09-19T21:37:59.131Z' },
+    registro: {
+      deposito: {
+        storkhubDepositoId: 'PZ04OfRT2R9y27cFfaDN', confirmadoStorkhub: true, confirmadoStorkhubAt: '2026-09-21T03:50:49.041Z',
+        comercioDepositoId: 'oxbOqPxj3RmPKdXahedk', confirmadoComercio: true, confirmadoComercioAt: '2026-09-21T03:50:49.085Z',
+      },
+    },
+  }
+}
+const DEP_0004: DepositoRegistrado = {
+  id: 'PZ04OfRT2R9y27cFfaDN', codigo: 'DEP-0004', tipo: 'recaudacion_motorizado_storkhub', estado: 'confirmado',
+  destinatario: 'storkhub', destinatarioNombre: 'Storkhub', motorizadoUid: MOTO_JP2, solicitudIds: [SH_0005_ID],
+  montoTotal: 90, boucherVersion: 2, creadoAt: '2026-09-19T21:43:59.645Z',
+  confirmadoAt: '2026-09-21T03:50:49.041Z', confirmadoPorUid: ADMIN,
+}
+const DEP_0005: DepositoRegistrado = {
+  id: 'oxbOqPxj3RmPKdXahedk', codigo: 'DEP-0005', tipo: 'recaudacion_motorizado_comercio', estado: 'confirmado',
+  destinatario: 'comercio', destinatarioNombre: 'Mariposita', motorizadoUid: MOTO_JP2, solicitudIds: [SH_0005_ID],
+  montoTotal: 910, creadoAt: '2026-09-19T21:44:07.739Z',
+  confirmadoAt: '2026-09-21T03:50:49.085Z', confirmadoPorUid: ADMIN,
+}
+/** Los eventos tal como están en ordenes_deposito/{id}/eventos. */
+const HISTORIAS = [
+  {
+    deposito: DEP_0004,
+    eventos: [
+      { id: 'A19HYTpmRHfrhyt5BbS6', tipo: 'DEPOSITO_DEVUELTO', at: '2026-09-21T03:29:53.289Z', porUid: ADMIN, motivo: 'Comprobante incorrecto, por favor subir nuevamente.' },
+      {
+        id: 'fqKqw16We8IXJl8fclRG', tipo: 'BOUCHER_REEMPLAZADO', at: '2026-09-21T03:48:08.171Z', porUid: MOTO_JP2, motivo: 'Me confundi', version: 2,
+        reemplazaA: `depositos/${MOTO_JP2}/PZ04OfRT2R9y27cFfaDN/boucher.jpg`,
+      },
+      { id: 'vtA2KP1BRPxE1DGVM9hU', tipo: 'DEPOSITO_CONFIRMADO', at: '2026-09-21T03:50:49.041Z', porUid: ADMIN },
+    ],
+  },
+  {
+    deposito: DEP_0005,
+    eventos: [{ id: 'fxHBZjKYi8iBzqZ6fAiw', tipo: 'DEPOSITO_CONFIRMADO', at: '2026-09-21T03:50:49.085Z', porUid: ADMIN }],
+  },
+]
+const tl5 = () => construirTimeline(sh0005(), { storkhub: DEP_0004, comercio: DEP_0005 }, HISTORIAS)
+const buscar = (pref: string) => tl5().find((e) => e.id.startsWith(pref))!
+
+test('EV1 · DEPOSITO_DEVUELTO aparece en el historial de la orden', () => {
+  const e = buscar('deposito_devuelto:PZ04OfRT2R9y27cFfaDN')
+  assert.equal(e.titulo, 'DEP-0004 · Corrección solicitada')
+  assert.equal(e.at.toISOString(), '2026-09-21T03:29:53.289Z')
+  assert.equal(e.grupo, 'cambio')
+})
+
+test('EV2 · la corrección muestra su motivo', () => {
+  assert.equal(buscar('deposito_devuelto:').detalle, 'Motivo: Comprobante incorrecto, por favor subir nuevamente.')
+})
+
+test('EV3 · "Corrección solicitada por" con el actor del evento', () => {
+  const e = buscar('deposito_devuelto:')
+  assert.equal(e.actorUid, ADMIN)
+  assert.equal(e.actorEtiqueta, 'Corrección solicitada por')
+})
+
+test('EV4 · BOUCHER_REEMPLAZADO aparece como comprobante corregido', () => {
+  const e = buscar('deposito_corregido:PZ04OfRT2R9y27cFfaDN')
+  assert.equal(e.titulo, 'DEP-0004 · Comprobante corregido')
+  assert.equal(e.at.toISOString(), '2026-09-21T03:48:08.171Z')
+})
+
+test('EV5 · versión 1 → 2 cuando está demostrada; sin versión válida no se afirma ninguna', () => {
+  assert.match(buscar('deposito_corregido:').detalle!, /^Versión 1 → 2/)
+  const sinVersion = construirTimeline(sh0005(), {}, [{
+    deposito: DEP_0004,
+    eventos: [{ id: 'x', tipo: 'BOUCHER_REEMPLAZADO', at: '2026-09-21T03:48:08.171Z', porUid: MOTO_JP2, motivo: 'Otra foto' }],
+  }]).find((e) => e.id.startsWith('deposito_corregido:'))!
+  assert.equal(sinVersion.detalle, 'Motivo: Otra foto')
+})
+
+test('EV6 · el reemplazo muestra su motivo', () => {
+  assert.equal(buscar('deposito_corregido:').detalle, 'Versión 1 → 2 · Motivo: Me confundi')
+})
+
+test('EV7 · "Comprobante corregido por" con el motorizado que lo subió', () => {
+  const e = buscar('deposito_corregido:')
+  assert.equal(e.actorUid, MOTO_JP2)
+  assert.equal(e.actorEtiqueta, 'Comprobante corregido por')
+})
+
+test('EV8 · DEPOSITO_CONFIRMADO con "Confirmado por"; no se duplica con el confirmado derivado', () => {
+  const t = tl5()
+  const c4 = t.filter((e) => e.titulo === 'DEP-0004 confirmado')
+  assert.equal(c4.length, 1)
+  assert.equal(c4[0].actorUid, ADMIN)
+  assert.equal(c4[0].actorEtiqueta, 'Confirmado por')
+  assert.equal(c4[0].detalle, 'Esta orden aporta C$ 90')
+  assert.equal(t.filter((e) => e.titulo === 'DEP-0005 confirmado').length, 1)
+  assert.ok(!t.some((e) => e.id === 'deposito_confirmado:storkhub'))
+})
+
+test('EV9 · depósito legacy sin eventos: no rompe y conserva su "confirmado" derivado, ahora con etiqueta', () => {
+  const t = construirTimeline(sh0001(), { storkhub: DEP_0001 }, [{ deposito: DEP_0001, eventos: [] }])
+  const c = t.find((e) => e.id === 'deposito_confirmado:storkhub')!
+  assert.equal(c.titulo, 'DEP-0001 confirmado')
+  assert.equal(c.actorEtiqueta, 'Confirmado por')
+  // Sin historias, la timeline es la de siempre.
+  assert.deepEqual(construirTimeline(sh0001(), { storkhub: DEP_0001 }).map((e) => e.id), t.map((e) => e.id))
+})
+
+test('EV10 · dos depósitos: sus eventos se intercalan en orden cronológico', () => {
+  const titulos = tl5().filter((e) => e.tipo === 'deposito').map((e) => e.titulo)
+  assert.deepEqual(titulos, [
+    'DEP-0004 enviado a StorkHub',
+    'DEP-0005 enviado a Mariposita',
+    'DEP-0004 · Corrección solicitada',
+    'DEP-0004 · Comprobante corregido',
+    'DEP-0004 confirmado',
+    'DEP-0005 confirmado',
+  ])
+})
+
+test('EV11 · rehecho, anulado y tipos desconocidos: los conocidos con su etiqueta, el desconocido no se inventa', () => {
+  const t = construirTimeline(sh0005(), {}, [{
+    deposito: DEP_0004,
+    eventos: [
+      { id: 'r', tipo: 'DEPOSITO_REHECHO', at: '2026-09-22T10:00:00.000Z', porUid: ADMIN, motivo: 'Monto mal' },
+      { id: 'a', tipo: 'DEPOSITO_ANULADO', at: '2026-09-22T11:00:00.000Z', porUid: ADMIN, motivo: 'Duplicado' },
+      { id: 'z', tipo: 'OTRA_COSA', at: '2026-09-22T12:00:00.000Z', porUid: ADMIN },
+    ],
+  }]).filter((e) => e.id.includes(':PZ04OfRT2R9y27cFfaDN:'))
+  assert.deepEqual(t.map((e) => [e.titulo, e.actorEtiqueta, e.detalle]), [
+    ['DEP-0004 · Vuelve a revisión', 'Rehecho por', 'Motivo: Monto mal'],
+    ['DEP-0004 · Anulado', 'Anulado por', 'Motivo: Duplicado'],
+  ])
+})
+
+test('EV12 · "Delivery cobrado en efectivo" de SH-0005 dice C$ 90, no C$ 0', () => {
+  const e = tl5().find((x) => x.id === 'delivery_pagado')!
+  assert.equal(e.titulo, 'Delivery cobrado en efectivo')
+  assert.equal(e.detalle, 'C$ 90')
+})
+
+test('EV13 · la etiqueta solo acompaña a un actor real: sin UID no hay "… por"', () => {
+  const t = construirTimeline(sh0005(), {}, [{
+    deposito: DEP_0004,
+    eventos: [{ id: 'd', tipo: 'DEPOSITO_DEVUELTO', at: '2026-09-21T03:29:53.289Z', motivo: 'Sin actor' }],
+  }]).find((e) => e.id.startsWith('deposito_devuelto:'))!
+  assert.equal(t.actorUid, undefined)
+  assert.equal(t.actorEtiqueta, undefined)
+})

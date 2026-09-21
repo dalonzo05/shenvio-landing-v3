@@ -94,7 +94,13 @@ function Evento({
         <p className="text-xs text-gray-500">{fechaHora(evento.at)}</p>
         {/* El actor solo aparece si el dato existe; presentarActor devuelve
             null sin UID y "Usuario interno" sin nombre. */}
-        {actor && <p className="text-xs font-medium text-gray-700">{actor.nombre}</p>}
+        {/* FIN-TRAZABILIDAD-UX-2 — "Confirmado por: …", no un nombre suelto. */}
+        {actor && (
+          <p className="text-xs text-gray-700">
+            {evento.actorEtiqueta && <span className="text-gray-500">{evento.actorEtiqueta}: </span>}
+            <span className="font-medium">{actor.nombre}</span>
+          </p>
+        )}
         {evento.detalle && <p className="text-xs text-gray-600 mt-0.5">{evento.detalle}</p>}
       </div>
     </li>
