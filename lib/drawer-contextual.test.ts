@@ -9,8 +9,7 @@ import {
   vistaDrawerOrden,
   depositosPorDestinoDeLaOrden,
   contextoDeposito,
-  depositoEnRevision,
-  motivoNoRevisable,
+  accesosLiquidacion,
   permiteVerEnDepositos,
   TEXTO_VER_DEPOSITO,
   TEXTO_VER_FICHA,
@@ -133,22 +132,20 @@ test('RD8 · tipo C: C$80, transferencia y StorkHub directo del comercio', () =>
 
 // ─── DC · el segundo nivel: el depósito ──────────────────────────────────────
 
-test('DC1 · un DEP A/B en revisión ofrece abrir su contexto, mire quien mire', () => {
+test('DC1 · un DEP A/B en revisión aparece en la lista y se puede consultar', () => {
   const enRevision = { ...DEP_0004, estado: 'en_revision', confirmadoAt: undefined, confirmadoPorUid: undefined }
-  assert.equal(depositoEnRevision(enRevision), true)
-  assert.equal(motivoNoRevisable(enRevision), null)
   const v = vistaDrawerOrden(sh0005(), { depositos: [enRevision, DEP_0005] })
-  assert.deepEqual(v.enRevision, [enRevision.id])
+  assert.deepEqual(v.liquidaciones.map((l) => l.id), [enRevision.id, DEP_0005.id])
+  assert.equal(contextoDeposito(enRevision).estado, 'En revisión')
 })
 
-test('DC2 · un DEP confirmado no ofrece nada: ya no hay nada que mirar en revisión', () => {
-  assert.equal(depositoEnRevision(DEP_0004), false)
-  assert.equal(motivoNoRevisable(DEP_0004), 'estado')
-  assert.equal(motivoNoRevisable(null), 'sin_deposito')
-  assert.deepEqual(vista().enRevision, [])
+test('DC2 · un DEP confirmado también: consultar no depende del estado', () => {
+  const ids = vista().liquidaciones.map((l) => l.id)
+  assert.deepEqual(ids, [DEP_0004.id, DEP_0005.id])
+  assert.deepEqual(vista().liquidaciones.map((l) => l.estado), ['Confirmado', 'Confirmado'])
 })
 
-test('DC3 · un DEP devuelto muestra su estado y su motivo, y no queda en revisión', () => {
+test('DC3 · un DEP devuelto muestra su estado y su motivo', () => {
   const devuelto = {
     ...DEP_0004, estado: 'devuelto', motivoDevolucion: 'Comprobante incorrecto, por favor subir nuevamente.',
     confirmadoAt: undefined, confirmadoPorUid: undefined,
@@ -156,16 +153,14 @@ test('DC3 · un DEP devuelto muestra su estado y su motivo, y no queda en revisi
   const c = contextoDeposito(devuelto, null, { nombresActores: NOMBRES })
   assert.equal(c.estado, 'Corrección solicitada')
   assert.equal(c.motivo, 'Comprobante incorrecto, por favor subir nuevamente.')
-  assert.equal(depositoEnRevision(devuelto), false)
   assert.equal(c.confirmadoPorUid, null)
 })
 
-test('DC4 · el tipo C no entra en la revisión A/B: su corrección es Cobros → Revertir', () => {
-  assert.equal(motivoNoRevisable(DEP_0002), 'tipo_c')
-  const enRevision = { ...DEP_0002, estado: 'en_revision' }
-  assert.equal(depositoEnRevision(enRevision), false)
+test('DC4 · el tipo C se consulta como lo que es, sin volverse un depósito A/B', () => {
   const c = contextoDeposito(DEP_0002, null, {})
   assert.equal(c.destino, 'Pago del delivery por transferencia')
+  // Nunca "Motorizado → StorkHub": el comercio transfirió directo.
+  assert.ok(!c.destino.includes('→'))
 })
 
 test('DC5 · el contexto describe el depósito con los campos de su propio documento', () => {
@@ -219,8 +214,8 @@ test('COPY3 · abrir el contexto sigue trayendo el DEP correcto, no otro', () =>
   const enRevision = { ...DEP_0004, estado: 'en_revision', confirmadoAt: undefined, confirmadoPorUid: undefined }
   const deps = [enRevision, DEP_0005]
   const v = vistaDrawerOrden(sh0005(), { depositos: deps, nombresActores: NOMBRES })
-  assert.deepEqual(v.enRevision, [enRevision.id])
-  const abierto = deps.find((d) => d.id === v.enRevision[0])!
+  assert.deepEqual(v.liquidaciones.map((l) => l.id), [enRevision.id, DEP_0005.id])
+  const abierto = deps.find((d) => d.id === v.liquidaciones[0].id)!
   const c = contextoDeposito(abierto, sh0005() as never, { nombresActores: NOMBRES })
   assert.equal(c.id, DEP_0004.id)
   assert.equal(c.codigo, 'DEP-0004')
@@ -247,9 +242,13 @@ test('COPY5 · desde Comercio NO se ofrece un enlace a una ruta del gestor', () 
 // ─── API · nada muerto en el view-model ──────────────────────────────────────
 
 test('API1 · la vista del drawer expone solo lo que la UI consume', () => {
-  assert.deepEqual(Object.keys(vista()).sort(), ['enRevision', 'liquidaciones', 'resumen'])
+  assert.deepEqual(Object.keys(vista()).sort(), ['liquidaciones', 'resumen'])
   assert.equal('revisables' in vista(), false)
   assert.equal('puedeRevisarDeposito' in DrawerContextual, false)
+  // Y no queda ningún gate por estado: consultar no se filtra.
+  assert.equal('enRevision' in vista(), false)
+  assert.equal('depositoEnRevision' in DrawerContextual, false)
+  assert.equal('motivoNoRevisable' in DrawerContextual, false)
 })
 
 test('API2 · el contexto del DEP no afirma permisos: no depende del rol', () => {
@@ -357,6 +356,124 @@ test('DAW9 · el contexto se abre con cualquiera de los asociados, no solo con l
   const deps = [DEP_0004, DEP_0005, SUELTO]
   const v = vistaCon(deps)
   assert.ok(v.liquidaciones.some((l) => l.id === SUELTO.id))
-  assert.deepEqual(v.enRevision, [SUELTO.id])
   assert.equal(contextoDeposito(deps.find((d) => d.id === SUELTO.id)!, null).codigo, 'DEP-0010')
+})
+
+// ─── VD · consultar un depósito no es operarlo ────────────────────────────────
+//
+// El E2E encontró que DEP-0004 y DEP-0005, ya confirmados, no ofrecían nada:
+// la acción estaba condicionada a A/B + en_revision, que es la condición para
+// REVISAR. Consultar es otra cosa y no depende del estado ni del tipo. La
+// vista del drawer pinta un "Ver depósito" por fila de `liquidaciones`, así
+// que lo que estos casos fijan es que la fila esté ahí y que no exista ningún
+// campo de gate que la UI pudiera volver a mirar.
+
+const conEstado = (base: DepositoRegistrado, estado: string): DepositoRegistrado => ({
+  ...base, estado, confirmadoAt: estado === 'confirmado' ? base.confirmadoAt : undefined,
+  confirmadoPorUid: estado === 'confirmado' ? base.confirmadoPorUid : undefined,
+})
+const filas = (deps: DepositoRegistrado[]) => vistaDrawerOrden(sh0005(), { depositos: deps, nombresActores: NOMBRES }).liquidaciones
+
+test('VD1 · DEP A confirmado se puede consultar', () => {
+  const f = filas([DEP_0004])
+  assert.deepEqual(f.map((l) => [l.id, l.estado]), [[DEP_0004.id, 'Confirmado']])
+  assert.equal(contextoDeposito(DEP_0004, sh0005() as never, { nombresActores: NOMBRES }).codigo, 'DEP-0004')
+})
+
+test('VD2 · DEP B confirmado se puede consultar', () => {
+  const f = filas([DEP_0005])
+  assert.deepEqual(f.map((l) => [l.id, l.estado]), [[DEP_0005.id, 'Confirmado']])
+  assert.equal(contextoDeposito(DEP_0005, null, { nombresActores: NOMBRES }).destino, 'John Pork 2 → Mariposita')
+})
+
+test('VD3 · DEP en revisión se puede consultar', () => {
+  const d = conEstado(DEP_0004, 'en_revision')
+  assert.deepEqual(filas([d]).map((l) => l.id), [d.id])
+  assert.equal(contextoDeposito(d).estado, 'En revisión')
+})
+
+test('VD4 · DEP devuelto se puede consultar', () => {
+  const d = conEstado(DEP_0004, 'devuelto')
+  assert.deepEqual(filas([d]).map((l) => l.id), [d.id])
+  assert.equal(contextoDeposito(d).estado, 'Corrección solicitada')
+})
+
+test('VD5 · DEP anulado, pendiente de boucher o convertido en deuda: también', () => {
+  for (const estado of ['anulado', 'pendiente_boucher', 'convertido_en_deuda', 'rechazado']) {
+    const d = conEstado(DEP_0004, estado)
+    assert.deepEqual(filas([d]).map((l) => l.id), [d.id], estado)
+    assert.equal(contextoDeposito(d).estadoClave, estado)
+  }
+})
+
+test('VD6 · el tipo C confirmado es un depósito asociado consultable', () => {
+  const sh0003 = {
+    estado: 'entregado', tipoCliente: 'contado', ownerSnapshot: { companyName: 'Mariposita' },
+    confirmacion: { precioFinalCordobas: 80 }, pagoDelivery: { quienPaga: 'transferencia' },
+    cobroContraEntrega: { aplica: false, monto: 0 },
+    cobroDelivery: { estado: 'pagado', formaPago: 'transferencia', monto: 80 },
+    registro: { deposito: { storkhubDepositoId: DEP_0002.id, confirmadoStorkhub: true } },
+  } as EntradaResumenEjecutivo
+  const v = vistaDrawerOrden(sh0003, { depositos: [DEP_0002] })
+  assert.deepEqual(v.liquidaciones.map((l) => l.id), [DEP_0002.id])
+  assert.equal(contextoDeposito(DEP_0002).codigo, 'DEP-0002')
+  assert.equal(contextoDeposito(DEP_0002).monto, 'C$ 80')
+})
+
+test('VD7 · el tipo C no gana acciones A/B ni un origen que no tuvo', () => {
+  const v = vistaDrawerOrden(sh0005(), { depositos: [DEP_0002] })
+  // La vista no trae ningún campo de acción o permiso que la UI pueda usar.
+  assert.deepEqual(Object.keys(v).sort(), ['liquidaciones', 'resumen'])
+  const c = contextoDeposito(DEP_0002)
+  assert.equal(c.destino, 'Pago del delivery por transferencia')
+  assert.equal(v.liquidaciones[0].origenDestino, 'Pago del delivery por transferencia')
+  assert.ok(!JSON.stringify(c).includes('Motorizado →'))
+})
+
+test('VD8 · SH-0005: dos accesos separados, uno por depósito', () => {
+  const docs = { storkhub: DEP_0004, comercio: DEP_0005 }
+  const lineas = [{ destino: 'storkhub' as const }, { destino: 'comercio' as const }]
+  const a = accesosLiquidacion(lineas, docs)
+  assert.deepEqual(a, [
+    { destino: 'storkhub', depositoId: DEP_0004.id, abrible: true },
+    { destino: 'comercio', depositoId: DEP_0005.id, abrible: true },
+  ])
+  assert.notEqual(a[0].depositoId, a[1].depositoId)
+})
+
+test('VD9 · el acceso de la línea de StorkHub abre DEP-0004', () => {
+  const docs = { storkhub: DEP_0004, comercio: DEP_0005 }
+  const a = accesosLiquidacion([{ destino: 'storkhub' as const }], docs)[0]
+  const abierto = [DEP_0004, DEP_0005].find((d) => d.id === a.depositoId)!
+  assert.equal(contextoDeposito(abierto, sh0005() as never, { nombresActores: NOMBRES }).codigo, 'DEP-0004')
+  assert.equal(contextoDeposito(abierto).monto, 'C$ 90')
+})
+
+test('VD10 · el acceso de la línea del comercio abre DEP-0005', () => {
+  const docs = { storkhub: DEP_0004, comercio: DEP_0005 }
+  const a = accesosLiquidacion([{ destino: 'comercio' as const }], docs)[0]
+  const abierto = [DEP_0004, DEP_0005].find((d) => d.id === a.depositoId)!
+  assert.equal(contextoDeposito(abierto, null, { nombresActores: NOMBRES }).codigo, 'DEP-0005')
+  assert.equal(contextoDeposito(abierto).monto, 'C$ 910')
+})
+
+test('VD11 · con N depósitos no hay un acceso único ambiguo', () => {
+  const docs = { storkhub: DEP_0004, comercio: DEP_0005 }
+  const a = accesosLiquidacion([{ destino: 'storkhub' as const }, { destino: 'comercio' as const }], docs)
+  assert.equal(a.length, 2)
+  assert.equal(new Set(a.map((x) => x.depositoId)).size, 2)
+  // Y en el drawer, una fila por depósito: nunca una sola para los dos.
+  assert.equal(filas([DEP_0004, DEP_0005]).length, 2)
+})
+
+test('VD12 · sin depósitos no se ofrece ninguna acción', () => {
+  assert.deepEqual(accesosLiquidacion([], {}), [])
+  assert.deepEqual(accesosLiquidacion([{ destino: 'storkhub' as const }], {}), [
+    { destino: 'storkhub', depositoId: null, abrible: false },
+  ])
+  // Una línea registrada que este perfil no puede leer tampoco abre nada.
+  assert.deepEqual(accesosLiquidacion([{ destino: 'comercio' as const }], { comercio: null }), [
+    { destino: 'comercio', depositoId: null, abrible: false },
+  ])
+  assert.deepEqual(filas([]), [])
 })

@@ -61,6 +61,7 @@ import { montoDeliveryCobrado } from '@/lib/monto-delivery'
 // Cobros; la flecha sigue llevando a la ficha completa, en la misma pestaña.
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
 import { IrAFicha } from '../_components/IrAFicha'
+import { accesosLiquidacion, TEXTO_VER_DEPOSITO } from '@/lib/drawer-contextual'
 import { useSearchParams, useRouter, usePathname } from 'next/navigation'
 import { normalizarFecha } from '@/lib/timeline-orden'
 import { ImageLightbox } from '../../_components/ImageLightbox'
@@ -1303,12 +1304,19 @@ function CobrosPageContent() {
   const router = useRouter()
   const pathname = usePathname()
   const drawerOrdenId = searchParams.get('orden')
-  const abrirDrawerOrden = (id: string) => {
+  // El depósito con el que abrir el drawer, cuando se entró por el chip de la
+  // columna Liquidación. Vive en estado local y no en la URL: "Volver a la
+  // orden" es del drawer, y un ?dep= obligaría a que el drawer avisara hacia
+  // afuera para limpiarlo —más superficie que la que este acceso necesita—.
+  const [depDrawer, setDepDrawer] = useState<string | null>(null)
+  const abrirDrawerOrden = (id: string, depId: string | null = null) => {
+    setDepDrawer(depId)
     const p = new URLSearchParams(searchParams.toString())
     p.set('orden', id)
     router.replace(`${pathname}?${p.toString()}`, { scroll: false })
   }
   const cerrarDrawerOrden = () => {
+    setDepDrawer(null)
     const p = new URLSearchParams(searchParams.toString())
     p.delete('orden')
     const q = p.toString()
@@ -1824,7 +1832,7 @@ function CobrosPageContent() {
       )}
       {/* DRAWER-CONTEXTUAL-1 — resumen de la orden encima de Cobros. */}
       {drawerOrdenId && (
-        <SolicitudDrawer solicitudId={drawerOrdenId} onClose={cerrarDrawerOrden} comercioNames={comercioNames} />
+        <SolicitudDrawer solicitudId={drawerOrdenId} onClose={cerrarDrawerOrden} comercioNames={comercioNames} depInicial={depDrawer} />
       )}
 
       {viendoBoucher && (
@@ -2272,10 +2280,18 @@ function CobrosPageContent() {
                                   </span>
                                 )
                               }
+                              // DRAWER-CONTEXTUAL-1 · E2E — cada línea abre SU
+                              // depósito: una orden puede liquidar a StorkHub
+                              // y al comercio con dos comprobantes distintos,
+                              // y un único botón no diría cuál. Sin lecturas
+                              // nuevas: el documento ya está en el caché, y
+                              // una línea sin documento no ofrece nada.
+                              const accesos = accesosLiquidacion(dv.lineas, docs)
                               return (
                                 <div className="flex flex-col gap-1">
-                                  {dv.lineas.map((l) => {
+                                  {dv.lineas.map((l, i) => {
                                     const dep = docs[l.destino] ?? null
+                                    const acceso = accesos[i]
                                     const texto = dep
                                       ? liquidacionDeposito(dep)
                                       : l.clave === 'pendiente'
@@ -2286,12 +2302,23 @@ function CobrosPageContent() {
                                       : l.clave === 'registrado_sin_detalle'
                                         ? 'bg-gray-50 text-gray-600 border-gray-200'
                                         : 'bg-green-50 text-green-700 border-green-200'
+                                    const clase = `inline-flex w-fit text-xs font-semibold px-2 py-0.5 rounded-full border whitespace-nowrap ${tono}`
+                                    const titulo = `${l.destinoEtiqueta}: ${l.texto} · ${fmt(l.obligacion)}${dep ? ` · ID técnico ${dep.id}` : ''}`
+                                    if (acceso?.abrible && acceso.depositoId) {
+                                      return (
+                                        <button
+                                          key={l.destino}
+                                          type="button"
+                                          onClick={() => abrirDrawerOrden(s.id, acceso.depositoId)}
+                                          className={`${clase} hover:brightness-95 transition cursor-pointer`}
+                                          title={`${TEXTO_VER_DEPOSITO} · ${titulo}`}
+                                        >
+                                          {texto}
+                                        </button>
+                                      )
+                                    }
                                     return (
-                                      <span
-                                        key={l.destino}
-                                        className={`inline-flex w-fit text-xs font-semibold px-2 py-0.5 rounded-full border whitespace-nowrap ${tono}`}
-                                        title={`${l.destinoEtiqueta}: ${l.texto} · ${fmt(l.obligacion)}${dep ? ` · ID técnico ${dep.id}` : ''}`}
-                                      >
+                                      <span key={l.destino} className={clase} title={titulo}>
                                         {texto}
                                       </span>
                                     )

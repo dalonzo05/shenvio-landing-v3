@@ -480,21 +480,30 @@ export function SolicitudDrawer({
   solicitudId,
   onClose,
   comercioNames = {},
+  depInicial = null,
 }: {
   solicitudId: string
   onClose: () => void
   comercioNames?: Record<string, string>
+  /**
+   * Depósito con el que abrir directamente el segundo nivel, cuando quien
+   * monta el drawer ya sabe cuál se pidió —el chip de la columna Liquidación
+   * de Cobros—. Desde ahí se vuelve a la orden como siempre.
+   */
+  depInicial?: string | null
 }) {
   // DRAWER-CONTEXTUAL-1 — segundo nivel: el depósito abierto dentro del mismo
   // drawer. null = se ve la orden. Nunca hay una tercera capa.
-  const [depContextoId, setDepContextoId] = useState<string | null>(null)
+  const [depContextoId, setDepContextoId] = useState<string | null>(depInicial)
   // Este mismo drawer se monta en /panel/comercio: la ruta dice desde dónde se
   // está mirando, sin leer el perfil ni recibir el rol. Decide una sola cosa:
   // si "Ver en Depósitos" —una ruta del gestor— se ofrece o no.
   const pathnameDrawer = usePathname()
   const ofreceVerEnDepositos = permiteVerEnDepositos(pathnameDrawer)
-  // Al cambiar de orden se vuelve siempre al nivel 1.
-  useEffect(() => { setDepContextoId(null) }, [solicitudId])
+  // Al cambiar de orden se vuelve al nivel 1; si quien abre pidió un depósito
+  // concreto, se entra directo a ese. "Volver a la orden" sigue mandando: el
+  // efecto no se vuelve a disparar mientras la orden y el pedido no cambien.
+  useEffect(() => { setDepContextoId(depInicial ?? null) }, [solicitudId, depInicial])
   const [solicitud, setSolicitud] = useState<SolicitudDetalle | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
@@ -1040,15 +1049,19 @@ export function SolicitudDrawer({
                                 <span className="text-sm font-medium text-gray-900">
                                   {typeof l.monto === 'number' ? money(l.monto) : '—'} · {l.estado}
                                 </span>
-                                {vista.enRevision.includes(l.id) && (
-                                  <button
-                                    type="button"
-                                    onClick={() => setDepContextoId(l.id)}
-                                    className="rounded-lg border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 transition"
-                                  >
-                                    {TEXTO_VER_DEPOSITO}
-                                  </button>
-                                )}
+                                {/* Consultar no es operar: la acción se ofrece
+                                    para cualquier depósito asociado, esté
+                                    confirmado, en revisión, devuelto o
+                                    anulado, y también para el tipo C. Las
+                                    acciones que escriben viven en Depósitos. */}
+                                <button
+                                  type="button"
+                                  onClick={() => setDepContextoId(l.id)}
+                                  title={`${TEXTO_VER_DEPOSITO} ${l.identidad.texto}`}
+                                  className="rounded-lg border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 transition"
+                                >
+                                  {TEXTO_VER_DEPOSITO}
+                                </button>
                               </span>
                             </li>
                           ))}

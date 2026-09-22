@@ -24,7 +24,6 @@ import type { DepositoRegistrado, DestinoDeposito } from './deposito-orden'
 import {
   identidadDeposito,
   estadoDeposito,
-  claseDeposito,
   origenDestinoDeposito,
   comprobanteDeposito,
   nombreMotorizadoDeposito,
@@ -39,6 +38,11 @@ import { normalizarMotivoEvento } from './deposito-eventos'
  * comercio, reportes, dashboard): el verbo describe lo que el botón hace
  * —abrir el depósito— y no promete una aprobación financiera que acá no
  * existe. Confirmar y rechazar siguen viviendo en el panel de Depósitos.
+ *
+ * CONSULTAR NO ES OPERAR. La acción se ofrece para cualquier depósito
+ * asociado y legible, en cualquier estado —pendiente_boucher, en_revision,
+ * devuelto, confirmado, convertido_en_deuda, anulado— y también para el tipo
+ * C. El estado cambia el badge y los datos, nunca el derecho a mirarlo.
  */
 export const TEXTO_VER_DEPOSITO = 'Ver depósito'
 export const TEXTO_VOLVER_ORDEN = 'Volver a la orden'
@@ -61,49 +65,46 @@ export function permiteVerEnDepositos(pathname: string | null | undefined): bool
   return pathname === AMBITO_GESTOR || pathname.startsWith(`${AMBITO_GESTOR}/`)
 }
 
-// ─── ¿Este depósito espera revisión? ──────────────────────────────────────────
+// ─── Acceso al depósito desde una línea de liquidación ────────────────────────
 
-/** Estado en el que un depósito del motorizado espera la revisión del gestor. */
-export const ESTADO_REVISABLE = 'en_revision'
-
-export type MotivoNoRevisable = 'sin_deposito' | 'tipo_c' | 'estado'
-
-/**
- * Por qué este depósito NO está esperando revisión. El tipo C (pago del
- * delivery por transferencia) nunca lo está: su corrección es Cobros →
- * Revertir, no la cola A/B. Y uno confirmado, devuelto, anulado o todavía sin
- * comprobante tampoco.
- */
-export function motivoNoRevisable(dep: DepositoRegistrado | null | undefined): MotivoNoRevisable | null {
-  if (!dep) return 'sin_deposito'
-  if (claseDeposito(dep) === 'transferencia_delivery') return 'tipo_c'
-  if ((dep.estado ?? '') !== ESTADO_REVISABLE) return 'estado'
-  return null
+export interface AccesoLiquidacion {
+  destino: DestinoDeposito
+  /** El documento que hay que abrir. null = no hay nada que consultar. */
+  depositoId: string | null
+  /** ¿Se ofrece abrir el depósito en esta línea? */
+  abrible: boolean
 }
 
 /**
- * ¿Este depósito está esperando revisión? Solo mira el documento: tipo A/B y
- * estado 'en_revision'. Es lo que decide si el drawer ofrece ABRIR el contexto
- * del depósito, que es de solo lectura y no necesita saber el rol —así un
- * listado no tiene que leer el perfil para pintar una fila—. Las acciones que
- * sí escriben viven en el panel de Depósitos, que ya valida rol y Rules.
+ * Para la columna "Liquidación" de Cobros: por cada línea de la orden, el
+ * depósito que esa línea abre. Una entrada por línea y nunca una sola acción
+ * agregada para toda la orden: SH-0005 liquida a StorkHub y al comercio con
+ * DOS comprobantes distintos, y un botón único no diría cuál abre.
+ *
+ * Una línea sin documento a mano —pendiente, o registrada y no legible— no
+ * ofrece nada: no se inventa un destino ni se dispara una lectura por fila.
  */
-export function depositoEnRevision(dep: DepositoRegistrado | null | undefined): boolean {
-  return motivoNoRevisable(dep) === null
+export function accesosLiquidacion(
+  lineas: Array<{ destino: DestinoDeposito }>,
+  depositos: Partial<Record<DestinoDeposito, DepositoRegistrado | null>> = {},
+): AccesoLiquidacion[] {
+  return lineas.map((l) => {
+    const dep = depositos[l.destino] ?? null
+    const depositoId = dep && typeof dep.id === 'string' && dep.id ? dep.id : null
+    return { destino: l.destino, depositoId, abrible: depositoId !== null }
+  })
 }
 
 // ─── Vista de la orden en el drawer ───────────────────────────────────────────
 
 export interface VistaDrawerOrden {
   resumen: ResumenEjecutivo
-  /** Una línea por depósito, nunca un total. */
-  liquidaciones: FilaDepositoAsociado[]
   /**
-   * IDs de los depósitos en revisión: los que ofrecen abrir su contexto. No
-   * depende del rol —el contexto es de solo lectura— y por eso un listado no
-   * tiene que leer el perfil para pintar una fila.
+   * Una línea por depósito, nunca un total. Cada una ofrece "Ver depósito":
+   * la vista no trae ningún campo que filtre por estado o por rol, porque
+   * consultar un depósito asociado no depende de ninguno de los dos.
    */
-  enRevision: string[]
+  liquidaciones: FilaDepositoAsociado[]
 }
 
 export interface OpcionesVistaDrawer extends OpcionesResumenEjecutivo {
@@ -119,7 +120,6 @@ export function vistaDrawerOrden(
   return {
     resumen: resumenEjecutivoOrden(orden, { ...resto, depositos: limpios }),
     liquidaciones: filasDepositosAsociados(limpios, orden as never, (d) => nombreMotorizadoDeposito(d, nombresActores)),
-    enRevision: limpios.filter((d) => depositoEnRevision(d)).map((d) => d.id),
   }
 }
 
