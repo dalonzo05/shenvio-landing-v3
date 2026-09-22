@@ -57,7 +57,7 @@ import { montoDeliveryCobrado, deliveryCubiertoPorCobroProducto } from '@/lib/mo
 // SOLICITUD-RESUMEN-UX-1 — mismo vocabulario que el resumen de la ficha.
 import { TEXTO_DESCONTADO_CE } from '@/lib/resumen-ejecutivo-orden'
 import { trazabilidadPago, type EntradaTrazabilidad } from '@/lib/trazabilidad-pago'
-import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
+import { presentarActor, uidsPorResolver, resolverNombresActores } from '@/lib/actor-resolucion'
 import { mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
 import {
   X,
@@ -639,29 +639,44 @@ export function SolicitudDrawer({
     [depositosAsociados, solicitud?.registro]
   )
 
-  // PAGO-TRANSFERENCIA-UX-1 — quién confirmó el cobro, con nombre. Decía
-  // "Usuario interno" aunque el UID estaba guardado (DRAWER-ACTOR-SIN-NOMBRE).
-  // Una lectura por UID distinto, cacheada; sin permiso o sin nombre queda ''
-  // y se sigue mostrando "Usuario interno". No se infiere el rol.
+  // PAGO-TRANSFERENCIA-UX-1 + DRAWER-CONTEXTUAL-1 · ACTOR — los actores
+  // internos del drawer, con nombre. Decía "Usuario interno" aunque el UID
+  // estaba guardado (DRAWER-ACTOR-SIN-NOMBRE): primero para el cobro y después
+  // para los depósitos asociados, que guardan confirmadoPorUid y cuyo nombre
+  // vive en usuarios/{uid} —la misma fuente que ya usan la ficha, Depósitos y
+  // Auditoría—.
+  //
+  // La unidad de lectura es el UID DISTINTO no cacheado: DEP-0004 y DEP-0005,
+  // confirmados por la misma persona, se resuelven con UNA lectura, y en las
+  // aperturas siguientes con ninguna. Sin permiso, sin documento o sin nombre
+  // queda '' y se sigue mostrando "Usuario interno". Nunca se infiere el rol.
   const uidConfirmador = solicitud?.cobroDelivery?.confirmadoPor ?? null
-  const [nombreConfirmador, setNombreConfirmador] = useState<string | null>(null)
+  const uidsConfirmadoresDepositos = depositosAsociados
+    .map((d) => (typeof d.confirmadoPorUid === 'string' ? d.confirmadoPorUid.trim() : ''))
+    .filter((u) => !!u)
+    .join('|')
+  // Versión del caché: solo existe para volver a renderizar cuando llegan
+  // nombres nuevos. El caché sigue siendo uno, a nivel de módulo.
+  const [versionNombres, setVersionNombres] = useState(0)
   useEffect(() => {
-    if (!uidConfirmador) { setNombreConfirmador(null); return }
-    const cacheado = nombresUsuariosDrawer.get(uidConfirmador)
-    if (cacheado !== undefined) { setNombreConfirmador(cacheado); return }
+    const uids = [uidConfirmador, ...(uidsConfirmadoresDepositos ? uidsConfirmadoresDepositos.split('|') : [])]
+    const pendientes = uidsPorResolver(uids, nombresUsuariosDrawer)
+    if (pendientes.length === 0) return
     let vivo = true
-    getDoc(doc(db, 'usuarios', uidConfirmador))
-      .then((snap) => {
-        const n = snap.exists() ? nombreDeUsuario(snap.data() as { name?: string; nombre?: string }) : ''
-        nombresUsuariosDrawer.set(uidConfirmador, n)
-        if (vivo) setNombreConfirmador(n)
-      })
-      .catch(() => {
-        nombresUsuariosDrawer.set(uidConfirmador, '')
-        if (vivo) setNombreConfirmador('')
-      })
+    resolverNombresActores(pendientes, nombresUsuariosDrawer, async (uid) => {
+      const snap = await getDoc(doc(db, 'usuarios', uid))
+      return snap.exists() ? (snap.data() as { name?: unknown; nombre?: unknown }) : null
+    }).then(() => { if (vivo) setVersionNombres((v) => v + 1) })
     return () => { vivo = false }
-  }, [uidConfirmador])
+  }, [uidConfirmador, uidsConfirmadoresDepositos])
+  // Lo que la UI lee: el caché completo, ya con lo que traían otras aperturas.
+  const nombresActoresDrawer = useMemo(
+    () => Object.fromEntries(nombresUsuariosDrawer),
+    // versionNombres es la dependencia real: el Map se muta en su lugar.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [versionNombres, uidConfirmador, uidsConfirmadoresDepositos]
+  )
+  const nombreConfirmador = uidConfirmador ? (nombresActoresDrawer[uidConfirmador] ?? null) : null
 
   // Fetch del comercio para resolver requiereBolso
   useEffect(() => {
@@ -972,7 +987,7 @@ export function SolicitudDrawer({
           {solicitud && depContextoId && (() => {
             const abierto = depositosAsociados.find((d) => d.id === depContextoId) ?? null
             if (!abierto) return null
-            const nombres = Object.fromEntries(nombresUsuariosDrawer)
+            const nombres = nombresActoresDrawer
             return (
               <div className="absolute inset-0 z-10 overflow-y-auto bg-gray-50 p-4">
                 <DepositoContexto
@@ -1011,8 +1026,9 @@ export function SolicitudDrawer({
                 // anulado cuyo puntero se liberó—, no solo la línea viva de
                 // cada destino.
                 const depsLista = depositosAsociados
-                // El caché de nombres del drawer es un Map a nivel de módulo.
-                const nombres = Object.fromEntries(nombresUsuariosDrawer)
+                // El caché de nombres del drawer es un Map a nivel de módulo;
+                // acá se lee ya resuelto, con los UIDs de esta orden.
+                const nombres = nombresActoresDrawer
                 const vista = vistaDrawerOrden(solicitud as never, {
                   depositos: depsLista,
                   depositosPorDestino: depositosOrden,

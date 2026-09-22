@@ -49,3 +49,67 @@ export function nombreDeUsuario(data: { name?: unknown; nombre?: unknown } | nul
   const n2 = typeof data.nombre === 'string' ? data.nombre.trim() : ''
   return n2
 }
+
+// ─── Resolución de nombres por UID ────────────────────────────────────────────
+//
+// DRAWER-CONTEXTUAL-1 · ACTOR — la unidad de lectura es el UID DISTINTO no
+// cacheado, no el documento que lo menciona: dos depósitos confirmados por la
+// misma persona se resuelven con una sola lectura. Acá no hay Firestore: quien
+// llama inyecta el lector, así que esto se puede probar contando lecturas.
+
+/** Mínimo que necesita el resolver de una caché: saber y guardar por UID. */
+export interface CacheNombres {
+  has(uid: string): boolean
+  get(uid: string): string | undefined
+  set(uid: string, nombre: string): unknown
+}
+
+/** Lo que devuelve leer `usuarios/{uid}`; null si no existe. */
+export type DatosUsuario = { name?: unknown; nombre?: unknown } | null
+
+/**
+ * Qué UIDs hay que ir a buscar: no vacíos, sin repetir y todavía no cacheados
+ * —ni con nombre ni con el '' que marca "ya se intentó"—.
+ */
+export function uidsPorResolver(
+  uids: Array<string | null | undefined>,
+  cache: CacheNombres,
+): string[] {
+  const vistos = new Set<string>()
+  const out: string[] = []
+  for (const u of uids) {
+    if (typeof u !== 'string') continue
+    const uid = u.trim()
+    if (!uid || vistos.has(uid) || cache.has(uid)) continue
+    vistos.add(uid)
+    out.push(uid)
+  }
+  return out
+}
+
+/**
+ * Resuelve los UIDs pendientes con el lector inyectado y los deja en la caché.
+ *
+ * Una lectura por UID pendiente, nunca dos. Un usuario inexistente, sin nombre
+ * legible o una lectura que falla guardan '' : la UI cae a "Usuario interno" y
+ * no se reintenta en lo que resta de la sesión. Nunca lanza.
+ */
+export async function resolverNombresActores(
+  uids: Array<string | null | undefined>,
+  cache: CacheNombres,
+  leerUsuario: (uid: string) => Promise<DatosUsuario>,
+): Promise<Record<string, string>> {
+  const pendientes = uidsPorResolver(uids, cache)
+  const resueltos: Record<string, string> = {}
+  await Promise.all(pendientes.map(async (uid) => {
+    let nombre = ''
+    try {
+      nombre = nombreDeUsuario(await leerUsuario(uid))
+    } catch {
+      nombre = ''
+    }
+    cache.set(uid, nombre)
+    resueltos[uid] = nombre
+  }))
+  return resueltos
+}
