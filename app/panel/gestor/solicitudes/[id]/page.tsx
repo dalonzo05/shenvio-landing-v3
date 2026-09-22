@@ -29,6 +29,8 @@ import { detalleIncidencia } from '@/lib/incidencia-cobro'
 import { construirTimeline, uidsDeTimeline, type HistoriaDeposito, type EventoDepositoLeido } from '@/lib/timeline-orden'
 import { filasDepositosAsociados, uidsDepositosAsociados } from '@/lib/depositos-asociados'
 import { DepositosAsociados } from './_components/DepositosAsociados'
+import { resumenEjecutivoOrden } from '@/lib/resumen-ejecutivo-orden'
+import { ResumenEjecutivo } from './_components/ResumenEjecutivo'
 import { ImageLightbox } from '../../../_components/ImageLightbox'
 import { nombreDeUsuario } from '@/lib/actor-resolucion'
 import { mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
@@ -314,6 +316,22 @@ async function copyToClipboard(text: string) {
     document.execCommand('copy')
     document.body.removeChild(ta)
   }
+}
+
+/**
+ * SOLICITUD-RESUMEN-UX-1 — nombre del motorizado de la orden. Primero el
+ * resuelto por UID (el mismo mapa que usan la timeline y los depósitos) y
+ * después el guardado en la asignación. Sin ninguno, null: no se inventa.
+ */
+function nombreMotorizadoDeLaOrden(
+  orden: { asignacion?: { motorizadoAuthUid?: string | null; motorizadoNombre?: string | null } | null } | null,
+  nombres: Record<string, string>,
+): string | null {
+  const uid = orden?.asignacion?.motorizadoAuthUid
+  const resuelto = typeof uid === 'string' ? (nombres[uid] ?? '').trim() : ''
+  if (resuelto) return resuelto
+  const guardado = orden?.asignacion?.motorizadoNombre
+  return typeof guardado === 'string' && guardado.trim() !== '' ? guardado.trim() : null
 }
 
 function statusLabel(estado: EstadoSolicitud) {
@@ -828,6 +846,21 @@ function GestorSolicitudDetallePageContent() {
     [depositosDeLaOrden, solicitud, nombresActores]
   )
 
+  // SOLICITUD-RESUMEN-UX-1 — el resumen compone lo que la ficha YA cargó: la
+  // orden, sus depósitos (los mismos de "Depósitos asociados") y los nombres
+  // ya resueltos. Ninguna lectura nueva.
+  const resumenEjecutivo = useMemo(
+    () => (solicitud
+      ? resumenEjecutivoOrden(solicitud as never, {
+        depositos: depositosDeLaOrden,
+        depositosPorDestino: depositosOrden,
+        nombreMotorizado: nombreMotorizadoDeLaOrden(solicitud as never, nombresActores),
+        estadoEtiqueta: statusLabel(solicitud.estado),
+      })
+      : null),
+    [solicitud, depositosDeLaOrden, depositosOrden, nombresActores]
+  )
+
   const uidsActores = useMemo(() => {
     const cm = solicitud?.cobrosMotorizado as
       | { producto?: { resolucion?: { resueltoPor?: string } }; resolucion?: { resueltoPor?: string } }
@@ -1195,6 +1228,10 @@ function GestorSolicitudDetallePageContent() {
       {/* B2.6 — lo primero que se ve: qué falta para cerrar la orden, y un
           índice para saltar al bloque que lo resuelve. Ambos derivados: no
           consultan nada ni persisten nada. */}
+      {/* SOLICITUD-RESUMEN-UX-1 — nivel 1: entender la orden sin recorrerla.
+          "Qué falta en esta orden" sigue abajo como detalle de pendientes. */}
+      {resumenEjecutivo && <ResumenEjecutivo resumen={resumenEjecutivo} />}
+
       <ResumenOrden orden={solicitud as never} depositos={depositosOrden} />
       <IndiceFicha
         hayIncidencia={detalleIncidencia(solicitud as never).length > 0}

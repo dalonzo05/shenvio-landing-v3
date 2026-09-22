@@ -45,6 +45,8 @@ import {
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { montoAsociadoDeposito, momentosDeposito } from '@/lib/pago-transferencia'
 import { montoDeliveryCobrado, deliveryCubiertoPorCobroProducto } from '@/lib/monto-delivery'
+// SOLICITUD-RESUMEN-UX-1 — mismo vocabulario que el resumen de la ficha.
+import { TEXTO_DESCONTADO_CE } from '@/lib/resumen-ejecutivo-orden'
 import { trazabilidadPago, type EntradaTrazabilidad } from '@/lib/trazabilidad-pago'
 import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
 import { mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
@@ -1188,7 +1190,7 @@ export function SolicitudDrawer({
                       {(() => {
                         const cubierto = deliveryCubiertoPorCobroProducto(solicitud as never)
                         return cubierto != null
-                          ? <InfoRow label="Cubierto con el cobro del producto" value={money(cubierto)} />
+                          ? <InfoRow label={TEXTO_DESCONTADO_CE} value={money(cubierto)} />
                           : null
                       })()}
                       {typeof solicitud.cobroDelivery?.montoDelivery === 'number'
