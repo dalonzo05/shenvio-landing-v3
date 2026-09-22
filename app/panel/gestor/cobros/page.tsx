@@ -1288,10 +1288,17 @@ export default function CobrosPage() {
 
 function CobrosPageContent() {
   // DRAWER-CONTEXTUAL-1 — la orden abierta en el drawer viaja en la URL
-  // (?orden=<docId>): refrescar o copiar el link reabre el mismo resumen, y
-  // atrás lo cierra. Se usa replace para no llenar el historial con cada
-  // apertura. El listado no se remonta: su pestaña, sus filtros y su scroll
-  // viven en estado local y esto no los toca.
+  // (?orden=<docId>): refrescar o copiar el link reabre el mismo resumen.
+  //
+  // Se usa replace, a propósito: abrir y cerrar el drawer NO agrega una
+  // entrada al historial por cada apertura. Cerrar quita ?orden de la URL de
+  // forma explícita (el botón X / la tecla del drawer), que es el camino para
+  // volver a la orden cerrada. Atrás conserva la semántica normal del
+  // navegador: como no hay entrada propia, puede salir de Cobros en vez de
+  // cerrar el drawer.
+  //
+  // El listado no se remonta: su pestaña, sus filtros y su scroll viven en
+  // estado local y esto no los toca.
   const searchParams = useSearchParams()
   const router = useRouter()
   const pathname = usePathname()

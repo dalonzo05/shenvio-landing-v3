@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { usePathname } from 'next/navigation'
 import { rutaOrden } from '@/lib/ruta-orden'
 import {
   collection,
@@ -34,14 +35,14 @@ import {
   vistaDrawerOrden,
   contextoDeposito,
   depositosPorDestinoDeLaOrden,
-  TEXTO_REVISAR_DEPOSITO,
+  permiteVerEnDepositos,
+  TEXTO_VER_DEPOSITO,
 } from '@/lib/drawer-contextual'
 import { DepositoContexto } from './DepositoContexto'
 import {
   depositoVisible,
   idsDepositoDeOrden,
   type DepositoRegistrado,
-  type DestinoDeposito,
 } from '@/lib/deposito-orden'
 import {
   identidadDeposito,
@@ -479,21 +480,19 @@ export function SolicitudDrawer({
   solicitudId,
   onClose,
   comercioNames = {},
-  rol = null,
 }: {
   solicitudId: string
   onClose: () => void
   comercioNames?: Record<string, string>
-  /**
-   * DRAWER-CONTEXTUAL-1 — rol de la sesión, cuando quien abre el drawer ya lo
-   * tiene. Sin él, el contexto de depósito sigue abriéndose (es de solo
-   * lectura); lo único que no se afirma es que este rol pueda revisarlo.
-   */
-  rol?: string | null
 }) {
   // DRAWER-CONTEXTUAL-1 — segundo nivel: el depósito abierto dentro del mismo
   // drawer. null = se ve la orden. Nunca hay una tercera capa.
   const [depContextoId, setDepContextoId] = useState<string | null>(null)
+  // Este mismo drawer se monta en /panel/comercio: la ruta dice desde dónde se
+  // está mirando, sin leer el perfil ni recibir el rol. Decide una sola cosa:
+  // si "Ver en Depósitos" —una ruta del gestor— se ofrece o no.
+  const pathnameDrawer = usePathname()
+  const ofreceVerEnDepositos = permiteVerEnDepositos(pathnameDrawer)
   // Al cambiar de orden se vuelve siempre al nivel 1.
   useEffect(() => { setDepContextoId(null) }, [solicitudId])
   const [solicitud, setSolicitud] = useState<SolicitudDetalle | null>(null)
@@ -968,8 +967,9 @@ export function SolicitudDrawer({
             return (
               <div className="absolute inset-0 z-10 overflow-y-auto bg-gray-50 p-4">
                 <DepositoContexto
-                  contexto={contextoDeposito(abierto, solicitud as never, { rol, nombresActores: nombres })}
+                  contexto={contextoDeposito(abierto, solicitud as never, { nombresActores: nombres })}
                   nombresActores={nombres}
+                  verEnDepositos={ofreceVerEnDepositos}
                   onVolver={() => setDepContextoId(null)}
                   onVerComprobante={(url) => setLightboxUrl(url)}
                 />
@@ -996,10 +996,11 @@ export function SolicitudDrawer({
                   atención, con lo que la propia orden puede demostrar. */}
               {(() => {
                 // Mismo view-model que la ficha: resumen, depósitos asociados
-                // y cuáles están en revisión. No lee nada nuevo: usa los
-                // depósitos que el drawer ya trajo por puntero.
-                // La lista canónica entera: incluye un depósito anulado cuyo
-                // puntero se liberó, no solo la línea viva de cada destino.
+                // y cuáles están en revisión. No lee nada nuevo: compone los
+                // depósitos que el drawer ya trajo con la query canónica
+                // (solicitudIds array-contains), la lista entera —incluido un
+                // anulado cuyo puntero se liberó—, no solo la línea viva de
+                // cada destino.
                 const depsLista = depositosAsociados
                 // El caché de nombres del drawer es un Map a nivel de módulo.
                 const nombres = Object.fromEntries(nombresUsuariosDrawer)
@@ -1008,7 +1009,6 @@ export function SolicitudDrawer({
                   depositosPorDestino: depositosOrden,
                   nombresActores: nombres,
                   nombreMotorizado: solicitud.asignacion?.motorizadoNombre ?? null,
-                  rol,
                 })
                 return (
                   <>
@@ -1046,7 +1046,7 @@ export function SolicitudDrawer({
                                     onClick={() => setDepContextoId(l.id)}
                                     className="rounded-lg border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 transition"
                                   >
-                                    {TEXTO_REVISAR_DEPOSITO}
+                                    {TEXTO_VER_DEPOSITO}
                                   </button>
                                 )}
                               </span>

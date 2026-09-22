@@ -34,43 +34,51 @@ import { normalizarMotivoEvento } from './deposito-eventos'
 
 // ─── Copy ─────────────────────────────────────────────────────────────────────
 
-export const TEXTO_REVISAR_DEPOSITO = 'Revisar depósito'
+/**
+ * El segundo nivel es de SOLO LECTURA y el drawer es compartido (gestor,
+ * comercio, reportes, dashboard): el verbo describe lo que el botón hace
+ * —abrir el depósito— y no promete una aprobación financiera que acá no
+ * existe. Confirmar y rechazar siguen viviendo en el panel de Depósitos.
+ */
+export const TEXTO_VER_DEPOSITO = 'Ver depósito'
 export const TEXTO_VOLVER_ORDEN = 'Volver a la orden'
 export const TEXTO_VER_EN_DEPOSITOS = 'Ver en Depósitos'
 export const TEXTO_VER_FICHA = 'Ver ficha completa'
 /** La única ruta de depósitos que existe: no se inventa una por DEP. */
 export const RUTA_DEPOSITOS = '/panel/gestor/depositos'
+/** Las rutas del gestor, las únicas desde donde RUTA_DEPOSITOS es navegable. */
+export const AMBITO_GESTOR = '/panel/gestor'
 
-// ─── ¿Se puede revisar este depósito? ─────────────────────────────────────────
+/**
+ * ¿Ofrecer "Ver en Depósitos"? Solo dentro del panel del gestor. El mismo
+ * drawer se monta en /panel/comercio, y ahí ese enlace apuntaría a una ruta
+ * que ese usuario no puede abrir: el contexto de solo lectura termina en la
+ * vuelta a la orden. Se decide con el pathname que la superficie ya conoce —
+ * ninguna lectura nueva, ningún rol— y por defecto NO se ofrece.
+ */
+export function permiteVerEnDepositos(pathname: string | null | undefined): boolean {
+  if (typeof pathname !== 'string') return false
+  return pathname === AMBITO_GESTOR || pathname.startsWith(`${AMBITO_GESTOR}/`)
+}
+
+// ─── ¿Este depósito espera revisión? ──────────────────────────────────────────
 
 /** Estado en el que un depósito del motorizado espera la revisión del gestor. */
 export const ESTADO_REVISABLE = 'en_revision'
-/** Quién revisa depósitos. El digitador registra, no confirma. */
-export const ROLES_REVISION = ['gestor', 'admin']
 
-export type MotivoNoRevisable = 'sin_deposito' | 'tipo_c' | 'rol' | 'estado'
+export type MotivoNoRevisable = 'sin_deposito' | 'tipo_c' | 'estado'
 
 /**
- * El tipo C (pago del delivery por transferencia) NO se revisa como un
- * depósito del motorizado: su corrección es Cobros → Revertir. Y un depósito
- * confirmado, devuelto, anulado o todavía sin comprobante no está en revisión.
+ * Por qué este depósito NO está esperando revisión. El tipo C (pago del
+ * delivery por transferencia) nunca lo está: su corrección es Cobros →
+ * Revertir, no la cola A/B. Y uno confirmado, devuelto, anulado o todavía sin
+ * comprobante tampoco.
  */
-export function motivoNoRevisable(
-  dep: DepositoRegistrado | null | undefined,
-  rol: string | null | undefined,
-): MotivoNoRevisable | null {
+export function motivoNoRevisable(dep: DepositoRegistrado | null | undefined): MotivoNoRevisable | null {
   if (!dep) return 'sin_deposito'
   if (claseDeposito(dep) === 'transferencia_delivery') return 'tipo_c'
-  if (!ROLES_REVISION.includes(typeof rol === 'string' ? rol : '')) return 'rol'
   if ((dep.estado ?? '') !== ESTADO_REVISABLE) return 'estado'
   return null
-}
-
-export function puedeRevisarDeposito(
-  dep: DepositoRegistrado | null | undefined,
-  rol: string | null | undefined,
-): boolean {
-  return motivoNoRevisable(dep, rol) === null
 }
 
 /**
@@ -81,8 +89,7 @@ export function puedeRevisarDeposito(
  * sí escriben viven en el panel de Depósitos, que ya valida rol y Rules.
  */
 export function depositoEnRevision(dep: DepositoRegistrado | null | undefined): boolean {
-  const m = motivoNoRevisable(dep, ROLES_REVISION[0])
-  return m === null
+  return motivoNoRevisable(dep) === null
 }
 
 // ─── Vista de la orden en el drawer ───────────────────────────────────────────
@@ -91,15 +98,15 @@ export interface VistaDrawerOrden {
   resumen: ResumenEjecutivo
   /** Una línea por depósito, nunca un total. */
   liquidaciones: FilaDepositoAsociado[]
-  /** IDs de los depósitos que el rol actual puede revisar ahora. */
-  revisables: string[]
-  /** IDs de los depósitos en revisión, mire quien mire: no depende del rol. */
+  /**
+   * IDs de los depósitos en revisión: los que ofrecen abrir su contexto. No
+   * depende del rol —el contexto es de solo lectura— y por eso un listado no
+   * tiene que leer el perfil para pintar una fila.
+   */
   enRevision: string[]
 }
 
 export interface OpcionesVistaDrawer extends OpcionesResumenEjecutivo {
-  /** Rol del usuario de la sesión; decide si "Revisar depósito" se ofrece. */
-  rol?: string | null
   nombresActores?: Record<string, string>
 }
 
@@ -107,12 +114,11 @@ export function vistaDrawerOrden(
   orden: EntradaResumenEjecutivo,
   opciones: OpcionesVistaDrawer = {},
 ): VistaDrawerOrden {
-  const { rol = null, nombresActores = {}, depositos = [], ...resto } = opciones
+  const { nombresActores = {}, depositos = [], ...resto } = opciones
   const limpios = depositos.filter((d): d is DepositoRegistrado => !!d && typeof d.id === 'string')
   return {
     resumen: resumenEjecutivoOrden(orden, { ...resto, depositos: limpios }),
     liquidaciones: filasDepositosAsociados(limpios, orden as never, (d) => nombreMotorizadoDeposito(d, nombresActores)),
-    revisables: limpios.filter((d) => puedeRevisarDeposito(d, rol)).map((d) => d.id),
     enRevision: limpios.filter((d) => depositoEnRevision(d)).map((d) => d.id),
   }
 }
@@ -189,7 +195,6 @@ export interface ContextoDeposito {
   confirmadoPorUid: string | null
   /** Por qué se devolvió o se anuló, cuando el documento lo guarda. */
   motivo: string | null
-  puedeRevisar: boolean
 }
 
 const money = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? `C$ ${n.toLocaleString('es-NI')}` : SIN_DATO)
@@ -202,9 +207,9 @@ const money = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? `C$
 export function contextoDeposito(
   dep: DepositoRegistrado,
   orden?: Parameters<typeof momentosDeposito>[1],
-  opciones: { rol?: string | null; nombresActores?: Record<string, string> } = {},
+  opciones: { nombresActores?: Record<string, string> } = {},
 ): ContextoDeposito {
-  const { rol = null, nombresActores = {} } = opciones
+  const { nombresActores = {} } = opciones
   const ids = Array.isArray(dep.solicitudIds) ? dep.solicitudIds : []
   const v = dep.boucherVersion
   const motivo = normalizarMotivoEvento(dep.motivoDevolucion)
@@ -227,6 +232,5 @@ export function contextoDeposito(
       ? dep.confirmadoPorUid
       : null,
     motivo: motivo || null,
-    puedeRevisar: puedeRevisarDeposito(dep, rol),
   }
 }

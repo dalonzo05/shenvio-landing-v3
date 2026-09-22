@@ -4,13 +4,15 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import * as DrawerContextual from './drawer-contextual'
 import {
   vistaDrawerOrden,
   depositosPorDestinoDeLaOrden,
   contextoDeposito,
-  puedeRevisarDeposito,
+  depositoEnRevision,
   motivoNoRevisable,
-  TEXTO_REVISAR_DEPOSITO,
+  permiteVerEnDepositos,
+  TEXTO_VER_DEPOSITO,
   TEXTO_VER_FICHA,
   RUTA_DEPOSITOS,
 } from './drawer-contextual'
@@ -69,7 +71,6 @@ const vista = (opc = {}) => vistaDrawerOrden(sh0005(), {
   nombresActores: NOMBRES,
   nombreMotorizado: 'John Pork 2',
   estadoEtiqueta: 'Entregado',
-  rol: 'gestor',
   ...opc,
 })
 
@@ -121,7 +122,7 @@ test('RD8 · tipo C: C$80, transferencia y StorkHub directo del comercio', () =>
   } as EntradaResumenEjecutivo
   const v = vistaDrawerOrden(sh0003, {
     depositos: [DEP_0002], depositosPorDestino: { storkhub: DEP_0002 },
-    nombreMotorizado: 'John Pork 2', estadoEtiqueta: 'Entregado', rol: 'gestor',
+    nombreMotorizado: 'John Pork 2', estadoEtiqueta: 'Entregado',
   })
   assert.equal(v.resumen.cobro.delivery, 'C$ 80')
   assert.equal(v.resumen.cobro.formaPago, 'transferencia')
@@ -132,48 +133,43 @@ test('RD8 · tipo C: C$80, transferencia y StorkHub directo del comercio', () =>
 
 // ─── DC · el segundo nivel: el depósito ──────────────────────────────────────
 
-test('DC1 · un DEP A/B en revisión ofrece "Revisar depósito" al gestor y al admin', () => {
+test('DC1 · un DEP A/B en revisión ofrece abrir su contexto, mire quien mire', () => {
   const enRevision = { ...DEP_0004, estado: 'en_revision', confirmadoAt: undefined, confirmadoPorUid: undefined }
-  assert.equal(puedeRevisarDeposito(enRevision, 'gestor'), true)
-  assert.equal(puedeRevisarDeposito(enRevision, 'admin'), true)
-  const v = vistaDrawerOrden(sh0005(), { depositos: [enRevision, DEP_0005], rol: 'gestor' })
-  assert.deepEqual(v.revisables, [enRevision.id])
-  assert.equal(TEXTO_REVISAR_DEPOSITO, 'Revisar depósito')
+  assert.equal(depositoEnRevision(enRevision), true)
+  assert.equal(motivoNoRevisable(enRevision), null)
+  const v = vistaDrawerOrden(sh0005(), { depositos: [enRevision, DEP_0005] })
+  assert.deepEqual(v.enRevision, [enRevision.id])
 })
 
-test('DC2 · un DEP confirmado no ofrece revisión; tampoco a un rol que no revisa', () => {
-  assert.equal(puedeRevisarDeposito(DEP_0004, 'gestor'), false)
-  assert.equal(motivoNoRevisable(DEP_0004, 'gestor'), 'estado')
-  const enRevision = { ...DEP_0004, estado: 'en_revision' }
-  assert.equal(puedeRevisarDeposito(enRevision, 'digitador'), false)
-  assert.equal(motivoNoRevisable(enRevision, 'digitador'), 'rol')
-  assert.equal(motivoNoRevisable(null, 'gestor'), 'sin_deposito')
-  assert.deepEqual(vista().revisables, [])
+test('DC2 · un DEP confirmado no ofrece nada: ya no hay nada que mirar en revisión', () => {
+  assert.equal(depositoEnRevision(DEP_0004), false)
+  assert.equal(motivoNoRevisable(DEP_0004), 'estado')
+  assert.equal(motivoNoRevisable(null), 'sin_deposito')
+  assert.deepEqual(vista().enRevision, [])
 })
 
-test('DC3 · un DEP devuelto muestra su estado y su motivo, sin botón de revisión', () => {
+test('DC3 · un DEP devuelto muestra su estado y su motivo, y no queda en revisión', () => {
   const devuelto = {
     ...DEP_0004, estado: 'devuelto', motivoDevolucion: 'Comprobante incorrecto, por favor subir nuevamente.',
     confirmadoAt: undefined, confirmadoPorUid: undefined,
   }
-  const c = contextoDeposito(devuelto, null, { rol: 'gestor', nombresActores: NOMBRES })
+  const c = contextoDeposito(devuelto, null, { nombresActores: NOMBRES })
   assert.equal(c.estado, 'Corrección solicitada')
   assert.equal(c.motivo, 'Comprobante incorrecto, por favor subir nuevamente.')
-  assert.equal(c.puedeRevisar, false)
+  assert.equal(depositoEnRevision(devuelto), false)
   assert.equal(c.confirmadoPorUid, null)
 })
 
 test('DC4 · el tipo C no entra en la revisión A/B: su corrección es Cobros → Revertir', () => {
-  assert.equal(motivoNoRevisable(DEP_0002, 'gestor'), 'tipo_c')
+  assert.equal(motivoNoRevisable(DEP_0002), 'tipo_c')
   const enRevision = { ...DEP_0002, estado: 'en_revision' }
-  assert.equal(puedeRevisarDeposito(enRevision, 'admin'), false)
-  const c = contextoDeposito(DEP_0002, null, { rol: 'gestor' })
+  assert.equal(depositoEnRevision(enRevision), false)
+  const c = contextoDeposito(DEP_0002, null, {})
   assert.equal(c.destino, 'Pago del delivery por transferencia')
-  assert.equal(c.puedeRevisar, false)
 })
 
 test('DC5 · el contexto describe el depósito con los campos de su propio documento', () => {
-  const c = contextoDeposito(DEP_0004, sh0005() as never, { rol: 'gestor', nombresActores: NOMBRES })
+  const c = contextoDeposito(DEP_0004, sh0005() as never, { nombresActores: NOMBRES })
   assert.equal(c.codigo, 'DEP-0004')
   assert.equal(c.estado, 'Confirmado')
   assert.equal(c.monto, 'C$ 90')
@@ -202,6 +198,70 @@ test('DC7 · navegación: solo la ruta de Depósitos que ya existe, y el copy of
   assert.equal(TEXTO_VER_FICHA, 'Ver ficha completa')
 })
 
+// ─── COPY · qué promete el drawer compartido, y a quién ──────────────────────
+//
+// SolicitudDrawer se monta en gestor, comercio, reportes y dashboard. Todo lo
+// que diga tiene que ser cierto para los cuatro: el segundo nivel es de solo
+// lectura y no aprueba dinero.
+
+test('COPY1 · la acción del segundo nivel se llama "Ver depósito"', () => {
+  assert.equal(TEXTO_VER_DEPOSITO, 'Ver depósito')
+})
+
+test('COPY2 · ningún copy del drawer compartido promete revisar un depósito', () => {
+  const copys = Object.entries(DrawerContextual).filter(([, v]) => typeof v === 'string') as Array<[string, string]>
+  assert.ok(copys.length > 0)
+  assert.deepEqual(copys.filter(([, v]) => v.toLowerCase().includes('revisar')), [])
+  assert.equal('TEXTO_REVISAR_DEPOSITO' in DrawerContextual, false)
+})
+
+test('COPY3 · abrir el contexto sigue trayendo el DEP correcto, no otro', () => {
+  const enRevision = { ...DEP_0004, estado: 'en_revision', confirmadoAt: undefined, confirmadoPorUid: undefined }
+  const deps = [enRevision, DEP_0005]
+  const v = vistaDrawerOrden(sh0005(), { depositos: deps, nombresActores: NOMBRES })
+  assert.deepEqual(v.enRevision, [enRevision.id])
+  const abierto = deps.find((d) => d.id === v.enRevision[0])!
+  const c = contextoDeposito(abierto, sh0005() as never, { nombresActores: NOMBRES })
+  assert.equal(c.id, DEP_0004.id)
+  assert.equal(c.codigo, 'DEP-0004')
+  assert.equal(c.monto, 'C$ 90')
+})
+
+test('COPY4 · dentro del panel del gestor se ofrece "Ver en Depósitos"', () => {
+  assert.equal(permiteVerEnDepositos('/panel/gestor/cobros'), true)
+  assert.equal(permiteVerEnDepositos('/panel/gestor/depositos'), true)
+  assert.equal(permiteVerEnDepositos('/panel/gestor/solicitudes/abc123'), true)
+  assert.equal(permiteVerEnDepositos('/panel/gestor'), true)
+})
+
+test('COPY5 · desde Comercio NO se ofrece un enlace a una ruta del gestor', () => {
+  assert.equal(permiteVerEnDepositos('/panel/comercio/depositos'), false)
+  assert.equal(permiteVerEnDepositos('/panel/motorizado'), false)
+  // Fail-closed: sin ruta conocida, no se ofrece.
+  assert.equal(permiteVerEnDepositos(null), false)
+  assert.equal(permiteVerEnDepositos(undefined), false)
+  // Y no alcanza con empezar parecido.
+  assert.equal(permiteVerEnDepositos('/panel/gestorx/depositos'), false)
+})
+
+// ─── API · nada muerto en el view-model ──────────────────────────────────────
+
+test('API1 · la vista del drawer expone solo lo que la UI consume', () => {
+  assert.deepEqual(Object.keys(vista()).sort(), ['enRevision', 'liquidaciones', 'resumen'])
+  assert.equal('revisables' in vista(), false)
+  assert.equal('puedeRevisarDeposito' in DrawerContextual, false)
+})
+
+test('API2 · el contexto del DEP no afirma permisos: no depende del rol', () => {
+  const c = contextoDeposito(DEP_0004, null, { nombresActores: NOMBRES })
+  assert.equal('puedeRevisar' in c, false)
+  // El mismo contexto, sin opciones: idéntico salvo el nombre resuelto.
+  const sinOpciones = contextoDeposito(DEP_0004)
+  assert.equal(sinOpciones.id, c.id)
+  assert.equal(sinOpciones.estado, c.estado)
+  assert.equal(sinOpciones.monto, c.monto)
+})
+
 // ─── DAW · fuente canónica de los depósitos asociados ────────────────────────
 //
 // El drawer dejó de mirar los dos punteros de la orden: lee los depósitos que
@@ -219,7 +279,7 @@ const vistaCon = (deps: DepositoRegistrado[], registro: unknown = REG_0005) => v
   {
     depositos: deps,
     depositosPorDestino: depositosPorDestinoDeLaOrden(deps, registro as never),
-    nombresActores: NOMBRES, nombreMotorizado: 'John Pork 2', estadoEtiqueta: 'Entregado', rol: 'gestor',
+    nombresActores: NOMBRES, nombreMotorizado: 'John Pork 2', estadoEtiqueta: 'Entregado',
   },
 )
 
@@ -298,5 +358,5 @@ test('DAW9 · el contexto se abre con cualquiera de los asociados, no solo con l
   const v = vistaCon(deps)
   assert.ok(v.liquidaciones.some((l) => l.id === SUELTO.id))
   assert.deepEqual(v.enRevision, [SUELTO.id])
-  assert.equal(contextoDeposito(deps.find((d) => d.id === SUELTO.id)!, null, { rol: 'gestor' }).codigo, 'DEP-0010')
+  assert.equal(contextoDeposito(deps.find((d) => d.id === SUELTO.id)!, null).codigo, 'DEP-0010')
 })

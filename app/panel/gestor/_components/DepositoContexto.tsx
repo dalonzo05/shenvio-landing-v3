@@ -43,11 +43,18 @@ function Dato({ label, children }: { label: string; children: React.ReactNode })
 export function DepositoContexto({
   contexto,
   nombresActores = {},
+  verEnDepositos = false,
   onVolver,
   onVerComprobante,
 }: {
   contexto: ContextoDeposito
   nombresActores?: Record<string, string>
+  /**
+   * ¿Ofrecer el salto al panel de Depósitos? Solo dentro del panel del gestor:
+   * desde /panel/comercio esa ruta no es navegable para quien mira, y el
+   * contexto de solo lectura termina en "Volver a la orden". Por defecto NO.
+   */
+  verEnDepositos?: boolean
   onVolver: () => void
   onVerComprobante?: (url: string, label: string) => void
 }) {
@@ -63,9 +70,11 @@ export function DepositoContexto({
           <ArrowLeft className="h-3.5 w-3.5" />
           {TEXTO_VOLVER_ORDEN}
         </button>
-        <Link href={RUTA_DEPOSITOS} className="text-xs font-semibold text-teal-700 hover:underline">
-          {TEXTO_VER_EN_DEPOSITOS} →
-        </Link>
+        {verEnDepositos && (
+          <Link href={RUTA_DEPOSITOS} className="text-xs font-semibold text-teal-700 hover:underline">
+            {TEXTO_VER_EN_DEPOSITOS} →
+          </Link>
+        )}
       </div>
 
       <div className="rounded-xl border border-gray-200 bg-white p-3.5">
