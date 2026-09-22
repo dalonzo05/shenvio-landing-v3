@@ -2672,6 +2672,8 @@ function DepositosPageContent() {
         <SolicitudDrawer
           solicitudId={selectedOrdenId}
           onClose={() => setSelectedOrdenId(null)}
+          // DRAWER-CONTEXTUAL-1 — el rol ya lo tiene esta página: ninguna lectura nueva.
+          rol={userRol}
         />
       )}
     </div>

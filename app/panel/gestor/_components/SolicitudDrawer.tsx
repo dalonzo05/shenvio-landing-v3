@@ -29,6 +29,13 @@ import {
   type MotorizadoRankeado,
 } from '@/lib/motorizado-ranking'
 import { ResumenRapido } from './ResumenRapido'
+// DRAWER-CONTEXTUAL-1 — depósitos asociados y su contexto, dentro del drawer.
+import {
+  vistaDrawerOrden,
+  contextoDeposito,
+  TEXTO_REVISAR_DEPOSITO,
+} from '@/lib/drawer-contextual'
+import { DepositoContexto } from './DepositoContexto'
 import {
   depositoVisible,
   idsDepositoDeOrden,
@@ -471,11 +478,23 @@ export function SolicitudDrawer({
   solicitudId,
   onClose,
   comercioNames = {},
+  rol = null,
 }: {
   solicitudId: string
   onClose: () => void
   comercioNames?: Record<string, string>
+  /**
+   * DRAWER-CONTEXTUAL-1 — rol de la sesión, cuando quien abre el drawer ya lo
+   * tiene. Sin él, el contexto de depósito sigue abriéndose (es de solo
+   * lectura); lo único que no se afirma es que este rol pueda revisarlo.
+   */
+  rol?: string | null
 }) {
+  // DRAWER-CONTEXTUAL-1 — segundo nivel: el depósito abierto dentro del mismo
+  // drawer. null = se ve la orden. Nunca hay una tercera capa.
+  const [depContextoId, setDepContextoId] = useState<string | null>(null)
+  // Al cambiar de orden se vuelve siempre al nivel 1.
+  useEffect(() => { setDepContextoId(null) }, [solicitudId])
   const [solicitud, setSolicitud] = useState<SolicitudDetalle | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
@@ -918,7 +937,25 @@ export function SolicitudDrawer({
         </div>
 
         {/* Contenido */}
-        <div className="flex-1 overflow-y-auto bg-gray-50">
+        <div className="relative flex-1 overflow-y-auto bg-gray-50">
+          {/* DRAWER-CONTEXTUAL-1 — segundo nivel DENTRO del drawer: el
+              depósito ocupa el cuerpo entero y se vuelve a la orden con el
+              botón. No hay una tercera capa flotando sobre el listado. */}
+          {solicitud && depContextoId && (() => {
+            const abierto = Object.values(depositosOrden).find((d) => d?.id === depContextoId) ?? null
+            if (!abierto) return null
+            const nombres = Object.fromEntries(nombresUsuariosDrawer)
+            return (
+              <div className="absolute inset-0 z-10 overflow-y-auto bg-gray-50 p-4">
+                <DepositoContexto
+                  contexto={contextoDeposito(abierto, solicitud as never, { rol, nombresActores: nombres })}
+                  nombresActores={nombres}
+                  onVolver={() => setDepContextoId(null)}
+                  onVerComprobante={(url) => setLightboxUrl(url)}
+                />
+              </div>
+            )
+          })()}
           {loading && (
             <div className="p-6 space-y-3">
               {[1,2,3].map(i => (
@@ -937,7 +974,61 @@ export function SolicitudDrawer({
                   el recorrido que la ficha ya cuenta con timestamps y actores
                   en #historial. La reemplaza una conclusión: qué requiere
                   atención, con lo que la propia orden puede demostrar. */}
-              <ResumenRapido solicitudId={solicitudId} orden={solicitud as never} depositos={depositosOrden} />
+              {(() => {
+                // Mismo view-model que la ficha: resumen, depósitos asociados
+                // y cuáles están en revisión. No lee nada nuevo: usa los
+                // depósitos que el drawer ya trajo por puntero.
+                const depsLista = Object.values(depositosOrden).filter((d): d is DepositoRegistrado => !!d)
+                // El caché de nombres del drawer es un Map a nivel de módulo.
+                const nombres = Object.fromEntries(nombresUsuariosDrawer)
+                const vista = vistaDrawerOrden(solicitud as never, {
+                  depositos: depsLista,
+                  depositosPorDestino: depositosOrden,
+                  nombresActores: nombres,
+                  nombreMotorizado: solicitud.asignacion?.motorizadoNombre ?? null,
+                  rol,
+                })
+                return (
+                  <>
+                    <ResumenRapido solicitudId={solicitudId} orden={solicitud as never} depositos={depositosOrden} />
+
+                    {/* Depósitos asociados, en compacto: una línea por
+                        depósito y nunca un total —son obligaciones
+                        distintas—. El detalle completo sigue en la ficha. */}
+                    {vista.liquidaciones.length > 0 && (
+                      <div className="rounded-xl border border-gray-200 bg-white p-3.5">
+                        <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-2">
+                          Depósitos asociados ({vista.liquidaciones.length})
+                        </p>
+                        <ul className="space-y-2">
+                          {vista.liquidaciones.map((l) => (
+                            <li key={l.id} className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
+                              <span className="min-w-0 text-xs text-gray-600 break-words">
+                                <span className="font-mono font-bold text-gray-900">{l.identidad.texto}</span>
+                                {' · '}{l.origenDestino}
+                              </span>
+                              <span className="flex items-center gap-2 shrink-0">
+                                <span className="text-sm font-medium text-gray-900">
+                                  {typeof l.monto === 'number' ? money(l.monto) : '—'} · {l.estado}
+                                </span>
+                                {vista.enRevision.includes(l.id) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setDepContextoId(l.id)}
+                                    className="rounded-lg border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 transition"
+                                  >
+                                    {TEXTO_REVISAR_DEPOSITO}
+                                  </button>
+                                )}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )
+              })()}
 
               {/* Tiempo restante */}
               {tiempoRestante !== null && (

@@ -57,6 +57,11 @@ import {
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { momentoCobro, resumenAtencionCobros } from '@/lib/pago-transferencia'
 import { montoDeliveryCobrado } from '@/lib/monto-delivery'
+// DRAWER-CONTEXTUAL-1 — el código de la orden abre el drawer sin salir de
+// Cobros; la flecha sigue llevando a la ficha completa, en la misma pestaña.
+import { SolicitudDrawer } from '../_components/SolicitudDrawer'
+import { IrAFicha } from '../_components/IrAFicha'
+import { useSearchParams, useRouter, usePathname } from 'next/navigation'
 import { normalizarFecha } from '@/lib/timeline-orden'
 import { ImageLightbox } from '../../_components/ImageLightbox'
 import {
@@ -300,16 +305,39 @@ function getTipoCobro(s: Solicitud): string {
  * el ID como texto plano, así que para entender un caso había que buscarlo a
  * mano. El ancla lleva directo al bloque relevante.
  */
-function LinkOrden({ id, ancla, codigo }: { id: string; ancla: 'cobros' | 'incidencia'; codigo?: string }) {
+function LinkOrden({ id, ancla, codigo, onAbrir }: {
+  id: string
+  ancla: 'cobros' | 'incidencia'
+  codigo?: string
+  /** DRAWER-CONTEXTUAL-1 — abre el drawer encima de Cobros, sin navegar. */
+  onAbrir?: (id: string) => void
+}) {
+  if (!onAbrir) {
+    return (
+      <Link
+        // B2.5 — misma ruta de siempre, ahora construida por el helper común.
+        href={rutaOrden(id, ancla) ?? '#'}
+        className="font-mono text-blue-600 hover:text-blue-800 hover:underline transition"
+        title={`Ver ficha completa · ${id}`}
+      >
+        {mostrarCodigo(codigo, id)}
+      </Link>
+    )
+  }
+  // El código abre el resumen contextual —Cobros queda detrás, con su
+  // pestaña, sus filtros y su scroll—; la flecha va a la ficha completa.
   return (
-    <Link
-      // B2.5 — misma ruta de siempre, ahora construida por el helper común.
-      href={rutaOrden(id, ancla) ?? '#'}
-      className="font-mono text-blue-600 hover:text-blue-800 hover:underline transition"
-      title={`Ver ficha completa · ${id}`}
-    >
-      {mostrarCodigo(codigo, id)}
-    </Link>
+    <span className="inline-flex items-center gap-1">
+      <button
+        type="button"
+        onClick={() => onAbrir(id)}
+        title={`Ver resumen de la orden · ${id}`}
+        className="font-mono text-blue-600 hover:text-blue-800 hover:underline transition"
+      >
+        {mostrarCodigo(codigo, id)}
+      </button>
+      <IrAFicha id={id} anchor={ancla} />
+    </span>
   )
 }
 
@@ -1259,6 +1287,26 @@ export default function CobrosPage() {
 }
 
 function CobrosPageContent() {
+  // DRAWER-CONTEXTUAL-1 — la orden abierta en el drawer viaja en la URL
+  // (?orden=<docId>): refrescar o copiar el link reabre el mismo resumen, y
+  // atrás lo cierra. Se usa replace para no llenar el historial con cada
+  // apertura. El listado no se remonta: su pestaña, sus filtros y su scroll
+  // viven en estado local y esto no los toca.
+  const searchParams = useSearchParams()
+  const router = useRouter()
+  const pathname = usePathname()
+  const drawerOrdenId = searchParams.get('orden')
+  const abrirDrawerOrden = (id: string) => {
+    const p = new URLSearchParams(searchParams.toString())
+    p.set('orden', id)
+    router.replace(`${pathname}?${p.toString()}`, { scroll: false })
+  }
+  const cerrarDrawerOrden = () => {
+    const p = new URLSearchParams(searchParams.toString())
+    p.delete('orden')
+    const q = p.toString()
+    router.replace(q ? `${pathname}?${q}` : pathname, { scroll: false })
+  }
   const [mainTab, setMainTab] = useState<MainTab>('contado')
   const [contadoSub, setContadoSub] = useState<ContadoSub>('por_orden')
   const [incidenciasTab, setIncidenciasTab] = useState<IncidenciasTab>('pendientes')
@@ -1767,6 +1815,11 @@ function CobrosPageContent() {
       {marcandoPago && (
         <PagoContadoModal orden={marcandoPago} nombres={comercioNames} onClose={() => setMarcandoPago(null)} />
       )}
+      {/* DRAWER-CONTEXTUAL-1 — resumen de la orden encima de Cobros. */}
+      {drawerOrdenId && (
+        <SolicitudDrawer solicitudId={drawerOrdenId} onClose={cerrarDrawerOrden} comercioNames={comercioNames} />
+      )}
+
       {viendoBoucher && (
         <BoucherModal orden={viendoBoucher} nombres={comercioNames} onClose={() => setViendoBoucher(null)} />
       )}
@@ -1862,7 +1915,7 @@ function CobrosPageContent() {
                   const requiereRevision = acu.estado === 'requiere_revision'
                   return (
                     <tr key={s.id} className="hover:bg-gray-50/70">
-                      <td className="px-4 py-3 font-mono text-xs"><LinkOrden id={s.id} ancla="cobros" codigo={s.codigo} /></td>
+                      <td className="px-4 py-3 font-mono text-xs"><LinkOrden id={s.id} ancla="cobros" codigo={s.codigo} onAbrir={abrirDrawerOrden} /></td>
                       <td className="px-4 py-3">{getClienteNombre(s, comercioNames)}</td>
                       <td className="px-4 py-3 text-gray-500">{fmtFecha(s.entregadoAt)}</td>
                       {/* B1.2: el pendiente real, no el precio de lista. Con un
@@ -1978,7 +2031,7 @@ function CobrosPageContent() {
                       return (
                         <tr key={s.id} className={`hover:bg-gray-50 transition-colors ${tieneBoucher ? 'bg-blue-50/40' : ''}`}>
                           <td className={tdCls}>{fmtDate(s.entregadoAt)}</td>
-                          <td className={tdCls}><LinkOrden id={s.id} ancla="cobros" codigo={s.codigo} /></td>
+                          <td className={tdCls}><LinkOrden id={s.id} ancla="cobros" codigo={s.codigo} onAbrir={abrirDrawerOrden} /></td>
                           <td className={`${tdCls} font-semibold text-gray-900`}>{getClienteNombre(s, comercioNames)}</td>
                           {/* B2-PAGO-MEDIO-BOUCHER-REVIEW — el medio REAL, y
                               nada más. Acá se leía `quienPaga` y se mostraba
@@ -2175,7 +2228,7 @@ function CobrosPageContent() {
                         <tr key={s.id} className="hover:bg-gray-50 transition-colors">
                           {/* Fecha y hora en Managua; el efectivo del motorizado ya no queda en "—". */}
                           <td className={`${tdCls} whitespace-nowrap`}>{fechaHoraOperativa(momentoCobro(s as never))}</td>
-                          <td className={tdCls}><LinkOrden id={s.id} ancla="cobros" codigo={s.codigo} /></td>
+                          <td className={tdCls}><LinkOrden id={s.id} ancla="cobros" codigo={s.codigo} onAbrir={abrirDrawerOrden} /></td>
                           <td className={`${tdCls} font-semibold text-gray-900`}>{getClienteNombre(s, comercioNames)}</td>
                           <td className={tdCls}>
                             {esTrans ? (
@@ -2440,7 +2493,7 @@ function CobrosPageContent() {
                             ? fmtDate(resolucion?.at)
                             : fmtDate(s.createdAt)}
                         </td>
-                        <td className={tdCls}><LinkOrden id={s.id} ancla="incidencia" codigo={s.codigo} /></td>
+                        <td className={tdCls}><LinkOrden id={s.id} ancla="incidencia" codigo={s.codigo} onAbrir={abrirDrawerOrden} /></td>
                         <td className={`${tdCls} font-semibold text-gray-900`}>{comercio}</td>
                         <td className={tdCls}>
                           <div className="flex items-center gap-2">
