@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   vistaDrawerOrden,
+  depositosPorDestinoDeLaOrden,
   contextoDeposito,
   puedeRevisarDeposito,
   motivoNoRevisable,
@@ -199,4 +200,103 @@ test('DC6 · con dos depósitos, cada contexto es el suyo', () => {
 test('DC7 · navegación: solo la ruta de Depósitos que ya existe, y el copy oficial', () => {
   assert.equal(RUTA_DEPOSITOS, '/panel/gestor/depositos')
   assert.equal(TEXTO_VER_FICHA, 'Ver ficha completa')
+})
+
+// ─── DAW · fuente canónica de los depósitos asociados ────────────────────────
+//
+// El drawer dejó de mirar los dos punteros de la orden: lee los depósitos que
+// la nombran en solicitudIds, igual que la ficha. Estos casos fijan qué
+// aparece y cómo queda el índice por destino que usan las líneas de depósito.
+
+const REG_0005 = {
+  deposito: {
+    storkhubDepositoId: DEP_0004.id, confirmadoStorkhub: true,
+    comercioDepositoId: DEP_0005.id, confirmadoComercio: true,
+  },
+}
+const vistaCon = (deps: DepositoRegistrado[], registro: unknown = REG_0005) => vistaDrawerOrden(
+  { ...sh0005(), registro } as EntradaResumenEjecutivo,
+  {
+    depositos: deps,
+    depositosPorDestino: depositosPorDestinoDeLaOrden(deps, registro as never),
+    nombresActores: NOMBRES, nombreMotorizado: 'John Pork 2', estadoEtiqueta: 'Entregado', rol: 'gestor',
+  },
+)
+
+test('DAW1 · orden sin depósitos ⇒ lista vacía y sin índice por destino', () => {
+  const v = vistaCon([], { deposito: null })
+  assert.deepEqual(v.liquidaciones, [])
+  assert.deepEqual(v.resumen.liquidaciones, [])
+  assert.deepEqual(depositosPorDestinoDeLaOrden([], null), {})
+})
+
+test('DAW2 · orden con un solo depósito ⇒ una fila, y esa es la línea de su destino', () => {
+  const v = vistaCon([DEP_0004], { deposito: { storkhubDepositoId: DEP_0004.id } })
+  assert.equal(v.liquidaciones.length, 1)
+  assert.equal(depositosPorDestinoDeLaOrden([DEP_0004], { deposito: { storkhubDepositoId: DEP_0004.id } }).storkhub?.id, DEP_0004.id)
+})
+
+test('DAW3 · SH-0005 ⇒ DEP-0004 y DEP-0005, cada uno en su destino', () => {
+  const v = vistaCon([DEP_0004, DEP_0005])
+  assert.deepEqual(v.liquidaciones.map((l) => l.identidad.texto), ['DEP-0004', 'DEP-0005'])
+  const idx = depositosPorDestinoDeLaOrden([DEP_0004, DEP_0005], REG_0005)
+  assert.equal(idx.storkhub?.codigo, 'DEP-0004')
+  assert.equal(idx.comercio?.codigo, 'DEP-0005')
+})
+
+test('DAW4 · tres depósitos asociados ⇒ se muestran los tres, sin tope de dos', () => {
+  const DEP_EXTRA: DepositoRegistrado = {
+    ...DEP_0004, id: 'dep_extra', codigo: 'DEP-0009', estado: 'anulado',
+    creadoAt: '2026-09-19T20:00:00.000Z', confirmadoAt: undefined, confirmadoPorUid: undefined,
+  }
+  const v = vistaCon([DEP_EXTRA, DEP_0004, DEP_0005])
+  assert.equal(v.liquidaciones.length, 3)
+  assert.deepEqual(v.liquidaciones.map((l) => l.identidad.texto), ['DEP-0009', 'DEP-0004', 'DEP-0005'])
+})
+
+test('DAW5 · un anulado sin puntero sigue en la lista; la línea viva es el vigente', () => {
+  const ANULADO: DepositoRegistrado = {
+    ...DEP_0004, id: 'dep_anulado', codigo: 'DEP-0008', estado: 'anulado',
+    creadoAt: '2026-09-19T20:00:00.000Z', confirmadoAt: undefined, confirmadoPorUid: undefined,
+  }
+  const deps = [ANULADO, DEP_0004]
+  const v = vistaCon(deps, { deposito: { storkhubDepositoId: DEP_0004.id } })
+  assert.deepEqual(v.liquidaciones.map((l) => [l.identidad.texto, l.estado]), [['DEP-0008', 'Anulado'], ['DEP-0004', 'Confirmado']])
+  // El puntero manda para la línea de StorkHub…
+  assert.equal(depositosPorDestinoDeLaOrden(deps, { deposito: { storkhubDepositoId: DEP_0004.id } }).storkhub?.codigo, 'DEP-0004')
+  // …y sin puntero se prefiere el último NO anulado.
+  assert.equal(depositosPorDestinoDeLaOrden(deps, null).storkhub?.codigo, 'DEP-0004')
+  // Si todos están anulados, se muestra el anulado y no se inventa ninguno.
+  assert.equal(depositosPorDestinoDeLaOrden([ANULADO], null).storkhub?.codigo, 'DEP-0008')
+})
+
+test('DAW6 · un depósito agrupado aparece una sola vez para esta orden', () => {
+  const AGRUPADO = { ...DEP_0005, solicitudIds: [SH_0005_ID, 'otra_orden'] }
+  const v = vistaCon([AGRUPADO, AGRUPADO, DEP_0004])
+  assert.equal(v.liquidaciones.filter((l) => l.identidad.texto === 'DEP-0005').length, 1)
+  assert.equal(v.liquidaciones.find((l) => l.identidad.texto === 'DEP-0005')?.esAgrupado, true)
+})
+
+test('DAW7 · la lista no suma montos: cada depósito con el suyo', () => {
+  const v = vistaCon([DEP_0004, DEP_0005])
+  assert.deepEqual(v.liquidaciones.map((l) => l.monto), [90, 910])
+  assert.ok(!JSON.stringify(v.liquidaciones).includes('1000'))
+  assert.ok(!JSON.stringify(v.resumen.liquidaciones).includes('1,000'))
+})
+
+test('DAW8 · el tipo C conserva su presentación y su destino', () => {
+  const v = vistaCon([DEP_0002], { deposito: { storkhubDepositoId: DEP_0002.id } })
+  assert.equal(v.liquidaciones[0].origenDestino, 'Pago del delivery por transferencia')
+  assert.equal(v.resumen.liquidaciones[0].destino, 'A StorkHub, por transferencia del comercio')
+  // Y su línea sigue siendo la de StorkHub, como su puntero.
+  assert.equal(depositosPorDestinoDeLaOrden([DEP_0002], { deposito: { storkhubDepositoId: DEP_0002.id } }).storkhub?.codigo, 'DEP-0002')
+})
+
+test('DAW9 · el contexto se abre con cualquiera de los asociados, no solo con los punteros', () => {
+  const SUELTO: DepositoRegistrado = { ...DEP_0004, id: 'dep_suelto', codigo: 'DEP-0010', estado: 'en_revision', confirmadoAt: undefined, confirmadoPorUid: undefined }
+  const deps = [DEP_0004, DEP_0005, SUELTO]
+  const v = vistaCon(deps)
+  assert.ok(v.liquidaciones.some((l) => l.id === SUELTO.id))
+  assert.deepEqual(v.enRevision, [SUELTO.id])
+  assert.equal(contextoDeposito(deps.find((d) => d.id === SUELTO.id)!, null, { rol: 'gestor' }).codigo, 'DEP-0010')
 })

@@ -20,7 +20,7 @@ import {
   SIN_DATO,
 } from './resumen-ejecutivo-orden'
 import { filasDepositosAsociados, type FilaDepositoAsociado } from './depositos-asociados'
-import type { DepositoRegistrado } from './deposito-orden'
+import type { DepositoRegistrado, DestinoDeposito } from './deposito-orden'
 import {
   identidadDeposito,
   estadoDeposito,
@@ -115,6 +115,59 @@ export function vistaDrawerOrden(
     revisables: limpios.filter((d) => puedeRevisarDeposito(d, rol)).map((d) => d.id),
     enRevision: limpios.filter((d) => depositoEnRevision(d)).map((d) => d.id),
   }
+}
+
+// ─── De la lista canónica al índice por destino ───────────────────────────────
+
+/**
+ * Los depósitos asociados, indexados por destino, para las partes del drawer
+ * que razonan por línea (obligación a StorkHub / al comercio): lineasDeposito,
+ * trazabilidadPago, resumenOrden.
+ *
+ * La lista canónica es la de la query `solicitudIds array-contains`, que puede
+ * traer más de uno por destino —un anulado cuyo puntero se liberó y el que lo
+ * reemplazó—. Para cada destino manda:
+ *
+ *   1. el que apunta el registro de la orden (es el vigente por definición);
+ *   2. si no hay puntero, el último NO anulado;
+ *   3. si todos están anulados, el último.
+ *
+ * Así el índice describe la línea viva y la lista completa sigue mostrándose
+ * entera en "Depósitos asociados", sin perder el anulado.
+ */
+export function depositosPorDestinoDeLaOrden(
+  depositos: Array<DepositoRegistrado | null | undefined>,
+  registro?: { deposito?: { storkhubDepositoId?: string | null; comercioDepositoId?: string | null } | null } | null,
+): Partial<Record<DestinoDeposito, DepositoRegistrado | null>> {
+  const limpios = depositos.filter((d): d is DepositoRegistrado => !!d && typeof d.id === 'string')
+  const punteros: Partial<Record<DestinoDeposito, string | null>> = {
+    storkhub: registro?.deposito?.storkhubDepositoId ?? null,
+    comercio: registro?.deposito?.comercioDepositoId ?? null,
+  }
+  const out: Partial<Record<DestinoDeposito, DepositoRegistrado | null>> = {}
+  for (const destino of ['storkhub', 'comercio'] as DestinoDeposito[]) {
+    const candidatos = limpios.filter((d) => destinoDeDeposito(d) === destino)
+    if (candidatos.length === 0) continue
+    const puntero = punteros[destino]
+    const apuntado = puntero ? candidatos.find((d) => d.id === puntero) : undefined
+    if (apuntado) { out[destino] = apuntado; continue }
+    const ordenados = [...candidatos].sort((a, b) => msCreado(a) - msCreado(b))
+    const vivos = ordenados.filter((d) => (d.estado ?? '') !== 'anulado')
+    out[destino] = (vivos.length > 0 ? vivos : ordenados)[Math.max(0, (vivos.length > 0 ? vivos : ordenados).length - 1)]
+  }
+  return out
+}
+
+/** El destino real del documento; el tipo C va a StorkHub, como su puntero. */
+function destinoDeDeposito(dep: DepositoRegistrado): DestinoDeposito {
+  return dep.destinatario === 'comercio' ? 'comercio' : 'storkhub'
+}
+
+const msCreado = (dep: DepositoRegistrado): number => {
+  const v = dep.creadoAt as { toDate?: () => Date } | string | number | null | undefined
+  if (typeof v === 'string' || typeof v === 'number') { const t = new Date(v).getTime(); return Number.isFinite(t) ? t : 0 }
+  const d = typeof v?.toDate === 'function' ? v.toDate() : null
+  return d ? d.getTime() : 0
 }
 
 // ─── Segundo nivel: el depósito ───────────────────────────────────────────────

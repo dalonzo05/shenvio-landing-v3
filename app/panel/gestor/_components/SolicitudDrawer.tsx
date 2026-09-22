@@ -33,6 +33,7 @@ import { ResumenRapido } from './ResumenRapido'
 import {
   vistaDrawerOrden,
   contextoDeposito,
+  depositosPorDestinoDeLaOrden,
   TEXTO_REVISAR_DEPOSITO,
 } from '@/lib/drawer-contextual'
 import { DepositoContexto } from './DepositoContexto'
@@ -581,35 +582,54 @@ export function SolicitudDrawer({
     return () => unsub()
   }, [solicitudId])
 
-  // DEPOSITOS-UX-TRAZABILIDAD-1 — los depósitos de ESTA orden, por el puntero
-  // de la propia orden: como máximo dos getDoc, sin listener y sin recorrer
-  // ordenes_deposito. La dependencia es la clave de IDs, no el objeto: el
-  // onSnapshot de la orden no dispara relecturas. Un depósito que no se pudo
-  // leer queda en null y la línea dice "Depósito registrado", nunca un estado
-  // inventado.
-  const [depositosOrden, setDepositosOrden] = useState<Partial<Record<DestinoDeposito, DepositoRegistrado | null>>>({})
+  // DRAWER-CONTEXTUAL-1 · fuente canónica — los depósitos de ESTA orden son
+  // los que la nombran en `solicitudIds`, igual que en la ficha completa. Una
+  // query por apertura del drawer (índice de campo simple), no dos getDoc por
+  // puntero: esos se perdían un depósito anulado cuyo puntero ya se liberó,
+  // uno agrupado que llegó por otro camino, o un tercero.
+  //
+  // Si la query se deniega —un rol que solo puede leer sus propios depósitos—
+  // se cae a los punteros de la orden, que es lo que ese rol sí puede leer. La
+  // lista deja de ser exhaustiva y por eso se dice cuál fue la fuente.
+  const [depositosAsociados, setDepositosAsociados] = useState<DepositoRegistrado[]>([])
+  const [fuenteDepositos, setFuenteDepositos] = useState<'canonica' | 'punteros'>('canonica')
   const claveDepositos = solicitud
     ? idsDepositoDeOrden(solicitud as never).map((d) => `${d.destino}:${d.id}`).join('|')
     : ''
   useEffect(() => {
-    if (!claveDepositos) { setDepositosOrden({}); return }
+    if (!solicitudId) { setDepositosAsociados([]); return }
     let vivo = true
-    const pares = claveDepositos.split('|').map((p) => {
-      const [destino, id] = p.split(':')
-      return { destino: destino as DestinoDeposito, id }
-    })
-    Promise.all(pares.map(({ destino, id }) =>
-      getDoc(doc(db, 'ordenes_deposito', id))
-        .then((snap) => ({ destino, dep: snap.exists() ? ({ id: snap.id, ...(snap.data() as object) } as DepositoRegistrado) : null }))
-        .catch(() => ({ destino, dep: null as DepositoRegistrado | null }))
-    )).then((res) => {
-      if (!vivo) return
-      const mapa: Partial<Record<DestinoDeposito, DepositoRegistrado | null>> = {}
-      res.forEach(({ destino, dep }) => { mapa[destino] = dep })
-      setDepositosOrden(mapa)
-    })
+    const leerPorPunteros = async () => {
+      const pares = claveDepositos ? claveDepositos.split('|').map((p) => p.split(':')[1]) : []
+      if (pares.length === 0) return [] as DepositoRegistrado[]
+      const snaps = await Promise.all(pares.map((id) => getDoc(doc(db, 'ordenes_deposito', id)).catch(() => null)))
+      return snaps
+        .filter((s): s is NonNullable<typeof s> => !!s && s.exists())
+        .map((s) => ({ id: s.id, ...(s.data() as object) } as DepositoRegistrado))
+    }
+    getDocs(query(collection(db, 'ordenes_deposito'), where('solicitudIds', 'array-contains', solicitudId)))
+      .then((snap) => {
+        if (!vivo) return
+        setFuenteDepositos('canonica')
+        setDepositosAsociados(snap.docs.map((d) => ({ id: d.id, ...(d.data() as object) } as DepositoRegistrado)))
+      })
+      .catch(async () => {
+        const porPunteros = await leerPorPunteros()
+        if (!vivo) return
+        setFuenteDepositos('punteros')
+        setDepositosAsociados(porPunteros)
+      })
     return () => { vivo = false }
-  }, [claveDepositos])
+    // Se relee al cambiar de orden y cuando sus punteros cambian (se registró,
+    // se anuló o se reemplazó un depósito).
+  }, [solicitudId, claveDepositos])
+
+  // Índice por destino para lo que razona por línea (obligación a StorkHub /
+  // al comercio): lineasDeposito, trazabilidadPago y resumenOrden.
+  const depositosOrden = useMemo(
+    () => depositosPorDestinoDeLaOrden(depositosAsociados, solicitud?.registro as never),
+    [depositosAsociados, solicitud?.registro]
+  )
 
   // PAGO-TRANSFERENCIA-UX-1 — quién confirmó el cobro, con nombre. Decía
   // "Usuario interno" aunque el UID estaba guardado (DRAWER-ACTOR-SIN-NOMBRE).
@@ -942,7 +962,7 @@ export function SolicitudDrawer({
               depósito ocupa el cuerpo entero y se vuelve a la orden con el
               botón. No hay una tercera capa flotando sobre el listado. */}
           {solicitud && depContextoId && (() => {
-            const abierto = Object.values(depositosOrden).find((d) => d?.id === depContextoId) ?? null
+            const abierto = depositosAsociados.find((d) => d.id === depContextoId) ?? null
             if (!abierto) return null
             const nombres = Object.fromEntries(nombresUsuariosDrawer)
             return (
@@ -978,7 +998,9 @@ export function SolicitudDrawer({
                 // Mismo view-model que la ficha: resumen, depósitos asociados
                 // y cuáles están en revisión. No lee nada nuevo: usa los
                 // depósitos que el drawer ya trajo por puntero.
-                const depsLista = Object.values(depositosOrden).filter((d): d is DepositoRegistrado => !!d)
+                // La lista canónica entera: incluye un depósito anulado cuyo
+                // puntero se liberó, no solo la línea viva de cada destino.
+                const depsLista = depositosAsociados
                 // El caché de nombres del drawer es un Map a nivel de módulo.
                 const nombres = Object.fromEntries(nombresUsuariosDrawer)
                 const vista = vistaDrawerOrden(solicitud as never, {
@@ -1000,6 +1022,13 @@ export function SolicitudDrawer({
                         <p className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-2">
                           Depósitos asociados ({vista.liquidaciones.length})
                         </p>
+                        {/* Con el fallback por punteros la lista puede no ser
+                            completa: se dice, en vez de afirmar que lo es. */}
+                        {fuenteDepositos === 'punteros' && (
+                          <p className="text-[11px] text-amber-700 mb-2">
+                            Lista parcial: solo los depósitos que este perfil puede leer.
+                          </p>
+                        )}
                         <ul className="space-y-2">
                           {vista.liquidaciones.map((l) => (
                             <li key={l.id} className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
