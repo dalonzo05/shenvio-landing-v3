@@ -193,8 +193,55 @@ export interface ContextoDeposito {
   version: number | null
   momentos: MomentoDeposito[]
   confirmadoPorUid: string | null
-  /** Por qué se devolvió o se anuló, cuando el documento lo guarda. */
-  motivo: string | null
+  /**
+   * El motivo que el documento guarda, con la etiqueta del episodio al que
+   * pertenece. Nunca "Motivo:" a secas: un DEP hoy confirmado conserva el
+   * `motivoDevolucion` de su corrección anterior, y esa etiqueta suelta lo
+   * hacía leer como el motivo de la confirmación.
+   */
+  motivo: MotivoContexto | null
+}
+
+export interface MotivoContexto {
+  /** "Motivo de la corrección" | "Motivo de la anulación" | … */
+  etiqueta: string
+  texto: string
+}
+
+/** El motorizado subió otro comprobante: `motivoDevolucion`, estado devuelto. */
+export const MOTIVO_CORRECCION = 'Motivo de la corrección'
+/** `motivoAnulacion`, que escribe camposAnularDeposito y la reversión tipo C. */
+export const MOTIVO_ANULACION = 'Motivo de la anulación'
+/** `motivoRechazo`, que escribe el rechazo del panel de Depósitos. */
+export const MOTIVO_RECHAZO = 'Motivo del rechazo'
+
+/**
+ * El motivo del depósito, etiquetado por el episodio del campo que lo guardó
+ * —no por el estado actual—. Si el estado tiene su propio campo, ese manda;
+ * si no, se muestra el que exista, diciendo de qué episodio viene. Así un DEP
+ * confirmado que arrastra el motivo de su corrección lo dice como tal, y no
+ * se mezclan motivos distintos bajo una etiqueta única.
+ */
+function motivoDeposito(dep: DepositoRegistrado): MotivoContexto | null {
+  const candidatos: Array<[string, unknown]> = [
+    [MOTIVO_CORRECCION, dep.motivoDevolucion],
+    [MOTIVO_ANULACION, (dep as { motivoAnulacion?: unknown }).motivoAnulacion],
+    [MOTIVO_RECHAZO, dep.motivoRechazo],
+  ]
+  const propioDelEstado: Record<string, string> = {
+    devuelto: MOTIVO_CORRECCION,
+    anulado: MOTIVO_ANULACION,
+    rechazado: MOTIVO_RECHAZO,
+  }
+  const preferida = propioDelEstado[dep.estado ?? '']
+  const ordenados = preferida
+    ? [...candidatos].sort((a, b) => (a[0] === preferida ? -1 : b[0] === preferida ? 1 : 0))
+    : candidatos
+  for (const [etiqueta, valor] of ordenados) {
+    const texto = normalizarMotivoEvento(valor)
+    if (texto) return { etiqueta, texto }
+  }
+  return null
 }
 
 const money = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? `C$ ${n.toLocaleString('es-NI')}` : SIN_DATO)
@@ -212,9 +259,6 @@ export function contextoDeposito(
   const { nombresActores = {} } = opciones
   const ids = Array.isArray(dep.solicitudIds) ? dep.solicitudIds : []
   const v = dep.boucherVersion
-  const motivo = normalizarMotivoEvento(dep.motivoDevolucion)
-    || normalizarMotivoEvento((dep as { motivoAnulacion?: unknown }).motivoAnulacion)
-    || normalizarMotivoEvento(dep.motivoRechazo)
   return {
     id: dep.id,
     codigo: identidadDeposito(dep).texto,
@@ -231,6 +275,6 @@ export function contextoDeposito(
     confirmadoPorUid: dep.estado === 'confirmado' && typeof dep.confirmadoPorUid === 'string' && dep.confirmadoPorUid
       ? dep.confirmadoPorUid
       : null,
-    motivo: motivo || null,
+    motivo: motivoDeposito(dep),
   }
 }

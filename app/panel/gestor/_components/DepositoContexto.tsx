@@ -104,9 +104,12 @@ export function DepositoContexto({
           {contexto.version != null && <Dato label="Comprobante vigente">Versión {contexto.version}</Dato>}
         </div>
 
+        {/* La etiqueta nombra el episodio del que viene el motivo: un DEP
+            confirmado que arrastra el de su corrección lo dice así, y no
+            parece el motivo de la confirmación. */}
         {contexto.motivo && (
           <p className="mt-3 text-xs text-gray-700 break-words">
-            <span className="text-gray-500">Motivo: </span>{contexto.motivo}
+            <span className="text-gray-500">{contexto.motivo.etiqueta}: </span>{contexto.motivo.texto}
           </p>
         )}
 

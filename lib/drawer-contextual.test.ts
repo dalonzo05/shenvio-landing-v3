@@ -14,7 +14,11 @@ import {
   TEXTO_VER_DEPOSITO,
   TEXTO_VER_FICHA,
   RUTA_DEPOSITOS,
+  MOTIVO_CORRECCION,
+  MOTIVO_ANULACION,
+  MOTIVO_RECHAZO,
 } from './drawer-contextual'
+import { presentarActor, NOMBRE_ACTOR_DESCONOCIDO } from './actor-resolucion'
 import type { DepositoRegistrado } from './deposito-orden'
 import type { EntradaResumenEjecutivo } from './resumen-ejecutivo-orden'
 
@@ -152,7 +156,10 @@ test('DC3 · un DEP devuelto muestra su estado y su motivo', () => {
   }
   const c = contextoDeposito(devuelto, null, { nombresActores: NOMBRES })
   assert.equal(c.estado, 'Corrección solicitada')
-  assert.equal(c.motivo, 'Comprobante incorrecto, por favor subir nuevamente.')
+  assert.deepEqual(c.motivo, {
+    etiqueta: 'Motivo de la corrección',
+    texto: 'Comprobante incorrecto, por favor subir nuevamente.',
+  })
   assert.equal(c.confirmadoPorUid, null)
 })
 
@@ -464,6 +471,94 @@ test('VD11 · con N depósitos no hay un acceso único ambiguo', () => {
   assert.equal(new Set(a.map((x) => x.depositoId)).size, 2)
   // Y en el drawer, una fila por depósito: nunca una sola para los dos.
   assert.equal(filas([DEP_0004, DEP_0005]).length, 2)
+})
+
+// ─── ACT · quién confirmó, con nombre ─────────────────────────────────────────
+//
+// El documento del depósito guarda solo `confirmadoPorUid`; el nombre vive en
+// usuarios/{uid}. Estos casos fijan el contrato de la capa pura: con el UID
+// resuelto en el mapa se muestra el nombre; sin él, "Usuario interno", y nunca
+// un rol deducido del UID.
+
+test('ACT1 · con el UID resuelto en el mapa, el actor tiene nombre humano', () => {
+  const c = contextoDeposito(DEP_0004, null, { nombresActores: NOMBRES })
+  const mapa: Record<string, string> = NOMBRES
+  const actor = presentarActor(c.confirmadoPorUid, mapa[c.confirmadoPorUid ?? ''])
+  assert.equal(actor?.nombre, 'Admin Staging')
+  assert.equal(actor?.tieneNombre, true)
+  assert.equal(actor?.uid, ADMIN)
+})
+
+test('ACT2 · sin nombre resoluble se conserva "Usuario interno"', () => {
+  const c = contextoDeposito(DEP_0004, null, {})
+  const sinMapa = presentarActor(c.confirmadoPorUid, undefined)
+  assert.equal(sinMapa?.nombre, NOMBRE_ACTOR_DESCONOCIDO)
+  assert.equal(sinMapa?.nombre, 'Usuario interno')
+  assert.equal(sinMapa?.tieneNombre, false)
+  // Un nombre vacío en el mapa —leído y sin nombre legible— es lo mismo.
+  assert.equal(presentarActor(ADMIN, '')?.nombre, 'Usuario interno')
+  assert.equal(presentarActor(ADMIN, '   ')?.nombre, 'Usuario interno')
+})
+
+test('ACT3 · no se infiere un rol ni nada desde el UID', () => {
+  const a = presentarActor(ADMIN, undefined)
+  assert.equal(a?.nombre, 'Usuario interno')
+  for (const inventado of ['Admin', 'Gestor', 'Digitador', ADMIN]) {
+    assert.notEqual(a?.nombre, inventado)
+  }
+  // Y sin UID no hay actor que presentar: no se rellena con nada.
+  assert.equal(presentarActor(null, 'Admin Staging'), null)
+  assert.equal(presentarActor('', 'Admin Staging'), null)
+})
+
+test('ACT4 · DEP-0004: el contexto conserva el UID que el mapa resuelve', () => {
+  const c = contextoDeposito(DEP_0004, sh0005() as never, { nombresActores: NOMBRES })
+  assert.equal(c.confirmadoPorUid, ADMIN)
+  assert.equal(presentarActor(c.confirmadoPorUid, NOMBRES[ADMIN])?.nombre, 'Admin Staging')
+})
+
+test('ACT5 · DEP-0005: mismo actor, mismo camino', () => {
+  const c = contextoDeposito(DEP_0005, null, { nombresActores: NOMBRES })
+  assert.equal(c.confirmadoPorUid, ADMIN)
+  assert.equal(presentarActor(c.confirmadoPorUid, NOMBRES[ADMIN])?.nombre, 'Admin Staging')
+  // Un DEP reabierto no tiene confirmador vigente aunque el doc lo conserve.
+  assert.equal(contextoDeposito({ ...DEP_0005, estado: 'devuelto' }).confirmadoPorUid, null)
+})
+
+// ─── COPY-M · el motivo dice de qué episodio viene ───────────────────────────
+
+test('COPY-M1 · un DEP confirmado con corrección previa: "Motivo de la corrección"', () => {
+  // Es el caso real de DEP-0004: confirmado, versión 2, y el documento
+  // conserva el motivo por el que se pidió la corrección.
+  const c = contextoDeposito({ ...DEP_0004, motivoDevolucion: 'Comprobante incorrecto, por favor subir nuevamente.' })
+  assert.equal(c.estado, 'Confirmado')
+  assert.deepEqual(c.motivo, {
+    etiqueta: MOTIVO_CORRECCION,
+    texto: 'Comprobante incorrecto, por favor subir nuevamente.',
+  })
+})
+
+test('COPY-M2 · nunca "Motivo" a secas, y cada campo con su episodio', () => {
+  const soloEtiquetas = [MOTIVO_CORRECCION, MOTIVO_ANULACION, MOTIVO_RECHAZO]
+  for (const e of soloEtiquetas) {
+    assert.notEqual(e, 'Motivo')
+    assert.ok(e.startsWith('Motivo de') || e.startsWith('Motivo del'))
+  }
+  // Anulado con su propio campo.
+  const anulado = contextoDeposito({ ...DEP_0004, estado: 'anulado', motivoAnulacion: 'Duplicado' } as DepositoRegistrado)
+  assert.deepEqual(anulado.motivo, { etiqueta: MOTIVO_ANULACION, texto: 'Duplicado' })
+  // Rechazado con el suyo.
+  const rechazado = contextoDeposito({ ...DEP_0004, estado: 'rechazado', motivoRechazo: 'Monto que no cuadra' })
+  assert.deepEqual(rechazado.motivo, { etiqueta: MOTIVO_RECHAZO, texto: 'Monto que no cuadra' })
+  // Con dos motivos guardados manda el del estado actual, sin mezclarlos.
+  const dos = contextoDeposito({
+    ...DEP_0004, estado: 'anulado',
+    motivoDevolucion: 'Comprobante incorrecto',
+    motivoAnulacion: 'Anulado por duplicado',
+  } as DepositoRegistrado)
+  assert.deepEqual(dos.motivo, { etiqueta: MOTIVO_ANULACION, texto: 'Anulado por duplicado' })
+  // Sin motivo guardado, no se inventa una etiqueta.
+  assert.equal(contextoDeposito(DEP_0005).motivo, null)
 })
 
 test('VD12 · sin depósitos no se ofrece ninguna acción', () => {
