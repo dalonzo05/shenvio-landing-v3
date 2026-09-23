@@ -19,7 +19,13 @@ import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { useSearchParams } from 'next/navigation'
 // DEPOSITOS-ALERTA-REVISION-1 — el aviso del dashboard abre esta pagina ya en
 // la pestaña que corresponde; el nombre del parametro vive en el helper.
-import { PARAM_TAB_DEPOSITOS, TAB_POR_REVISAR_GESTOR } from '@/lib/revision-depositos-gestor'
+import {
+  PARAM_TAB_DEPOSITOS,
+  TAB_POR_REVISAR_GESTOR,
+  clasificarColaRevision,
+  TITULO_ESPERANDO_COMPROBANTE,
+  DETALLE_ESPERANDO_COMPROBANTE,
+} from '@/lib/revision-depositos-gestor'
 import { compressImage, uploadDepositoBoucher, uploadVersionBoucherDeposito } from '@/fb/storage'
 import { registrarMovimiento, convertirDepositoEnDeuda } from '@/lib/financial-writes'
 import { getDepositoEstado, cuentas } from '@/lib/financial-types'
@@ -778,6 +784,21 @@ function DepositosPageContent() {
 
   // ── KPIs extendidos ────────────────────────────────────────────────────────
 
+  // DEPOSITOS-ALERTA-REVISION-1 — la query trae dos cosas juntas: lo que espera
+  // la decisión del gestor ('en_revision') y lo que espera el comprobante de
+  // quien lo envió ('pendiente_boucher'). El KPI las sumaba y decía 2 donde el
+  // gestor tenía 1 decisión por tomar. Acá se separan, con el mismo helper que
+  // usan el badge del sidebar y el aviso del dashboard.
+  //
+  // Para el digitador esta pestaña es "Mis digitaciones" —su historial completo,
+  // que su query trae entero— y no se toca: no es la cola de revisión de nadie.
+  const esDigitadorSesion = userRol === 'digitador'
+  const colaRevision = useMemo(() => clasificarColaRevision(porRevisar as never), [porRevisar])
+  const porRevisarVisible = useMemo(
+    () => (esDigitadorSesion ? porRevisar : (colaRevision.porRevisar as unknown as DepositoOrderDoc[])),
+    [esDigitadorSesion, porRevisar, colaRevision],
+  )
+
   const kpisExtended = useMemo(() => ({
     ...kpis,
     totalGastosDescontados: gruposMotorizado.reduce((s, g) => s + g.storkhub.gastosDeducibles, 0),
@@ -785,8 +806,12 @@ function DepositosPageContent() {
     // Filtrado explícito por estado: para Digitador, `porRevisar` ahora trae
     // TODO su historial (la query se amplió para poder leerlo bajo Rules —
     // ver el useEffect de arriba), no solo lo pendiente.
-    totalPorRevisar: porRevisar.filter((d) => d.estado === 'pendiente_boucher' || d.estado === 'en_revision').length,
-  }), [kpis, gruposMotorizado, porRevisar])
+    // Solo lo que espera una decisión suya. Para el digitador, su cola de
+    // digitaciones abiertas, como antes.
+    totalPorRevisar: esDigitadorSesion
+      ? porRevisar.filter((d) => d.estado === 'pendiente_boucher' || d.estado === 'en_revision').length
+      : colaRevision.porRevisar.length,
+  }), [kpis, gruposMotorizado, porRevisar, esDigitadorSesion, colaRevision])
 
   // ── Historial ──────────────────────────────────────────────────────────────
 
@@ -1993,12 +2018,12 @@ function DepositosPageContent() {
       {tab === 'por_revisar' && (() => {
         const motorizadosPR = (() => {
           const map = new Map<string, string>()
-          porRevisar.forEach((d) => { if (d.motorizadoUid && d.motorizadoNombre) map.set(d.motorizadoUid, d.motorizadoNombre) })
+          porRevisarVisible.forEach((d) => { if (d.motorizadoUid && d.motorizadoNombre) map.set(d.motorizadoUid, d.motorizadoNombre) })
           return [...map.entries()].map(([id, nombre]) => ({ id, nombre }))
         })()
         const porRevisarFiltrado = filtroMotorizadoPorRevisar === 'todos'
-          ? porRevisar
-          : porRevisar.filter((d) => d.motorizadoUid === filtroMotorizadoPorRevisar)
+          ? porRevisarVisible
+          : porRevisarVisible.filter((d) => d.motorizadoUid === filtroMotorizadoPorRevisar)
         return (
         <>
         <div className="flex flex-col gap-3">
@@ -2007,7 +2032,7 @@ function DepositosPageContent() {
             <div className="flex flex-wrap gap-2">
               <button onClick={() => setFiltroMotorizadoPorRevisar('todos')}
                 className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${filtroMotorizadoPorRevisar === 'todos' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
-                Todos ({porRevisar.length})
+                Todos ({porRevisarVisible.length})
               </button>
               {motorizadosPR.map((m) => (
                 <button key={m.id} onClick={() => setFiltroMotorizadoPorRevisar(m.id)}
@@ -2422,6 +2447,38 @@ function DepositosPageContent() {
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* DEPOSITOS-ALERTA-REVISION-1 — 'pendiente_boucher' no es una revisión
+              pendiente: el envío no se completó y no hay comprobante que mirar.
+              Sale de la cola de arriba y de los contadores, pero NO del módulo:
+              un documento así puede quedar de una subida que falló y alguien
+              tiene que poder verlo. Solo lectura; las acciones siguen donde
+              estaban. */}
+          {!esDigitadorSesion && colaRevision.esperandoComprobante.length > 0 && (
+            <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+              <div className="border-b border-gray-100 px-4 py-3">
+                <p className="text-sm font-black text-gray-900">
+                  {TITULO_ESPERANDO_COMPROBANTE} ({colaRevision.esperandoComprobante.length})
+                </p>
+                <p className="mt-0.5 text-xs text-gray-500">{DETALLE_ESPERANDO_COMPROBANTE}</p>
+              </div>
+              <ul className="divide-y divide-gray-100">
+                {colaRevision.esperandoComprobante.map((dep) => (
+                  <li key={dep.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-2.5">
+                    <span className="min-w-0 text-xs text-gray-600 break-words">
+                      <span className="font-mono font-bold text-gray-900">{identidadDeposito(dep).texto}</span>
+                      {' · '}{fmtNombreMotorizado(dep.motorizadoNombre ?? '', motorizadoNames, dep.motorizadoUid ?? undefined)}
+                      {' · '}{dep.destinatario === 'storkhub' ? 'StorkHub' : (dep.destinatarioNombre || 'Comercio')}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-3">
+                      <span className="text-xs text-gray-500 whitespace-nowrap">{fechaHoraOperativa(dep.creadoAt)}</span>
+                      <span className="text-sm font-semibold text-gray-900 whitespace-nowrap">{fmt(dep.montoTotal ?? 0)}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </div>

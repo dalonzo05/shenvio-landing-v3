@@ -17,6 +17,10 @@ import {
   ESTADO_POR_REVISAR_GESTOR,
   RUTA_DEPOSITOS_GESTOR,
   TAB_POR_REVISAR_GESTOR,
+  clasificarColaRevision,
+  esperaComprobanteDelMotorizado,
+  TITULO_ESPERANDO_COMPROBANTE,
+  DETALLE_ESPERANDO_COMPROBANTE,
 } from './revision-depositos-gestor'
 import type { DepositoRegistrado } from './deposito-orden'
 
@@ -151,4 +155,92 @@ test('GUI7 · DEP-0006 real: un depósito por revisar, con su aviso', () => {
   const n = cantidadDepositosPorRevisarGestor([dep()])
   assert.equal(n, 1)
   assert.equal(avisoRevisionGestor(n)?.titulo, 'Tienes 1 depósito por revisar')
+})
+
+// ─── ALIGN · las cuatro superficies dicen lo mismo ───────────────────────────
+//
+// El KPI y la pestaña de Depósitos contaban 'pendiente_boucher' junto con
+// 'en_revision', así que la página podía decir 2 donde el gestor tenía 1
+// decisión por tomar, y el dashboard decía 1. Ahora las cuatro superficies
+// —dashboard, badge, pestaña y KPI— salen del mismo helper, y el
+// pendiente_boucher tiene su propia sección: sale de los contadores, no del
+// módulo.
+
+const pendienteBoucher = dep({ id: 'dep_pb', codigo: 'DEP-0007', estado: 'pendiente_boucher' })
+const enRevision = dep({ id: 'dep_er', codigo: 'DEP-0006', estado: 'en_revision' })
+
+test('ALIGN1 · solo pendiente_boucher ⇒ 0 por revisar, y no se pierde', () => {
+  const cola = clasificarColaRevision([pendienteBoucher])
+  assert.equal(cola.porRevisar.length, 0)
+  assert.deepEqual(cola.esperandoComprobante.map((d) => d.id), ['dep_pb'])
+  assert.equal(cantidadDepositosPorRevisarGestor([pendienteBoucher]), 0)
+  assert.equal(avisoRevisionGestor(0), null)
+  assert.equal(esperaComprobanteDelMotorizado(pendienteBoucher), true)
+  assert.equal(requiereRevisionGestor(pendienteBoucher), false)
+})
+
+test('ALIGN2 · solo en_revision ⇒ 1 por revisar, nada esperando comprobante', () => {
+  const cola = clasificarColaRevision([enRevision])
+  assert.deepEqual(cola.porRevisar.map((d) => d.id), ['dep_er'])
+  assert.equal(cola.esperandoComprobante.length, 0)
+  assert.equal(cantidadDepositosPorRevisarGestor([enRevision]), 1)
+  assert.equal(avisoRevisionGestor(1)?.titulo, 'Tienes 1 depósito por revisar')
+})
+
+test('ALIGN3 · uno de cada ⇒ por revisar 1, esperando 1, nunca 2', () => {
+  const cola = clasificarColaRevision([pendienteBoucher, enRevision])
+  assert.equal(cola.porRevisar.length, 1)
+  assert.equal(cola.esperandoComprobante.length, 1)
+  assert.notEqual(cola.porRevisar.length, 2)
+  assert.equal(cantidadDepositosPorRevisarGestor([pendienteBoucher, enRevision]), 1)
+})
+
+test('ALIGN4 · el contador del dashboard es exactamente el del KPI', () => {
+  const lista = [pendienteBoucher, enRevision, dep({ id: 'c1', estado: 'confirmado' }), dep({ id: 'd1', estado: 'devuelto' })]
+  const kpi = clasificarColaRevision(lista).porRevisar.length
+  const dashboard = cantidadDepositosPorRevisarGestor(lista)
+  assert.equal(dashboard, kpi)
+  assert.equal(kpi, 1)
+  assert.equal(avisoRevisionGestor(dashboard)?.titulo, 'Tienes 1 depósito por revisar')
+})
+
+test('ALIGN5 · el badge es el mismo número, con su propia etiqueta', () => {
+  const lista = [pendienteBoucher, enRevision, dep({ id: 'x', estado: 'en_revision', tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio' })]
+  const kpi = clasificarColaRevision(lista).porRevisar.length
+  assert.equal(kpi, 2)
+  assert.equal(cantidadDepositosPorRevisarGestor(lista), kpi)
+  assert.equal(etiquetaBadgeDepositosGestor(kpi), 'Depósitos, 2 por revisar')
+})
+
+test('ALIGN6 · el tipo C no entra en ninguna de las dos colas', () => {
+  const tipoCRevision = dep({ id: 'c_rev', tipo: 'pago_delivery_deposito', estado: 'en_revision' })
+  const tipoCPendiente = dep({ id: 'c_pb', tipo: 'pago_delivery_deposito', estado: 'pendiente_boucher' })
+  const cola = clasificarColaRevision([tipoCRevision, tipoCPendiente])
+  assert.equal(cola.porRevisar.length, 0)
+  assert.equal(cola.esperandoComprobante.length, 0)
+  assert.equal(esperaComprobanteDelMotorizado(tipoCPendiente), false)
+})
+
+test('ALIGN7 · en_revision → devuelto: por revisar baja y el aviso se apaga', () => {
+  const antes = [enRevision]
+  assert.equal(cantidadDepositosPorRevisarGestor(antes), 1)
+  const despues = antes.map((d) => ({ ...d, estado: 'devuelto' }))
+  const cola = clasificarColaRevision(despues)
+  assert.equal(cola.porRevisar.length, 0)
+  // Un devuelto no cae en "esperando comprobante": es otra cosa, y su lugar
+  // sigue siendo el historial del módulo.
+  assert.equal(cola.esperandoComprobante.length, 0)
+  assert.equal(avisoRevisionGestor(cantidadDepositosPorRevisarGestor(despues)), null)
+})
+
+test('ALIGN8 · la cola deduplica y no se queda con documentos sin id', () => {
+  const cola = clasificarColaRevision([enRevision, enRevision, { ...enRevision }, dep({ id: '', estado: 'en_revision' }), null, undefined])
+  assert.equal(cola.porRevisar.length, 1)
+  assert.equal(cola.esperandoComprobante.length, 0)
+})
+
+test('ALIGN9 · el copy de la sección aparte no habla de revisión', () => {
+  assert.equal(TITULO_ESPERANDO_COMPROBANTE, 'Esperando comprobante')
+  assert.equal(DETALLE_ESPERANDO_COMPROBANTE, 'El envío no se completó: todavía no hay comprobante que revisar.')
+  assert.ok(!/por revisar/i.test(TITULO_ESPERANDO_COMPROBANTE))
 })

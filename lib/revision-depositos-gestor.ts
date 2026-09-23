@@ -14,8 +14,9 @@
 //   anulado              NO — terminó
 //   convertido_en_deuda  NO — no hay revisión suya demostrada
 //   pendiente_boucher    NO — el envío no se completó: no hay comprobante que
-//                        revisar todavía (el panel de Depósitos lo muestra en
-//                        la misma pestaña, pero no es una revisión pendiente)
+//                        revisar todavía. Sigue visible en el módulo, en su
+//                        propia sección ("Esperando comprobante"), pero no
+//                        cuenta como revisión pendiente en ninguna superficie
 //
 // El tipo C (pago_delivery_deposito) NO entra: nace 'confirmado' desde Cobros
 // —lo registra el propio gestor al confirmar el pago— y su corrección es
@@ -117,3 +118,58 @@ export function etiquetaBadgeDepositosGestor(cantidad: number): string {
   if (n <= 0) return 'Depósitos'
   return `Depósitos, ${n} por revisar`
 }
+
+// ─── La cola del módulo de Depósitos ──────────────────────────────────────────
+//
+// La query de esa página trae dos cosas juntas: los que esperan revisión y los
+// que todavía no tienen comprobante. Son estados distintos con dueños
+// distintos, así que la pestaña las separa y solo la primera cuenta como
+// "Por revisar" — antes el KPI sumaba las dos y decía 2 donde el gestor tenía
+// 1 decisión por tomar.
+
+/** El motorizado (o el digitador) creó el depósito y el comprobante no llegó. */
+export const ESTADO_ESPERANDO_COMPROBANTE = 'pendiente_boucher'
+
+/**
+ * ¿Este depósito espera el comprobante de quien lo envió?
+ *
+ * No es trabajo del gestor: no hay nada que revisar todavía. Sigue visible en
+ * el módulo —un documento así puede quedar de un envío que falló— pero aparte.
+ */
+export function esperaComprobanteDelMotorizado(dep: DepositoRegistrado | null | undefined): boolean {
+  if (!dep) return false
+  if (!esDepositoDelMotorizado(dep)) return false
+  return (dep.estado ?? '') === ESTADO_ESPERANDO_COMPROBANTE
+}
+
+export interface ColaRevisionDepositos {
+  /** Esperan una decisión del gestor: confirmar o pedir corrección. */
+  porRevisar: DepositoRegistrado[]
+  /** Esperan el comprobante de quien los creó. No son trabajo del gestor. */
+  esperandoComprobante: DepositoRegistrado[]
+}
+
+/**
+ * Parte la cola en las dos cosas que hoy venían mezcladas. Preserva el orden de
+ * entrada (la página ya la trae ordenada por fecha) y deduplica por id.
+ */
+export function clasificarColaRevision(
+  depositos: Array<DepositoRegistrado | null | undefined>,
+): ColaRevisionDepositos {
+  const vistos = new Set<string>()
+  const porRevisar: DepositoRegistrado[] = []
+  const esperandoComprobante: DepositoRegistrado[] = []
+  for (const dep of depositos) {
+    if (!dep) continue
+    const id = typeof dep.id === 'string' ? dep.id : ''
+    if (!id || vistos.has(id)) continue
+    if (requiereRevisionGestor(dep)) { vistos.add(id); porRevisar.push(dep); continue }
+    if (esperaComprobanteDelMotorizado(dep)) { vistos.add(id); esperandoComprobante.push(dep) }
+  }
+  return { porRevisar, esperandoComprobante }
+}
+
+/** Encabezado de la sección aparte, para que nadie la lea como una revisión. */
+export const TITULO_ESPERANDO_COMPROBANTE = 'Esperando comprobante'
+export const DETALLE_ESPERANDO_COMPROBANTE =
+  'El envío no se completó: todavía no hay comprobante que revisar.'
