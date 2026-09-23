@@ -25,6 +25,8 @@ import {
   avisoTopeDepositos,
   MENSAJE_IMAGEN_ILEGIBLE,
   cantidadDepositosQueRequierenAtencion,
+  cantidadTareasDepositoMotorizado,
+  etiquetaBadgeDepositos,
   avisoAtencionMotorizado,
   ETIQUETA_ATENCION_MOTORIZADO,
   type PestanaDepositosMotorizado,
@@ -1025,6 +1027,15 @@ export default function PanelMotorizadoPage() {
     [depositosDevueltos, uidSesion],
   );
   const avisoAtencion = useMemo(() => avisoAtencionMotorizado(depositosAtencion), [depositosAtencion]);
+  // MOTO-DEPOSITOS-AVISOS-1 · E2E — el número general de Depósitos son las
+  // TAREAS que tiene por hacer: cada obligación todavía sin depositar (una
+  // orden puede deber a StorkHub y al comercio: son dos envíos) más cada
+  // depósito devuelto por corregir. Sin lecturas nuevas: compone el resumen
+  // que ya existe con el contador de devueltos.
+  const tareasDeposito = useMemo(
+    () => cantidadTareasDepositoMotorizado(resumenMotorizado, depositosAtencion),
+    [resumenMotorizado, depositosAtencion],
+  );
   const codigoDeOrden = useMemo(() => {
     const m: Record<string, string> = {};
     ordenes.forEach((o) => { if (typeof o.codigo === 'string') m[o.id] = o.codigo; });
@@ -1293,7 +1304,7 @@ export default function PanelMotorizadoPage() {
           <StatCard label="Nuevas" value={pendientes.length} color={pendientes.length > 0 ? '#d97706' : '#6b7280'} bg={pendientes.length > 0 ? '#fffbeb' : '#f9fafb'} border={pendientes.length > 0 ? '#fde68a' : '#e5e7eb'} />
           <StatCard label="En curso" value={enCurso.length} color={enCurso.length > 0 ? '#2563eb' : '#6b7280'} bg={enCurso.length > 0 ? '#eff6ff' : '#f9fafb'} border={enCurso.length > 0 ? '#bfdbfe' : '#e5e7eb'} />
           <StatCard label="Hoy" value={historialFiltrado.length} color="#16a34a" bg="#f0fdf4" border="#bbf7d0" />
-          <StatCard label="Depósitos" value={resumenMotorizado.pendiente.ordenes} color={resumenMotorizado.pendiente.ordenes > 0 ? '#7c3aed' : '#6b7280'} bg={resumenMotorizado.pendiente.ordenes > 0 ? '#f5f3ff' : '#f9fafb'} border={resumenMotorizado.pendiente.ordenes > 0 ? '#ddd6fe' : '#e5e7eb'} />
+          <StatCard label="Depósitos" value={tareasDeposito} color={tareasDeposito > 0 ? '#7c3aed' : '#6b7280'} bg={tareasDeposito > 0 ? '#f5f3ff' : '#f9fafb'} border={tareasDeposito > 0 ? '#ddd6fe' : '#e5e7eb'} />
         </div>
       </div>
 
@@ -2399,7 +2410,7 @@ export default function PanelMotorizadoPage() {
            depositar, que sigue a la vista en la StatCard "Depósitos" del
            encabezado y en "Por depositar" dentro de la pestaña; un solo número
            no puede significar las dos cosas. */
-        depositosCount={depositosAtencion}
+        depositosCount={tareasDeposito}
       />
     </div>
   );
@@ -2429,9 +2440,11 @@ function BottomNav({ tab, setTab, pendientesCount, enCursoCount, depositosCount 
   pendientesCount: number; enCursoCount: number; depositosCount: number;
 }) {
   // MOTO-DEPOSITOS-AVISOS-1 — el badge es un número suelto: sin esto, un
-  // lector de pantalla no dice de qué son. `atencion` marca al que significa
-  // "esperan una acción tuya", que no es lo mismo que "hay tantos".
-  const items: { key: TabKey; label: string; icon: React.ReactNode; count: number; atencion?: boolean }[] = [
+  // lector de pantalla no dice de qué son. El de Depósitos trae su propia
+  // etiqueta: son TAREAS pendientes (envíos por hacer + correcciones pedidas),
+  // y decir "requieren atención" sería falso —solo el banner habla de
+  // correcciones, que pueden ser menos—.
+  const items: { key: TabKey; label: string; icon: React.ReactNode; count: number; etiqueta?: (n: number) => string }[] = [
     {
       key: 'pendientes', label: 'Nuevas', count: pendientesCount,
       icon: (
@@ -2463,7 +2476,7 @@ function BottomNav({ tab, setTab, pendientesCount, enCursoCount, depositosCount 
       ),
     },
     {
-      key: 'depositos', label: 'Depósitos', count: depositosCount, atencion: true,
+      key: 'depositos', label: 'Depósitos', count: depositosCount, etiqueta: etiquetaBadgeDepositos,
       icon: (
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
           <rect x="2" y="7" width="20" height="15" rx="2" />
@@ -2490,11 +2503,9 @@ function BottomNav({ tab, setTab, pendientesCount, enCursoCount, depositosCount 
             key={item.key}
             onClick={() => setTab(item.key)}
             aria-current={active ? 'page' : undefined}
-            aria-label={item.count > 0
-              ? (item.atencion
-                ? `${item.label}, ${item.count} ${item.count === 1 ? 'requiere' : 'requieren'} atención`
-                : `${item.label}, ${item.count}`)
-              : item.label}
+            aria-label={item.etiqueta
+              ? item.etiqueta(item.count)
+              : (item.count > 0 ? `${item.label}, ${item.count}` : item.label)}
             style={{
               flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
               gap: 3, border: 'none', background: 'transparent', cursor: 'pointer',

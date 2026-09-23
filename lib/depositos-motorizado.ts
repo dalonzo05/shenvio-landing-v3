@@ -50,12 +50,25 @@ export interface ResumenDepositosMotorizado {
     total: number
     /** Órdenes con algún destino pendiente. */
     ordenes: number
+    // ── MOTO-DEPOSITOS-AVISOS-1 · E2E ───────────────────────────────────────
+    /**
+     * OBLIGACIONES pendientes, no órdenes: una sola orden puede deber un
+     * depósito a StorkHub y otro al comercio, y son dos envíos distintos.
+     * Se cuenta con la misma decisión que reparte los montos de arriba —no hay
+     * segunda lógica— y no se deduce del monto: un pendiente a StorkHub que
+     * los gastos dejan en C$0 neto sigue siendo una obligación.
+     */
+    obligaciones: number
+    obligacionesStorkhub: number
+    obligacionesComercio: number
   }
   enRevision: {
     storkhub: number
     comercio: number
     total: number
     ordenes: number
+    /** Obligaciones ya enviadas y sin confirmar. */
+    obligaciones: number
   }
 }
 
@@ -70,6 +83,10 @@ export function resumenDepositosMotorizado(
 ): ResumenDepositosMotorizado {
   let pendStorkhub = 0, pendComercio = 0, revStorkhub = 0, revComercio = 0
   let ordenesPend = 0, ordenesRev = 0
+  // Obligaciones, no órdenes: se cuentan en las MISMAS ramas que reparten los
+  // montos, así que no puede haber una discrepancia entre lo que se muestra y
+  // lo que se cuenta.
+  let obligPendStorkhub = 0, obligPendComercio = 0, obligRev = 0
 
   for (const o of ordenes) {
     const calc = calcularDeposito(o)
@@ -77,12 +94,12 @@ export function resumenDepositosMotorizado(
     let pend = false, rev = false
 
     if (calc.totalAStorkhub > 0 && !reg?.confirmadoStorkhub) {
-      if (reg?.storkhubDepositoId) { revStorkhub += calc.totalAStorkhub; rev = true }
-      else { pendStorkhub += calc.totalAStorkhub; pend = true }
+      if (reg?.storkhubDepositoId) { revStorkhub += calc.totalAStorkhub; rev = true; obligRev++ }
+      else { pendStorkhub += calc.totalAStorkhub; pend = true; obligPendStorkhub++ }
     }
     if (calc.totalAlComercio > 0 && !reg?.confirmadoComercio) {
-      if (reg?.comercioDepositoId) { revComercio += calc.totalAlComercio; rev = true }
-      else { pendComercio += calc.totalAlComercio; pend = true }
+      if (reg?.comercioDepositoId) { revComercio += calc.totalAlComercio; rev = true; obligRev++ }
+      else { pendComercio += calc.totalAlComercio; pend = true; obligPendComercio++ }
     }
     if (pend) ordenesPend++
     if (rev) ordenesRev++
@@ -97,12 +114,16 @@ export function resumenDepositosMotorizado(
       comercio: pendComercio,
       total: storkhubNeto + pendComercio,
       ordenes: ordenesPend,
+      obligaciones: obligPendStorkhub + obligPendComercio,
+      obligacionesStorkhub: obligPendStorkhub,
+      obligacionesComercio: obligPendComercio,
     },
     enRevision: {
       storkhub: revStorkhub,
       comercio: revComercio,
       total: revStorkhub + revComercio,
       ordenes: ordenesRev,
+      obligaciones: obligRev,
     },
   }
 }
@@ -366,4 +387,57 @@ export function avisoAtencionMotorizado(cantidad: number): AvisoAtencionMotoriza
     ruta: RUTA_DEPOSITOS_MOTORIZADO,
     tab: TAB_DEPOSITOS_MOTORIZADO,
   }
+}
+
+// ─── Tareas de depósito del motorizado ────────────────────────────────────────
+//
+// MOTO-DEPOSITOS-AVISOS-1 · E2E — el número general de "Depósitos" contaba
+// ÓRDENES con algo pendiente. SH-0006 mostró el problema: una sola orden que
+// debe C$90 a StorkHub y C$1,000 al comercio son DOS envíos, y el panel decía
+// 1. Y cuando el gestor devolvió el depósito de los C$90, seguía diciendo 1
+// aunque el motorizado tenía dos cosas por hacer: corregir ese comprobante y
+// depositar los C$1,000.
+//
+// Una TAREA es algo que el motorizado tiene que hacer ahora:
+//
+//   · una obligación todavía sin depositar (por destino), y
+//   · un depósito 'devuelto' que hay que corregir.
+//
+// Lo que espera a StorkHub (en_revision), lo cerrado (confirmado, anulado,
+// convertido en deuda) y el tipo C no son tareas suyas.
+//
+// No hay doble conteo: en cuanto existe el puntero del depósito, la obligación
+// deja de estar "pendiente" y pasa a "en revisión" —también si ese depósito
+// fue devuelto—, así que el devuelto se cuenta una sola vez, por el lado de la
+// corrección.
+
+/**
+ * Cuántas tareas de depósito tiene el motorizado ahora mismo.
+ *
+ * @param resumen   el de resumenDepositosMotorizado(): de ahí salen las
+ *                  obligaciones pendientes, con la misma lógica que pinta
+ *                  "Por depositar".
+ * @param devueltos cuántos depósitos suyos están devueltos, tal como los
+ *                  cuenta cantidadDepositosQueRequierenAtencion().
+ */
+export function cantidadTareasDepositoMotorizado(
+  resumen: Pick<ResumenDepositosMotorizado, 'pendiente'>,
+  devueltos: number,
+): number {
+  const pendientes = Number.isFinite(resumen?.pendiente?.obligaciones)
+    ? Math.max(0, Math.floor(resumen.pendiente.obligaciones))
+    : 0
+  const correcciones = Number.isFinite(devueltos) ? Math.max(0, Math.floor(devueltos)) : 0
+  return pendientes + correcciones
+}
+
+/**
+ * Etiqueta accesible del badge de Depósitos. Dice "pendientes", no "requieren
+ * atención": el número mezcla envíos por hacer con correcciones pedidas, y
+ * solo el banner habla específicamente de correcciones.
+ */
+export function etiquetaBadgeDepositos(tareas: number): string {
+  const n = Number.isFinite(tareas) ? Math.max(0, Math.floor(tareas)) : 0
+  if (n <= 0) return 'Depósitos'
+  return `Depósitos, ${n} ${n === 1 ? 'pendiente' : 'pendientes'}`
 }

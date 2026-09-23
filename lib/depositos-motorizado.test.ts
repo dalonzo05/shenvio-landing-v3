@@ -21,6 +21,8 @@ import {
   requiereAtencionMotorizado,
   depositosQueRequierenAtencion,
   cantidadDepositosQueRequierenAtencion,
+  cantidadTareasDepositoMotorizado,
+  etiquetaBadgeDepositos,
   avisoAtencionMotorizado,
   ETIQUETA_ATENCION_MOTORIZADO,
   RUTA_DEPOSITOS_MOTORIZADO,
@@ -410,4 +412,168 @@ test('MC7 · el historial no es fuente del contador: mismo dato, resultados dist
   const recortados = todos.filter((d) => idsDelListado.has(d.id))
   assert.equal(cantidadDepositosQueRequierenAtencion(recortados, MOTO), 0)
   assert.equal(cantidadDepositosQueRequierenAtencion(comoQueryAtencion(todos, MOTO), MOTO), 1)
+})
+
+// ─── CT · tareas de depósito: obligaciones, no órdenes ───────────────────────
+//
+// SH-0006 (E2E real): una sola orden con delivery C$90 en efectivo a StorkHub y
+// cobro contra entrega C$1,000 al comercio. Son DOS envíos distintos y el panel
+// decía 1, porque contaba órdenes. Y con el depósito de los C$90 devuelto
+// seguía diciendo 1, aunque había dos cosas por hacer.
+
+/** Delivery C$90 en efectivo (no deducido del CE) + CE C$1,000 al comercio. */
+function sh0006(registro: EntradaDepositoOrden['registro'] = { deposito: null }): EntradaDepositoOrden {
+  return {
+    estado: 'entregado',
+    tipoCliente: 'contado',
+    confirmacion: { precioFinalCordobas: 90 },
+    pagoDelivery: { quienPaga: 'entrega', montoSugerido: 90, deducirDelCobroContraEntrega: false, tipo: 'contado' },
+    cobroContraEntrega: { aplica: true, monto: 1000 },
+    cobrosMotorizado: { delivery: { monto: 90, recibio: true }, producto: { monto: 1000, recibio: true } },
+    registro,
+  } as EntradaDepositoOrden
+}
+const tareas = (ordenes: EntradaDepositoOrden[], devueltos = 0, gastos = 0) =>
+  cantidadTareasDepositoMotorizado(resumenDepositosMotorizado(ordenes, gastos), devueltos)
+
+test('CT0 · precondición: SH-0006 obliga C$90 a StorkHub y C$1,000 al comercio', () => {
+  const r = resumenDepositosMotorizado([sh0006()])
+  assert.equal(r.pendiente.storkhubBruto, 90)
+  assert.equal(r.pendiente.comercio, 1000)
+  // Una sola orden…
+  assert.equal(r.pendiente.ordenes, 1)
+  // …y DOS obligaciones. Ahí estaba el bug del contador.
+  assert.equal(r.pendiente.obligaciones, 2)
+})
+
+test('CT1 · una orden con obligación a StorkHub y al comercio ⇒ 2 tareas', () => {
+  assert.equal(tareas([sh0006()]), 2)
+})
+
+test('CT2 · solo StorkHub pendiente ⇒ 1', () => {
+  const r = resumenDepositosMotorizado([sh0001()])
+  assert.equal(r.pendiente.obligacionesStorkhub, 1)
+  assert.equal(r.pendiente.obligacionesComercio, 0)
+  assert.equal(tareas([sh0001()]), 1)
+})
+
+test('CT3 · solo el comercio pendiente ⇒ 1', () => {
+  // El depósito a StorkHub ya se envió; queda el del comercio.
+  const reg = { deposito: { storkhubDepositoId: 'dep_sh' } }
+  const r = resumenDepositosMotorizado([sh0006(reg)])
+  assert.equal(r.pendiente.obligacionesStorkhub, 0)
+  assert.equal(r.pendiente.obligacionesComercio, 1)
+  assert.equal(tareas([sh0006(reg)]), 1)
+})
+
+test('CT4 · las dos enviadas (en revisión) ⇒ 0 tareas', () => {
+  const reg = { deposito: { storkhubDepositoId: 'dep_sh', comercioDepositoId: 'dep_co' } }
+  const r = resumenDepositosMotorizado([sh0006(reg)])
+  assert.equal(r.pendiente.obligaciones, 0)
+  assert.equal(r.enRevision.obligaciones, 2)
+  assert.equal(tareas([sh0006(reg)]), 0)
+})
+
+test('CT5 · comercio pendiente + StorkHub devuelto ⇒ 2', () => {
+  // Devuelto = el puntero existe (el depósito está registrado) y además hay un
+  // DEP en estado devuelto: la corrección es la segunda tarea.
+  const reg = { deposito: { storkhubDepositoId: 'dep_sh' } }
+  const devueltos = cantidadDepositosQueRequierenAtencion([dep({ id: 'dep_sh' })], MOTO)
+  assert.equal(devueltos, 1)
+  assert.equal(tareas([sh0006(reg)], devueltos), 2)
+})
+
+test('CT6 · un devuelto no se cuenta dos veces: el puntero lo saca de pendiente', () => {
+  const reg = { deposito: { storkhubDepositoId: 'dep_sh' } }
+  const r = resumenDepositosMotorizado([sh0006(reg)])
+  // A StorkHub ya no hay nada PENDIENTE aunque el depósito esté devuelto…
+  assert.equal(r.pendiente.storkhub, 0)
+  assert.equal(r.pendiente.obligacionesStorkhub, 0)
+  // …así que sumar la corrección no duplica esa deuda.
+  assert.equal(tareas([sh0006(reg)], 1), 2)
+  // Y si esa orden no tuviera nada más pendiente, la tarea es solo la corrección.
+  const soloStorkhub = sh0001({ deposito: { storkhubDepositoId: 'dep_sh' } })
+  assert.equal(resumenDepositosMotorizado([soloStorkhub]).pendiente.obligaciones, 0)
+  assert.equal(tareas([soloStorkhub], 1), 1)
+})
+
+test('CT7 · dos órdenes con cuatro obligaciones pendientes ⇒ 4', () => {
+  const otra = { ...sh0006(), confirmacion: { precioFinalCordobas: 50 } } as EntradaDepositoOrden
+  const r = resumenDepositosMotorizado([sh0006(), otra])
+  assert.equal(r.pendiente.obligaciones, 4)
+  assert.equal(r.pendiente.ordenes, 2)
+  assert.equal(tareas([sh0006(), otra]), 4)
+})
+
+test('CT8 · en_revision no es tarea del motorizado', () => {
+  const reg = { deposito: { storkhubDepositoId: 'dep_sh', comercioDepositoId: 'dep_co' } }
+  assert.equal(tareas([sh0006(reg)], 0), 0)
+  // Y un DEP en_revision tampoco entra por el lado de las correcciones.
+  assert.equal(cantidadDepositosQueRequierenAtencion([dep({ estado: 'en_revision' })], MOTO), 0)
+})
+
+test('CT9 · confirmado no es tarea', () => {
+  const reg = {
+    deposito: {
+      storkhubDepositoId: 'dep_sh', confirmadoStorkhub: true,
+      comercioDepositoId: 'dep_co', confirmadoComercio: true,
+    },
+  }
+  assert.equal(tareas([sh0006(reg)]), 0)
+  assert.equal(cantidadDepositosQueRequierenAtencion([dep({ estado: 'confirmado' })], MOTO), 0)
+})
+
+test('CT10 · el tipo C nunca es tarea del motorizado', () => {
+  const tipoC = dep({ id: 'c1', tipo: 'pago_delivery_deposito' })
+  const devueltos = cantidadDepositosQueRequierenAtencion([tipoC], MOTO)
+  assert.equal(devueltos, 0)
+  assert.equal(tareas([], devueltos), 0)
+})
+
+test('CT11 · el banner sigue contando SOLO devueltos, no las tareas', () => {
+  // Estado E2E de SH-0006: C$1,000 pendiente al comercio + DEP-0006 devuelto.
+  const reg = { deposito: { storkhubDepositoId: 'dep_sh' } }
+  const devueltos = cantidadDepositosQueRequierenAtencion([dep({ id: 'dep_sh' })], MOTO)
+  assert.equal(tareas([sh0006(reg)], devueltos), 2, 'contador general')
+  const aviso = avisoAtencionMotorizado(devueltos)
+  assert.equal(aviso?.titulo, 'Tienes 1 depósito que requiere atención')
+  assert.equal(aviso?.cta, 'Revisar depósito')
+})
+
+test('CT12 · StatCard y badge comparten el contador, con su etiqueta propia', () => {
+  const reg = { deposito: { storkhubDepositoId: 'dep_sh' } }
+  const n = tareas([sh0006(reg)], 1)
+  assert.equal(n, 2)
+  // El mismo número alimenta los dos; la etiqueta del badge no dice "atención".
+  assert.equal(etiquetaBadgeDepositos(n), 'Depósitos, 2 pendientes')
+  assert.equal(etiquetaBadgeDepositos(1), 'Depósitos, 1 pendiente')
+  assert.equal(etiquetaBadgeDepositos(0), 'Depósitos')
+  assert.ok(!/atenci/i.test(etiquetaBadgeDepositos(2)))
+})
+
+test('CT13 · lifecycle SH-0006: 2 → 1 → 2 → 1 → 0', () => {
+  const DEP_SH = 'dep_sh_0006'
+  // 1. recién entregada: los dos depósitos por hacer.
+  assert.equal(tareas([sh0006()], 0), 2)
+  // 2. envía los C$90: queda el del comercio.
+  const enviado = sh0006({ deposito: { storkhubDepositoId: DEP_SH } })
+  assert.equal(tareas([enviado], 0), 1)
+  // 3. StorkHub devuelve ese depósito: corregirlo + depositar al comercio.
+  const devueltos = cantidadDepositosQueRequierenAtencion([dep({ id: DEP_SH })], MOTO)
+  assert.equal(tareas([enviado], devueltos), 2)
+  // 4. lo corrige: vuelve a en_revision.
+  const corregidos = cantidadDepositosQueRequierenAtencion([dep({ id: DEP_SH, estado: 'en_revision' })], MOTO)
+  assert.equal(tareas([enviado], corregidos), 1)
+  // 5. envía los C$1,000: nada por hacer.
+  const ambos = sh0006({ deposito: { storkhubDepositoId: DEP_SH, comercioDepositoId: 'dep_co_0006' } })
+  assert.equal(tareas([ambos], corregidos), 0)
+  assert.equal(avisoAtencionMotorizado(corregidos), null)
+})
+
+test('CT14 · un pendiente que los gastos dejan en C$0 neto sigue siendo tarea', () => {
+  // El monto no decide: la obligación existe aunque el neto a StorkHub sea 0.
+  const r = resumenDepositosMotorizado([sh0001()], 500)
+  assert.equal(r.pendiente.storkhub, 0)
+  assert.equal(r.pendiente.obligaciones, 1)
+  assert.equal(tareas([sh0001()], 0, 500), 1)
 })
