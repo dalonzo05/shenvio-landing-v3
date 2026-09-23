@@ -16,6 +16,10 @@ import {
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
+import { useSearchParams } from 'next/navigation'
+// DEPOSITOS-ALERTA-REVISION-1 — el aviso del dashboard abre esta pagina ya en
+// la pestaña que corresponde; el nombre del parametro vive en el helper.
+import { PARAM_TAB_DEPOSITOS, TAB_POR_REVISAR_GESTOR } from '@/lib/revision-depositos-gestor'
 import { compressImage, uploadDepositoBoucher, uploadVersionBoucherDeposito } from '@/fb/storage'
 import { registrarMovimiento, convertirDepositoEnDeuda } from '@/lib/financial-writes'
 import { getDepositoEstado, cuentas } from '@/lib/financial-types'
@@ -349,7 +353,15 @@ export default function DepositosPage() {
 }
 
 function DepositosPageContent() {
-  const [tab, setTab] = useState<MainTab>('pendientes')
+  // DEPOSITOS-ALERTA-REVISION-1 — ?tab=por_revisar abre la cola de revision sin
+  // tocar el resto: es el estado local de siempre, solo con valor inicial. Un
+  // valor que no sea una pestaña real se ignora, y la URL no se reescribe.
+  const paramsDepositos = useSearchParams()
+  const tabPedida = paramsDepositos.get(PARAM_TAB_DEPOSITOS)
+  const tabInicial: MainTab = tabPedida === TAB_POR_REVISAR_GESTOR || tabPedida === 'historial' || tabPedida === 'pendientes'
+    ? (tabPedida as MainTab)
+    : 'pendientes'
+  const [tab, setTab] = useState<MainTab>(tabInicial)
   const [ordenes, setOrdenes] = useState<Solicitud[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedOrdenId, setSelectedOrdenId] = useState<string | null>(null)

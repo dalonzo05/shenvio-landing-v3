@@ -9,6 +9,12 @@ import { useUser } from '@/app/Components/UserProvider'
 import { useRoleGuard, type Rol } from '../_hooks/useRoleGuard'
 import { ToastNuevaOrden, type ToastData } from './_components/ToastNuevaOrden'
 import { PanelShell } from '../_components/PanelShell'
+// DEPOSITOS-ALERTA-REVISION-1 — badge del sidebar y banner del dashboard con
+// UNA sola query: el listener vive acá y el numero baja por contexto.
+import {
+  useContarDepositosPorRevisar,
+  DepositosPorRevisarProvider,
+} from './_components/DepositosPorRevisar'
 
 const MAX_TOASTS = 3
 
@@ -209,6 +215,12 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
     }
   }, [pathname])
 
+  // DEPOSITOS-ALERTA-REVISION-1 — antes del early return del guard: un hook no
+  // puede llamarse condicionalmente. El propio hook no abre nada hasta que el
+  // rol está autorizado, y un digitador no revisa depósitos (sus Rules solo lo
+  // dejan listar lo que él digitó).
+  const depositosPorRevisar = useContarDepositosPorRevisar(autorizado && !esDigitador)
+
   // Dos textos distintos a propósito: "Validando permisos..." solo se ve
   // mientras la verificación está realmente en curso. Si el rol no
   // corresponde, el estado pasa a 'redirigiendo' y el mensaje cambia — así
@@ -240,6 +252,7 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
       badges={{
         solicitudes: { count: pendientesCount > 0 ? pendientesCount : undefined, variant: solicitudesBadgeVariant },
         cobros: { count: cobrosPendientes > 0 ? cobrosPendientes : undefined },
+        depositos: { count: depositosPorRevisar > 0 ? depositosPorRevisar : undefined },
       }}
       overlayExtra={!esDigitador && <ToastNuevaOrden toasts={toasts} onDismiss={dismissToast} />}
       footerExtra={
@@ -301,7 +314,9 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
         )
       }
     >
-      {children}
+      <DepositosPorRevisarProvider valor={depositosPorRevisar}>
+        {children}
+      </DepositosPorRevisarProvider>
     </PanelShell>
   )
 }

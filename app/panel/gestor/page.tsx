@@ -18,6 +18,7 @@ import {
   Layers,
   ChevronLeft,
   ChevronRight,
+  Wallet,
 } from 'lucide-react'
 import { collection, onSnapshot, query, where, limit, Timestamp } from 'firebase/firestore'
 import { db } from '@/fb/config'
@@ -33,6 +34,10 @@ import {
 import { SolicitudDrawer } from './_components/SolicitudDrawer'
 import { IrAFicha } from './_components/IrAFicha'
 import { useModuleGuard } from '../_hooks/useModuleGuard'
+// DEPOSITOS-ALERTA-REVISION-1 — el contador lo calcula el layout con un solo
+// listener; acá solo se lee y se le pone copy.
+import { useDepositosPorRevisar } from './_components/DepositosPorRevisar'
+import { avisoRevisionGestor } from '@/lib/revision-depositos-gestor'
 
 type OrdenActiva = {
   id: string
@@ -137,6 +142,9 @@ export default function PanelGestorPage() {
 }
 
 function PanelGestorPageContent() {
+  // DEPOSITOS-ALERTA-REVISION-1 — derivado, sin query propia ni persistencia.
+  const depositosPorRevisar = useDepositosPorRevisar()
+  const avisoDepositosPorRevisar = useMemo(() => avisoRevisionGestor(depositosPorRevisar), [depositosPorRevisar])
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [loadingMotos, setLoadingMotos] = useState(true)
   const [busqueda, setBusqueda] = useState('')
@@ -519,6 +527,31 @@ function PanelGestorPageContent() {
           ))}
         </div>
       </section>
+
+      {/* DEPOSITOS-ALERTA-REVISION-1 — el motorizado ya subió su comprobante y
+          el depósito espera a que el gestor lo confirme o pida corrección. Eso
+          solo se veía entrando a Depósitos → Por revisar. Ámbar, no el rojo de
+          "Alertas operacionales": es trabajo por hacer, no una falla. El
+          número sale del mismo listener que el badge del sidebar. */}
+      {avisoDepositosPorRevisar && (
+        <section className="rounded-2xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex min-w-0 items-start gap-2">
+              <Wallet className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+              <div className="min-w-0">
+                <h2 className="text-sm font-black text-amber-900 break-words">{avisoDepositosPorRevisar.titulo}</h2>
+                <p className="mt-0.5 text-xs text-amber-800 break-words">{avisoDepositosPorRevisar.detalle}</p>
+              </div>
+            </div>
+            <Link
+              href={avisoDepositosPorRevisar.href}
+              className="inline-flex shrink-0 items-center rounded-lg border border-amber-300 bg-amber-100 px-3 py-2 text-xs font-bold text-amber-900 transition hover:bg-amber-200"
+            >
+              {avisoDepositosPorRevisar.cta}
+            </Link>
+          </div>
+        </section>
+      )}
 
       {/* Alertas operacionales */}
       {(alertas.sinAsignarMucho.length > 0 || alertas.atascadas.length > 0 || cobrosAlerta.length > 0) && (
