@@ -27,6 +27,11 @@ import {
   where,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import {
+  puedeGestorCambiarEstadoCliente,
+  esEstadoOperativoDelMotorizado,
+  MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO,
+} from '@/lib/transiciones-viaje'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import {
   Search,
@@ -52,6 +57,7 @@ import {
   Eraser,
   CalendarDays,
   Lock,
+  Bike,
   Star,
   AlertTriangle,
   X,
@@ -1262,6 +1268,13 @@ function GestorSolicitudesPageContent() {
         setToast({ type: 'error', message: `No se puede pasar de "${labelActual}" a "${labelNuevo}"` })
         return
       }
+      // VIAJE-ENTREGADO-SIN-COBRO-1 — los estados operativos son del flujo
+      // del motorizado: no se escriben desde acá ni aunque alguien llame a
+      // esta función desde otro botón. Las Rules lo deniegan igual.
+      if (!puedeGestorCambiarEstadoCliente(nuevo)) {
+        setToast({ type: 'error', message: MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO })
+        return
+      }
       if (nuevo === 'asignada' && !solicitud.asignacion?.motorizadoId) {
         setToast({ type: 'error', message: 'No se puede marcar como asignada sin motorizado.' })
         return
@@ -1818,6 +1831,15 @@ function GestorSolicitudesPageContent() {
                               <div className="inline-flex items-center gap-1 rounded border border-gray-200 bg-gray-50 px-2 py-1 text-[10px] text-gray-500">
                                 <Lock className="h-3 w-3" /> Cerrada
                               </div>
+                            ) : esEstadoOperativoDelMotorizado(s.estado) ? (
+                              /* En viaje: el estado es display. Lo registra el
+                                 motorizado desde su panel. */
+                              <div
+                                className="inline-flex items-center gap-1 rounded border border-gray-200 bg-gray-50 px-2 py-1 text-[10px] text-gray-500"
+                                title={MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO}
+                              >
+                                <Bike className="h-3 w-3" /> {statusLabel(s.estado)}
+                              </div>
                             ) : (
                               <select
                                 value={s.estado}
@@ -1826,6 +1848,10 @@ function GestorSolicitudesPageContent() {
                               >
                                 <option value={s.estado} disabled>{statusLabel(s.estado)}</option>
                                 {(TRANSICIONES_VALIDAS[s.estado] ?? [])
+                                  /* VIAJE-ENTREGADO-SIN-COBRO-1 — el viaje lo mueve el
+                                     motorizado: retiro, camino y entrega dejan de ser
+                                     opciones del gestor. Lo administrativo sigue acá. */
+                                  .filter((key) => puedeGestorCambiarEstadoCliente(key))
                                   .filter((key) => !(key === 'asignada' && !s.asignacion?.motorizadoId))
                                   .map((key) => {
                                     const e = ESTADOS.find((x) => x.key === key)

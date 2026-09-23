@@ -741,6 +741,45 @@ service cloud.firestore {
           && request.resource.data.get('rechazo', null) == null;
       }
 
+      // ── VIAJE-ENTREGADO-SIN-COBRO-1: el viaje es del motorizado ──────────
+      //
+      // Un gestor —o un admin— podía marcar una orden como 'entregado' con un
+      // updateDoc de dos campos. El documento quedaba sin entregadoAt, sin
+      // cobrosMotorizado, sin cobroDelivery y sin acumulacionCobroSemanal, y
+      // calcularDeposito(), que lee la AUSENCIA de
+      // cobrosMotorizado.delivery.recibio == false como "sí lo cobró", le
+      // exigía al motorizado depositar un dinero que nadie confirmó que
+      // recibió: C$1,090 en el caso medido (C$90 de delivery + C$1,000 del
+      // cobro contra entrega).
+      //
+      // Los cuatro estados del viaje dejan de ser escribibles por cliente en
+      // esta rama. 'retirado' y 'entregado' los escribe
+      // confirmarTransicionConCobro con el Admin SDK, que no pasa por Rules:
+      // la autoridad server sigue intacta. 'en_camino_*' los escribe el
+      // motorizado en su propia rama, acotados más abajo.
+      //
+      // SIN excepción para admin: un 'if admin' acá recrearía el agujero. La
+      // regularización retrospectiva (plataforma caída, operación en papel)
+      // volverá por SUPERVISION-OPERATIVA-1, con su propia Function, hechos
+      // declarados, fecha efectiva, motivo y trazabilidad.
+      //
+      // Lo administrativo no se toca: confirmar, asignar, reasignar, rebotar,
+      // rechazar, cancelar y reactivar siguen exactamente como estaban, igual
+      // que todas las escrituras que NO mueven estado (registro.deposito.*,
+      // cobroDelivery.*, cobroPendiente…), que pasan por conservaEstado().
+      function esEstadoOperativoDeViaje(estadoOrden) {
+        return estadoOrden in ['en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado'];
+      }
+
+      function conservaEstado() {
+        return request.resource.data.get('estado', '') == resource.data.get('estado', '');
+      }
+
+      function destinoOperativoProhibido() {
+        return conservaEstado()
+          || !esEstadoOperativoDeViaje(request.resource.data.get('estado', ''));
+      }
+
       function transicionDesdeCerradoValida() {
         return !esEstadoCerradoSolicitud(resource.data.get('estado', ''))
           || conservaEstadoYAsignacion()
@@ -752,7 +791,11 @@ service cloud.firestore {
       // IDENTIDAD-HUMANA-1: noTocaCodigo() solo hace falta en esta rama. Las
       // de motorizado y comercio ya traen su propia allowlist de raiz
       // (hasOnly), que deja fuera codigo y secuencia por construccion.
-      allow update: if isAdminOrGestor() && transicionDesdeCerradoValida() && noTocaCodigo() && cobroPagadoIntegro();
+      allow update: if isAdminOrGestor()
+        && transicionDesdeCerradoValida()
+        && destinoOperativoProhibido()
+        && noTocaCodigo()
+        && cobroPagadoIntegro();
 
       // ── COBROS-PAGO-INTEGRIDAD-1 · un cobro pagado es evidencia cerrada ──────
       //
@@ -1025,7 +1068,34 @@ service cloud.firestore {
       // Un motorizado que intente escribir 'asignacion' o 'cobrosMotorizado'
       // por updateDoc directo (bypaseando las Functions) deniega acá, limpio
       // — ver P1-FN-MOTO sección 17 (prueba anti-bypass).
+      // ── VIAJE-ENTREGADO-SIN-COBRO-1: qué transición puede mandar él ───────
+      //
+      // El motorizado avisa que va en camino; el cierre del dinero lo hace el
+      // servidor. Por cliente solo se aceptan las dos señales, y solo desde su
+      // origen exacto:
+      //
+      //   asignada → en_camino_retiro
+      //   retirado → en_camino_entrega
+      //
+      // 'retirado' y 'entregado' quedan fuera: los escribe
+      // confirmarTransicionConCobro con el Admin SDK, que es quien además
+      // persiste cobrosMotorizado, cobroDelivery (único lugar donde vive
+      // formaPago) y el marcador del crédito semanal. Antes esta rama solo
+      // filtraba CLAVES, así que un updateDoc directo podía saltar de
+      // 'asignada' a 'entregado' sin ningún cobro — el test J2 lo afirmaba.
+      //
+      // Los updates del motorizado que NO mueven estado (evidencias, boucher,
+      // marcador semanal) siguen pasando por conservaEstado().
+      function transicionClienteMotorizadoValida() {
+        return conservaEstado()
+          || (resource.data.get('estado', '') == 'asignada'
+              && request.resource.data.get('estado', '') == 'en_camino_retiro')
+          || (resource.data.get('estado', '') == 'retirado'
+              && request.resource.data.get('estado', '') == 'en_camino_entrega');
+      }
+
       allow update: if isAssignedMotorizado()
+        && transicionClienteMotorizadoValida()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'estado',
           'updatedAt',

@@ -21,6 +21,11 @@ import {
 } from 'firebase/firestore'
 import { db, auth } from '@/fb/config'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
+// VIAJE-ENTREGADO-SIN-COBRO-1 — el viaje lo mueve el motorizado.
+import {
+  puedeGestorCambiarEstadoCliente,
+  MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO,
+} from '@/lib/transiciones-viaje'
 import { compressImage, uploadEvidenciaPath } from '@/fb/storage'
 import {
   rankearMotorizados,
@@ -72,9 +77,7 @@ import {
   XCircle,
   Clock3,
   Package,
-  Truck,
   AlertTriangle,
-  CheckCheck,
   Star,
 } from 'lucide-react'
 
@@ -791,6 +794,10 @@ export function SolicitudDrawer({
   const cambiarEstado = async (nuevo: EstadoSolicitud) => {
     if (!solicitud) return
     if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
+    // Retiro, camino y entrega los registra el motorizado con la Function que
+    // escribe los cobros. Desde acá dejaban la orden incompleta y con una
+    // obligación de depósito sin evidencia.
+    if (!puedeGestorCambiarEstadoCliente(nuevo)) return setErr(MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO)
     const motorizadoId = solicitud.asignacion?.motorizadoId
     try {
       const b = writeBatch(db)
@@ -1949,30 +1956,6 @@ export function SolicitudDrawer({
                         className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
                       >
                         <RotateCcw size={15} /> Rebotar a confirmada
-                      </button>
-                    )}
-                    {estado === 'en_camino_retiro' && (
-                      <button
-                        onClick={() => cambiarEstado('retirado')}
-                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
-                      >
-                        <Package size={15} /> Marcar retirado
-                      </button>
-                    )}
-                    {estado === 'retirado' && (
-                      <button
-                        onClick={() => cambiarEstado('en_camino_entrega')}
-                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
-                      >
-                        <Truck size={15} /> Pasar a entrega
-                      </button>
-                    )}
-                    {estado === 'en_camino_entrega' && (
-                      <button
-                        onClick={() => cambiarEstado('entregado')}
-                        className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-green-200 bg-green-50 px-4 py-2.5 text-sm font-semibold text-green-700 hover:bg-green-100 transition"
-                      >
-                        <CheckCheck size={15} /> Marcar entregado
                       </button>
                     )}
                   </div>

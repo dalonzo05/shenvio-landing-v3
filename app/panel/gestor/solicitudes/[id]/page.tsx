@@ -20,6 +20,10 @@ import {
   increment,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
+import {
+  puedeGestorCambiarEstadoCliente,
+  MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO,
+} from '@/lib/transiciones-viaje'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import { BloqueCobros, BloqueIncidencia } from './_components/BloquesCobros'
 import { BloqueDepositos } from './_components/BloqueDepositos'
@@ -66,15 +70,12 @@ import {
   MapPin,
   User,
   Wallet,
-  Truck,
   CheckCircle2,
   RotateCcw,
   XCircle,
   Clock3,
-  Package,
   Send,
   AlertTriangle,
-  CheckCheck,
   Bike,
   Star,
 } from 'lucide-react'
@@ -1023,6 +1024,12 @@ function GestorSolicitudDetallePageContent() {
     if (!solicitud) return
     setErr(null)
     if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
+    // VIAJE-ENTREGADO-SIN-COBRO-1 — el viaje lo mueve el motorizado. Marcar
+    // retiro o entrega desde acá dejaba la orden sin cobros, sin cobroDelivery
+    // y sin entregadoAt, y aun así le generaba al motorizado la obligación de
+    // depositar ese dinero. Los botones ya no existen; el guard queda para que
+    // no vuelva por otra llamada. Las Rules lo deniegan igual.
+    if (!puedeGestorCambiarEstadoCliente(nuevo)) return setErr(MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO)
     const motorizadoId = solicitud.asignacion?.motorizadoId
 
     try {
@@ -1745,33 +1752,6 @@ function GestorSolicitudDetallePageContent() {
                     className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
                   >
                     <RotateCcw className="h-4 w-4" /> Rebotar a confirmada
-                  </button>
-                )}
-
-                {estado === 'en_camino_retiro' && (
-                  <button
-                    onClick={() => cambiarEstado('retirado')}
-                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
-                  >
-                    <Package className="h-4 w-4" /> Marcar retirado
-                  </button>
-                )}
-
-                {estado === 'retirado' && (
-                  <button
-                    onClick={() => cambiarEstado('en_camino_entrega')}
-                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
-                  >
-                    <Truck className="h-4 w-4" /> Pasar a entrega
-                  </button>
-                )}
-
-                {estado === 'en_camino_entrega' && (
-                  <button
-                    onClick={() => cambiarEstado('entregado')}
-                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-green-200 bg-green-50 px-4 py-2.5 text-sm font-semibold text-green-700 hover:bg-green-100 transition"
-                  >
-                    <CheckCheck className="h-4 w-4" /> Marcar entregado
                   </button>
                 )}
 

@@ -33,6 +33,12 @@ import {
 } from 'firebase/firestore'
 import { db, auth } from '@/fb/config'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
+// VIAJE-ENTREGADO-SIN-COBRO-1 — Base de datos no es una puerta para escribir
+// estados operativos: eso es del flujo del motorizado.
+import {
+  puedeGestorCambiarEstadoCliente,
+  MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO,
+} from '@/lib/transiciones-viaje'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { useRoleGuard, type Rol } from '../../_hooks/useRoleGuard'
 import {
@@ -47,10 +53,7 @@ import {
   RotateCcw,
   XCircle,
   Clock3,
-  Package,
-  Truck,
   AlertTriangle,
-  CheckCheck,
   Filter,
   Search,
   Download,
@@ -455,6 +458,7 @@ function SolicitudDrawer({
   const cambiarEstado = async (nuevo: EstadoSolicitud) => {
     if (!solicitud) return
     if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
+    if (!puedeGestorCambiarEstadoCliente(nuevo)) return setErr(MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO)
     try {
       await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: nuevo,
@@ -758,21 +762,6 @@ function SolicitudDrawer({
                     {estado === 'asignada' && (
                       <button onClick={rebotarAsignacion} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50">
                         <RotateCcw size={15} /> Rebotar a confirmada
-                      </button>
-                    )}
-                    {estado === 'en_camino_retiro' && (
-                      <button onClick={() => cambiarEstado('retirado')} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50">
-                        <Package size={15} /> Marcar retirado
-                      </button>
-                    )}
-                    {estado === 'retirado' && (
-                      <button onClick={() => cambiarEstado('en_camino_entrega')} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50">
-                        <Truck size={15} /> Pasar a entrega
-                      </button>
-                    )}
-                    {estado === 'en_camino_entrega' && (
-                      <button onClick={() => cambiarEstado('entregado')} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-2.5 text-sm font-semibold text-green-700">
-                        <CheckCheck size={15} /> Marcar entregado
                       </button>
                     )}
                   </div>

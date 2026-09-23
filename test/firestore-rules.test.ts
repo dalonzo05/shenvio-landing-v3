@@ -229,18 +229,36 @@ test('J · gestor intenta borrar la secuencia ⇒ DENY', async () => {
   await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), { secuencia: deleteField() }))
 })
 
-test('J2 · el motorizado asignado sigue pudiendo entregar, y no puede tocar el codigo', async () => {
+// VIAJE-ENTREGADO-SIN-COBRO-1 — CAMBIO DE CONTRATO DELIBERADO.
+//
+// Este test afirmaba que el motorizado podía escribir 'entregado' por updateDoc
+// directo. Ese contrato era el agujero: la entrega la cierra
+// confirmarTransicionConCobro, que además escribe cobrosMotorizado,
+// cobroDelivery y el marcador del crédito semanal. Ahora la señal que SÍ le
+// corresponde (asignada → en_camino_retiro) es lo que demuestra que su rama
+// sigue viva, y la entrega por cliente queda denegada.
+test('J2 · el motorizado avisa que va en camino, no cierra la entrega, y no toca el codigo', async () => {
   const id = await ordenConCodigo('ordMoto', {
+    estado: 'asignada',
+    asignacion: { motorizadoAuthUid: UID_MOTO, motorizadoNombre: 'John Pork' },
+  })
+  // Su señal legítima: sigue pasando.
+  await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
+    estado: 'en_camino_retiro',
+    updatedAt: serverTimestamp(),
+    'historial.en_camino_retiroAt': serverTimestamp(),
+  }))
+  // El cierre de la entrega, no: es del servidor.
+  const idEntrega = await ordenConCodigo('ordMotoEntrega', {
     estado: 'en_camino_entrega',
     asignacion: { motorizadoAuthUid: UID_MOTO, motorizadoNombre: 'John Pork' },
   })
-  // Su allowlist de raíz ya deja fuera codigo/secuencia: el ALLOW normal
-  // demuestra que no se rompió, y el DENY que la allowlist sigue cerrando.
-  await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
+  await assertFails(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', idEntrega), {
     estado: 'entregado',
     entregadoAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   }))
+  // Su allowlist de raíz sigue dejando fuera codigo/secuencia.
   await assertFails(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), { codigo: 'SH-9999' }))
   await assertFails(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), { secuencia: 2 }))
 })
@@ -2121,4 +2139,222 @@ test('DG13 · el reemplazo del digitador no puede tocar monto, órdenes, tipo ni
     await depositoDigitado('en_revision')
     await assertFails(reemplazar({ uid: UID_DIGITADOR, rol: 'digitador', extraDeposito: extra }))
   }
+})
+
+// ─── VR · VIAJE-ENTREGADO-SIN-COBRO-1: el viaje es del motorizado ────────────
+//
+// El agujero P0: un gestor o un admin podía marcar 'entregado' con un updateDoc
+// de dos campos, y la orden quedaba sin cobros, sin cobroDelivery y sin
+// entregadoAt — pero calcularDeposito() igual le exigía al motorizado depositar
+// ese dinero. Acá se fija la barrera: los cuatro estados del viaje no se
+// escriben desde cliente, y el motorizado solo manda las dos señales.
+//
+// La autoridad server (confirmarTransicionConCobro, Admin SDK) no pasa por
+// Rules: VR14 lo deja demostrado.
+
+/** Orden en un estado operativo concreto, asignada al motorizado de prueba. */
+async function ordenEnViaje(id: string, estado: string) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', id), {
+      ...ordenBase({
+        estado,
+        asignacion: { motorizadoAuthUid: UID_MOTO, motorizadoNombre: 'John Pork', estadoAceptacion: 'aceptada' },
+      }),
+      codigo: 'SH-1001',
+      secuencia: 1001,
+    })
+  })
+  return id
+}
+
+test('VR1 · gestor: en_camino_entrega → entregado ⇒ DENY', async () => {
+  const id = await ordenEnViaje('vr1', 'en_camino_entrega')
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
+    estado: 'entregado',
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('VR2 · admin: en_camino_entrega → entregado ⇒ DENY (sin excepción por rol)', async () => {
+  const id = await ordenEnViaje('vr2', 'en_camino_entrega')
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'solicitudes_envio', id), {
+    estado: 'entregado',
+    updatedAt: serverTimestamp(),
+  }))
+  // Tampoco con la metadata completa: el problema es quién lo escribe.
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'solicitudes_envio', id), {
+    estado: 'entregado',
+    entregadoAt: serverTimestamp(),
+    cobroPendiente: false,
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('VR3 · gestor: en_camino_retiro → retirado ⇒ DENY', async () => {
+  const id = await ordenEnViaje('vr3', 'en_camino_retiro')
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
+    estado: 'retirado',
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('VR4 · admin: retirado → en_camino_entrega ⇒ DENY (también es del viaje)', async () => {
+  const id = await ordenEnViaje('vr4', 'retirado')
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'solicitudes_envio', id), {
+    estado: 'en_camino_entrega',
+    updatedAt: serverTimestamp(),
+  }))
+  // Y el gestor tampoco puede iniciar el viaje por él.
+  const id2 = await ordenEnViaje('vr4b', 'asignada')
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id2), {
+    estado: 'en_camino_retiro',
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('VR5 · motorizado: asignada → en_camino_retiro ⇒ ALLOW', async () => {
+  const id = await ordenEnViaje('vr5', 'asignada')
+  await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
+    estado: 'en_camino_retiro',
+    updatedAt: serverTimestamp(),
+    'historial.en_camino_retiroAt': serverTimestamp(),
+  }))
+})
+
+test('VR6 · motorizado: retirado → en_camino_entrega ⇒ ALLOW', async () => {
+  const id = await ordenEnViaje('vr6', 'retirado')
+  await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
+    estado: 'en_camino_entrega',
+    updatedAt: serverTimestamp(),
+    'historial.en_camino_entregaAt': serverTimestamp(),
+  }))
+})
+
+test('VR7 · motorizado: en_camino_retiro → retirado por updateDoc ⇒ DENY', async () => {
+  const id = await ordenEnViaje('vr7', 'en_camino_retiro')
+  await assertFails(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
+    estado: 'retirado',
+    updatedAt: serverTimestamp(),
+    'historial.retiradoAt': serverTimestamp(),
+  }))
+})
+
+test('VR8 · motorizado: en_camino_entrega → entregado por updateDoc ⇒ DENY', async () => {
+  const id = await ordenEnViaje('vr8', 'en_camino_entrega')
+  await assertFails(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
+    estado: 'entregado',
+    entregadoAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('VR9 · motorizado: asignada → entregado ⇒ DENY', async () => {
+  const id = await ordenEnViaje('vr9', 'asignada')
+  await assertFails(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
+    estado: 'entregado',
+    entregadoAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('VR10 · motorizado: asignada → en_camino_entrega ⇒ DENY (salto)', async () => {
+  const id = await ordenEnViaje('vr10', 'asignada')
+  await assertFails(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
+    estado: 'en_camino_entrega',
+    updatedAt: serverTimestamp(),
+  }))
+  // Y en_camino_retiro → en_camino_entrega tampoco.
+  const id2 = await ordenEnViaje('vr10b', 'en_camino_retiro')
+  await assertFails(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id2), {
+    estado: 'en_camino_entrega',
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('VR11 · gestor: rechazada → pendiente_confirmacion ⇒ ALLOW (reactivación intacta)', async () => {
+  const id = await ordenConCodigo('vr11', { estado: 'rechazada', rechazo: { motivoCodigo: 'otro' } })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
+    estado: 'pendiente_confirmacion',
+    rechazo: null,
+    asignacion: null,
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('VR12 · gestor: cancelada → pendiente_confirmacion ⇒ ALLOW', async () => {
+  const id = await ordenConCodigo('vr12', { estado: 'cancelada' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
+    estado: 'pendiente_confirmacion',
+    rechazo: null,
+    asignacion: null,
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('VR13 · gestor: rechazada → confirmada ⇒ DENY (el único destino es pendiente)', async () => {
+  const id = await ordenConCodigo('vr13', { estado: 'rechazada' })
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
+    estado: 'confirmada',
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('VR14 · la autoridad server no pasa por Rules: Admin SDK persiste entregado', async () => {
+  const id = await ordenEnViaje('vr14', 'en_camino_entrega')
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await assertSucceeds(updateDoc(doc(ctx.firestore(), 'solicitudes_envio', id), {
+      estado: 'entregado',
+      entregadoAt: serverTimestamp(),
+      'historial.entregadoAt': serverTimestamp(),
+      cobroPendiente: false,
+      updatedAt: serverTimestamp(),
+    }))
+  })
+})
+
+test('VR15 · gestor y admin conservan lo administrativo y lo financiero', async () => {
+  // Confirmar y asignar: intactos.
+  const id = await ordenConCodigo('vr15', { estado: 'pendiente_confirmacion' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
+    estado: 'confirmada',
+    confirmacion: { precioFinalCordobas: 90, confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp() },
+    updatedAt: serverTimestamp(),
+  }))
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
+    estado: 'asignada',
+    asignacion: { motorizadoAuthUid: UID_MOTO, motorizadoNombre: 'John Pork', estadoAceptacion: 'pendiente' },
+    updatedAt: serverTimestamp(),
+  }))
+  // Rechazar y cancelar: intactos.
+  const id2 = await ordenConCodigo('vr15b', { estado: 'pendiente_confirmacion' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id2), {
+    estado: 'rechazada',
+    rechazo: { motivoCodigo: 'otro', rechazadoPorUid: UID_GESTOR, rechazadoAt: serverTimestamp() },
+    asignacion: null,
+    updatedAt: serverTimestamp(),
+  }))
+  const id3 = await ordenConCodigo('vr15c', { estado: 'confirmada' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id3), {
+    estado: 'cancelada',
+    updatedAt: serverTimestamp(),
+  }))
+  // Y una escritura financiera sobre una orden YA entregada, que no mueve
+  // estado, sigue permitida: es la que usa lib/financial-writes.ts.
+  const id4 = await ordenConCodigo('vr15d', { estado: 'entregado' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id4), {
+    'registro.deposito.storkhubDepositoId': 'depX',
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('VR16 · el motorizado conserva sus escrituras que no mueven estado', async () => {
+  const id = await ordenEnViaje('vr16', 'en_camino_entrega')
+  // Evidencias y marcador semanal: sin tocar estado, siguen pasando.
+  await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
+    evidencias: { entrega: 'https://example.test/e.jpg' },
+    updatedAt: serverTimestamp(),
+  }))
+  await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
+    acumulacionCobroSemanal: { estado: 'pendiente', updatedAt: serverTimestamp() },
+  }))
 })
