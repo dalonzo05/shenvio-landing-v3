@@ -333,3 +333,81 @@ test('UI6 · el CTA lleva a los depósitos de su propio panel, sin inventar ruta
   assert.equal(ETIQUETA_ATENCION_MOTORIZADO, 'Requiere atención')
   assert.ok(!/notificacion/i.test(JSON.stringify(a)))
 })
+
+// ─── MC · el aviso no depende del recorte del historial ──────────────────────
+//
+// HARDENING: el historial trae ≤100 documentos sin orderBy. Si el aviso saliera
+// de ahí, un motorizado con más de 100 depósitos podría tener uno devuelto
+// fuera del recorte y el panel diría "0 requiere atención": un falso negativo
+// en una alerta operativa. Por eso el aviso tiene su propia fuente —los
+// devueltos— y estos casos fijan que el contador no se apoya en el listado.
+
+/** Lo que devuelve la query de atención: solo los devueltos del motorizado. */
+const comoQueryAtencion = (todos: DepositoRegistrado[], uid: string) =>
+  todos.filter((d) => d.motorizadoUid === uid && d.estado === 'devuelto')
+
+const historicoDe = (n: number, over: (i: number) => Partial<DepositoRegistrado> = () => ({})) =>
+  Array.from({ length: n }, (_, i) => dep({
+    id: `dep_${String(i).padStart(3, '0')}`,
+    codigo: `DEP-${String(i).padStart(4, '0')}`,
+    estado: 'confirmado',
+    // Más nuevo primero al ordenar: el índice 0 es el más reciente.
+    creadoAt: new Date(Date.UTC(2026, 8, 1) + (n - i) * 3600_000).toISOString(),
+    confirmadoAt: new Date(Date.UTC(2026, 8, 2) + (n - i) * 3600_000).toISOString(),
+    ...over(i),
+  }))
+
+test('MC1 · 105 depósitos y el devuelto fuera de los primeros 100: el aviso lo ve igual', () => {
+  // El devuelto es el más ANTIGUO: en el historial ordenado queda en la
+  // posición 104 y el recorte de 100 lo deja afuera.
+  const todos = historicoDe(105, (i) => (i === 104 ? { estado: 'devuelto', confirmadoAt: undefined } : {}))
+  const filas = historialDepositosMotorizado(todos, {}, 100)
+  assert.equal(filas.length, 100)
+  assert.equal(filas.some((f) => f.estadoClave === 'devuelto'), false, 'el listado recortado no lo trae')
+  // El aviso no sale del listado: sale de su propia query.
+  assert.equal(cantidadDepositosQueRequierenAtencion(comoQueryAtencion(todos, MOTO), MOTO), 1)
+  assert.equal(avisoAtencionMotorizado(1)?.titulo, 'Tienes 1 depósito que requiere atención')
+})
+
+test('MC2 · la query de atención con dos devueltos da 2', () => {
+  const todos = [...historicoDe(3), dep({ id: 'x1' }), dep({ id: 'x2' })]
+  const atencion = comoQueryAtencion(todos, MOTO)
+  assert.deepEqual(atencion.map((d) => d.id), ['x1', 'x2'])
+  assert.equal(cantidadDepositosQueRequierenAtencion(atencion, MOTO), 2)
+})
+
+test('MC3 · 100 confirmados + 1 devuelto: el badge dice 1', () => {
+  const todos = [...historicoDe(100), dep({ id: 'devuelto_1' })]
+  assert.equal(cantidadDepositosQueRequierenAtencion(comoQueryAtencion(todos, MOTO), MOTO), 1)
+})
+
+test('MC4 · al corregir, la query de atención deja de traerlo y el badge baja a 0', () => {
+  const antes = [...historicoDe(2), dep({ id: 'd1' })]
+  assert.equal(cantidadDepositosQueRequierenAtencion(comoQueryAtencion(antes, MOTO), MOTO), 1)
+  const despues = antes.map((d) => (d.id === 'd1' ? { ...d, estado: 'en_revision' } : d))
+  assert.deepEqual(comoQueryAtencion(despues, MOTO), [], 'ya no entra en la query')
+  assert.equal(cantidadDepositosQueRequierenAtencion(comoQueryAtencion(despues, MOTO), MOTO), 0)
+  assert.equal(avisoAtencionMotorizado(0), null)
+})
+
+test('MC5 · un tipo C devuelto que llegara por la query lo excluye el helper', () => {
+  const tipoC = dep({ id: 'c1', codigo: 'DEP-0002', tipo: 'pago_delivery_deposito' })
+  const atencion = comoQueryAtencion([tipoC, dep({ id: 'a1' })], MOTO)
+  assert.equal(atencion.length, 2, 'la query por estado sí lo trae')
+  assert.equal(cantidadDepositosQueRequierenAtencion(atencion, MOTO), 1, 'el helper lo descarta')
+})
+
+test('MC6 · un tipo B devuelto cuenta igual: no se filtra por destino', () => {
+  const tipoB = dep({ id: 'b1', tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio', destinatarioNombre: 'Mariposita' })
+  assert.equal(cantidadDepositosQueRequierenAtencion(comoQueryAtencion([tipoB], MOTO), MOTO), 1)
+})
+
+test('MC7 · el historial no es fuente del contador: mismo dato, resultados distintos', () => {
+  const todos = historicoDe(105, (i) => (i === 104 ? { estado: 'devuelto', confirmadoAt: undefined } : {}))
+  // Contar sobre el listado recortado daría 0 —el falso negativo que motivó el
+  // hardening—; contar sobre la fuente de atención da 1.
+  const idsDelListado = new Set(historialDepositosMotorizado(todos, {}, 100).map((f) => f.id))
+  const recortados = todos.filter((d) => idsDelListado.has(d.id))
+  assert.equal(cantidadDepositosQueRequierenAtencion(recortados, MOTO), 0)
+  assert.equal(cantidadDepositosQueRequierenAtencion(comoQueryAtencion(todos, MOTO), MOTO), 1)
+})

@@ -975,17 +975,12 @@ export default function PanelMotorizadoPage() {
   // Rules solo dejan leer los depósitos con motorizadoUid == auth.uid, y la
   // query lleva ese mismo where(): sin él, el list() entero se deniega. No hay
   // orderBy para no exigir un índice compuesto nuevo; se trae un tope y se
-  // ordena en el cliente.
-  //
-  // MOTO-DEPOSITOS-AVISOS-1 — este listener dejó de estar atado a la pestaña
-  // Depósitos: es la ÚNICA fuente de los depósitos propios y ahora también
-  // alimenta el aviso del home y el badge de la navegación. Sin él en el home,
-  // un depósito devuelto solo se descubría entrando a mirar. No se agregó una
-  // segunda query: sigue siendo una, compartida por las tres superficies.
+  // ordena en el cliente. Solo con la pestaña Depósitos abierta: es una
+  // superficie de LISTADO y su tope no decide nada operativo.
   const [depositosPropios, setDepositosPropios] = useState<DepositoRegistrado[]>([]);
   const uidSesion = user?.uid ?? null;
   useEffect(() => {
-    if (!uidSesion) return;
+    if (!uidSesion || tab !== 'depositos') return;
     const q = query(
       collection(db, 'ordenes_deposito'),
       where('motorizadoUid', '==', uidSesion),
@@ -995,13 +990,39 @@ export default function PanelMotorizadoPage() {
       (s) => setDepositosPropios(s.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<DepositoRegistrado, 'id'>) }))),
       (e) => console.error('[motorizado] historial de depósitos', e),
     );
+  }, [uidSesion, tab]);
+
+  // MOTO-DEPOSITOS-AVISOS-1 — fuente propia del aviso, separada del listado.
+  //
+  // El historial trae ≤100 documentos sin orderBy: sirve para listar, pero un
+  // aviso operativo no puede depender de ese recorte —con más de 100 depósitos,
+  // un devuelto podía quedar afuera y el panel diría "0 requiere atención"—.
+  // Así que el aviso pregunta por lo que le importa y por nada más:
+  // motorizadoUid == su uid AND estado == 'devuelto', sin limit. Son pocos por
+  // naturaleza (los que StorkHub devolvió y todavía no corrigió) y la query
+  // corre con los índices actuales: dos igualdades, verificado contra staging.
+  //
+  // Vive en todo el panel, no solo en la pestaña, porque su razón de ser es
+  // avisar cuando el motorizado NO está mirando Depósitos.
+  const [depositosDevueltos, setDepositosDevueltos] = useState<DepositoRegistrado[]>([]);
+  useEffect(() => {
+    if (!uidSesion) { setDepositosDevueltos([]); return; }
+    const q = query(
+      collection(db, 'ordenes_deposito'),
+      where('motorizadoUid', '==', uidSesion),
+      where('estado', '==', ESTADO_DEVUELTO),
+    );
+    return onSnapshot(q,
+      (s) => setDepositosDevueltos(s.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<DepositoRegistrado, 'id'>) }))),
+      (e) => console.error('[motorizado] depósitos por corregir', e),
+    );
   }, [uidSesion]);
-  // MOTO-DEPOSITOS-AVISOS-1 — derivado, nunca persistido: cuántos depósitos
-  // suyos esperan una acción de él (devueltos para corregir el comprobante).
-  // El tipo C y lo que espera a StorkHub no cuentan.
+  // Derivado, nunca persistido. El helper vuelve a filtrar en el cliente: la
+  // query dice "devuelto", pero el tipo C no es un depósito suyo aunque un
+  // documento raro llegara con ese estado.
   const depositosAtencion = useMemo(
-    () => cantidadDepositosQueRequierenAtencion(depositosPropios, uidSesion),
-    [depositosPropios, uidSesion],
+    () => cantidadDepositosQueRequierenAtencion(depositosDevueltos, uidSesion),
+    [depositosDevueltos, uidSesion],
   );
   const avisoAtencion = useMemo(() => avisoAtencionMotorizado(depositosAtencion), [depositosAtencion]);
   const codigoDeOrden = useMemo(() => {
