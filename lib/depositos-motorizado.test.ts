@@ -18,6 +18,12 @@ import {
   PASO_VER_MAS_DEPOSITOS,
   TOPE_QUERY_HISTORIAL_MOTORIZADO,
   MENSAJE_IMAGEN_ILEGIBLE,
+  requiereAtencionMotorizado,
+  depositosQueRequierenAtencion,
+  cantidadDepositosQueRequierenAtencion,
+  avisoAtencionMotorizado,
+  ETIQUETA_ATENCION_MOTORIZADO,
+  RUTA_DEPOSITOS_MOTORIZADO,
 } from './depositos-motorizado'
 import type { EntradaDepositoOrden, DepositoRegistrado } from './deposito-orden'
 
@@ -194,4 +200,136 @@ test('M15 · aviso de tope: solo al llegar a 100 y sin afirmar que son los más 
 test('M16 · mensaje de imagen ilegible: entendible y sin prometer PDF', () => {
   assert.equal(MENSAJE_IMAGEN_ILEGIBLE, 'No se pudo leer la imagen. Probá con una captura o una imagen JPG.')
   assert.ok(!/pdf/i.test(MENSAJE_IMAGEN_ILEGIBLE))
+})
+
+// ─── MA · MOTO-DEPOSITOS-AVISOS-1: qué requiere acción del motorizado ────────
+//
+// "Requiere atención" = StorkHub devolvió el depósito para que corrija el
+// comprobante. Nada más: ni lo que espera a StorkHub, ni lo que ya terminó.
+// Fixtures sintéticos, sin tocar staging.
+
+const MOTO = 'juAOhfxi96dlLv8LV3mZwA3cK362'
+const OTRO_MOTO = 'otro-motorizado-uid'
+const dep = (over: Partial<DepositoRegistrado>): DepositoRegistrado => ({
+  id: 'dep_a', codigo: 'DEP-0010', tipo: 'recaudacion_motorizado_storkhub', estado: 'devuelto',
+  destinatario: 'storkhub', motorizadoUid: MOTO, solicitudIds: [SH_0001], montoTotal: 110,
+  creadoAt: '2026-09-20T10:00:00.000Z',
+  ...over,
+})
+
+test('MA1 · un DEP tipo A devuelto requiere atención del motorizado', () => {
+  const d = dep({})
+  assert.equal(requiereAtencionMotorizado(d), true)
+  assert.equal(requiereAtencionMotorizado(d, MOTO), true)
+})
+
+test('MA2 · un DEP tipo B devuelto también: la corrección es suya igual', () => {
+  const d = dep({ id: 'dep_b', tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio', destinatarioNombre: 'Mariposita' })
+  assert.equal(requiereAtencionMotorizado(d, MOTO), true)
+})
+
+test('MA3 · en_revision NO requiere atención: ya hizo su parte y espera a StorkHub', () => {
+  assert.equal(requiereAtencionMotorizado(dep({ estado: 'en_revision' }), MOTO), false)
+  assert.equal(cantidadDepositosQueRequierenAtencion([dep({ estado: 'en_revision' })], MOTO), 0)
+})
+
+test('MA4 · confirmado NO requiere atención', () => {
+  assert.equal(requiereAtencionMotorizado(dep({ estado: 'confirmado' }), MOTO), false)
+})
+
+test('MA5 · anulado NO, y tampoco convertido_en_deuda ni pendiente_boucher', () => {
+  for (const estado of ['anulado', 'convertido_en_deuda', 'pendiente_boucher', 'rechazado', '']) {
+    assert.equal(requiereAtencionMotorizado(dep({ estado }), MOTO), false, estado)
+  }
+  assert.equal(requiereAtencionMotorizado(null), false)
+  assert.equal(requiereAtencionMotorizado(undefined), false)
+})
+
+test('MA6 · el tipo C NO es un depósito del motorizado, ni devuelto', () => {
+  const tipoC = dep({ id: 'dep_c', codigo: 'DEP-0002', tipo: 'pago_delivery_deposito', estado: 'devuelto' })
+  assert.equal(requiereAtencionMotorizado(tipoC, MOTO), false)
+  assert.equal(cantidadDepositosQueRequierenAtencion([tipoC], MOTO), 0)
+})
+
+test('MA7 · dos devueltos y uno en revisión: el contador dice 2', () => {
+  const lista = [dep({ id: 'a' }), dep({ id: 'b' }), dep({ id: 'c', estado: 'en_revision' })]
+  assert.equal(cantidadDepositosQueRequierenAtencion(lista, MOTO), 2)
+  assert.deepEqual(depositosQueRequierenAtencion(lista, MOTO).map((d) => d.id), ['a', 'b'])
+})
+
+test('MA8 · sin devueltos el contador es 0', () => {
+  assert.equal(cantidadDepositosQueRequierenAtencion([], MOTO), 0)
+  assert.equal(cantidadDepositosQueRequierenAtencion([dep({ estado: 'confirmado' }), dep({ id: 'x', estado: 'en_revision' })], MOTO), 0)
+})
+
+test('MA9 · al corregir (devuelto → en_revision) el contador baja', () => {
+  const antes = [dep({ id: 'a' }), dep({ id: 'b' })]
+  assert.equal(cantidadDepositosQueRequierenAtencion(antes, MOTO), 2)
+  const despues = [dep({ id: 'a', estado: 'en_revision' }), dep({ id: 'b' })]
+  assert.equal(cantidadDepositosQueRequierenAtencion(despues, MOTO), 1)
+  const todos = [dep({ id: 'a', estado: 'en_revision' }), dep({ id: 'b', estado: 'en_revision' })]
+  assert.equal(cantidadDepositosQueRequierenAtencion(todos, MOTO), 0)
+  assert.equal(avisoAtencionMotorizado(cantidadDepositosQueRequierenAtencion(todos, MOTO)), null)
+})
+
+test('MA10 · dos depósitos de la MISMA solicitud cuentan dos: la unidad es el DEP', () => {
+  const lista = [
+    dep({ id: 'a', solicitudIds: [SH_0001] }),
+    dep({ id: 'b', solicitudIds: [SH_0001], tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio' }),
+  ]
+  assert.equal(cantidadDepositosQueRequierenAtencion(lista, MOTO), 2)
+})
+
+test('MA11 · el devuelto de OTRO motorizado no cuenta', () => {
+  const ajeno = dep({ id: 'ajeno', motorizadoUid: OTRO_MOTO })
+  assert.equal(requiereAtencionMotorizado(ajeno, MOTO), false)
+  assert.equal(cantidadDepositosQueRequierenAtencion([ajeno, dep({ id: 'mio' })], MOTO), 1)
+  // Sin uid se confía en la query que trajo la lista (where motorizadoUid == su uid).
+  assert.equal(cantidadDepositosQueRequierenAtencion([ajeno]), 1)
+  // Un documento sin motorizadoUid no se cuela cuando se exige pertenencia.
+  assert.equal(requiereAtencionMotorizado(dep({ motorizadoUid: undefined }), MOTO), false)
+})
+
+test('MA12 · un mismo DEP repetido cuenta una sola vez', () => {
+  const d = dep({ id: 'a' })
+  assert.equal(cantidadDepositosQueRequierenAtencion([d, d, { ...d }], MOTO), 1)
+  // Un documento sin id no se cuenta: no hay nada que abrir.
+  assert.equal(cantidadDepositosQueRequierenAtencion([dep({ id: '' })], MOTO), 0)
+})
+
+// ─── UI · copy del aviso y del badge ─────────────────────────────────────────
+
+test('UI1 · con 1 depósito, el aviso habla en singular', () => {
+  const a = avisoAtencionMotorizado(1)
+  assert.equal(a?.titulo, 'Tienes 1 depósito que requiere atención')
+  assert.equal(a?.detalle, 'StorkHub solicitó corregir un comprobante.')
+  assert.equal(a?.cta, 'Revisar depósito')
+})
+
+test('UI2 · con 2 o más, en plural', () => {
+  const a = avisoAtencionMotorizado(2)
+  assert.equal(a?.titulo, 'Tienes 2 depósitos que requieren atención')
+  assert.equal(a?.detalle, 'StorkHub solicitó corregir los comprobantes.')
+  assert.equal(a?.cta, 'Revisar depósitos')
+  assert.equal(avisoAtencionMotorizado(7)?.titulo, 'Tienes 7 depósitos que requieren atención')
+})
+
+test('UI3 · con 0 no hay aviso: null, no un banner vacío', () => {
+  assert.equal(avisoAtencionMotorizado(0), null)
+  assert.equal(avisoAtencionMotorizado(-3), null)
+  assert.equal(avisoAtencionMotorizado(Number.NaN), null)
+})
+
+test('UI4 y UI5 · el badge sale del contador: 0 se oculta, >0 se muestra', () => {
+  assert.equal(cantidadDepositosQueRequierenAtencion([dep({ estado: 'en_revision' })], MOTO), 0)
+  assert.equal(cantidadDepositosQueRequierenAtencion([dep({ id: 'a' }), dep({ id: 'b' }), dep({ id: 'c' })], MOTO), 3)
+})
+
+test('UI6 · el CTA lleva a los depósitos de su propio panel, sin inventar ruta', () => {
+  const a = avisoAtencionMotorizado(1)
+  assert.equal(a?.ruta, '/panel/motorizado')
+  assert.equal(a?.tab, 'depositos')
+  assert.equal(RUTA_DEPOSITOS_MOTORIZADO, '/panel/motorizado')
+  assert.equal(ETIQUETA_ATENCION_MOTORIZADO, 'Requiere atención')
+  assert.ok(!/notificacion/i.test(JSON.stringify(a)))
 })

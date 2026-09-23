@@ -258,3 +258,112 @@ export function avisoTopeDepositos(cargados: number): string | null {
 
 /** Mensaje cuando el navegador no puede decodificar la imagen elegida. */
 export const MENSAJE_IMAGEN_ILEGIBLE = 'No se pudo leer la imagen. Probá con una captura o una imagen JPG.'
+
+// ─── MOTO-DEPOSITOS-AVISOS-1 · ¿esto requiere acción del motorizado? ──────────
+//
+// "Requiere atención" es una sola cosa: StorkHub le devolvió el depósito para
+// que corrija el comprobante. NO es "pendiente de StorkHub" ni "cualquier
+// depósito abierto".
+//
+//   devuelto             SÍ — tiene que subir otra versión del comprobante
+//   en_revision          NO — ya hizo su parte; espera a StorkHub
+//   confirmado           NO — terminó
+//   anulado              NO — terminó
+//   convertido_en_deuda  NO — no hay flujo suyo demostrado
+//   pendiente_boucher    NO — es el estado inicial de F1 (create-first, sin
+//                        comprobante todavía), otra cosa que una corrección
+//                        pedida; ampliarlo sería otro bloque
+//
+// El aviso se DERIVA de los documentos que el panel ya tiene. No existe ni se
+// escribe ningún `requiereAtencion`, contador ni notificación en Firestore.
+
+/** El único estado que hoy pide una acción del motorizado. */
+export const ESTADOS_ATENCION_MOTORIZADO: readonly string[] = [ESTADO_DEVUELTO]
+
+/**
+ * ¿Este depósito espera algo del motorizado?
+ *
+ * Decide por el ESTADO, no por el texto del motivo, la versión del boucher ni
+ * las fechas. Un tipo C (pago del delivery por transferencia) nunca cuenta: no
+ * es un depósito suyo aunque el documento lleve su nombre. Con `uidMotorizado`
+ * se exige además la pertenencia, para que un arreglo mezclado no produzca
+ * avisos cruzados entre motorizados.
+ */
+export function requiereAtencionMotorizado(
+  dep: DepositoRegistrado | null | undefined,
+  uidMotorizado?: string | null,
+): boolean {
+  if (!dep) return false
+  if (claseDeposito(dep) === 'transferencia_delivery') return false
+  const uid = typeof uidMotorizado === 'string' ? uidMotorizado.trim() : ''
+  if (uid && (typeof dep.motorizadoUid !== 'string' || dep.motorizadoUid !== uid)) return false
+  return ESTADOS_ATENCION_MOTORIZADO.includes(dep.estado ?? '')
+}
+
+/** Los depósitos que esperan una acción suya, sin repetir un mismo documento. */
+export function depositosQueRequierenAtencion(
+  depositos: Array<DepositoRegistrado | null | undefined>,
+  uidMotorizado?: string | null,
+): DepositoRegistrado[] {
+  const vistos = new Set<string>()
+  const out: DepositoRegistrado[] = []
+  for (const dep of depositos) {
+    if (!requiereAtencionMotorizado(dep, uidMotorizado)) continue
+    const id = typeof dep!.id === 'string' ? dep!.id : ''
+    if (!id || vistos.has(id)) continue
+    vistos.add(id)
+    out.push(dep!)
+  }
+  return out
+}
+
+/**
+ * Cuántos depósitos esperan una acción del motorizado. La unidad es el DEP:
+ * dos depósitos de la misma orden cuentan dos. No suma montos.
+ */
+export function cantidadDepositosQueRequierenAtencion(
+  depositos: Array<DepositoRegistrado | null | undefined>,
+  uidMotorizado?: string | null,
+): number {
+  return depositosQueRequierenAtencion(depositos, uidMotorizado).length
+}
+
+// ─── Copy del aviso ───────────────────────────────────────────────────────────
+
+/** Etiqueta del contador, separada de "Por depositar": son cosas distintas. */
+export const ETIQUETA_ATENCION_MOTORIZADO = 'Requiere atención'
+/**
+ * Los depósitos del motorizado no tienen ruta propia: son una pestaña de su
+ * panel. El CTA cambia de pestaña, no navega, así que no se inventa una ruta.
+ */
+export const RUTA_DEPOSITOS_MOTORIZADO = '/panel/motorizado'
+export const TAB_DEPOSITOS_MOTORIZADO = 'depositos'
+
+export interface AvisoAtencionMotorizado {
+  titulo: string
+  detalle: string
+  cta: string
+  /** A dónde lleva el CTA: la pestaña de Depósitos de su propio panel. */
+  ruta: string
+  tab: string
+}
+
+/**
+ * El aviso del home, o null si no hay nada que avisar. Quien pide la
+ * corrección siempre es StorkHub —solo gestor/admin devuelven un depósito—,
+ * también cuando el depósito iba al comercio.
+ */
+export function avisoAtencionMotorizado(cantidad: number): AvisoAtencionMotorizado | null {
+  const n = Number.isFinite(cantidad) ? Math.floor(cantidad) : 0
+  if (n <= 0) return null
+  const plural = n > 1
+  return {
+    titulo: `Tienes ${n} depósito${plural ? 's' : ''} que requiere${plural ? 'n' : ''} atención`,
+    detalle: plural
+      ? 'StorkHub solicitó corregir los comprobantes.'
+      : 'StorkHub solicitó corregir un comprobante.',
+    cta: plural ? 'Revisar depósitos' : 'Revisar depósito',
+    ruta: RUTA_DEPOSITOS_MOTORIZADO,
+    tab: TAB_DEPOSITOS_MOTORIZADO,
+  }
+}

@@ -24,6 +24,9 @@ import {
   siguienteLimiteDepositos,
   avisoTopeDepositos,
   MENSAJE_IMAGEN_ILEGIBLE,
+  cantidadDepositosQueRequierenAtencion,
+  avisoAtencionMotorizado,
+  ETIQUETA_ATENCION_MOTORIZADO,
   type PestanaDepositosMotorizado,
 } from '@/lib/depositos-motorizado';
 import { resumenViajeHistorial } from '@/lib/historial-viaje-motorizado';
@@ -972,11 +975,17 @@ export default function PanelMotorizadoPage() {
   // Rules solo dejan leer los depósitos con motorizadoUid == auth.uid, y la
   // query lleva ese mismo where(): sin él, el list() entero se deniega. No hay
   // orderBy para no exigir un índice compuesto nuevo; se trae un tope y se
-  // ordena en el cliente. Solo con la pestaña Depósitos abierta.
+  // ordena en el cliente.
+  //
+  // MOTO-DEPOSITOS-AVISOS-1 — este listener dejó de estar atado a la pestaña
+  // Depósitos: es la ÚNICA fuente de los depósitos propios y ahora también
+  // alimenta el aviso del home y el badge de la navegación. Sin él en el home,
+  // un depósito devuelto solo se descubría entrando a mirar. No se agregó una
+  // segunda query: sigue siendo una, compartida por las tres superficies.
   const [depositosPropios, setDepositosPropios] = useState<DepositoRegistrado[]>([]);
   const uidSesion = user?.uid ?? null;
   useEffect(() => {
-    if (!uidSesion || tab !== 'depositos') return;
+    if (!uidSesion) return;
     const q = query(
       collection(db, 'ordenes_deposito'),
       where('motorizadoUid', '==', uidSesion),
@@ -986,7 +995,15 @@ export default function PanelMotorizadoPage() {
       (s) => setDepositosPropios(s.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<DepositoRegistrado, 'id'>) }))),
       (e) => console.error('[motorizado] historial de depósitos', e),
     );
-  }, [uidSesion, tab]);
+  }, [uidSesion]);
+  // MOTO-DEPOSITOS-AVISOS-1 — derivado, nunca persistido: cuántos depósitos
+  // suyos esperan una acción de él (devueltos para corregir el comprobante).
+  // El tipo C y lo que espera a StorkHub no cuentan.
+  const depositosAtencion = useMemo(
+    () => cantidadDepositosQueRequierenAtencion(depositosPropios, uidSesion),
+    [depositosPropios, uidSesion],
+  );
+  const avisoAtencion = useMemo(() => avisoAtencionMotorizado(depositosAtencion), [depositosAtencion]);
   const codigoDeOrden = useMemo(() => {
     const m: Record<string, string> = {};
     ordenes.forEach((o) => { if (typeof o.codigo === 'string') m[o.id] = o.codigo; });
@@ -1260,6 +1277,35 @@ export default function PanelMotorizadoPage() {
       </div>
 
       {err && <div style={{ margin: '12px 16px 0', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12, padding: '10px 14px', color: '#dc2626', fontSize: 13 }}>⚠️ {err}</div>}
+
+      {/* MOTO-DEPOSITOS-AVISOS-1 — aviso operativo: StorkHub pidió corregir un
+          comprobante y el motorizado tenía que entrar a Depósitos para
+          enterarse. Ámbar, como el resto de "atención" del panel; no rojo, que
+          acá significa error. Dentro de la pestaña Depósitos no se repite: ahí
+          la fila del depósito ya lo dice todo. */}
+      {avisoAtencion && tab !== 'depositos' && (
+        <div style={{
+          margin: '12px 16px 0', background: '#fffbeb', border: '1px solid #fde68a',
+          borderRadius: 12, padding: '12px 14px',
+        }}>
+          <p style={{ fontSize: 13, fontWeight: 800, color: '#92400e', margin: 0, overflowWrap: 'anywhere' as const }}>
+            {avisoAtencion.titulo}
+          </p>
+          <p style={{ fontSize: 12, color: '#b45309', margin: '4px 0 10px', overflowWrap: 'anywhere' as const }}>
+            {avisoAtencion.detalle}
+          </p>
+          <button
+            type="button"
+            onClick={() => setTab('depositos')}
+            style={{
+              width: '100%', minHeight: 44, border: '1px solid #f59e0b', borderRadius: 10,
+              background: '#f59e0b', color: '#fff', fontSize: 14, fontWeight: 800, cursor: 'pointer',
+            }}
+          >
+            {avisoAtencion.cta}
+          </button>
+        </div>
+      )}
 
       <div style={{ padding: '16px 16px 0' }}>
 
@@ -1796,6 +1842,20 @@ export default function PanelMotorizadoPage() {
                   <p style={{ fontSize: 11, color: '#b45309', margin: '2px 0 0' }}>Ya enviado · esperando confirmación de StorkHub</p>
                 </div>
               )}
+              {/* MOTO-DEPOSITOS-AVISOS-1 — aparte de "Por depositar" y aparte
+                  de "En revisión": son tres cosas distintas y no se suman.
+                  Acá la unidad es el depósito, no el córdoba. */}
+              {depositosAtencion > 0 && (
+                <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 12, padding: '10px 14px', marginTop: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 13, color: '#9a3412', fontWeight: 700 }}>{ETIQUETA_ATENCION_MOTORIZADO}</span>
+                    <span style={{ fontSize: 18, fontWeight: 900, color: '#c2410c' }}>{depositosAtencion}</span>
+                  </div>
+                  <p style={{ fontSize: 11, color: '#c2410c', margin: '2px 0 0' }}>
+                    {depositosAtencion === 1 ? 'StorkHub solicitó corregir un comprobante' : 'StorkHub solicitó corregir comprobantes'}
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Vacío cuando no queda NADA por enviar. Antes miraba
@@ -2313,7 +2373,12 @@ export default function PanelMotorizadoPage() {
         setTab={setTab}
         pendientesCount={pendientes.length}
         enCursoCount={enCurso.length}
-        depositosCount={resumenMotorizado.pendiente.ordenes}
+        /* MOTO-DEPOSITOS-AVISOS-1 — el badge dice lo que ESPERA UNA ACCIÓN
+           suya: depósitos devueltos para corregir. Antes contaba órdenes por
+           depositar, que sigue a la vista en la StatCard "Depósitos" del
+           encabezado y en "Por depositar" dentro de la pestaña; un solo número
+           no puede significar las dos cosas. */
+        depositosCount={depositosAtencion}
       />
     </div>
   );
@@ -2342,7 +2407,10 @@ function BottomNav({ tab, setTab, pendientesCount, enCursoCount, depositosCount 
   tab: TabKey; setTab: (t: TabKey) => void;
   pendientesCount: number; enCursoCount: number; depositosCount: number;
 }) {
-  const items: { key: TabKey; label: string; icon: React.ReactNode; count: number }[] = [
+  // MOTO-DEPOSITOS-AVISOS-1 — el badge es un número suelto: sin esto, un
+  // lector de pantalla no dice de qué son. `atencion` marca al que significa
+  // "esperan una acción tuya", que no es lo mismo que "hay tantos".
+  const items: { key: TabKey; label: string; icon: React.ReactNode; count: number; atencion?: boolean }[] = [
     {
       key: 'pendientes', label: 'Nuevas', count: pendientesCount,
       icon: (
@@ -2374,7 +2442,7 @@ function BottomNav({ tab, setTab, pendientesCount, enCursoCount, depositosCount 
       ),
     },
     {
-      key: 'depositos', label: 'Depósitos', count: depositosCount,
+      key: 'depositos', label: 'Depósitos', count: depositosCount, atencion: true,
       icon: (
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
           <rect x="2" y="7" width="20" height="15" rx="2" />
@@ -2400,6 +2468,12 @@ function BottomNav({ tab, setTab, pendientesCount, enCursoCount, depositosCount 
           <button
             key={item.key}
             onClick={() => setTab(item.key)}
+            aria-current={active ? 'page' : undefined}
+            aria-label={item.count > 0
+              ? (item.atencion
+                ? `${item.label}, ${item.count} ${item.count === 1 ? 'requiere' : 'requieren'} atención`
+                : `${item.label}, ${item.count}`)
+              : item.label}
             style={{
               flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
               gap: 3, border: 'none', background: 'transparent', cursor: 'pointer',
@@ -2414,7 +2488,7 @@ function BottomNav({ tab, setTab, pendientesCount, enCursoCount, depositosCount 
                 minWidth: 18, height: 18, fontSize: 10, fontWeight: 800,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 padding: '0 4px', lineHeight: 1,
-              }}>
+              }} aria-hidden="true">
                 {item.count}
               </span>
             )}
