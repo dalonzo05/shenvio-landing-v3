@@ -87,18 +87,85 @@ export function resolverFormaPago(entrada: {
  * cobro?
  *
  * El guard general es fail-closed: sin delivery, producto ni cargotrans no hay
- * nada legítimo que escribir. Se abre UNA excepción estrecha: el cierre de
- * `cobroDelivery` al entregar.
+ * nada legítimo que escribir. Se abren DOS transiciones, y solo cuando el
+ * propio servidor calculó que no hay nada que confirmar —el llamador consulta
+ * esto dentro del `if (!showDelivery && !showProducto && !showCargotransCobro)`
+ * que deriva de la orden, nunca de lo que diga el cliente—.
  *
- * Existe porque el cierre dejó de hacerlo el cliente. Las Rules solo le
- * permiten al motorizado escribir `cobroDelivery` en su primera aparición y
- * con un `hasOnly` que excluye `formaPago` por construcción, así que el medio
- * jamás podría persistirse desde ahí. Centralizarlo en la Function —que usa
- * Admin SDK— es lo que hace posible el feature sin tocar Rules.
+ * `entregado` (B2-PAGO-MEDIO): el cierre de `cobroDelivery` dejó de hacerlo el
+ * cliente. Las Rules solo le permiten al motorizado escribirlo en su primera
+ * aparición y con un `hasOnly` que excluye `formaPago` por construcción, así
+ * que el medio jamás podría persistirse desde ahí.
+ *
+ * `retirado` (VIAJE-ENTREGADO-SIN-COBRO-1): antes, un retiro sin cobro en la
+ * recolección —el caso corriente, `quienPaga: 'entrega'`— lo escribía el
+ * cliente con un updateDoc directo, y las Rules nuevas lo deniegan. En vez de
+ * reabrirles `retirado` a los clientes, la callable acepta ese cierre: el
+ * retiro pasa a ser server-authoritative SIEMPRE, con o sin cobro.
+ *
+ * Esto no le permite al cliente saltarse una confirmación: si la orden exige
+ * cobro en el retiro, los flags que el servidor calcula son verdaderos, esta
+ * función ni se consulta y la callable falla por payload faltante.
  */
 export function permiteCierreSinConfirmaciones(entrada: {
   nuevo: string;
   traePayloadDeCobro: boolean;
 }): boolean {
-  return entrada.nuevo === 'entregado' && !entrada.traePayloadDeCobro;
+  if (entrada.traePayloadDeCobro) return false;
+  return entrada.nuevo === 'entregado' || entrada.nuevo === 'retirado';
+}
+
+// ── Qué confirmación de cobro corresponde a esta transición ──────────────────
+//
+// VIAJE-ENTREGADO-SIN-COBRO-1 — vivía dentro de la callable, donde no se podía
+// probar sin montar el emulador. Es la derivación AUTORITATIVA: la callable la
+// recalcula desde la orden y nunca confía en lo que el cliente diga. De ella
+// depende que un retiro sin cobro pueda cerrarse sin payload y que uno con
+// cobro no pueda.
+
+export interface DatosDepositoTransicion {
+  tieneProducto: boolean;
+  tieneDelivery: boolean;
+}
+
+export interface FlagsConfirmacion {
+  showDelivery: boolean;
+  showProducto: boolean;
+  showCargotransCobro: boolean;
+  deducirDelCE: boolean;
+}
+
+export function calcularFlagsConfirmacion(
+  orden: {
+    pagoDelivery?: { quienPaga?: unknown; deducirDelCobroContraEntrega?: unknown };
+    tipoServicio?: unknown;
+    fueraManagua?: { metodoEnvio?: unknown; pagoCargotrans?: unknown };
+  },
+  dep: DatosDepositoTransicion,
+  nuevo: string,
+): FlagsConfirmacion {
+  const quienPaga = orden.pagoDelivery?.quienPaga || '';
+  const esFueraManagua = orden.tipoServicio === 'fuera_managua';
+  // Para fuera_managua la regla de negocio es que el comercio paga en la
+  // recolección, así que el cobro del delivery cae en el retiro.
+  const esRetiro = quienPaga === 'recoleccion' || esFueraManagua;
+  const deducirDelCE = orden.pagoDelivery?.deducirDelCobroContraEntrega === true;
+
+  const showDelivery =
+    dep.tieneDelivery &&
+    !deducirDelCE &&
+    ((nuevo === 'retirado' && esRetiro) || (nuevo === 'entregado' && !esRetiro));
+  const showProducto = nuevo === 'entregado' && dep.tieneProducto;
+  const showCargotransCobro =
+    nuevo === 'retirado' &&
+    orden.tipoServicio === 'fuera_managua' &&
+    orden.fueraManagua?.metodoEnvio === 'cargotrans' &&
+    orden.fueraManagua?.pagoCargotrans === 'efectivo_motorizado';
+
+  return { showDelivery, showProducto, showCargotransCobro, deducirDelCE };
+}
+
+/** ¿Esta transición exige que el motorizado confirme algún cobro? */
+export function requiereConfirmacionDeCobro(flags: FlagsConfirmacion): boolean {
+  return flags.showDelivery || flags.showProducto || flags.showCargotransCobro;
 }

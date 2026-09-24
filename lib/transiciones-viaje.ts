@@ -106,3 +106,49 @@ export function puedeGestorCambiarEstadoCliente(destino: string | null | undefin
 /** Copy único para cuando la UI tiene que explicar por qué no ofrece la acción. */
 export const MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO =
   'Este estado lo registra el motorizado desde su panel.'
+
+// ─── Por dónde va cada transición del motorizado ──────────────────────────────
+//
+// VIAJE-ENTREGADO-SIN-COBRO-1 · HOTFIX — el E2E de SH-0007 mostró el agujero de
+// este contrato: "Paquete recogido" llamaba a la Function solo cuando había un
+// cobro que confirmar en la recolección. Con `quienPaga: 'entrega'` —el caso
+// corriente— no hay nada que cobrar en el retiro, así que el cliente escribía
+// `retirado` con un updateDoc directo… que las Rules nuevas deniegan. El SDK
+// aplicaba el write local, el servidor lo rechazaba y la UI "cambiaba y volvía".
+//
+// La respuesta no es reabrirle `retirado` al cliente: es que el retiro pase por
+// la Function SIEMPRE, con cobro o sin él. Acá se decide la ruta, en un helper
+// puro, para que la decisión sea testeable y no viva enterrada en un handler.
+
+export type RutaTransicionMotorizado =
+  /** Va directo a la callable, sin preguntar nada: no hay cobro que confirmar. */
+  | 'function'
+  /** Abre el modal de confirmación y después llama a la callable. */
+  | 'modal'
+  /** updateDoc del cliente: es una señal, no un hecho financiero. */
+  | 'cliente'
+
+export interface FlagsCobroTransicion {
+  showDelivery: boolean
+  showProducto: boolean
+  showCargotransCobro: boolean
+}
+
+/**
+ * Qué camino toma una transición del motorizado.
+ *
+ * Los dos estados server-authoritative (`retirado`, `entregado`) van SIEMPRE por
+ * la Function: con confirmaciones pendientes, pasando por el modal; sin ellas,
+ * directo. Las dos señales (`en_camino_retiro`, `en_camino_entrega`) siguen
+ * siendo un updateDoc del cliente, que es lo que las Rules le permiten.
+ */
+export function rutaTransicionMotorizado(
+  destino: string | null | undefined,
+  flags: FlagsCobroTransicion = { showDelivery: false, showProducto: false, showCargotransCobro: false },
+): RutaTransicionMotorizado {
+  if (esEstadoServerAuthoritative(destino)) {
+    const pide = !!flags.showDelivery || !!flags.showProducto || !!flags.showCargotransCobro
+    return pide ? 'modal' : 'function'
+  }
+  return 'cliente'
+}

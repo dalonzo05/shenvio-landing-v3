@@ -17,6 +17,7 @@ import {
   ESTADOS_SERVER_AUTHORITATIVE,
   TRANSICIONES_CLIENTE_MOTORIZADO,
   MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO,
+  rutaTransicionMotorizado,
 } from './transiciones-viaje'
 import { calcularDeposito } from './calculo-deposito'
 import { esEstadoCerrado, esEstadoReactivable, esTerminalDefinitivo, ESTADO_TRAS_REACTIVAR } from './estados-solicitud'
@@ -162,4 +163,75 @@ test('VE17 · calcularDeposito sin cobrosMotorizado mantiene el resultado de hoy
   } as EntradaDepositoOrden)
   assert.equal(noRecibio.totalAStorkhub, 0)
   assert.equal(noRecibio.totalAlComercio, 1000)
+})
+
+// ─── VU · Por dónde sale cada transición del panel del motorizado ────────────
+//
+// El E2E de SH-0007: el botón "Paquete recogido" llamaba a la callable SOLO
+// cuando había un cobro que confirmar en la recolección. En el caso corriente
+// —`quienPaga: 'entrega'`, nada que cobrar al recoger— caía en el updateDoc del
+// cliente, que VR7 deniega: el SDK lo aplicaba local y el servidor lo revertía,
+// y en pantalla el estado "cambiaba y volvía". Las Rules no se tocaron; lo que
+// cambió es que el retiro pasa por la Function con cobro o sin él.
+
+test('VU1 · retirado sin nada que confirmar va DIRECTO a la Function', () => {
+  // Este es el caso que estaba roto: el retiro corriente.
+  assert.equal(rutaTransicionMotorizado('retirado', { showDelivery: false, showProducto: false, showCargotransCobro: false }), 'function')
+  // Y sin pasarle flags tampoco se cae al cliente: el default es seguro.
+  assert.equal(rutaTransicionMotorizado('retirado'), 'function')
+})
+
+test('VU2 · retirado con un cobro que confirmar pasa por el modal, y después la Function', () => {
+  // Cualquiera de los tres flags basta; ninguno devuelve la orden al cliente.
+  assert.equal(rutaTransicionMotorizado('retirado', { showDelivery: true, showProducto: false, showCargotransCobro: false }), 'modal')
+  assert.equal(rutaTransicionMotorizado('retirado', { showDelivery: false, showProducto: true, showCargotransCobro: false }), 'modal')
+  assert.equal(rutaTransicionMotorizado('retirado', { showDelivery: false, showProducto: false, showCargotransCobro: true }), 'modal')
+})
+
+test('VU3 · entregado conserva su contrato: Function siempre, modal si hay cobro', () => {
+  // B2-PAGO-MEDIO ya lo había centralizado; este bloque no lo mueve.
+  assert.equal(rutaTransicionMotorizado('entregado', { showDelivery: false, showProducto: false, showCargotransCobro: false }), 'function')
+  assert.equal(rutaTransicionMotorizado('entregado'), 'function')
+  assert.equal(rutaTransicionMotorizado('entregado', { showDelivery: true, showProducto: true, showCargotransCobro: false }), 'modal')
+})
+
+test('VU4 · las dos señales siguen siendo updateDoc del cliente', () => {
+  // VR5 y VR6 las permiten en Rules; no hay razón para pagar una callable por
+  // avisar que vas en camino, y meterlas acá rompería el viaje del motorizado.
+  for (const señal of ['en_camino_retiro', 'en_camino_entrega']) {
+    assert.equal(rutaTransicionMotorizado(señal, { showDelivery: false, showProducto: false, showCargotransCobro: false }), 'cliente', señal)
+    // Ni siquiera con flags encendidos: una señal no confirma dinero.
+    assert.equal(rutaTransicionMotorizado(señal, { showDelivery: true, showProducto: true, showCargotransCobro: true }), 'cliente', señal)
+  }
+})
+
+test('VU5 · ningún camino del cliente termina escribiendo un estado server-authoritative', () => {
+  // Barrido exhaustivo de las ocho combinaciones de flags por estado: los dos
+  // que cierran dinero nunca devuelven 'cliente', y los demás nunca llaman a la
+  // Function. Si alguien reabriera el atajo, este caso lo delata.
+  const BOOLS = [false, true]
+  for (const showDelivery of BOOLS) {
+    for (const showProducto of BOOLS) {
+      for (const showCargotransCobro of BOOLS) {
+        const flags = { showDelivery, showProducto, showCargotransCobro }
+        const etiqueta = JSON.stringify(flags)
+        for (const destino of ESTADOS_SERVER_AUTHORITATIVE) {
+          const ruta = rutaTransicionMotorizado(destino, flags)
+          assert.notEqual(ruta, 'cliente', destino + ' ' + etiqueta)
+          assert.equal(
+            ruta,
+            showDelivery || showProducto || showCargotransCobro ? 'modal' : 'function',
+            destino + ' ' + etiqueta,
+          )
+        }
+        for (const señal of ['en_camino_retiro', 'en_camino_entrega', ...ADMINISTRATIVOS]) {
+          assert.equal(rutaTransicionMotorizado(señal, flags), 'cliente', señal + ' ' + etiqueta)
+        }
+      }
+    }
+  }
+  // Entradas vacías no habilitan la Function.
+  assert.equal(rutaTransicionMotorizado(''), 'cliente')
+  assert.equal(rutaTransicionMotorizado(null), 'cliente')
+  assert.equal(rutaTransicionMotorizado(undefined), 'cliente')
 })

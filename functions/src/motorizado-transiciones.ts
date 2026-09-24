@@ -47,7 +47,11 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { FieldValue } from 'firebase-admin/firestore';
 import { semanaKeyDeFecha } from './cobro-semanal';
-import { resolverFormaPago, permiteCierreSinConfirmaciones } from './medio-pago';
+import {
+  resolverFormaPago,
+  permiteCierreSinConfirmaciones,
+  calcularFlagsConfirmacion,
+} from './medio-pago';
 
 const MAX_ID_LEN = 200;
 const MAX_JUSTIFICACION_LEN = 500;
@@ -300,40 +304,18 @@ function calcDeposito(orden: FirebaseFirestore.DocumentData): DepositoInfo {
   };
 }
 
-interface ShowFlags {
-  showDelivery: boolean;
-  showProducto: boolean;
-  showCargotransCobro: boolean;
-  deducirDelCE: boolean;
-}
-
-// ── Misma lógica que cambiar() en el cliente para decidir qué confirmación
-// corresponde. Se recalcula acá para no confiar en lo que el cliente diga
-// que "aplica" — si el cliente manda una confirmación que el estado real de
-// la orden no pide, se rechaza (ver validación más abajo). ──────────────
-function calcularShowFlags(
+// ── Qué confirmación corresponde: se recalcula acá para no confiar en lo que
+// el cliente diga que "aplica" — si manda una confirmación que el estado real
+// de la orden no pide, se rechaza (ver validación más abajo).
+//
+// VIAJE-ENTREGADO-SIN-COBRO-1 — la derivación vive ahora en medio-pago.ts, que
+// es puro y tiene tests: de ella depende que un retiro SIN cobro pueda cerrarse
+// sin payload y que uno CON cobro no pueda.
+const calcularShowFlags = (
   orden: FirebaseFirestore.DocumentData,
   dep: DepositoInfo,
   nuevo: NuevoEstadoTransicion,
-): ShowFlags {
-  const quienPaga = orden.pagoDelivery?.quienPaga || '';
-  const esFueraManagua = orden.tipoServicio === 'fuera_managua';
-  const esRetiro = quienPaga === 'recoleccion' || esFueraManagua;
-  const deducirDelCE = orden.pagoDelivery?.deducirDelCobroContraEntrega === true;
-
-  const showDelivery =
-    dep.tieneDelivery &&
-    !deducirDelCE &&
-    ((nuevo === 'retirado' && esRetiro) || (nuevo === 'entregado' && !esRetiro));
-  const showProducto = nuevo === 'entregado' && dep.tieneProducto;
-  const showCargotransCobro =
-    nuevo === 'retirado' &&
-    orden.tipoServicio === 'fuera_managua' &&
-    orden.fueraManagua?.metodoEnvio === 'cargotrans' &&
-    orden.fueraManagua?.pagoCargotrans === 'efectivo_motorizado';
-
-  return { showDelivery, showProducto, showCargotransCobro, deducirDelCE };
-}
+) => calcularFlagsConfirmacion(orden, dep, nuevo);
 
 /** cobroDelivery — misma fórmula que executeCambiar() en la transición a 'entregado'. */
 function construirCobroDelivery(
@@ -506,23 +488,29 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
     const { showDelivery, showProducto, showCargotransCobro, deducirDelCE } = calcularShowFlags(orden, dep, nuevo);
 
     if (!showDelivery && !showProducto && !showCargotransCobro) {
-      // Fail-closed con UNA excepción estrecha (B2-PAGO-MEDIO).
+      // Fail-closed, con los DOS cierres server-authoritative como excepción.
       //
       // Antes: sin delivery, producto ni cargotrans no había nada legítimo que
-      // escribir, porque el cierre de `cobroDelivery` lo hacía el cliente por
-      // updateDoc directo. Ahora ese cierre vive acá, y por eso existe una
-      // llamada legítima sin confirmaciones: entregar una orden cuyo cobro ya
-      // se resolvió antes (típicamente cobrada en la recolección).
+      // escribir, porque el cierre lo hacía el cliente por updateDoc directo.
+      // Ahora vive acá, y por eso existen llamadas legítimas sin confirmación:
+      // una orden cuyo cobro ya se resolvió en la otra punta del viaje.
       //
-      // Se centraliza porque las Rules solo permiten al motorizado escribir
-      // `cobroDelivery` en su PRIMERA aparición y con un hasOnly que excluye
-      // `formaPago` por construcción: desde el cliente el medio no podría
-      // persistirse nunca. La Function usa Admin SDK, así que cierra sin tocar
-      // Rules — y de paso desaparece la fórmula duplicada cliente/servidor.
+      // B2-PAGO-MEDIO trajo 'entregado': las Rules solo permiten al motorizado
+      // escribir `cobroDelivery` en su PRIMERA aparición y con un hasOnly que
+      // excluye `formaPago` por construcción, así que desde el cliente el medio
+      // no podría persistirse nunca. La Function usa Admin SDK, cierra sin tocar
+      // Rules, y de paso desaparece la fórmula duplicada cliente/servidor.
       //
-      // La excepción es estrecha a propósito: solo 'entregado' y solo sin
-      // ningún payload de cobro. Con `cobros` o `cargotransCobro` presentes
-      // sigue siendo un error, igual que cualquier otra transición.
+      // VIAJE-ENTREGADO-SIN-COBRO-1 trajo 'retirado'. El E2E de SH-0007 mostró
+      // que el retiro corriente —`quienPaga: 'entrega'`, nada que cobrar al
+      // recoger— se escribía por updateDoc y las Rules del cierre financiero lo
+      // denegaban: el write se aplicaba local y el servidor lo revertía. La
+      // salida no fue reabrirle `retirado` al cliente sino aceptarlo acá.
+      //
+      // Esto no le permite a nadie saltarse una confirmación: los flags de
+      // arriba los deriva el servidor de la orden, no del payload. Si la orden
+      // exige cobro en el retiro, este `if` no se entra. Y con `cobros` o
+      // `cargotransCobro` presentes sigue siendo un error.
       const traePayloadDeCobro = cobrosInput != null || cargotransCobroInput != null;
       if (!permiteCierreSinConfirmaciones({ nuevo, traePayloadDeCobro })) {
         throw new HttpsError('failed-precondition', 'Esta transición no requiere confirmación de cobro.');

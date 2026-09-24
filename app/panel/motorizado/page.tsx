@@ -61,6 +61,9 @@ import {
 import { ImageLightbox } from '../_components/ImageLightbox';
 import { fechaHoraOperativa } from '@/lib/fecha-operativa';
 import { avisoNoCobrarMotorizado, descripcionCobroMotorizado, etiquetaDeliveryMotorizado } from '@/lib/pago-transferencia';
+// VIAJE-ENTREGADO-SIN-COBRO-1 — el retiro y la entrega van SIEMPRE por la
+// Function; las dos señales siguen siendo updateDoc del cliente.
+import { rutaTransicionMotorizado } from '@/lib/transiciones-viaje';
 import type { DepositoRegistrado } from '@/lib/deposito-orden';
 import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
 
@@ -648,9 +651,16 @@ export default function PanelMotorizadoPage() {
       // hace ahora SOLO la Function: es la única que puede persistir
       // `formaPago` —las Rules se lo prohíben al motorizado por
       // construcción— y tener una sola fórmula evita que las dos copias se
-      // separen. cambiar() enruta toda transición a `entregado` por la
-      // callable, así que esta función ya no ve ese caso.
-      // Cierra PAGO-CLIENTE-ESCRIBE-COBRODELIVERY para `entregado`.
+      // separen. Cierra PAGO-CLIENTE-ESCRIBE-COBRODELIVERY para `entregado`.
+      //
+      // VIAJE-ENTREGADO-SIN-COBRO-1 — cambiar() enruta por la callable TODA
+      // transición a `retirado` y a `entregado`, con cobro o sin él, así que
+      // esta función ya solo ve las dos señales del motorizado
+      // (`en_camino_retiro`, `en_camino_entrega`). El `if (nuevo ===
+      // 'entregado')` de arriba y la rama `nuevo === 'entregado'` de abajo son
+      // código muerto que se conserva por paridad con executeConfirmarConCobro;
+      // si alguna vez se llegara acá con un estado del cierre, escribiría lo
+      // mismo que antes y las Rules lo denegarían igual.
 
       await updateDoc(doc(db, 'solicitudes_envio', o.id), p);
       // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
@@ -774,18 +784,26 @@ export default function PanelMotorizadoPage() {
       o.fueraManagua?.metodoEnvio === 'cargotrans' &&
       o.fueraManagua?.pagoCargotrans === 'efectivo_motorizado';
 
-    if (!showDelivery && !showProducto && !showCargotransCobro) {
-      // B2-PAGO-MEDIO — el cierre de `cobroDelivery` al entregar dejó de
-      // hacerlo el cliente: ahora lo centraliza la Function, que es la única
-      // que puede persistir `formaPago` (las Rules se lo prohíben al
-      // motorizado por construcción). Sin confirmaciones que pedir, se llama
-      // igual pero sin payload de cobro. El resto de transiciones sigue por
-      // el updateDoc directo de siempre.
-      if (nuevo === 'entregado') {
-        executeConfirmarConCobro(o, 'entregado');
-        return;
-      }
+    // VIAJE-ENTREGADO-SIN-COBRO-1 — la ruta la decide un helper puro:
+    //
+    //   retirado / entregado  → Function SIEMPRE (con modal si hay que
+    //                           confirmar un cobro; directo si no hay nada)
+    //   en_camino_*           → updateDoc del cliente, que es una señal
+    //
+    // Antes, un retiro sin cobro en la recolección —`quienPaga: 'entrega'`, el
+    // caso corriente— se escribía por updateDoc, y las Rules que protegen el
+    // cierre financiero lo deniegan: el SDK aplicaba el write local y el
+    // servidor lo revertía. B2-PAGO-MEDIO ya había centralizado `entregado`
+    // por la misma razón (solo la Function puede persistir `formaPago`).
+    const ruta = rutaTransicionMotorizado(nuevo, { showDelivery, showProducto, showCargotransCobro });
+    if (ruta === 'cliente') {
       executeCambiar(o, nuevo);
+      return;
+    }
+    if (ruta === 'function') {
+      // Sin payload de cobro: el servidor recalcula los flags desde la orden y
+      // solo acepta el cierre si él mismo concluye que no hay nada que confirmar.
+      executeConfirmarConCobro(o, nuevo as 'retirado' | 'entregado');
       return;
     }
 
