@@ -157,16 +157,16 @@ export function rutaTransicionMotorizado(
 //
 // VIAJE-CANCELACION-CONSISTENCIA-1 — el listado cancelaba (y devolvía a
 // `confirmada`) escribiendo solo `estado`: la orden quedaba cerrada pero todavía
-// vinculada al motorizado, que seguía `ocupado`; y la ficha y el drawer, ante una
-// asignación residual, escribían `ocupado` sobre él. Rebotar y rechazar, en
-// cambio, siempre limpiaron la asignación y liberaron al motorizado. Acá está esa
-// misma semántica, una sola vez, para que las tres superficies no diverjan.
+// vinculada al motorizado; y la ficha y el drawer, ante una asignación residual,
+// escribían `ocupado` sobre él. Acá se decide, una sola vez, qué le pasa a la
+// SOLICITUD, para que las tres superficies no diverjan.
 //
-// Decide QUÉ efectos corresponden; no escribe nada. Las escrituras (y el batch
-// que junta solicitud y motorizado) siguen en cada pantalla.
-
-/** Estado con el que queda el motorizado al que se le retira una orden. */
-export const ESTADO_MOTORIZADO_LIBERADO = 'disponible' as const
+// Decide QUÉ efectos corresponden sobre la solicitud; no escribe nada. Y no
+// decide la disponibilidad del motorizado: un motorizado puede tener varias
+// órdenes activas, así que `disponible` u `ocupado` no se deriva de una sola
+// solicitud, y el cliente no puede recalcularlo sin carreras. Ese contrato es de
+// MOTO-DISPONIBILIDAD-CONTRATO-1; hasta entonces cancelar y desasignar no tocan
+// el perfil del motorizado.
 
 /**
  * Desde dónde puede cancelar el Gestor con el selector administrativo. Una
@@ -185,11 +185,6 @@ export const MSG_CANCELAR_OPERACION_EN_CURSO =
 export interface EfectosCambioAdministrativo {
   /** Escribir `asignacion: null` junto con el nuevo estado. */
   limpiarAsignacion: boolean
-  /**
-   * Estado con el que queda el motorizado vinculado, o null si su perfil no se
-   * toca. Solo puede ser `disponible`: cancelar o desasignar nunca ocupa a nadie.
-   */
-  estadoMotorizado: typeof ESTADO_MOTORIZADO_LIBERADO | null
   /** Escribir `historial.canceladaAt`. */
   registrarCanceladaAt: boolean
 }
@@ -197,14 +192,12 @@ export interface EfectosCambioAdministrativo {
 /**
  * Efectos administrativos de mover una orden a `destino`.
  *
- *   → cancelada              registra canceladaAt; si hay asignación, la limpia y
- *                            libera al motorizado
- *   asignada → confirmada    es una desasignación (igual que rebotar): limpia la
- *                            asignación y libera al motorizado
+ *   → cancelada              registra canceladaAt; limpia la asignación si hay
+ *                            (también un residuo)
+ *   asignada → confirmada    es una desasignación: limpia la asignación
  *   cualquier otra           sin efectos nuevos
  *
- * `estadoMotorizado` es una decisión, no una orden: quien escribe solo toca el
- * perfil si además conoce el id del motorizado vinculado.
+ * Ninguno toca el perfil del motorizado.
  */
 export function efectosCambioAdministrativo(
   origen: string | null | undefined,
@@ -213,12 +206,11 @@ export function efectosCambioAdministrativo(
 ): EfectosCambioAdministrativo {
   const desde = texto(origen)
   const hacia = texto(destino)
-  const libera = tieneAsignacion ? ESTADO_MOTORIZADO_LIBERADO : null
   if (hacia === 'cancelada') {
-    return { limpiarAsignacion: tieneAsignacion, estadoMotorizado: libera, registrarCanceladaAt: true }
+    return { limpiarAsignacion: tieneAsignacion, registrarCanceladaAt: true }
   }
   if (hacia === 'confirmada' && desde === 'asignada') {
-    return { limpiarAsignacion: true, estadoMotorizado: libera, registrarCanceladaAt: false }
+    return { limpiarAsignacion: true, registrarCanceladaAt: false }
   }
-  return { limpiarAsignacion: false, estadoMotorizado: null, registrarCanceladaAt: false }
+  return { limpiarAsignacion: false, registrarCanceladaAt: false }
 }

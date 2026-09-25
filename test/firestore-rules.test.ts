@@ -2361,9 +2361,10 @@ test('VR16 · el motorizado conserva sus escrituras que no mueven estado', async
 
 // ─── VR · VIAJE-CANCELACION-CONSISTENCIA-1 ───────────────────────────────────
 //
-// Cancelar (o devolver a confirmada) una orden asignada limpia la asignación y
-// libera al motorizado en el mismo batch. Las Rules ya lo autorizan: esto lo
-// deja demostrado y evita que un cambio futuro lo rompa sin que nadie se entere.
+// Cancelar (o devolver a confirmada) una orden asignada limpia la asignación de
+// la SOLICITUD. Las Rules ya lo autorizan: esto lo deja demostrado y evita que un
+// cambio futuro lo rompa sin que nadie se entere. El perfil del motorizado no
+// participa: su disponibilidad no la decide este flujo.
 
 const ASIGNACION_ACEPTADA = {
   motorizadoId: 'moto1',
@@ -2372,44 +2373,23 @@ const ASIGNACION_ACEPTADA = {
   estadoAceptacion: 'aceptada',
 }
 
-async function motorizadoOcupado(id = 'moto1') {
-  await env.withSecurityRulesDisabled(async (ctx) => {
-    await setDoc(doc(ctx.firestore(), 'motorizado', id), {
-      nombre: 'John Pork',
-      authUid: UID_MOTO,
-      estado: 'ocupado',
-    })
-  })
-  return id
-}
-
-test('VR17 · gestor: asignada → cancelada con asignacion null y motorizado disponible, en un batch ⇒ ALLOW', async () => {
+test('VR17 · gestor: asignada → cancelada con asignacion null, canceladaAt y updatedAt ⇒ ALLOW', async () => {
   const id = await ordenConCodigo('vr17', { estado: 'asignada', asignacion: ASIGNACION_ACEPTADA })
-  const moto = await motorizadoOcupado()
-  const db = como(UID_GESTOR)
-  const b = writeBatch(db)
-  b.update(doc(db, 'solicitudes_envio', id), {
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
     estado: 'cancelada',
     asignacion: null,
     'historial.canceladaAt': serverTimestamp(),
     updatedAt: serverTimestamp(),
-  })
-  b.update(doc(db, 'motorizado', moto), { estado: 'disponible', updatedAt: serverTimestamp() })
-  await assertSucceeds(b.commit())
+  }))
 })
 
-test('VR18 · gestor: asignada → confirmada con asignacion null y motorizado disponible, en un batch ⇒ ALLOW', async () => {
+test('VR18 · gestor: asignada → confirmada con asignacion null y updatedAt ⇒ ALLOW', async () => {
   const id = await ordenConCodigo('vr18', { estado: 'asignada', asignacion: ASIGNACION_ACEPTADA })
-  const moto = await motorizadoOcupado()
-  const db = como(UID_GESTOR)
-  const b = writeBatch(db)
-  b.update(doc(db, 'solicitudes_envio', id), {
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
     estado: 'confirmada',
     asignacion: null,
     updatedAt: serverTimestamp(),
-  })
-  b.update(doc(db, 'motorizado', moto), { estado: 'disponible', updatedAt: serverTimestamp() })
-  await assertSucceeds(b.commit())
+  }))
 })
 
 test('VR19 · gestor: confirmada → cancelada sin asignación, solo la orden ⇒ ALLOW', async () => {

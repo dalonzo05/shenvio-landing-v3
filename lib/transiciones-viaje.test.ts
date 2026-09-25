@@ -21,7 +21,6 @@ import {
   efectosCambioAdministrativo,
   puedeGestorCancelarDesde,
   ORIGENES_CANCELABLES_POR_GESTOR,
-  ESTADO_MOTORIZADO_LIBERADO,
 } from './transiciones-viaje'
 import { calcularDeposito } from './calculo-deposito'
 import { esEstadoCerrado, esEstadoReactivable, esTerminalDefinitivo, ESTADO_TRAS_REACTIVAR } from './estados-solicitud'
@@ -243,57 +242,56 @@ test('VU5 · ningún camino del cliente termina escribiendo un estado server-aut
 // ─── VC · VIAJE-CANCELACION-CONSISTENCIA-1 ────────────────────────────────────
 //
 // Cancelar y devolver `asignada → confirmada` son desasignaciones: la orden no
-// puede quedar vinculada a un motorizado que ya no la tiene, ni él `ocupado`.
+// puede quedar vinculada a un motorizado que ya no la tiene.
 
 const TODOS_LOS_ESTADOS = [...ADMINISTRATIVOS, ...ESTADOS_OPERATIVOS_VIAJE]
 
-test('VC1 · asignada → confirmada limpia la asignación y libera al motorizado', () => {
+// El contrato es solo sobre la solicitud: la disponibilidad del motorizado no se
+// deriva de una sola orden (puede tener varias) y por eso el helper no la decide.
+
+test('VC1 · asignada → confirmada limpia la asignación y no decide nada sobre el motorizado', () => {
   assert.deepEqual(efectosCambioAdministrativo('asignada', 'confirmada', true), {
     limpiarAsignacion: true,
-    estadoMotorizado: 'disponible',
     registrarCanceladaAt: false,
   })
 })
 
-test('VC2 · asignada → cancelada limpia la asignación, libera al motorizado y registra la cancelación', () => {
+test('VC2 · asignada → cancelada limpia la asignación y registra la cancelación, sin decidir disponibilidad', () => {
   assert.deepEqual(efectosCambioAdministrativo('asignada', 'cancelada', true), {
     limpiarAsignacion: true,
-    estadoMotorizado: 'disponible',
     registrarCanceladaAt: true,
   })
 })
 
-test('VC3 · confirmada → cancelada sin asignación cancela y registra, sin tocar a ningún motorizado', () => {
+test('VC3 · confirmada → cancelada sin asignación registra la cancelación y no toca perfiles', () => {
   assert.deepEqual(efectosCambioAdministrativo('confirmada', 'cancelada', false), {
     limpiarAsignacion: false,
-    estadoMotorizado: null,
     registrarCanceladaAt: true,
   })
 })
 
-test('VC4 · confirmada → cancelada con asignación residual la limpia y libera al motorizado', () => {
+test('VC4 · confirmada → cancelada con asignación residual la limpia y registra la cancelación', () => {
   assert.deepEqual(efectosCambioAdministrativo('confirmada', 'cancelada', true), {
     limpiarAsignacion: true,
-    estadoMotorizado: 'disponible',
     registrarCanceladaAt: true,
   })
 })
 
-test('VC5 · cancelar o desasignar nunca deja a nadie ocupado', () => {
-  assert.equal(ESTADO_MOTORIZADO_LIBERADO, 'disponible')
+test('VC5 · el helper nunca devuelve ocupado ni disponible: ese concepto no es parte de su contrato', () => {
   for (const origen of TODOS_LOS_ESTADOS) {
     for (const destino of TODOS_LOS_ESTADOS) {
       for (const tiene of [true, false]) {
-        const { estadoMotorizado } = efectosCambioAdministrativo(origen, destino, tiene)
-        assert.notEqual(estadoMotorizado, 'ocupado', `${origen} → ${destino} (${tiene})`)
-        assert.ok(estadoMotorizado === null || estadoMotorizado === 'disponible', `${origen} → ${destino}`)
+        const efectos = efectosCambioAdministrativo(origen, destino, tiene)
+        assert.deepEqual(Object.keys(efectos).sort(), ['limpiarAsignacion', 'registrarCanceladaAt'], `${origen} → ${destino}`)
+        assert.ok(!JSON.stringify(efectos).includes('ocupado'), `${origen} → ${destino}`)
+        assert.ok(!JSON.stringify(efectos).includes('disponible'), `${origen} → ${destino}`)
       }
     }
   }
 })
 
 test('VC6 · una transición administrativa no relacionada no recibe efectos nuevos', () => {
-  const sinEfectos = { limpiarAsignacion: false, estadoMotorizado: null, registrarCanceladaAt: false }
+  const sinEfectos = { limpiarAsignacion: false, registrarCanceladaAt: false }
   const casos: [string, string][] = [
     ['pendiente_confirmacion', 'confirmada'],
     ['pendiente_confirmacion', 'rechazada'],

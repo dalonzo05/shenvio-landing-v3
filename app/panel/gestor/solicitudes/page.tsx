@@ -1294,24 +1294,16 @@ function GestorSolicitudesPageContent() {
     }
     try {
       // Cancelar y devolver asignada → confirmada desasignan: se limpia la
-      // asignación y se libera al motorizado, en el mismo batch que la orden
-      // (mismo criterio que rebotarAsignacion).
+      // asignación de la orden. El perfil del motorizado no se toca: su
+      // disponibilidad no se deriva de una sola solicitud.
       const efectos = efectosCambioAdministrativo(solicitud?.estado, nuevo, !!solicitud?.asignacion)
-      const motorizadoId = solicitud?.asignacion?.motorizadoId
       const patch: UpdateData<DocumentData> = {
         estado: nuevo,
         updatedAt: serverTimestamp(),
         ...(efectos.limpiarAsignacion ? { asignacion: null } : {}),
         ...(efectos.registrarCanceladaAt ? { 'historial.canceladaAt': serverTimestamp() } : {}),
       }
-      if (efectos.estadoMotorizado && motorizadoId) {
-        const b = writeBatch(db)
-        b.update(doc(db, 'solicitudes_envio', id), patch)
-        b.update(doc(db, 'motorizado', motorizadoId), { estado: efectos.estadoMotorizado, updatedAt: serverTimestamp() })
-        await b.commit()
-      } else {
-        await updateDoc(doc(db, 'solicitudes_envio', id), patch)
-      }
+      await updateDoc(doc(db, 'solicitudes_envio', id), patch)
       setToast({ type: 'success', message: 'Estado actualizado' })
     } catch (e) {
       console.error(e)

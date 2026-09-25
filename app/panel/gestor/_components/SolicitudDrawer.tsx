@@ -802,25 +802,17 @@ export function SolicitudDrawer({
     // obligación de depósito sin evidencia.
     if (!puedeGestorCambiarEstadoCliente(nuevo)) return setErr(MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO)
     if (nuevo === 'cancelada' && !puedeGestorCancelarDesde(solicitud.estado)) return setErr(MSG_CANCELAR_OPERACION_EN_CURSO)
-    const motorizadoId = solicitud.asignacion?.motorizadoId
-    // Cancelar con una asignación viva (incluida una residual) desasigna: se
-    // limpia y el motorizado queda disponible. Cancelar nunca lo marca ocupado.
+    // Cancelar con una asignación viva (incluida una residual) la limpia. El
+    // perfil del motorizado no se toca: su disponibilidad no se deriva de una
+    // sola solicitud.
     const efectos = efectosCambioAdministrativo(solicitud.estado, nuevo, !!solicitud.asignacion)
     try {
-      const b = writeBatch(db)
-      b.update(doc(db, 'solicitudes_envio', solicitud.id), {
+      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: nuevo,
         updatedAt: serverTimestamp(),
         [`historial.${nuevo}At`]: serverTimestamp(),
         ...(efectos.limpiarAsignacion ? { asignacion: null } : {}),
       } as any)
-
-      // Liberar al motorizado vinculado, en el mismo batch que la orden.
-      if (efectos.estadoMotorizado && motorizadoId) {
-        b.update(doc(db, 'motorizado', motorizadoId), { estado: efectos.estadoMotorizado, updatedAt: serverTimestamp() })
-      }
-
-      await b.commit()
 
       if (nuevo === 'entregado') {
         const celular = solicitud.entrega?.celular?.replace(/\D/g, '')
