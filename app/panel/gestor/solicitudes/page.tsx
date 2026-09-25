@@ -5,6 +5,7 @@ import { SolicitudDrawer } from '../_components/SolicitudDrawer'
 import { rutaOrden } from '@/lib/ruta-orden'
 import { coincideCodigo, mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
 import { celdaAceptacion, type UltimoRechazoMotorizado } from '@/lib/rechazo-motorizado'
+import { celdaMotorizado } from '@/lib/columna-motorizado'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
   rankearMotorizados,
@@ -2052,31 +2053,21 @@ function GestorSolicitudesPageContent() {
                         </td>
 
                         <td className="px-3 py-2 border-r border-gray-100">
-                          {s.asignacion?.motorizadoNombre ? (
-                            <>
-                              <div className="text-xs font-medium text-gray-900 truncate">{s.asignacion.motorizadoNombre}</div>
-                              <div className="text-[11px] text-gray-600 mt-0.5">{s.asignacion.motorizadoTelefono || '—'}</div>
-                            </>
-                          ) : s.estado === 'confirmada' ? (() => {
-                            const top = rankingTabla.get(s.id)
-                            if (!top) return <div className="text-[11px] text-gray-400">{loadingRanking ? 'Calculando…' : 'Sin candidatos'}</div>
-                            const { score, explicacion } = top.scoreResult
-                            return (
-                              <div className="space-y-1">
-                                <div className="text-xs font-semibold text-gray-900 truncate">{top.nombre}</div>
-                                <div className="flex items-center gap-1 min-w-0">
-                                  <span className={`shrink-0 text-[10px] font-black px-1.5 py-0.5 rounded-full border ${
-                                    score >= 70 ? 'bg-green-50 text-green-700 border-green-200'
-                                    : score >= 40 ? 'bg-yellow-50 text-yellow-700 border-yellow-200'
-                                    : 'bg-red-50 text-red-600 border-red-200'
-                                  }`}>{score}</span>
-                                  <span className="text-[10px] text-gray-500 truncate leading-tight">{explicacion}</span>
-                                </div>
-                              </div>
-                            )
-                          })() : (
-                            <div className="text-[11px] text-gray-400">Sin asignar</div>
-                          )}
+                          {/* Esta columna es SOLO el motorizado asignado ahora. El candidato
+                              sugerido vive en "Asignar sugerido" / "Ver opciones"; el último
+                              rechazo, en la columna Aceptación. */}
+                          {(() => {
+                            const celda = celdaMotorizado(s)
+                            if (celda.tipo === 'asignado') {
+                              return (
+                                <>
+                                  <div className="text-xs font-medium text-gray-900 truncate">{celda.nombre}</div>
+                                  <div className="text-[11px] text-gray-600 mt-0.5">{celda.telefono || '—'}</div>
+                                </>
+                              )
+                            }
+                            return <div className="text-[11px] text-gray-400">Sin asignar</div>
+                          })()}
                         </td>
 
                         <td className="px-3 py-2 border-r border-gray-100">
@@ -2123,6 +2114,7 @@ function GestorSolicitudesPageContent() {
                                     <button
                                       onClick={() => asignarSugerido(s.id, top)}
                                       disabled={asignandoId === s.id}
+                                      title={`Sugerido: ${top.nombre} · score ${top.scoreResult.score} · ${top.scoreResult.explicacion}`}
                                       className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-700 w-full disabled:opacity-50 transition"
                                     >
                                       <Sparkles className="h-3.5 w-3.5 shrink-0" />
