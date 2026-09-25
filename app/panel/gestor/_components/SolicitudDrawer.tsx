@@ -25,6 +25,9 @@ import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import {
   puedeGestorCambiarEstadoCliente,
   MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO,
+  efectosCambioAdministrativo,
+  puedeGestorCancelarDesde,
+  MSG_CANCELAR_OPERACION_EN_CURSO,
 } from '@/lib/transiciones-viaje'
 import { compressImage, uploadEvidenciaPath } from '@/fb/storage'
 import {
@@ -798,18 +801,23 @@ export function SolicitudDrawer({
     // escribe los cobros. Desde acá dejaban la orden incompleta y con una
     // obligación de depósito sin evidencia.
     if (!puedeGestorCambiarEstadoCliente(nuevo)) return setErr(MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO)
+    if (nuevo === 'cancelada' && !puedeGestorCancelarDesde(solicitud.estado)) return setErr(MSG_CANCELAR_OPERACION_EN_CURSO)
     const motorizadoId = solicitud.asignacion?.motorizadoId
+    // Cancelar con una asignación viva (incluida una residual) desasigna: se
+    // limpia y el motorizado queda disponible. Cancelar nunca lo marca ocupado.
+    const efectos = efectosCambioAdministrativo(solicitud.estado, nuevo, !!solicitud.asignacion)
     try {
       const b = writeBatch(db)
       b.update(doc(db, 'solicitudes_envio', solicitud.id), {
         estado: nuevo,
         updatedAt: serverTimestamp(),
         [`historial.${nuevo}At`]: serverTimestamp(),
+        ...(efectos.limpiarAsignacion ? { asignacion: null } : {}),
       } as any)
 
-      if (motorizadoId) {
-        const nuevoEstadoMoto = nuevo === 'entregado' ? 'disponible' : 'ocupado'
-        b.update(doc(db, 'motorizado', motorizadoId), { estado: nuevoEstadoMoto, updatedAt: serverTimestamp() })
+      // Liberar al motorizado vinculado, en el mismo batch que la orden.
+      if (efectos.estadoMotorizado && motorizadoId) {
+        b.update(doc(db, 'motorizado', motorizadoId), { estado: efectos.estadoMotorizado, updatedAt: serverTimestamp() })
       }
 
       await b.commit()

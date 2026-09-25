@@ -25,12 +25,17 @@ import {
   updateDoc,
   writeBatch,
   where,
+  type DocumentData,
+  type UpdateData,
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import {
   puedeGestorCambiarEstadoCliente,
   esEstadoOperativoDelMotorizado,
   MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO,
+  efectosCambioAdministrativo,
+  puedeGestorCancelarDesde,
+  MSG_CANCELAR_OPERACION_EN_CURSO,
 } from '@/lib/transiciones-viaje'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import { esEntregadaHoy, esEntregadaEnRango, entregaSinFecha, rangoDiasDeFiltro } from '@/lib/dia-operativo'
@@ -1280,12 +1285,33 @@ function GestorSolicitudesPageContent() {
         setToast({ type: 'error', message: 'No se puede marcar como asignada sin motorizado.' })
         return
       }
+      // VIAJE-CANCELACION-CONSISTENCIA-1 — una operación que ya salió a retiro
+      // no se detiene desde el selector genérico.
+      if (nuevo === 'cancelada' && !puedeGestorCancelarDesde(solicitud.estado)) {
+        setToast({ type: 'error', message: MSG_CANCELAR_OPERACION_EN_CURSO })
+        return
+      }
     }
     try {
-      await updateDoc(doc(db, 'solicitudes_envio', id), {
+      // Cancelar y devolver asignada → confirmada desasignan: se limpia la
+      // asignación y se libera al motorizado, en el mismo batch que la orden
+      // (mismo criterio que rebotarAsignacion).
+      const efectos = efectosCambioAdministrativo(solicitud?.estado, nuevo, !!solicitud?.asignacion)
+      const motorizadoId = solicitud?.asignacion?.motorizadoId
+      const patch: UpdateData<DocumentData> = {
         estado: nuevo,
         updatedAt: serverTimestamp(),
-      })
+        ...(efectos.limpiarAsignacion ? { asignacion: null } : {}),
+        ...(efectos.registrarCanceladaAt ? { 'historial.canceladaAt': serverTimestamp() } : {}),
+      }
+      if (efectos.estadoMotorizado && motorizadoId) {
+        const b = writeBatch(db)
+        b.update(doc(db, 'solicitudes_envio', id), patch)
+        b.update(doc(db, 'motorizado', motorizadoId), { estado: efectos.estadoMotorizado, updatedAt: serverTimestamp() })
+        await b.commit()
+      } else {
+        await updateDoc(doc(db, 'solicitudes_envio', id), patch)
+      }
       setToast({ type: 'success', message: 'Estado actualizado' })
     } catch (e) {
       console.error(e)
@@ -1858,6 +1884,7 @@ function GestorSolicitudesPageContent() {
                                      motorizado: retiro, camino y entrega dejan de ser
                                      opciones del gestor. Lo administrativo sigue acá. */
                                   .filter((key) => puedeGestorCambiarEstadoCliente(key))
+                                  .filter((key) => key !== 'cancelada' || puedeGestorCancelarDesde(s.estado))
                                   .filter((key) => !(key === 'asignada' && !s.asignacion?.motorizadoId))
                                   .map((key) => {
                                     const e = ESTADOS.find((x) => x.key === key)
@@ -2290,6 +2317,7 @@ function GestorSolicitudesPageContent() {
                       >
                         <option value={s.estado} disabled>{statusLabel(s.estado)}</option>
                         {(TRANSICIONES_VALIDAS[s.estado] ?? [])
+                          .filter((key) => key !== 'cancelada' || puedeGestorCancelarDesde(s.estado))
                           .filter((key) => !(key === 'asignada' && !s.asignacion?.motorizadoId))
                           .map((key) => {
                             const e = ESTADOS.find((x) => x.key === key)

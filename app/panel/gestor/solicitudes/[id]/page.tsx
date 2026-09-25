@@ -23,6 +23,9 @@ import { auth, db } from '@/fb/config'
 import {
   puedeGestorCambiarEstadoCliente,
   MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO,
+  efectosCambioAdministrativo,
+  puedeGestorCancelarDesde,
+  MSG_CANCELAR_OPERACION_EN_CURSO,
 } from '@/lib/transiciones-viaje'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import { BloqueCobros, BloqueIncidencia } from './_components/BloquesCobros'
@@ -1030,7 +1033,11 @@ function GestorSolicitudDetallePageContent() {
     // depositar ese dinero. Los botones ya no existen; el guard queda para que
     // no vuelva por otra llamada. Las Rules lo deniegan igual.
     if (!puedeGestorCambiarEstadoCliente(nuevo)) return setErr(MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO)
+    if (nuevo === 'cancelada' && !puedeGestorCancelarDesde(solicitud.estado)) return setErr(MSG_CANCELAR_OPERACION_EN_CURSO)
     const motorizadoId = solicitud.asignacion?.motorizadoId
+    // Cancelar con una asignación viva (incluida una residual) desasigna: se
+    // limpia y el motorizado queda disponible. Cancelar nunca lo marca ocupado.
+    const efectos = efectosCambioAdministrativo(solicitud.estado, nuevo, !!solicitud.asignacion)
 
     try {
       const b = writeBatch(db)
@@ -1038,12 +1045,12 @@ function GestorSolicitudDetallePageContent() {
         estado: nuevo,
         updatedAt: serverTimestamp(),
         [`historial.${nuevo}At`]: serverTimestamp(),
+        ...(efectos.limpiarAsignacion ? { asignacion: null } : {}),
       } as any)
 
-      // Sincronizar estado del motorizado
-      if (motorizadoId) {
-        const nuevoEstadoMoto = nuevo === 'entregado' ? 'disponible' : 'ocupado'
-        b.update(doc(db, 'motorizado', motorizadoId), { estado: nuevoEstadoMoto, updatedAt: serverTimestamp() })
+      // Liberar al motorizado vinculado, en el mismo batch que la orden.
+      if (efectos.estadoMotorizado && motorizadoId) {
+        b.update(doc(db, 'motorizado', motorizadoId), { estado: efectos.estadoMotorizado, updatedAt: serverTimestamp() })
       }
 
       await b.commit()

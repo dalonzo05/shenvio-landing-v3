@@ -18,6 +18,10 @@ import {
   TRANSICIONES_CLIENTE_MOTORIZADO,
   MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO,
   rutaTransicionMotorizado,
+  efectosCambioAdministrativo,
+  puedeGestorCancelarDesde,
+  ORIGENES_CANCELABLES_POR_GESTOR,
+  ESTADO_MOTORIZADO_LIBERADO,
 } from './transiciones-viaje'
 import { calcularDeposito } from './calculo-deposito'
 import { esEstadoCerrado, esEstadoReactivable, esTerminalDefinitivo, ESTADO_TRAS_REACTIVAR } from './estados-solicitud'
@@ -234,4 +238,88 @@ test('VU5 · ningún camino del cliente termina escribiendo un estado server-aut
   assert.equal(rutaTransicionMotorizado(''), 'cliente')
   assert.equal(rutaTransicionMotorizado(null), 'cliente')
   assert.equal(rutaTransicionMotorizado(undefined), 'cliente')
+})
+
+// ─── VC · VIAJE-CANCELACION-CONSISTENCIA-1 ────────────────────────────────────
+//
+// Cancelar y devolver `asignada → confirmada` son desasignaciones: la orden no
+// puede quedar vinculada a un motorizado que ya no la tiene, ni él `ocupado`.
+
+const TODOS_LOS_ESTADOS = [...ADMINISTRATIVOS, ...ESTADOS_OPERATIVOS_VIAJE]
+
+test('VC1 · asignada → confirmada limpia la asignación y libera al motorizado', () => {
+  assert.deepEqual(efectosCambioAdministrativo('asignada', 'confirmada', true), {
+    limpiarAsignacion: true,
+    estadoMotorizado: 'disponible',
+    registrarCanceladaAt: false,
+  })
+})
+
+test('VC2 · asignada → cancelada limpia la asignación, libera al motorizado y registra la cancelación', () => {
+  assert.deepEqual(efectosCambioAdministrativo('asignada', 'cancelada', true), {
+    limpiarAsignacion: true,
+    estadoMotorizado: 'disponible',
+    registrarCanceladaAt: true,
+  })
+})
+
+test('VC3 · confirmada → cancelada sin asignación cancela y registra, sin tocar a ningún motorizado', () => {
+  assert.deepEqual(efectosCambioAdministrativo('confirmada', 'cancelada', false), {
+    limpiarAsignacion: false,
+    estadoMotorizado: null,
+    registrarCanceladaAt: true,
+  })
+})
+
+test('VC4 · confirmada → cancelada con asignación residual la limpia y libera al motorizado', () => {
+  assert.deepEqual(efectosCambioAdministrativo('confirmada', 'cancelada', true), {
+    limpiarAsignacion: true,
+    estadoMotorizado: 'disponible',
+    registrarCanceladaAt: true,
+  })
+})
+
+test('VC5 · cancelar o desasignar nunca deja a nadie ocupado', () => {
+  assert.equal(ESTADO_MOTORIZADO_LIBERADO, 'disponible')
+  for (const origen of TODOS_LOS_ESTADOS) {
+    for (const destino of TODOS_LOS_ESTADOS) {
+      for (const tiene of [true, false]) {
+        const { estadoMotorizado } = efectosCambioAdministrativo(origen, destino, tiene)
+        assert.notEqual(estadoMotorizado, 'ocupado', `${origen} → ${destino} (${tiene})`)
+        assert.ok(estadoMotorizado === null || estadoMotorizado === 'disponible', `${origen} → ${destino}`)
+      }
+    }
+  }
+})
+
+test('VC6 · una transición administrativa no relacionada no recibe efectos nuevos', () => {
+  const sinEfectos = { limpiarAsignacion: false, estadoMotorizado: null, registrarCanceladaAt: false }
+  const casos: [string, string][] = [
+    ['pendiente_confirmacion', 'confirmada'],
+    ['pendiente_confirmacion', 'rechazada'],
+    ['confirmada', 'asignada'],
+    ['confirmada', 'confirmada'],
+    ['rechazada', 'pendiente_confirmacion'],
+    ['cancelada', 'pendiente_confirmacion'],
+    ['asignada', 'asignada'],
+  ]
+  for (const [origen, destino] of casos) {
+    for (const tiene of [true, false]) {
+      assert.deepEqual(efectosCambioAdministrativo(origen, destino, tiene), sinEfectos, `${origen} → ${destino}`)
+    }
+  }
+  // Entradas vacías tampoco inventan efectos.
+  assert.deepEqual(efectosCambioAdministrativo(null, undefined, true), sinEfectos)
+  // Solo asignada → confirmada es desasignación: confirmar desde otro origen no.
+  assert.deepEqual(efectosCambioAdministrativo('pendiente_confirmacion', 'confirmada', true), sinEfectos)
+})
+
+test('VC7 · el Gestor no cancela una operación en curso: en_camino_retiro no es un origen cancelable', () => {
+  assert.deepEqual([...ORIGENES_CANCELABLES_POR_GESTOR], ['pendiente_confirmacion', 'confirmada', 'asignada'])
+  for (const origen of ['pendiente_confirmacion', 'confirmada', 'asignada']) {
+    assert.equal(puedeGestorCancelarDesde(origen), true, origen)
+  }
+  for (const origen of [...ESTADOS_OPERATIVOS_VIAJE, 'rechazada', 'cancelada', '', null, undefined]) {
+    assert.equal(puedeGestorCancelarDesde(origen), false, String(origen))
+  }
 })
