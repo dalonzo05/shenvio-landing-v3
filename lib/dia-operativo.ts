@@ -188,3 +188,60 @@ export function diaDeEntrega(orden: EntradaDiaOrden): DiaOperativo | null {
 export function entregaSinFecha(orden: EntradaDiaOrden): boolean {
   return orden?.estado === 'entregado' && diaDeEntrega(orden) === null
 }
+
+// ─── Entregas por día ─────────────────────────────────────────────────────────
+//
+// Una sola definición de "entregada ese día" para todo contador, filtro o
+// historial que hable de entregas. Solo lee `estado` y `diaDeEntrega()`:
+// `updatedAt` y `createdAt` no forman parte de la entrada a propósito.
+
+/** ¿La orden se entregó en ese día operativo? Sin fecha de entrega, nunca. */
+export function esEntregadaEnDia(orden: EntradaDiaOrden, dia: unknown): boolean {
+  return orden?.estado === 'entregado' && esDiaOperativo(dia) && diaDeEntrega(orden) === dia
+}
+
+/** ¿Se entregó en el día operativo actual? `ahora` se inyecta. */
+export function esEntregadaHoy(orden: EntradaDiaOrden, ahoraMs: number): boolean {
+  return esEntregadaEnDia(orden, hoyOperativo(ahoraMs))
+}
+
+/** ¿Se entregó dentro de [desde, hasta], ambos días operativos inclusivos? */
+export function esEntregadaEnRango(orden: EntradaDiaOrden, desde: unknown, hasta: unknown): boolean {
+  if (orden?.estado !== 'entregado' || !esDiaOperativo(desde) || !esDiaOperativo(hasta)) return false
+  const dia = diaDeEntrega(orden)
+  return dia !== null && dia >= desde && dia <= hasta
+}
+
+export type FiltroDiaRelativo = 'hoy' | 'ayer' | '7dias' | 'personalizado'
+
+export interface RangoDias {
+  desde: DiaOperativo
+  hasta: DiaOperativo
+}
+
+/**
+ * Los días que abarca un filtro de fecha de pantalla, en días operativos.
+ *
+ * 'hoy', 'ayer' y '7dias' salen del día operativo de `ahora`, no del reloj del
+ * navegador. 'personalizado' toma los dos días tal como el input de fecha los
+ * entrega; si alguno no es una fecha real devuelve null y el filtro no aplica.
+ */
+export function rangoDiasDeFiltro(
+  filtro: FiltroDiaRelativo,
+  ahoraMs: number,
+  desde?: unknown,
+  hasta?: unknown,
+): RangoDias | null {
+  if (filtro === 'personalizado') {
+    return esDiaOperativo(desde) && esDiaOperativo(hasta) ? { desde, hasta } : null
+  }
+  const hoy = hoyOperativo(ahoraMs)
+  if (hoy === null) return null
+  if (filtro === 'hoy') return { desde: hoy, hasta: hoy }
+  if (filtro === 'ayer') {
+    const ayer = diaAnterior(hoy)
+    return ayer === null ? null : { desde: ayer, hasta: ayer }
+  }
+  const inicio = sumarDiasOperativos(hoy, -6)
+  return inicio === null ? null : { desde: inicio, hasta: hoy }
+}

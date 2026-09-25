@@ -32,6 +32,7 @@ import {
   type PestanaDepositosMotorizado,
 } from '@/lib/depositos-motorizado';
 import { resumenViajeHistorial } from '@/lib/historial-viaje-motorizado';
+import { esEntregadaEnRango, hoyOperativo, rangoDiasDeFiltro } from '@/lib/dia-operativo';
 import {
   camposCreacionDepositoMotorizado,
   camposEnvioBoucherMotorizado,
@@ -250,10 +251,6 @@ function fmtDateInput(d: Date) {
 function isToday(d: Date) {
   const t = new Date();
   return d.getDate() === t.getDate() && d.getMonth() === t.getMonth() && d.getFullYear() === t.getFullYear();
-}
-
-function isSameDay(d: Date, ref: Date) {
-  return d.getDate() === ref.getDate() && d.getMonth() === ref.getMonth() && d.getFullYear() === ref.getFullYear();
 }
 
 function fmtRemaining(ms: number) {
@@ -481,7 +478,7 @@ export default function PanelMotorizadoPage() {
 
   // Historial filters
   const [histFecha, setHistFecha] = useState<'hoy' | 'ayer' | 'personalizado'>('hoy');
-  const [histDesde, setHistDesde] = useState(fmtDateInput(new Date()));
+  const [histDesde, setHistDesde] = useState(hoyOperativo(Date.now()) ?? fmtDateInput(new Date()));
 
   // Liquidaciones del motorizado
   const [liquidaciones, setLiquidaciones] = useState<Array<{
@@ -948,15 +945,11 @@ export default function PanelMotorizadoPage() {
 
   // Historial filtered by date
   const historialFiltrado = useMemo(() => {
-    const refDate = histFecha === 'personalizado'
-      ? new Date(histDesde + 'T00:00:00')
-      : histFecha === 'ayer'
-        ? (() => { const d = new Date(); d.setDate(d.getDate() - 1); return d; })()
-        : new Date();
-    return entregadas.filter((o) => {
-      const d = tsToDate(o.entregadoAt) || tsToDate(o.updatedAt);
-      return d && isSameDay(d, refDate);
-    });
+    // Día operativo de la entrega (Managua), no la medianoche del dispositivo;
+    // una orden sin fecha de entrega no aparece en ningún día.
+    const rango = rangoDiasDeFiltro(histFecha, Date.now(), histDesde, histDesde);
+    if (!rango) return [];
+    return entregadas.filter((o) => esEntregadaEnRango(o, rango.desde, rango.hasta));
   }, [entregadas, histFecha, histDesde]);
 
   // Depósitos: all delivered orders with pending deposits (not yet confirmed by motorizado)

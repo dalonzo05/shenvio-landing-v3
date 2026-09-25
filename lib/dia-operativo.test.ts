@@ -25,6 +25,10 @@ import {
   diaDeCreacion,
   diaDeEntrega,
   entregaSinFecha,
+  esEntregadaEnDia,
+  esEntregadaHoy,
+  esEntregadaEnRango,
+  rangoDiasDeFiltro,
   type EntradaDiaOrden,
 } from './dia-operativo'
 
@@ -263,4 +267,147 @@ test('DO20b · el estado "entregado" por sí solo no fecha nada', () => {
 test('DO20c · una orden no entregada nunca es "entrega sin fecha"', () => {
   assert.equal(entregaSinFecha({ estado: 'cancelada', createdAt: ts('2026-08-21T18:00:00.000Z') }), false)
   assert.equal(entregaSinFecha({ estado: 'confirmada' }), false)
+})
+
+// ─── VIAJE-FECHA-ENTREGA-CANONICA-1 · "entregada hoy" ─────────────────────────
+//
+// `updatedAt` y `createdAt` no forman parte de EntradaDiaOrden; estas órdenes
+// los llevan igual, como los lleva un documento real de Firestore, para probar
+// que ninguno de los dos cambia la respuesta.
+
+type OrdenReal = EntradaDiaOrden & {
+  updatedAt?: unknown
+  entregadoAt?: unknown
+  cobroDelivery?: unknown
+  registro?: unknown
+}
+
+// 20:00Z del 25/09 = 14:00 en Nicaragua: hoy operativo = 2026-09-25.
+const AHORA = ms('2026-09-25T20:00:00.000Z')
+const HOY = '2026-09-25'
+
+test('DO21 · F1 · entregada hoy por timestamp real → cuenta hoy', () => {
+  const orden: OrdenReal = {
+    estado: 'entregado',
+    createdAt: ts('2026-09-25T15:00:00.000Z'),
+    historial: { entregadoAt: ts('2026-09-25T18:00:00.000Z') },
+  }
+  assert.equal(esEntregadaHoy(orden, AHORA), true)
+  assert.equal(esEntregadaEnDia(orden, HOY), true)
+})
+
+test('DO22 · F2 · entregada AYER con updatedAt de hoy → NO cuenta hoy', () => {
+  const orden: OrdenReal = {
+    estado: 'entregado',
+    createdAt: ts('2026-09-24T15:00:00.000Z'),
+    historial: { entregadoAt: ts('2026-09-24T22:00:00.000Z') },
+    updatedAt: ts('2026-09-25T17:00:00.000Z'),
+  }
+  assert.equal(esEntregadaHoy(orden, AHORA), false)
+  assert.equal(esEntregadaEnDia(orden, '2026-09-24'), true)
+})
+
+test('DO23 · F3 · entregada hoy con updatedAt de otro día → cuenta por la entrega', () => {
+  const orden: OrdenReal = {
+    estado: 'entregado',
+    historial: { entregadoAt: ts('2026-09-25T19:00:00.000Z') },
+    updatedAt: ts('2026-09-20T12:00:00.000Z'),
+  }
+  assert.equal(esEntregadaHoy(orden, AHORA), true)
+})
+
+test('DO24 · F4 · estado entregado SIN timestamp de entrega → NO cuenta hoy y es entregaSinFecha', () => {
+  const sinHistorial: OrdenReal = {
+    estado: 'entregado',
+    createdAt: ts('2026-09-25T15:00:00.000Z'),
+    updatedAt: ts('2026-09-25T17:00:00.000Z'),
+  }
+  const historialVacio: OrdenReal = { ...sinHistorial, historial: { entregadoAt: null } }
+  for (const orden of [sinHistorial, historialVacio]) {
+    assert.equal(esEntregadaHoy(orden, AHORA), false)
+    assert.equal(esEntregadaEnDia(orden, HOY), false)
+    assert.equal(esEntregadaEnRango(orden, HOY, HOY), false)
+    assert.equal(entregaSinFecha(orden), true)
+  }
+})
+
+test('DO25 · F5 · updatedAt sin entregadoAt jamás se convierte en fecha de entrega', () => {
+  const orden: OrdenReal = {
+    estado: 'entregado',
+    updatedAt: ts('2026-09-25T17:00:00.000Z'),
+    createdAt: ts('2026-09-25T15:00:00.000Z'),
+  }
+  assert.equal(diaDeEntrega(orden), null)
+  for (const dia of ['2026-09-24', HOY, '2026-09-26']) {
+    assert.equal(esEntregadaEnDia(orden, dia), false)
+  }
+  assert.equal(esEntregadaEnRango(orden, '2026-01-01', '2026-12-31'), false)
+})
+
+test('DO26 · F6 · el día lo decide Nicaragua (UTC−6), no el huso del proceso', () => {
+  // 03:30Z del 26 = 21:30 del 25 en Nicaragua: en UTC ya es "mañana".
+  const tarde: OrdenReal = {
+    estado: 'entregado',
+    historial: { entregadoAt: ts('2026-09-26T03:30:00.000Z') },
+  }
+  assert.equal(esEntregadaEnDia(tarde, '2026-09-25'), true)
+  assert.equal(esEntregadaEnDia(tarde, '2026-09-26'), false)
+  // 22:00 del 25 en Nicaragua (04:00Z del 26): sigue siendo hoy 25.
+  assert.equal(esEntregadaHoy(tarde, ms('2026-09-26T04:00:00.000Z')), true)
+  // 00:00 del 26 en Nicaragua (06:00Z): el día cambió y la orden ya es de ayer.
+  assert.equal(esEntregadaHoy(tarde, ms('2026-09-26T06:00:00.000Z')), false)
+  // Un día inválido no coincide con nada.
+  assert.equal(esEntregadaEnDia(tarde, '2026-02-30'), false)
+  assert.equal(esEntregadaEnDia(tarde, ''), false)
+})
+
+test('DO27 · F7 · una escritura financiera posterior no mueve el día histórico de la entrega', () => {
+  const orden: OrdenReal = {
+    estado: 'entregado',
+    createdAt: ts('2026-09-22T15:00:00.000Z'),
+    historial: { entregadoAt: ts('2026-09-24T22:00:00.000Z') },
+    // Hoy alguien confirma un depósito, paga el cobro y toca la orden.
+    updatedAt: ts('2026-09-25T18:00:00.000Z'),
+    cobroDelivery: { estado: 'pagado', pagadoAt: ts('2026-09-25T18:00:00.000Z') },
+    registro: { deposito: { confirmadoStorkhubAt: ts('2026-09-25T18:00:00.000Z') } },
+  }
+  assert.equal(diaDeEntrega(orden), '2026-09-24')
+  assert.equal(esEntregadaHoy(orden, AHORA), false)
+  assert.equal(esEntregadaEnDia(orden, '2026-09-24'), true)
+})
+
+test('DO28 · una orden que no está entregada no cuenta aunque conserve una fecha de entrega vieja', () => {
+  const reabierta: OrdenReal = {
+    estado: 'pendiente_confirmacion',
+    historial: { entregadoAt: ts('2026-09-25T18:00:00.000Z') },
+  }
+  assert.equal(esEntregadaHoy(reabierta, AHORA), false)
+  assert.equal(esEntregadaEnRango(reabierta, HOY, HOY), false)
+})
+
+test('DO29 · rangoDiasDeFiltro resuelve hoy, ayer y 7 días en días operativos', () => {
+  assert.deepEqual(rangoDiasDeFiltro('hoy', AHORA), { desde: HOY, hasta: HOY })
+  assert.deepEqual(rangoDiasDeFiltro('ayer', AHORA), { desde: '2026-09-24', hasta: '2026-09-24' })
+  assert.deepEqual(rangoDiasDeFiltro('7dias', AHORA), { desde: '2026-09-19', hasta: HOY })
+  // Cambio de mes: 7 días terminando el 2 de octubre empiezan el 26 de septiembre.
+  assert.deepEqual(rangoDiasDeFiltro('7dias', ms('2026-10-02T20:00:00.000Z')), { desde: '2026-09-26', hasta: '2026-10-02' })
+  // A las 03:00Z del 26 todavía es 25 en Nicaragua.
+  assert.deepEqual(rangoDiasDeFiltro('hoy', ms('2026-09-26T03:00:00.000Z')), { desde: HOY, hasta: HOY })
+})
+
+test('DO30 · rangoDiasDeFiltro personalizado solo acepta fechas reales', () => {
+  assert.deepEqual(rangoDiasDeFiltro('personalizado', AHORA, '2026-09-01', '2026-09-10'), { desde: '2026-09-01', hasta: '2026-09-10' })
+  assert.equal(rangoDiasDeFiltro('personalizado', AHORA, '', '2026-09-10'), null)
+  assert.equal(rangoDiasDeFiltro('personalizado', AHORA, '2026-09-01', undefined), null)
+  assert.equal(rangoDiasDeFiltro('personalizado', AHORA, '2026-02-30', '2026-03-01'), null)
+  assert.equal(rangoDiasDeFiltro('hoy', Number.NaN), null)
+})
+
+test('DO31 · esEntregadaEnRango incluye ambos extremos y descarta fuera del rango', () => {
+  const entregadaEl = (iso: string): OrdenReal => ({ estado: 'entregado', historial: { entregadoAt: ts(iso) } })
+  assert.equal(esEntregadaEnRango(entregadaEl('2026-09-19T18:00:00.000Z'), '2026-09-19', HOY), true)
+  assert.equal(esEntregadaEnRango(entregadaEl('2026-09-25T18:00:00.000Z'), '2026-09-19', HOY), true)
+  assert.equal(esEntregadaEnRango(entregadaEl('2026-09-18T18:00:00.000Z'), '2026-09-19', HOY), false)
+  assert.equal(esEntregadaEnRango(entregadaEl('2026-09-26T18:00:00.000Z'), '2026-09-19', HOY), false)
+  assert.equal(esEntregadaEnRango(entregadaEl('2026-09-20T18:00:00.000Z'), 'x', HOY), false)
 })

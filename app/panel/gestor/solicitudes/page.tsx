@@ -33,6 +33,7 @@ import {
   MSG_ESTADO_OPERATIVO_DEL_MOTORIZADO,
 } from '@/lib/transiciones-viaje'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
+import { esEntregadaHoy, esEntregadaEnRango, entregaSinFecha, rangoDiasDeFiltro } from '@/lib/dia-operativo'
 import {
   Search,
   ExternalLink,
@@ -234,13 +235,6 @@ function getRiesgos(s: Solicitud): Riesgo[] {
     riesgos.push({ tipo: 'deposito_pendiente', label: 'Depósito pendiente' })
   }
   return riesgos
-}
-
-function isToday(ts: any): boolean {
-  const d = tsToDate(ts)
-  if (!d) return false
-  const hoy = new Date()
-  return d.getDate() === hoy.getDate() && d.getMonth() === hoy.getMonth() && d.getFullYear() === hoy.getFullYear()
 }
 
 const ESTADOS: { key: EstadoSolicitud; label: string; short: string }[] = [
@@ -740,11 +734,15 @@ function GestorSolicitudesPageContent() {
   }, [estadoFiltro])
 
   function getRelevantDateForFilter(s: Solicitud) {
-    if (estadoFiltro === 'entregado') {
-      return tsToDate(s.updatedAt) || tsToDate(s.confirmacion?.confirmadoAt) || tsToDate(s.createdAt)
-    }
     return tsToDate(s.createdAt) || tsToDate(s.updatedAt)
   }
+
+  // La pestaña Entregado filtra por el DÍA OPERATIVO de la entrega, no por una
+  // fecha de actualización ni por la medianoche del navegador.
+  const rangoDiasEntrega = useMemo(() => {
+    if (fechaFiltro === 'todos') return null
+    return rangoDiasDeFiltro(fechaFiltro, Date.now(), fechaDesde, fechaHasta)
+  }, [fechaFiltro, fechaDesde, fechaHasta])
 
   const rangoFechaActivo = useMemo(() => {
     if (fechaFiltro === 'todos') return null
@@ -809,7 +807,11 @@ function GestorSolicitudesPageContent() {
       arr = arr.filter((x) => !!x.asignacion?.motorizadoNombre)
     }
 
-    if (rangoFechaActivo) {
+    if (estadoFiltro === 'entregado') {
+      if (rangoDiasEntrega) {
+        arr = arr.filter((s) => esEntregadaEnRango(s, rangoDiasEntrega.desde, rangoDiasEntrega.hasta))
+      }
+    } else if (rangoFechaActivo) {
       arr = arr.filter((s) => {
         const d = getRelevantDateForFilter(s)
         if (!d) return false
@@ -912,7 +914,10 @@ function GestorSolicitudesPageContent() {
     // Filtro rápido
     if (filtroRapido === 'con_riesgo') arr = arr.filter((s) => getRiesgos(s).length > 0)
     if (filtroRapido === 'pendiente_cobro') arr = arr.filter((s) => ['pendiente', 'problema'].includes(getEstadoFinanciero(s)) && s.estado === 'entregado')
-    if (filtroRapido === 'entregadas_hoy') arr = arr.filter((s) => s.estado === 'entregado' && isToday(s.entregadoAt || s.updatedAt))
+    if (filtroRapido === 'entregadas_hoy') {
+      const ahoraMs = Date.now()
+      arr = arr.filter((s) => esEntregadaHoy(s, ahoraMs))
+    }
     if (filtroRapido === 'prioritarias') arr = arr.filter((s) => s.prioridad === true)
 
     if (zonaRetiroFiltro) arr = arr.filter((s) => s.zonaRetiroNombre === zonaRetiroFiltro)
@@ -950,6 +955,7 @@ function GestorSolicitudesPageContent() {
     motorizadoColFiltro,
     precioColFiltro,
     rangoFechaActivo,
+    rangoDiasEntrega,
     filtroRapido,
     zonaRetiroFiltro,
     zonaEntregaFiltro,
@@ -1018,18 +1024,12 @@ function GestorSolicitudesPageContent() {
   ])
 
   const hoyEntregadas = useMemo(() => {
-    const hoyLocal = new Date()
-    return allItems.filter((s) => {
-      if (s.estado !== 'entregado') return false
-      const d = tsToDate(s.updatedAt) || tsToDate(s.confirmacion?.confirmadoAt) || tsToDate(s.createdAt)
-      if (!d) return false
-      return (
-        d.getDate() === hoyLocal.getDate() &&
-        d.getMonth() === hoyLocal.getMonth() &&
-        d.getFullYear() === hoyLocal.getFullYear()
-      )
-    }).length
+    const ahoraMs = Date.now()
+    return allItems.filter((s) => esEntregadaHoy(s, ahoraMs)).length
   }, [allItems])
+
+  // Entregadas que no traen fecha de entrega: no se cuentan en ningún día.
+  const entregadasSinFecha = useMemo(() => allItems.filter((s) => entregaSinFecha(s)).length, [allItems])
 
   const sinAsignarConfirmadas = useMemo(() => {
     return allItems.filter((s) => s.estado === 'confirmada' && !s.asignacion?.motorizadoNombre).length
@@ -1040,7 +1040,8 @@ function GestorSolicitudesPageContent() {
   const metricas = useMemo(() => {
     const TERMINALES = ['entregado', 'cancelada', 'rechazada']
     const activas = allItems.filter((s) => !TERMINALES.includes(s.estado)).length
-    const entregadasHoy = allItems.filter((s) => s.estado === 'entregado' && isToday(s.entregadoAt || s.updatedAt)).length
+    const ahoraMs = Date.now()
+    const entregadasHoy = allItems.filter((s) => esEntregadaHoy(s, ahoraMs)).length
     const conProblema = allItems.filter((s) => getRiesgos(s).length > 0).length
     const pendCobro = allItems.filter((s) => ['pendiente', 'problema'].includes(getEstadoFinanciero(s)) && s.estado === 'entregado').length
     const prioritarias = allItems.filter((s) => s.prioridad === true).length
@@ -1583,6 +1584,11 @@ function GestorSolicitudesPageContent() {
             <span>Pend: <strong className="text-gray-800">{pendientesTotales}</strong></span>
             <span>Sin moto: <strong className="text-gray-800">{sinAsignarConfirmadas}</strong></span>
             <span>Hoy: <strong className="text-gray-800">{hoyEntregadas}</strong></span>
+            {entregadasSinFecha > 0 && (
+              <span title="Órdenes entregadas sin fecha de entrega registrada: no se cuentan en ningún día.">
+                Sin fecha: <strong className="text-gray-800">{entregadasSinFecha}</strong>
+              </span>
+            )}
             <span className="text-gray-400">({itemsFiltrados.length} mostradas)</span>
           </div>
         </div>

@@ -9,6 +9,7 @@ import { useUser } from '@/app/Components/UserProvider'
 import { useRoleGuard, type Rol } from '../_hooks/useRoleGuard'
 import { ToastNuevaOrden, type ToastData } from './_components/ToastNuevaOrden'
 import { PanelShell } from '../_components/PanelShell'
+import { esEntregadaHoy } from '@/lib/dia-operativo'
 // DEPOSITOS-ALERTA-REVISION-1 — badge del sidebar y banner del dashboard con
 // UNA sola query: el listener vive acá y el numero baja por contexto.
 import {
@@ -157,15 +158,10 @@ export default function GestorLayout({ children }: { children: React.ReactNode }
       const docs = snap.docs.map(d => ({ id: d.id, ...d.data() } as any))
 
       // ── Métricas existentes (sin cambios) ─────────────────────────────
-      const hoy = new Date()
-      const isToday = (ts: any) => {
-        const d = ts?.toDate ? ts.toDate() : ts instanceof Date ? ts : null
-        if (!d) return false
-        return d.getDate() === hoy.getDate() && d.getMonth() === hoy.getMonth() && d.getFullYear() === hoy.getFullYear()
-      }
+      const ahoraMs = Date.now()
       const TERMINALES = ['entregado', 'cancelada', 'rechazada']
       const activas = docs.filter((s: any) => !TERMINALES.includes(s.estado)).length
-      const entregadasHoy = docs.filter((s: any) => s.estado === 'entregado' && isToday(s.entregadoAt || s.updatedAt)).length
+      const entregadasHoy = docs.filter((s: any) => esEntregadaHoy(s, ahoraMs)).length
       const conProblema = docs.filter((s: any) => {
         if (s.estado === 'entregado' && s.pagoDelivery?.tipo !== 'credito_semanal' && s.cobrosMotorizado?.delivery?.recibio === false) return true
         if (s.registro?.deposito && !s.registro.deposito.confirmadoStorkhub) return true
