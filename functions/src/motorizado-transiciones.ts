@@ -47,6 +47,7 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { FieldValue } from 'firebase-admin/firestore';
 import { semanaKeyDeFecha } from './cobro-semanal';
+import { responderAsignacionEnTransaccion } from './asignacion-respuesta';
 import {
   resolverFormaPago,
   permiteCierreSinConfirmaciones,
@@ -121,47 +122,10 @@ export const responderAsignacion = onCall<ResponderAsignacionData>(async (reques
   // ── 6-7 (auth) + 7 (transición): todo dentro de la transacción, para
   // que una reasignación concurrente o una doble respuesta no ganen la
   // carrera contra esta lectura. ──────────────────────────────────────
-  await db.runTransaction(async (tx) => {
-    const snap = await tx.get(solicitudRef);
-    if (!snap.exists) throw new HttpsError('not-found', 'La solicitud no existe.');
-    const solicitud = snap.data()!;
-    const asignacion = solicitud.asignacion;
-
-    if (
-      typeof asignacion !== 'object' ||
-      asignacion === null ||
-      typeof asignacion.motorizadoAuthUid !== 'string' ||
-      asignacion.motorizadoAuthUid !== motorizadoUid
-    ) {
-      throw new HttpsError('permission-denied', 'Esta orden no está asignada a vos.');
-    }
-    // Transición permitida desde el estado actual: solo se puede aceptar o
-    // rechazar una asignación que sigue 'pendiente'. Esto es lo que impide
-    // una doble aceptación, un rechazo tardío después de ya haber aceptado,
-    // o una respuesta duplicada por reintento/doble clic.
-    if (asignacion.estadoAceptacion !== 'pendiente') {
-      throw new HttpsError('failed-precondition', 'Esta asignación ya no está pendiente de respuesta.');
-    }
-
-    if (accion === 'aceptar') {
-      tx.update(solicitudRef, {
-        'asignacion.estadoAceptacion': 'aceptada',
-        'asignacion.aceptadoAt': FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
-      });
-    } else {
-      // Rechazar: mismo comportamiento que el cliente tenía — el mapa
-      // completo se reemplaza por null (libera la orden) y el estado raíz
-      // vuelve a 'confirmada'. isAssignedMotorizado()-equivalente ya se
-      // comprobó arriba: esta orden estaba asignada a este motorizado antes
-      // de esta escritura, así que null no borra la asignación de otro.
-      tx.update(solicitudRef, {
-        estado: 'confirmada',
-        asignacion: null,
-        updatedAt: FieldValue.serverTimestamp(),
-      });
-    }
-  });
+  // Los guards (existe → pertenencia → estado `asignada` → asignación pendiente)
+  // y las escrituras viven en asignacion-respuesta.ts, con la transacción
+  // inyectada para poder probarlos sin emulador.
+  await db.runTransaction((tx) => responderAsignacionEnTransaccion(tx, solicitudRef, motorizadoUid, accion));
 
   console.log(JSON.stringify({ fn: 'responderAsignacion', solicitudId, motorizadoUid, accion }));
 
