@@ -1283,6 +1283,23 @@ service cloud.firestore {
         && comercioBoucherUpdateValido();
 
       allow delete: if false;
+
+      // ── VIAJE-RECHAZO-MOTORIZADO-TRAZA-1 · historia de la solicitud ───────
+      //
+      // solicitudes_envio/{id}/eventos/{eventoId}: append-only, y escrita
+      // SOLO por el servidor. Hoy la única entrada es `rechazo_motorizado`
+      // (responderAsignacion, Admin SDK, que no evalúa este archivo); otros
+      // episodios del viaje usarán la misma subcolección más adelante.
+      //
+      // Ningún cliente crea, edita ni borra un evento: ni el motorizado ni el
+      // comercio ni el propio gestor. Una historia que el actor pudiera
+      // escribir no demostraría nada. La lectura es solo de gestor y admin —
+      // quienes ven la ficha completa—, el mismo criterio con que se lee la
+      // solicitud en esa vista; el resto de los roles no recibe acceso nuevo.
+      match /eventos/{eventoId} {
+        allow read: if isAdminOrGestor();
+        allow create, update, delete: if false;
+      }
     }
 
     // clientes_envio.comercioUid: pese al nombre, siempre es el comercioId

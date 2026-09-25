@@ -20,6 +20,7 @@ import {
   type TimelineEvento,
 } from './timeline-orden'
 import type { DepositoRegistrado } from './deposito-orden'
+import { NOMBRE_MOTORIZADO_DESCONOCIDO } from './rechazo-motorizado'
 
 const ADMIN = 'RKTw1pLfK5O8Y3A6IIwDU8J3yr43'
 const ids = (o: EntradaTimeline, d = {}) => construirTimeline(o, d).map((e) => e.id)
@@ -815,4 +816,63 @@ test('EV13 · la etiqueta solo acompaña a un actor real: sin UID no hay "… po
   }]).find((e) => e.id.startsWith('deposito_devuelto:'))!
   assert.equal(t.actorUid, undefined)
   assert.equal(t.actorEtiqueta, undefined)
+})
+
+// ─── VIAJE-RECHAZO-MOTORIZADO-TRAZA-1 · rechazos de asignación ────────────────
+
+test('UI4 · dos rechazos por motorizados distintos salen los dos, en orden cronológico', () => {
+  // Los eventos llegan desordenados: la timeline los ordena por su instante.
+  const eventos = [
+    { id: 'evB', tipo: 'rechazo_motorizado', at: '2026-09-26T00:52:00.000Z', motorizadoNombre: 'María López' },
+    { id: 'evA', tipo: 'rechazo_motorizado', at: '2026-09-26T00:47:00.000Z', motorizadoNombre: 'John Pork 2' },
+  ]
+  const rechazos = construirTimeline({ createdAt: '2026-09-26T00:30:00.000Z' }, {}, [], eventos)
+    .filter((e) => e.id.startsWith('rechazo_motorizado:'))
+  assert.deepEqual(rechazos.map((e) => e.titulo), ['John Pork 2 rechazó la asignación', 'María López rechazó la asignación'])
+  assert.deepEqual(rechazos.map((e) => e.id), ['rechazo_motorizado:evA', 'rechazo_motorizado:evB'])
+  assert.ok(rechazos[0].at.getTime() < rechazos[1].at.getTime())
+  // Parte del recorrido de la orden, no del historial de cambios.
+  assert.ok(rechazos.every((e) => e.grupo === 'recorrido' && e.tipo === 'operativo'))
+})
+
+test('UI4b · el rechazo no inventa actor y sin timestamp no hay evento', () => {
+  const [e] = construirTimeline({}, {}, [], [
+    { id: 'ev1', tipo: 'rechazo_motorizado', at: '2026-09-26T00:47:00.000Z', motorizadoNombre: 'John Pork 2' },
+  ])
+  assert.equal(e.actorUid, undefined)
+  assert.equal(e.actorEtiqueta, undefined)
+  const sinFecha = construirTimeline({}, {}, [], [
+    { id: 'ev2', tipo: 'rechazo_motorizado', at: null, motorizadoNombre: 'John Pork 2' },
+    { id: 'ev3', tipo: 'rechazo_motorizado', at: 'no es fecha', motorizadoNombre: 'John Pork 2' },
+  ])
+  assert.equal(sinFecha.length, 0)
+})
+
+test('UI5c · un rechazo sin nombre demostrable dice "Un motorizado", sin UID', () => {
+  for (const motorizadoNombre of [null, undefined, '', '   ']) {
+    const [e] = construirTimeline({}, {}, [], [
+      { id: 'ev1', tipo: 'rechazo_motorizado', at: '2026-09-26T00:47:00.000Z', motorizadoNombre },
+    ])
+    assert.equal(e.titulo, `${NOMBRE_MOTORIZADO_DESCONOCIDO} rechazó la asignación`, String(motorizadoNombre))
+  }
+})
+
+test('UI4c · un tipo de evento de solicitud desconocido no se presenta y la timeline previa no cambia', () => {
+  const base = ordenCompleta()
+  const sin = construirTimeline(base).map((e) => e.id)
+  const conDesconocido = construirTimeline(base, {}, [], [
+    { id: 'x', tipo: 'algo_que_no_existe', at: '2026-09-26T00:47:00.000Z' },
+  ]).map((e) => e.id)
+  assert.deepEqual(conDesconocido, sin)
+  // Sin el cuarto argumento sigue igual que siempre.
+  assert.deepEqual(construirTimeline(base, {}, []).map((e) => e.id), sin)
+})
+
+test('UI4d · el rechazo se ordena entre la asignación y la aceptación con el mismo instante', () => {
+  const mismo = '2026-09-26T00:47:00.000Z'
+  const ev = construirTimeline(
+    { asignacion: { asignadoAt: mismo, aceptadoAt: mismo, motorizadoNombre: 'X' } },
+    {}, [], [{ id: 'ev1', tipo: 'rechazo_motorizado', at: mismo, motorizadoNombre: 'John Pork 2' }],
+  ).map((e) => e.id.split(':')[0])
+  assert.deepEqual(ev, ['asignada', 'rechazo_motorizado', 'aceptada'])
 })

@@ -52,6 +52,7 @@ const ICONO: Record<string, typeof Package> = {
   deposito_registrado: Wallet,
   deposito_confirmado: Wallet,
   rechazada: XCircle,
+  rechazo_motorizado: XCircle,
 }
 
 /** Mismo vocabulario cromático que el resto de la ficha. */

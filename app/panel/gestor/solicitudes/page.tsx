@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
 import { rutaOrden } from '@/lib/ruta-orden'
 import { coincideCodigo, mostrarCodigo, esFallbackTecnico } from '@/lib/codigo-humano'
+import { celdaAceptacion, type UltimoRechazoMotorizado } from '@/lib/rechazo-motorizado'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
   rankearMotorizados,
@@ -134,6 +135,9 @@ type Solicitud = {
     confirmadoAt?: any
   }
 
+  // VIAJE-RECHAZO-MOTORIZADO-TRAZA-1 — resumen del último rechazo de asignación,
+  // que escribe la Function junto con el evento append-only.
+  ultimoRechazoMotorizado?: UltimoRechazoMotorizado | null
   asignacion?: {
     motorizadoId?: string
     motorizadoAuthUid?: string
@@ -2076,13 +2080,26 @@ function GestorSolicitudesPageContent() {
                         </td>
 
                         <td className="px-3 py-2 border-r border-gray-100">
-                          {s.estado === 'asignada' ? (
-                            <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${aceptacionClass(s.asignacion || undefined)}`}>
-                              {aceptacionLabel(s.asignacion || undefined)}
-                            </span>
-                          ) : (
-                            <div className="text-[11px] text-gray-400">—</div>
-                          )}
+                          {(() => {
+                            // La asignación vigente manda. Sin ella, un rechazo previo
+                            // persistido se muestra como historia, no como estado actual.
+                            const celda = celdaAceptacion(s)
+                            if (celda.tipo === 'vigente') {
+                              return (
+                                <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${aceptacionClass(s.asignacion || undefined)}`}>
+                                  {aceptacionLabel(s.asignacion || undefined)}
+                                </span>
+                              )
+                            }
+                            if (celda.tipo === 'rechazo_previo') {
+                              return (
+                                <div className="text-[11px] leading-tight text-gray-500" title={celda.detalle}>
+                                  {celda.texto}
+                                </div>
+                              )
+                            }
+                            return <div className="text-[11px] text-gray-400">—</div>
+                          })()}
                         </td>
 
                         <td className={`px-2 py-2 sticky right-0 z-10 border-l border-gray-200 ${s.estado === 'confirmada' ? 'bg-emerald-50/30 group-hover:bg-emerald-50/70' : 'bg-white group-hover:bg-blue-50'}`}>

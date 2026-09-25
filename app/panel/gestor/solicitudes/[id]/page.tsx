@@ -33,7 +33,8 @@ import { BloqueDepositos } from './_components/BloqueDepositos'
 import { BloqueTimeline } from './_components/BloqueTimeline'
 import { ResumenOrden, IndiceFicha } from './_components/ResumenOrden'
 import { detalleIncidencia } from '@/lib/incidencia-cobro'
-import { construirTimeline, uidsDeTimeline, type HistoriaDeposito, type EventoDepositoLeido } from '@/lib/timeline-orden'
+import { construirTimeline, uidsDeTimeline, type HistoriaDeposito, type EventoDepositoLeido, type EventoSolicitudLeido } from '@/lib/timeline-orden'
+import type { UltimoRechazoMotorizado } from '@/lib/rechazo-motorizado'
 import { filasDepositosAsociados, uidsDepositosAsociados } from '@/lib/depositos-asociados'
 import { DepositosAsociados } from './_components/DepositosAsociados'
 import { resumenEjecutivoOrden } from '@/lib/resumen-ejecutivo-orden'
@@ -151,6 +152,9 @@ type Solicitud = {
     confirmadoAt?: any
   }
 
+  // VIAJE-RECHAZO-MOTORIZADO-TRAZA-1 — apunta (eventoId) al último rechazo de
+  // asignación; la ficha lo usa para releer la historia cuando cambia.
+  ultimoRechazoMotorizado?: UltimoRechazoMotorizado | null
   asignacion?: {
     motorizadoId?: string
     motorizadoAuthUid?: string
@@ -668,6 +672,8 @@ function GestorSolicitudDetallePageContent() {
   // los punteros de arriba).
   const [depositosAsociados, setDepositosAsociados] = useState<DepositoRegistrado[] | null>(null)
   const [historiasDeposito, setHistoriasDeposito] = useState<HistoriaDeposito[]>([])
+  // Eventos de la solicitud (hoy, los rechazos de asignación).
+  const [eventosSolicitud, setEventosSolicitud] = useState<EventoSolicitudLeido[]>([])
   const [showRechazarModal, setShowRechazarModal] = useState(false)
   const [motivoCodigo, setMotivoCodigo] = useState('')
   const [motivoTexto, setMotivoTexto] = useState('')
@@ -840,9 +846,27 @@ function GestorSolicitudDetallePageContent() {
   // B2.4 — historial autoritativo. Se deriva de lo ya cargado (la orden y los
   // depósitos de B2.3) y, desde FIN-TRAZABILIDAD-UX-2, de la historia de los
   // depósitos asociados.
+  // VIAJE-RECHAZO-MOTORIZADO-TRAZA-1 — historia append-only de la solicitud: una
+  // lectura de su subcolección `eventos`, solo en esta vista puntual. Se relee
+  // cuando cambia el último rechazo (lo apunta `ultimoRechazoMotorizado.eventoId`).
+  // Si las Rules la deniegan (un rol que no ve la historia) o no hay eventos, la
+  // timeline sigue sin ellos: nunca se inventa un rechazo.
+  const ultimoRechazoEventoId = solicitud?.ultimoRechazoMotorizado?.eventoId ?? null
+  useEffect(() => {
+    if (!id) return
+    let vivo = true
+    getDocs(collection(db, 'solicitudes_envio', id, 'eventos'))
+      .then((snap) => {
+        if (!vivo) return
+        setEventosSolicitud(snap.docs.map((d) => ({ id: d.id, ...(d.data() as object) } as EventoSolicitudLeido)))
+      })
+      .catch(() => { if (vivo) setEventosSolicitud([]) })
+    return () => { vivo = false }
+  }, [id, ultimoRechazoEventoId])
+
   const eventosTimeline = useMemo(
-    () => (solicitud ? construirTimeline(solicitud as never, depositosOrden, historiasDeposito) : []),
-    [solicitud, depositosOrden, historiasDeposito]
+    () => (solicitud ? construirTimeline(solicitud as never, depositosOrden, historiasDeposito, eventosSolicitud) : []),
+    [solicitud, depositosOrden, historiasDeposito, eventosSolicitud]
   )
 
   const filasAsociados = useMemo(

@@ -17,20 +17,30 @@ import { join } from 'node:path';
 import type { DocumentData } from 'firebase-admin/firestore';
 import {
   responderAsignacionEnTransaccion,
+  construirRechazo,
+  EVENTO_RECHAZO_MOTORIZADO,
   ESTADO_RESPONDIBLE,
   type TransaccionRespuesta,
 } from '../src/asignacion-respuesta';
 
 const UID_MOTO = 'uid_moto';
 const UID_OTRO = 'uid_otro';
-const REF = { id: 'sol1' };
+// Referencia falsa a la solicitud: `collection('eventos').doc()` entrega ids
+// distintos en cada llamada, como Firestore.
+function crearRef(id = 'sol1') {
+  let n = 0;
+  return { id, collection: () => ({ doc: () => ({ id: `ev${++n}` }) }) };
+}
+const REF = crearRef();
 
 type Doc = DocumentData;
 
 /** Transacción falsa con estado: aplica las escrituras al documento. */
 function crearTx(inicial: Doc | null) {
-  const actual: Doc | null = inicial === null ? null : JSON.parse(JSON.stringify(inicial));
+  let actual: Doc | null = inicial === null ? null : JSON.parse(JSON.stringify(inicial));
   const escrituras: Record<string, unknown>[] = [];
+  // Lo creado con `set` (los eventos): una entrada por evento, nunca se pisa.
+  const sets: { ref: unknown; data: Record<string, unknown> }[] = [];
   const tx: TransaccionRespuesta = {
     async get() {
       return { exists: actual !== null, data: () => (actual === null ? undefined : actual) };
@@ -47,8 +57,15 @@ function crearTx(inicial: Doc | null) {
         }
       }
     },
+    set(ref, data) {
+      sets.push({ ref, data });
+    },
   };
-  return { tx, escrituras, estado: () => actual };
+  // El gestor reasigna: cambia el documento por fuera de la transacción.
+  const reemplazar = (nuevo: Doc | null) => {
+    actual = nuevo === null ? null : JSON.parse(JSON.stringify(nuevo));
+  };
+  return { tx, escrituras, sets, estado: () => actual, reemplazar };
 }
 
 function orden(extra: Doc = {}): Doc {
@@ -78,7 +95,7 @@ test('RA2 · rechazar desde asignada con la asignación pendiente → conserva e
   assert.equal(escrituras.length, 1);
   assert.equal(escrituras[0].estado, 'confirmada');
   assert.equal(escrituras[0].asignacion, null);
-  assert.deepEqual(Object.keys(escrituras[0]).sort(), ['asignacion', 'estado', 'updatedAt']);
+  assert.deepEqual(Object.keys(escrituras[0]).sort(), ['asignacion', 'estado', 'ultimoRechazoMotorizado', 'updatedAt']);
 });
 
 // ─── Denegado: la solicitud ya no está en `asignada` ──────────────────────────
@@ -219,4 +236,136 @@ test('VG2 · la callable sigue validando auth y perfil antes de entrar a la tran
   assert.ok(iAuth > 0 && iPayload > 0 && iPerfil > 0 && iTx > 0, 'falta un guard');
   assert.ok(iAuth < iPayload && iPayload < iPerfil && iPerfil < iTx, 'los guards de la callable cambiaron de orden');
   assert.ok(!cuerpo.includes('tx.update('), 'la callable no debe escribir por fuera del módulo con los guards');
+});
+
+// ─── VIAJE-RECHAZO-MOTORIZADO-TRAZA-1 · la traza del rechazo ──────────────────
+//
+// Rechazar devuelve la solicitud a `confirmada` y borra la asignación. Antes de
+// borrarla, quién rechazó y cuándo queda en un evento append-only escrito en la
+// MISMA transacción, más un resumen en la solicitud para el listado.
+
+const UID_A = 'uid_moto_a';
+const UID_B = 'uid_moto_b';
+
+function asignadaA(uid: string, id: string, nombre: string | null, extra: DocumentData = {}): Doc {
+  return orden({
+    asignacion: {
+      motorizadoAuthUid: uid,
+      motorizadoId: id,
+      ...(nombre === null ? {} : { motorizadoNombre: nombre }),
+      motorizadoTelefono: '8888-0000',
+      estadoAceptacion: 'pendiente',
+      ...extra,
+    },
+  });
+}
+
+test('RM1 · rechazar desde asignada vuelve a confirmada, limpia la asignación y deja UN evento con la identidad', async () => {
+  const { tx, escrituras, sets, estado } = crearTx(asignadaA(UID_A, 'moto_a', 'John Pork 2'));
+  await responderAsignacionEnTransaccion(tx, crearRef(), UID_A, 'rechazar');
+
+  assert.equal(estado()!.estado, 'confirmada');
+  assert.equal(estado()!.asignacion, null);
+
+  assert.equal(sets.length, 1, 'exactamente un evento');
+  const evento = sets[0].data;
+  assert.equal(evento.tipo, EVENTO_RECHAZO_MOTORIZADO);
+  assert.equal(evento.tipo, 'rechazo_motorizado');
+  assert.equal(evento.porUid, UID_A);
+  assert.equal(evento.motorizadoId, 'moto_a');
+  assert.equal(evento.motorizadoNombre, 'John Pork 2');
+  assert.equal(evento.solicitudId, 'sol1');
+  // El sello lo pone el servidor: nunca una hora que mande el cliente.
+  assert.equal(typeof evento.at, 'object');
+  assert.ok(!(evento.at instanceof Date));
+  assert.equal(evento.at, escrituras[0].updatedAt, 'mismo instante que la transición');
+  // Sin motivo inventado, sin teléfono, sin rol.
+  assert.deepEqual(Object.keys(evento).sort(), ['at', 'motorizadoId', 'motorizadoNombre', 'porUid', 'solicitudId', 'tipo']);
+});
+
+test('RM2 · aceptar no crea ningún evento ni resumen de rechazo', async () => {
+  const { tx, escrituras, sets, estado } = crearTx(asignadaA(UID_A, 'moto_a', 'John Pork 2'));
+  await responderAsignacionEnTransaccion(tx, crearRef(), UID_A, 'aceptar');
+  assert.equal(sets.length, 0);
+  assert.ok(!('ultimoRechazoMotorizado' in escrituras[0]));
+  assert.ok(!('ultimoRechazoMotorizado' in estado()!));
+});
+
+test('RM3 · un rechazo bloqueado por estado inválido no cambia nada ni deja evento', async () => {
+  for (const estadoOrden of ['confirmada', 'cancelada', 'en_camino_retiro', 'entregado']) {
+    const { tx, escrituras, sets } = crearTx({ ...asignadaA(UID_A, 'moto_a', 'John Pork 2'), estado: estadoOrden });
+    await assert.rejects(responderAsignacionEnTransaccion(tx, crearRef(), UID_A, 'rechazar'), codigo('failed-precondition'));
+    assert.equal(escrituras.length, 0, estadoOrden);
+    assert.equal(sets.length, 0, estadoOrden);
+  }
+});
+
+test('RM4 · un llamador ajeno no deja evento', async () => {
+  const { tx, escrituras, sets } = crearTx(asignadaA(UID_A, 'moto_a', 'John Pork 2'));
+  await assert.rejects(responderAsignacionEnTransaccion(tx, crearRef(), UID_B, 'rechazar'), codigo('permission-denied'));
+  assert.equal(sets.length, 0);
+  assert.equal(escrituras.length, 0);
+});
+
+test('RM5 · una asignación que ya no está pendiente no deja evento', async () => {
+  for (const aceptacion of ['aceptada', 'rechazada', 'expirada']) {
+    const { tx, sets } = crearTx(asignadaA(UID_A, 'moto_a', 'John Pork 2', { estadoAceptacion: aceptacion }));
+    await assert.rejects(responderAsignacionEnTransaccion(tx, crearRef(), UID_A, 'rechazar'), codigo('failed-precondition'));
+    assert.equal(sets.length, 0, aceptacion);
+  }
+});
+
+test('RM6 · dos rechazos por motorizados distintos dejan dos eventos y ninguno pisa al otro', async () => {
+  const ref = crearRef();
+  const t = crearTx(asignadaA(UID_A, 'moto_a', 'John Pork 2'));
+  await responderAsignacionEnTransaccion(t.tx, ref, UID_A, 'rechazar');
+  const primero = JSON.stringify(t.sets[0]);
+
+  // El gestor reasigna a B y B también rechaza.
+  t.reemplazar(asignadaA(UID_B, 'moto_b', 'María López'));
+  await responderAsignacionEnTransaccion(t.tx, ref, UID_B, 'rechazar');
+
+  assert.equal(t.sets.length, 2);
+  assert.notEqual((t.sets[0].ref as { id: string }).id, (t.sets[1].ref as { id: string }).id, 'ids de evento distintos');
+  assert.equal(JSON.stringify(t.sets[0]), primero, 'el primer evento no cambió');
+  assert.equal(t.sets[0].data.motorizadoNombre, 'John Pork 2');
+  assert.equal(t.sets[1].data.motorizadoNombre, 'María López');
+  assert.equal(t.sets[0].data.porUid, UID_A);
+  assert.equal(t.sets[1].data.porUid, UID_B);
+});
+
+test('RM7 · el resumen apunta al rechazo más reciente', async () => {
+  const ref = crearRef();
+  const t = crearTx(asignadaA(UID_A, 'moto_a', 'John Pork 2'));
+  await responderAsignacionEnTransaccion(t.tx, ref, UID_A, 'rechazar');
+  const idA = (t.sets[0].ref as { id: string }).id;
+  assert.equal((t.estado()!.ultimoRechazoMotorizado as DocumentData).eventoId, idA);
+
+  t.reemplazar({ ...asignadaA(UID_B, 'moto_b', 'María López'), ultimoRechazoMotorizado: t.estado()!.ultimoRechazoMotorizado });
+  await responderAsignacionEnTransaccion(t.tx, ref, UID_B, 'rechazar');
+  const idB = (t.sets[1].ref as { id: string }).id;
+  const resumen = t.estado()!.ultimoRechazoMotorizado as DocumentData;
+  assert.equal(resumen.eventoId, idB, 'apunta al evento de B');
+  assert.notEqual(resumen.eventoId, idA);
+  assert.equal(resumen.motorizadoNombre, 'María López');
+  assert.equal(resumen.motorizadoId, 'moto_b');
+  assert.equal(resumen.rechazadoAt, t.sets[1].data.at, 'mismo instante que el evento');
+});
+
+test('RM8 · la identidad del evento sale de la asignación en el instante del rechazo, no de una lectura posterior', async () => {
+  const t = crearTx(asignadaA(UID_A, 'moto_a', 'John Pork 2'));
+  await responderAsignacionEnTransaccion(t.tx, crearRef(), UID_A, 'rechazar');
+  // La asignación ya no existe, pero el evento y el resumen conservan quién fue.
+  assert.equal(t.estado()!.asignacion, null);
+  assert.equal(t.sets[0].data.motorizadoNombre, 'John Pork 2');
+  assert.equal((t.estado()!.ultimoRechazoMotorizado as DocumentData).motorizadoNombre, 'John Pork 2');
+
+  // Sin nombre o sin id demostrables no se inventan: quedan null.
+  const sinNombre = construirRechazo('sol9', UID_A, { motorizadoAuthUid: UID_A, motorizadoNombre: '   ' }, 'ev9', 'T');
+  assert.equal(sinNombre.evento.motorizadoNombre, null);
+  assert.equal(sinNombre.evento.motorizadoId, null);
+  assert.equal(sinNombre.evento.porUid, UID_A);
+  // El teléfono de la asignación no se copia a la historia.
+  assert.ok(!JSON.stringify(sinNombre).includes('telefono'));
+  assert.ok(!JSON.stringify(t.sets[0].data).includes('8888-0000'));
 });

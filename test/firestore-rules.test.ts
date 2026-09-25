@@ -2400,3 +2400,75 @@ test('VR19 · gestor: confirmada → cancelada sin asignación, solo la orden �
     updatedAt: serverTimestamp(),
   }))
 })
+
+// ─── VR · VIAJE-RECHAZO-MOTORIZADO-TRAZA-1: historia de la solicitud ─────────
+//
+// solicitudes_envio/{id}/eventos la escribe solo el servidor (Admin SDK, que no
+// evalúa Rules). Ningún cliente crea, edita ni borra un evento; la lectura es
+// solo de gestor y admin, y el resto de los roles no gana acceso nuevo.
+
+const EVENTO_RECHAZO = {
+  tipo: 'rechazo_motorizado',
+  porUid: UID_MOTO,
+  motorizadoId: 'moto1',
+  motorizadoNombre: 'John Pork',
+  solicitudId: 'vr20',
+}
+
+async function ordenConEvento(id: string) {
+  await ordenEnViaje(id, 'asignada')
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', id, 'eventos', 'ev1'), {
+      ...EVENTO_RECHAZO,
+      solicitudId: id,
+      at: new Date(),
+    })
+  })
+  return id
+}
+
+test('VR20 · gestor y admin leen los eventos de una solicitud ⇒ ALLOW', async () => {
+  const id = await ordenConEvento('vr20')
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    const db = como(uid)
+    await assertSucceeds(getDoc(doc(db, 'solicitudes_envio', id, 'eventos', 'ev1')))
+    await assertSucceeds(getDocs(collection(db, 'solicitudes_envio', id, 'eventos')))
+  }
+})
+
+test('VR21 · nadie más lee la historia: motorizado, comercio y digitador ⇒ DENY', async () => {
+  const id = await ordenConEvento('vr21')
+  for (const uid of [UID_MOTO, UID_COMERCIO, UID_DIGITADOR]) {
+    const db = como(uid)
+    await assertFails(getDoc(doc(db, 'solicitudes_envio', id, 'eventos', 'ev1')))
+    await assertFails(getDocs(collection(db, 'solicitudes_envio', id, 'eventos')))
+  }
+})
+
+test('VR22 · ningún cliente crea un evento, ni siquiera gestor o admin ⇒ DENY', async () => {
+  const id = await ordenEnViaje('vr22', 'asignada')
+  for (const uid of [UID_MOTO, UID_COMERCIO, UID_GESTOR, UID_ADMIN, UID_DIGITADOR]) {
+    await assertFails(setDoc(doc(como(uid), 'solicitudes_envio', id, 'eventos', 'nuevo_' + uid), {
+      ...EVENTO_RECHAZO,
+      solicitudId: id,
+      at: serverTimestamp(),
+    }))
+  }
+})
+
+test('VR23 · ningún cliente edita ni borra un evento existente ⇒ DENY', async () => {
+  const id = await ordenConEvento('vr23')
+  for (const uid of [UID_MOTO, UID_COMERCIO, UID_GESTOR, UID_ADMIN]) {
+    const ref = doc(como(uid), 'solicitudes_envio', id, 'eventos', 'ev1')
+    await assertFails(updateDoc(ref, { motorizadoNombre: 'Otro' }))
+    await assertFails(deleteDoc(ref))
+  }
+})
+
+test('VR24 · la subcolección no afloja la solicitud raíz: el comercio sigue sin escribir su estado ⇒ DENY', async () => {
+  const id = await ordenConEvento('vr24')
+  await assertFails(updateDoc(doc(como(UID_COMERCIO), 'solicitudes_envio', id), {
+    estado: 'confirmada',
+    updatedAt: serverTimestamp(),
+  }))
+})

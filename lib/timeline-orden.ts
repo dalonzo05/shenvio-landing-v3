@@ -77,6 +77,21 @@ export interface EventoDepositoLeido {
   reemplazaA?: string | null
 }
 
+/**
+ * VIAJE-RECHAZO-MOTORIZADO-TRAZA-1 — un evento de
+ * `solicitudes_envio/{id}/eventos/{eventoId}` tal como se leyó. Hoy solo
+ * existe `rechazo_motorizado`; un tipo que la timeline no conoce no se presenta.
+ */
+export interface EventoSolicitudLeido {
+  id: string
+  tipo?: string | null
+  at?: unknown
+  motorizadoNombre?: string | null
+}
+
+/** Tipo de evento de solicitud que deja el rechazo de una asignación. */
+export const EVENTO_SOLICITUD_RECHAZO_MOTORIZADO = 'rechazo_motorizado'
+
 /** Un depósito asociado a la orden y los eventos de su subcolección. */
 export interface HistoriaDeposito {
   deposito: DepositoRegistrado
@@ -202,6 +217,7 @@ const RANGO: Record<string, number> = {
   creada: 10,
   confirmada: 20,
   asignada: 30,
+  rechazo_motorizado: 35,
   aceptada: 40,
   en_camino_retiro: 50,
   retirado: 60,
@@ -234,6 +250,9 @@ const GRUPO: Record<string, GrupoEvento> = {
   confirmada: 'recorrido',
   asignada: 'recorrido',
   aceptada: 'recorrido',
+  // El rechazo de una asignación es parte del recorrido de la orden: le pasó
+  // en el camino entre asignada y aceptada, no después de entregada.
+  rechazo_motorizado: 'recorrido',
   en_camino_retiro: 'recorrido',
   retirado: 'recorrido',
   en_camino_entrega: 'recorrido',
@@ -282,6 +301,7 @@ export function construirTimeline(
   orden: EntradaTimeline,
   depositos: Partial<Record<DestinoDeposito, DepositoRegistrado | null>> = {},
   historias: HistoriaDeposito[] = [],
+  eventosSolicitud: EventoSolicitudLeido[] = [],
 ): TimelineEvento[] {
   const ev: TimelineEvento[] = []
   const push = (id: string, tipo: TipoEvento, titulo: string, raw: unknown, extra: { actorUid?: string | null; actorEtiqueta?: string; detalle?: string | null } = {}) => {
@@ -514,6 +534,18 @@ export function construirTimeline(
           break
       }
     }
+  }
+
+  // ── Rechazos de asignación (VIAJE-RECHAZO-MOTORIZADO-TRAZA-1) ────────────
+  // Historia append-only: cada rechazo es su propio evento, así que si A
+  // rechaza y después B rechaza, salen los dos. El nombre es el que el evento
+  // guardó en el momento; sin nombre demostrable no se muestra un UID.
+  for (const e of eventosSolicitud) {
+    if (e.tipo !== EVENTO_SOLICITUD_RECHAZO_MOTORIZADO) continue
+    const nombre = typeof e.motorizadoNombre === 'string' && e.motorizadoNombre.trim() !== ''
+      ? e.motorizadoNombre.trim()
+      : 'Un motorizado'
+    push(`rechazo_motorizado:${e.id}`, 'operativo', `${nombre} rechazó la asignación`, e.at)
   }
 
   // Orden cronológico ascendente. Ante timestamps idénticos —que en los datos
