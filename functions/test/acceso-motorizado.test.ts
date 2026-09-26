@@ -13,7 +13,10 @@ import {
   repararAcceso,
   diagnosticarAcceso,
   clasificarAcceso,
-  type AccesoDeps,
+  finalizarActivacion,
+  VENTANA_SESION_RECIENTE_SEG,
+  type ActivacionDeps,
+  type ContextoSesion,
   type AuthLite,
   type MotorizadoDoc,
   type UsuarioDoc,
@@ -43,10 +46,17 @@ function mundo(inicial: MundoInicial = {}) {
     crearAuth: 0,
     escribirUsuario: [] as { uid: string; data: Record<string, unknown> }[],
     actualizarMotorizado: [] as { id: string; patch: Record<string, unknown> }[],
+    /** UIDs a los que el servidor les marcó emailVerified = true. */
+    verificar: [] as string[],
   };
   let fallaEscribirUsuario = false;
 
-  const deps: AccesoDeps = {
+  const deps: ActivacionDeps = {
+    async marcarEmailVerificado(uid) {
+      llamadas.verificar.push(uid);
+      const a = auths.get(uid);
+      if (a) auths.set(uid, { ...a, emailVerified: true });
+    },
     async getUsuario(uid) {
       const u = usuarios.get(uid);
       return u ? JSON.parse(JSON.stringify(u)) : null;
@@ -100,7 +110,7 @@ function mundo(inicial: MundoInicial = {}) {
       fallaEscribirUsuario = true;
     },
     sinEscrituras() {
-      return llamadas.crearAuth === 0 && llamadas.escribirUsuario.length === 0 && llamadas.actualizarMotorizado.length === 0;
+      return llamadas.crearAuth === 0 && llamadas.escribirUsuario.length === 0 && llamadas.actualizarMotorizado.length === 0 && llamadas.verificar.length === 0;
     },
   };
 }
@@ -543,4 +553,204 @@ test('DG6 · un perfil con otro rol es un conflicto, no algo reparable', () => {
   assert.equal(dx.estado, 'incompleto');
   assert.deepEqual(dx.problemas, ['rol_incompatible']);
   assert.equal(dx.reparable, false);
+});
+
+// ─── AV · finalizarActivacion: cerrar la activación con evidencia del servidor ──
+//
+// Que definir la contraseña por el enlace de /crear-password deje la cuenta
+// verificada NO se asume. El propio motorizado, ya autenticado con la contraseña
+// que acaba de definir, pide cerrar su activación; el servidor decide con la
+// sesión y con Firestore, y nunca con algo que mande el cliente.
+
+const AHORA = 1_800_000_000;
+
+/** Sesión válida: contraseña, iniciada hace 30 s. */
+function sesion(uid: string, over: Partial<ContextoSesion> = {}): ContextoSesion {
+  return { uid, proveedor: 'password', authTimeSec: AHORA - 30, ahoraSec: AHORA, ...over };
+}
+
+/** Un acceso creado por el alta y a la espera de que el motorizado active su cuenta. */
+function pendiente(over: { verificado?: boolean; motorizado?: MotorizadoDoc; usuario?: UsuarioDoc } = {}) {
+  return mundo({
+    motorizados: {
+      moto1: { ...MOTO_LIMPIO, authUid: 'uid_l', accesoEmail: 'luigi@example.com', ...(over.motorizado ?? {}) },
+    },
+    auths: { uid_l: { uid: 'uid_l', email: 'luigi@example.com', disabled: false, emailVerified: over.verificado === true } },
+    usuarios: { uid_l: over.usuario ?? { rol: 'motorizado', activo: true, email: 'luigi@example.com' } },
+  });
+}
+
+test('AV1 · un acceso recién creado (sin verificar) queda "pendiente de activación", no activo', async () => {
+  const m = mundo({ motorizados: { moto1: { ...MOTO_LIMPIO } } });
+  const r = await crearAcceso(m.deps, ADMIN, { motorizadoId: 'moto1', email: 'luigi@example.com' });
+  assert.equal(m.auths.get(r.authUid)!.emailVerified, false);
+  assert.equal(r.estado, 'pendiente_activacion');
+  const d = await diagnosticarAcceso(m.deps, GESTOR, { motorizadoId: 'moto1' });
+  assert.equal(d.estado, 'pendiente_activacion');
+  assert.equal(m.llamadas.verificar.length, 0, 'crear acceso no verifica nada');
+  // La evidencia de la activación pendiente quedó escrita por el servidor.
+  assert.equal(m.motorizados.get('moto1')!.accesoEmail, 'luigi@example.com');
+});
+
+test('AV2 · definir la contraseña SIN cerrar la activación no verifica la cuenta: sigue pendiente', async () => {
+  const m = pendiente();
+  // Firebase ya aceptó la contraseña, pero nadie llamó al cierre.
+  assert.equal((await diagnosticarAcceso(m.deps, ADMIN, { motorizadoId: 'moto1' })).estado, 'pendiente_activacion');
+
+  // Sin una sesión de contraseña (por ejemplo, un token de otro proveedor) no se cierra.
+  for (const proveedor of [null, 'google.com', 'custom', 'anonymous']) {
+    await assert.rejects(finalizarActivacion(m.deps, sesion('uid_l', { proveedor }), {}), codigo('permission-denied'), String(proveedor));
+  }
+  // Con una sesión vieja tampoco: tiene que ser un inicio de sesión reciente.
+  for (const authTimeSec of [null, AHORA - VENTANA_SESION_RECIENTE_SEG - 1, AHORA - 86_400, AHORA + 3_600]) {
+    await assert.rejects(finalizarActivacion(m.deps, sesion('uid_l', { authTimeSec }), {}), codigo('failed-precondition'), String(authTimeSec));
+  }
+  assert.equal(m.llamadas.verificar.length, 0);
+  assert.equal(m.auths.get('uid_l')!.emailVerified, false);
+});
+
+test('AV3 · la finalización válida verifica la cuenta y el acceso pasa a activo', async () => {
+  const m = pendiente();
+  const r = await finalizarActivacion(m.deps, sesion('uid_l'), {});
+  assert.equal(r.yaVerificado, false);
+  assert.equal(r.estado, 'activo');
+  assert.equal(m.auths.get('uid_l')!.emailVerified, true);
+  assert.deepEqual(m.llamadas.verificar, ['uid_l']);
+  assert.equal((await diagnosticarAcceso(m.deps, ADMIN, { motorizadoId: 'moto1' })).estado, 'activo');
+  // No toca el motorizado ni el perfil.
+  assert.equal(m.llamadas.actualizarMotorizado.length, 0);
+  assert.equal(m.llamadas.escribirUsuario.length, 0);
+});
+
+test('AV4 · otro actor no puede finalizar la activación de un tercero, ni con un payload libre', async () => {
+  const m = pendiente();
+  m.usuarios.set('uid_b', { rol: 'motorizado', activo: true, email: 'b@example.com' });
+  m.auths.set('uid_b', { uid: 'uid_b', email: 'b@example.com', disabled: false, emailVerified: false });
+  m.motorizados.set('moto2', { ...MOTO_LIMPIO, nombre: 'B', authUid: 'uid_b' }); // sin accesoEmail: nadie autorizó su activación
+
+  // Un gestor o un admin no activan cuentas ajenas: esto es solo del propio motorizado.
+  for (const uid of [GESTOR, ADMIN]) {
+    await assert.rejects(finalizarActivacion(m.deps, sesion(uid), {}), codigo('permission-denied'), uid);
+  }
+  // Otro motorizado solo puede cerrar SU activación, y no tiene una pendiente.
+  await assert.rejects(finalizarActivacion(m.deps, sesion('uid_b'), {}), codigo('failed-precondition'));
+  // Un payload que intente señalar a otro UID, o afirmar "verificado", se rechaza entero.
+  for (const extra of [{ uid: 'uid_l' }, { verified: true }, { emailVerified: true }, { motorizadoId: 'moto1' }, { authUid: 'uid_l' }]) {
+    await assert.rejects(finalizarActivacion(m.deps, sesion('uid_b'), extra), codigo('invalid-argument'), JSON.stringify(extra));
+  }
+  for (const data of ['x', 5, ['a'], true]) {
+    await assert.rejects(finalizarActivacion(m.deps, sesion('uid_b'), data), codigo('invalid-argument'));
+  }
+  assert.equal(m.llamadas.verificar.length, 0);
+  assert.equal(m.auths.get('uid_l')!.emailVerified, false);
+  assert.equal(m.auths.get('uid_b')!.emailVerified, false);
+});
+
+test('AV4b · una activación con otro correo que el de la cuenta no cuenta como pendiente', async () => {
+  for (const cambio of [
+    { motorizado: { accesoEmail: 'otro@example.com' } },
+    { motorizado: { accesoEmail: undefined } },
+    { usuario: { rol: 'motorizado', activo: true, email: 'otro@example.com' } as UsuarioDoc },
+  ]) {
+    const m = pendiente(cambio);
+    await assert.rejects(finalizarActivacion(m.deps, sesion('uid_l'), {}), codigo('failed-precondition'), JSON.stringify(cambio));
+    assert.equal(m.llamadas.verificar.length, 0);
+  }
+  // La cuenta deshabilitada tampoco se activa.
+  const off = pendiente();
+  off.auths.set('uid_l', { ...off.auths.get('uid_l')!, disabled: true });
+  await assert.rejects(finalizarActivacion(off.deps, sesion('uid_l'), {}), codigo('permission-denied'));
+  const sinAuth = pendiente();
+  sinAuth.auths.clear();
+  await assert.rejects(finalizarActivacion(sinAuth.deps, sesion('uid_l'), {}), codigo('failed-precondition'));
+  assert.equal(off.llamadas.verificar.length + sinAuth.llamadas.verificar.length, 0);
+});
+
+test('AV5 · un perfil sin rol (o con otro rol, o inactivo) no puede finalizar como acceso sano', async () => {
+  const perfiles: UsuarioDoc[] = [
+    { email: 'luigi@example.com' }, // el caso Luigi antes de reparar
+    { rol: 'gestor', activo: true, email: 'luigi@example.com' },
+    { rol: 'Motorizado', activo: true, email: 'luigi@example.com' },
+    { rol: 'motorizado', activo: false, email: 'luigi@example.com' },
+    { rol: 'motorizado', email: 'luigi@example.com' },
+  ];
+  for (const usuario of perfiles) {
+    const m = pendiente({ usuario });
+    await assert.rejects(finalizarActivacion(m.deps, sesion('uid_l'), {}), codigo('permission-denied'), JSON.stringify(usuario));
+    assert.equal(m.llamadas.verificar.length, 0);
+  }
+  const sinPerfil = pendiente();
+  sinPerfil.usuarios.delete('uid_l');
+  await assert.rejects(finalizarActivacion(sinPerfil.deps, sesion('uid_l'), {}), codigo('permission-denied'));
+});
+
+test('AV6 · si no hay un motorizado vinculado a ese UID, no se activa nada', async () => {
+  const sinVinculo = pendiente();
+  sinVinculo.motorizados.set('moto1', { ...MOTO_LIMPIO, authUid: 'uid_otro', accesoEmail: 'luigi@example.com' });
+  await assert.rejects(finalizarActivacion(sinVinculo.deps, sesion('uid_l'), {}), codigo('permission-denied'));
+
+  const duplicado = pendiente();
+  duplicado.motorizados.set('moto2', { ...MOTO_LIMPIO, nombre: 'Otro', authUid: 'uid_l', accesoEmail: 'luigi@example.com' });
+  await assert.rejects(finalizarActivacion(duplicado.deps, sesion('uid_l'), {}), codigo('failed-precondition'));
+  assert.equal(sinVinculo.llamadas.verificar.length + duplicado.llamadas.verificar.length, 0);
+});
+
+test('AV7 · una cuenta ya verificada es idempotente: éxito y sin escribir nada', async () => {
+  const m = pendiente({ verificado: true });
+  const r = await finalizarActivacion(m.deps, sesion('uid_l'), {});
+  assert.equal(r.yaVerificado, true);
+  assert.equal(r.estado, 'activo');
+  assert.ok(m.sinEscrituras());
+});
+
+test('AV8 · reintentar la finalización no duplica ni rompe nada', async () => {
+  const m = pendiente();
+  const primera = await finalizarActivacion(m.deps, sesion('uid_l'), {});
+  const segunda = await finalizarActivacion(m.deps, sesion('uid_l'), {});
+  const tercera = await finalizarActivacion(m.deps, sesion('uid_l'), {});
+  assert.equal(primera.yaVerificado, false);
+  assert.equal(segunda.yaVerificado, true);
+  assert.equal(tercera.yaVerificado, true);
+  assert.deepEqual(m.llamadas.verificar, ['uid_l'], 'se verificó una sola vez');
+  assert.equal(m.auths.get('uid_l')!.emailVerified, true);
+});
+
+test('AV9 · Luigi reparado pero sin activar sigue "pendiente de activación", nunca activo', async () => {
+  const m = luigi();
+  await repararAcceso(m.deps, ADMIN, { motorizadoId: 'moto1' });
+  const d = await diagnosticarAcceso(m.deps, GESTOR, { motorizadoId: 'moto1' });
+  assert.equal(d.estado, 'pendiente_activacion');
+  assert.equal(d.problemas.length, 0, 'ya no hay nada roto: solo falta activarlo');
+  // Y reparar no verifica la cuenta.
+  assert.equal(m.llamadas.verificar.length, 0);
+  assert.equal(m.auths.get('uid_l')!.emailVerified, false);
+});
+
+test('AV10 · Luigi reparado + invitación + activación completada → acceso activo', async () => {
+  const m = luigi();
+  await repararAcceso(m.deps, ADMIN, { motorizadoId: 'moto1' });
+
+  // Sin una invitación autorizada por un operador, no hay activación pendiente que cerrar.
+  await assert.rejects(finalizarActivacion(m.deps, sesion('uid_l'), {}), codigo('failed-precondition'));
+  assert.equal(m.auths.get('uid_l')!.emailVerified, false);
+
+  // El envío de la invitación (ruta enviar-activacion) deja la evidencia: el correo de la cuenta.
+  await m.deps.actualizarMotorizado('moto1', { accesoEmail: 'luigi@example.com' });
+  const r = await finalizarActivacion(m.deps, sesion('uid_l'), {});
+  assert.equal(r.estado, 'activo');
+  assert.equal(m.auths.get('uid_l')!.emailVerified, true);
+  assert.equal((await diagnosticarAcceso(m.deps, ADMIN, { motorizadoId: 'moto1' })).estado, 'activo');
+});
+
+test('AV11 · alta nueva de punta a punta: crear → definir contraseña → cerrar la activación → activo', async () => {
+  const m = mundo({ motorizados: { moto1: { ...MOTO_LIMPIO } } });
+  const alta = await crearAcceso(m.deps, GESTOR, { motorizadoId: 'moto1', email: 'luigi@example.com' });
+  assert.equal(alta.estado, 'pendiente_activacion');
+
+  // El motorizado abre el enlace, define su contraseña y se autentica con ella.
+  const r = await finalizarActivacion(m.deps, sesion(alta.authUid), {});
+  assert.equal(r.estado, 'activo');
+  assert.equal(m.auths.get(alta.authUid)!.emailVerified, true);
+  assert.equal(m.usuarios.get(alta.authUid)!.rol, 'motorizado');
+  assert.equal(m.motorizados.get('moto1')!.authUid, alta.authUid);
 });

@@ -2,6 +2,18 @@ import { NextRequest, NextResponse } from 'next/server'
 import { adminAuth, adminDb } from '@/fb/admin'
 import { operadorAutorizado, evaluarConfirmacionMotorizado } from '@/lib/motorizado-acceso'
 
+// ⚠️ OBSOLETO — MOTO-ALTA-AUTH-ROL-1. Ninguna pantalla lo llama desde que el alta
+// del acceso pasó al servidor. Se CONSERVA solo por compatibilidad con cuentas y
+// flujos anteriores, sin borrarlo.
+//
+// El camino oficial de activación es otro: el motorizado define su propia
+// contraseña con el enlace de correo y cierra la activación él mismo
+// (callable finalizarActivacionMotorizado, con su sesión). Este endpoint, en
+// cambio, deja que un OPERADOR marque el correo como verificado sin que el dueño
+// de la cuenta intervenga; con las Rules anteriores, además, la cadena de
+// evidencia que valida se podía armar a mano desde el cliente. No usarlo para
+// altas nuevas. Candidato a retirarse en un bloque aparte.
+//
 // MOTORIZADO EMAIL VERIFIED V1
 //
 // Confirma el acceso de un Motorizado ya creado por un Gestor/Admin — marca

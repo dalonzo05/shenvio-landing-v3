@@ -120,6 +120,12 @@ export async function POST(req: NextRequest) {
     )
   }
 
+  // Evidencia de que un operador autorizado inició la activación de ESTA cuenta:
+  // finalizarActivacionMotorizado solo cierra la activación si este correo
+  // coincide con el de la cuenta. La escribe el servidor, antes de que exista el
+  // enlace, y cubre también los accesos creados antes o reparados (que no la traen).
+  await motorizadoRef.set({ accesoEmail: email }, { merge: true })
+
   let resetLink: string
   try {
     const firebaseLink = await adminAuth.generatePasswordResetLink(email)

@@ -12,7 +12,8 @@ import {
   crearAcceso,
   repararAcceso,
   diagnosticarAcceso,
-  type AccesoDeps,
+  finalizarActivacion,
+  type ActivacionDeps,
   type AuthLite,
 } from './acceso-motorizado';
 
@@ -24,7 +25,7 @@ function esNoEncontrado(e: unknown): boolean {
   return (e as { code?: string })?.code === 'auth/user-not-found';
 }
 
-function depsReales(): AccesoDeps {
+function depsReales(): ActivacionDeps {
   const db = admin.firestore();
   const auth = admin.auth();
   return {
@@ -66,6 +67,9 @@ function depsReales(): AccesoDeps {
     async escribirUsuario(uid, data) {
       await db.collection('usuarios').doc(uid).set(data, { merge: true });
     },
+    async marcarEmailVerificado(uid) {
+      await auth.updateUser(uid, { emailVerified: true });
+    },
     ahora: () => FieldValue.serverTimestamp(),
     borrarCampo: () => FieldValue.delete(),
   };
@@ -93,4 +97,26 @@ export const repararAccesoMotorizado = onCall(async (request) => {
 /** Estado real del acceso, una vez al abrir el detalle: admin o gestor activo. */
 export const diagnosticarAccesoMotorizado = onCall(async (request) => {
   return diagnosticarAcceso(depsReales(), operadorUid(request), request.data);
+});
+
+/**
+ * Cierra la activación del acceso del PROPIO motorizado que llama. Sin payload:
+ * el uid, el proveedor de inicio de sesión y la hora de autenticación salen del
+ * ID token verificado, y todo lo demás de Firestore y Auth. Ver finalizarActivacion.
+ */
+export const finalizarActivacionMotorizado = onCall(async (request) => {
+  const uid = operadorUid(request);
+  const token = request.auth!.token;
+  const resultado = await finalizarActivacion(
+    depsReales(),
+    {
+      uid,
+      proveedor: typeof token.firebase?.sign_in_provider === 'string' ? token.firebase.sign_in_provider : null,
+      authTimeSec: typeof token.auth_time === 'number' ? token.auth_time : null,
+      ahoraSec: Math.floor(Date.now() / 1000),
+    },
+    request.data,
+  );
+  console.log(JSON.stringify({ fn: 'finalizarActivacionMotorizado', motorizadoId: resultado.motorizadoId, yaVerificado: resultado.yaVerificado, estado: resultado.estado }));
+  return resultado;
 });

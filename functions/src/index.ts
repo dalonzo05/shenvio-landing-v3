@@ -9,7 +9,7 @@ export { acumularCobroSemanalPorOrden } from './cobro-semanal';
 export { responderAsignacion, confirmarTransicionConCobro } from './motorizado-transiciones';
 export { confirmarPropuestaAbono, rechazarPropuestaAbono } from './propuestas-abono';
 export { asignarCodigoOrden, asignarCodigoDeposito } from './codigos';
-export { crearAccesoMotorizado, repararAccesoMotorizado, diagnosticarAccesoMotorizado } from './acceso-motorizado-callables';
+export { crearAccesoMotorizado, repararAccesoMotorizado, diagnosticarAccesoMotorizado, finalizarActivacionMotorizado } from './acceso-motorizado-callables';
 
 /**
  * Daily report (DRY-RUN / LOG-ONLY): lists orders delivered more than 45

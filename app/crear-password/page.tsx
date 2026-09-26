@@ -3,8 +3,16 @@
 import { Suspense, useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Fredoka } from 'next/font/google'
-import { auth } from '@/fb/config'
-import { verifyPasswordResetCode, confirmPasswordReset } from 'firebase/auth'
+import { auth, functions } from '@/fb/config'
+import {
+  verifyPasswordResetCode,
+  confirmPasswordReset,
+  signInWithEmailAndPassword,
+  signOut,
+  reload,
+} from 'firebase/auth'
+import { httpsCallable } from 'firebase/functions'
+import { completarActivacion } from '@/lib/activacion-password'
 import { Eye, EyeOff, CheckCircle2, XCircle } from 'lucide-react'
 
 const fredoka = Fredoka({ subsets: ['latin'], weight: ['400', '700'] })
@@ -26,6 +34,10 @@ function CrearPasswordContent() {
   const oobCode = qp.get('oobCode') ?? ''
 
   const [status, setStatus] = useState<'loading' | 'idle' | 'submitting' | 'ok' | 'error'>('loading')
+  // Correo de la cuenta: lo devuelve la verificación del código, nunca lo teclea el usuario.
+  const [email, setEmail] = useState('')
+  // La contraseña quedó definida Y el servidor cerró la activación de la cuenta.
+  const [activada, setActivada] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -40,7 +52,7 @@ function CrearPasswordContent() {
       return
     }
     verifyPasswordResetCode(auth, oobCode)
-      .then(() => setStatus('idle'))
+      .then((correo) => { setEmail(correo); setStatus('idle') })
       .catch(() => {
         setErrorMsg('El enlace expiró o ya fue usado. Solicitá uno nuevo al administrador.')
         setStatus('error')
@@ -55,7 +67,23 @@ function CrearPasswordContent() {
 
     setStatus('submitting')
     try {
-      await confirmPasswordReset(auth, oobCode, password)
+      // Definir la contraseña y, sin más pasos, cerrar la activación de la cuenta:
+      // el propio usuario, ya autenticado con ella, se lo pide al servidor.
+      const resultado = await completarActivacion(
+        {
+          confirmarPassword: (codigo, pw) => confirmPasswordReset(auth, codigo, pw),
+          iniciarSesion: async (correo, pw) => { await signInWithEmailAndPassword(auth, correo, pw) },
+          finalizarActivacion: async () => { await httpsCallable(functions, 'finalizarActivacionMotorizado')() },
+          refrescarSesion: async () => {
+            if (!auth.currentUser) return
+            await reload(auth.currentUser)
+            await auth.currentUser.getIdToken(true)
+          },
+          cerrarSesion: () => signOut(auth),
+        },
+        { oobCode, email, password },
+      )
+      setActivada(resultado.tipo === 'activada')
       setStatus('ok')
     } catch {
       setInlineError('No se pudo guardar la contraseña. El enlace puede haber expirado.')
@@ -101,9 +129,11 @@ function CrearPasswordContent() {
         {status === 'ok' && (
           <div className="text-center py-4">
             <CheckCircle2 className="mx-auto mb-3 text-green-500" size={40} />
-            <p className="text-gray-900 font-semibold text-lg mb-1">¡Contraseña creada!</p>
+            <p className="text-gray-900 font-semibold text-lg mb-1">{activada ? '¡Cuenta activada!' : '¡Contraseña creada!'}</p>
             <p className="text-gray-500 text-sm mb-6">
-              Ya podés ingresar a tu panel de StorkHub con tu correo y la contraseña que acabás de crear.
+              {activada
+                ? 'Tu cuenta quedó activada. Ya podés ingresar a tu panel de StorkHub.'
+                : 'Ya podés ingresar a tu panel de StorkHub con tu correo y la contraseña que acabás de crear.'}
             </p>
             <button
               onClick={() => router.replace('/login')}

@@ -21,11 +21,21 @@
 //                        al abrir el detalle (no una lectura a Auth por fila).
 //
 // ── emailVerified ──────────────────────────────────────────────────────────
-// La Function NO lo marca. El patrón canónico (crearAccesoComercio) tampoco: la
-// cuenta queda sin verificar y el enlace de activación (/crear-password →
-// confirmPasswordReset) es lo que completa el onboarding. Hasta entonces el
-// estado es `pendiente_activacion`; solo con `emailVerified === true` es `activo`.
-// El endpoint viejo /api/motorizado/confirmar-acceso deja de ser parte del alta.
+// El alta (crearAcceso) deja la cuenta SIN verificar y sin contraseña: no hay
+// nada que verificar todavía. El acceso solo es `activo` con `emailVerified ===
+// true`; hasta entonces es `pendiente_activacion`.
+//
+// Que definir la contraseña con el enlace de /crear-password (un código de
+// restablecimiento, PASSWORD_RESET) deje la cuenta verificada NO se asume: puede
+// que Firebase lo haga, pero el repo no lo demuestra. Por eso la activación se
+// cierra acá, de forma explícita y server-side (finalizarActivacion): el propio
+// motorizado, YA autenticado con la contraseña que acaba de definir, pide cerrar
+// su activación y el servidor decide con evidencia. Si Firebase ya lo verificó,
+// es un no-op idempotente; si no, lo verifica el servidor. Nunca por un valor que
+// mande el cliente: el payload va vacío y todo sale del token y de Firestore.
+//
+// /api/motorizado/confirmar-acceso (operador marca verificado sin que el dueño
+// del correo intervenga) queda obsoleto: ver su encabezado.
 //
 // ── Consistencia ───────────────────────────────────────────────────────────
 // Auth y Firestore no comparten transacción. El alta es reanudable: primero se
@@ -499,4 +509,109 @@ export async function diagnosticarAcceso(
     ...dx,
     detalle: dx.problemas.map((p) => MENSAJE_PROBLEMA[p]),
   };
+}
+
+// ─── finalizarActivacion ──────────────────────────────────────────────────────
+
+/** Puertos de la activación: los de siempre más el único que verifica la cuenta. */
+export interface ActivacionDeps extends AccesoDeps {
+  /** Marca `emailVerified = true` en Firebase Auth (Admin SDK). */
+  marcarEmailVerificado(uid: string): Promise<void>;
+}
+
+/** Lo que el servidor sabe de la sesión que llama: sale del ID token, nunca del payload. */
+export interface ContextoSesion {
+  uid: string;
+  /** `token.firebase.sign_in_provider` (p. ej. 'password'). */
+  proveedor: string | null;
+  /** `token.auth_time`, en segundos: cuándo se autenticó con la credencial. */
+  authTimeSec: number | null;
+  ahoraSec: number;
+}
+
+/** La sesión tiene que ser de un inicio de sesión reciente: recién definió su contraseña. */
+export const VENTANA_SESION_RECIENTE_SEG = 15 * 60;
+
+export interface ResultadoFinalizarActivacion {
+  ok: true;
+  motorizadoId: string;
+  /** La cuenta ya estaba verificada: no se escribió nada. */
+  yaVerificado: boolean;
+  estado: EstadoAcceso;
+  mensaje: string;
+}
+
+/**
+ * Cierra la activación del acceso de UN motorizado: el que llama, y solo él.
+ *
+ * Evidencia (todas, en este orden; la primera que falle corta sin escribir):
+ *   1. el payload va vacío: no hay uid, motorizadoId ni bandera que aceptar;
+ *   2. la sesión es de `password` y reciente: quien llama acaba de probar que
+ *      controla la cuenta, con la contraseña que definió por el enlace del correo;
+ *   3. su perfil es `motorizado` y está activo;
+ *   4. hay exactamente UN motorizado vinculado a ese UID;
+ *   5. la cuenta de Auth existe y no está deshabilitada;
+ *   6. existe una activación PENDIENTE autorizada por un operador:
+ *      `motorizado.accesoEmail` (que escriben crearAcceso y el envío de la
+ *      invitación) coincide con el correo de la cuenta y con el del perfil.
+ * Con eso, y solo con eso, el servidor marca la cuenta como verificada.
+ */
+export async function finalizarActivacion(
+  deps: ActivacionDeps,
+  ctx: ContextoSesion,
+  data: unknown,
+): Promise<ResultadoFinalizarActivacion> {
+  // 1. Payload vacío.
+  const vacio =
+    data === undefined ||
+    data === null ||
+    (typeof data === 'object' && !Array.isArray(data) && Object.keys(data as object).length === 0);
+  if (!vacio) {
+    throw new HttpsError('invalid-argument', 'Esta operación no recibe datos: se resuelve con tu sesión.');
+  }
+
+  // 2. Sesión de contraseña y reciente.
+  if (ctx.proveedor !== 'password') {
+    throw new HttpsError('permission-denied', 'Iniciá sesión con tu correo y contraseña para activar tu cuenta.');
+  }
+  if (ctx.authTimeSec === null || !Number.isFinite(ctx.authTimeSec) || ctx.ahoraSec - ctx.authTimeSec > VENTANA_SESION_RECIENTE_SEG || ctx.authTimeSec > ctx.ahoraSec + 60) {
+    throw new HttpsError('failed-precondition', 'Tu sesión no es reciente: volvé a iniciar sesión para activar tu cuenta.');
+  }
+
+  // 3. Perfil de motorizado activo.
+  const usuario = await deps.getUsuario(ctx.uid);
+  if (!usuario || usuario.rol !== 'motorizado' || usuario.activo !== true) {
+    throw new HttpsError('permission-denied', 'Esta cuenta no es un acceso de motorizado activo.');
+  }
+
+  // 4. Exactamente un motorizado vinculado a este UID.
+  const ids = await deps.motorizadosConAuthUid(ctx.uid);
+  if (ids.length === 0) throw new HttpsError('permission-denied', 'Esta cuenta no está vinculada a ningún motorizado.');
+  if (ids.length > 1) throw new HttpsError('failed-precondition', 'Esta cuenta está vinculada a más de un motorizado.');
+  const motorizadoId = ids[0];
+  const motorizado = await exigirMotorizado(deps, motorizadoId);
+
+  // 5. Cuenta de Auth existente y habilitada.
+  const auth = await deps.getAuthPorUid(ctx.uid);
+  if (!auth) throw new HttpsError('failed-precondition', 'La cuenta de acceso ya no existe.');
+  if (auth.disabled) throw new HttpsError('permission-denied', 'La cuenta de acceso está deshabilitada.');
+
+  // 6. Activación pendiente, con correos coherentes.
+  const emailAuth = normalizarEmail(auth.email);
+  const emailAcceso = normalizarEmail(motorizado.accesoEmail);
+  const emailPerfil = normalizarEmail(usuario.email);
+  if (!emailAuth || emailAcceso !== emailAuth || (emailPerfil && emailPerfil !== emailAuth)) {
+    throw new HttpsError('failed-precondition', 'No hay una activación pendiente para esta cuenta.');
+  }
+
+  // Idempotencia: si ya está verificada (Firebase lo hizo, o un intento previo), no se escribe nada.
+  if (auth.emailVerified) {
+    const dx = clasificarAcceso(await leerHechos(deps, motorizadoId, motorizado));
+    return { ok: true, motorizadoId, yaVerificado: true, estado: dx.estado, mensaje: 'Tu cuenta ya estaba activada.' };
+  }
+
+  await deps.marcarEmailVerificado(ctx.uid);
+
+  const dx = clasificarAcceso(await leerHechos(deps, motorizadoId, motorizado));
+  return { ok: true, motorizadoId, yaVerificado: false, estado: dx.estado, mensaje: 'Cuenta activada: ya podés iniciar sesión.' };
 }
