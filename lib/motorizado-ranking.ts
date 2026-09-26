@@ -3,6 +3,8 @@
 // motorizado. Sin dependencias de Firebase ni efectos secundarios.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { esMotorizadoEnLinea, tieneCargaOperativa } from './motorizado-presencia'
+
 // ─── Tipos ───────────────────────────────────────────────────────────────────
 
 export interface MotorizadoConRanking {
@@ -148,11 +150,11 @@ export function haversine(
 // ─── getProximoPuntoOperativo ─────────────────────────────────────────────────
 
 /**
- * Deriva el próximo punto operativo relevante de un motorizado según su estado
- * actual y sus órdenes activas.
+ * Deriva el próximo punto operativo relevante de un motorizado según sus
+ * órdenes activas (la carga se deriva de ellas, no de `motorizado.estado`).
  *
- * - disponible → ultimaUbicacionOperativa ?? ubicacionBase ?? null
- * - ocupado    → punto de la orden activa más avanzada en su ciclo de vida:
+ * - sin órdenes activas → ultimaUbicacionOperativa ?? ubicacionBase ?? null
+ * - con órdenes activas → punto de la orden activa más avanzada en su ciclo de vida:
  *     · asignada | en_camino_retiro  → recoleccion.coord (aún va a buscar)
  *     · retirado | en_camino_entrega → entrega.coord (ya lo tiene, va a entregar)
  * - fallback   → ultimaUbicacionOperativa ?? ubicacionBase ?? null
@@ -161,11 +163,8 @@ export function getProximoPuntoOperativo(
   motorizado: MotorizadoConRanking,
   todasLasOrdenes: OrdenActivaRanking[]
 ): { lat: number; lng: number } | null {
-  if (motorizado.estado === 'disponible') {
-    return motorizado.ultimaUbicacionOperativa ?? motorizado.ubicacionBase ?? null
-  }
-
-  // Ocupado: encontrar su orden activa más avanzada
+  // Con o sin trabajo: sus órdenes activas mandan, sea cual sea el `estado` crudo
+  // (disponible, o el legacy ocupado).
   const misOrdenes = todasLasOrdenes.filter(
     (o) =>
       o.asignacion?.motorizadoId === motorizado.id &&
@@ -225,11 +224,11 @@ export function calcularScore(
   // ── 3. Compatibilidad de ruta (20%) ─────────────────────────────────────────
   let scoreCompatibilidad: number
 
-  if (motorizado.estado !== 'ocupado') {
-    // Disponible: perfectamente compatible, sin conflicto de ruta
+  if (!tieneCargaOperativa(ordenesDelMoto)) {
+    // Sin órdenes activas: perfectamente compatible, sin conflicto de ruta
     scoreCompatibilidad = 1.0
   } else {
-    // Ocupado: evaluar qué tan lejos está su próximo destino del nuevo retiro
+    // Con órdenes activas: evaluar qué tan lejos está su próximo destino del nuevo retiro
     if (proximoPunto && coordRetiroNueva) {
       const distCompatKm = haversine(proximoPunto, coordRetiroNueva)
       scoreCompatibilidad = Math.max(0, 1 - distCompatKm / DIST_MAX_COMPAT)
@@ -259,7 +258,7 @@ export function calcularScore(
     : 0
 
   // ── 6b. Bonificación/penalización territorial ────────────────────────────────
-  // Solo aplica cuando el motorizado está ocupado y tiene órdenes activas.
+  // Solo aplica cuando el motorizado tiene órdenes activas.
   // Compara la macrozona de entrega de su orden más avanzada con la macrozona
   // de entrega del nuevo pedido: misma dirección territorial → bonus,
   // dirección opuesta → penalización.
@@ -268,7 +267,7 @@ export function calcularScore(
   let mismaMacroZona: boolean | null = null
   let mismaZona: boolean | null = null
 
-  if (motorizado.estado === 'ocupado' && ordenesDelMoto.length > 0) {
+  if (tieneCargaOperativa(ordenesDelMoto)) {
     const ordenMasAvanzada = [...ordenesDelMoto].sort(
       (a, b) => (PRIORIDAD_ESTADO[b.estado] ?? 0) - (PRIORIDAD_ESTADO[a.estado] ?? 0)
     )[0]
@@ -298,7 +297,7 @@ export function calcularScore(
     }
     // Si alguna macrozona es null → datos insuficientes → sin efecto (fallback gracioso)
   }
-  // Motorizados disponibles: no aplica bonificación zonal (son igualmente flexibles)
+  // Motorizados sin órdenes activas: no aplica bonificación zonal (son igualmente flexibles)
 
   // ── 7. Score total ──────────────────────────────────────────────────────────
   const scoreTotal = Math.round(
@@ -308,7 +307,7 @@ export function calcularScore(
   // ── 8. Explicación textual ──────────────────────────────────────────────────
   const partes: string[] = []
 
-  partes.push(motorizado.estado === 'disponible' ? 'Disponible' : 'Ocupado')
+  partes.push('En línea')
 
   partes.push(
     cargaActual === 0
@@ -317,13 +316,13 @@ export function calcularScore(
   )
 
   if (distanciaProximoKm !== null) {
-    const tipo = motorizado.estado === 'disponible' ? 'cercano' : 'estimado'
+    const tipo = tieneCargaOperativa(ordenesDelMoto) ? 'estimado' : 'cercano'
     partes.push(`Punto ${tipo} (${distanciaProximoKm.toFixed(1)} km)`)
   } else {
     partes.push('Sin ubicación de referencia')
   }
 
-  if (motorizado.estado === 'ocupado') {
+  if (tieneCargaOperativa(ordenesDelMoto)) {
     partes.push(scoreCompatibilidad >= 0.5 ? 'Ruta compatible' : 'Ruta alejada')
   } else {
     partes.push('Ruta compatible')
@@ -367,7 +366,9 @@ export function calcularScore(
 
 /**
  * Filtra, puntúa y ordena los motorizados elegibles para recibir una nueva
- * orden. Solo participan los que tienen `activo !== false`.
+ * orden. Solo participan los que tienen `activo !== false` y están en línea
+ * (`disponible`, o el legacy `ocupado`): un motorizado `inactivo` (fuera de línea)
+ * no recibe órdenes nuevas, aunque conserve las que ya tiene.
  *
  * @param motorizados       Lista completa de motorizados
  * @param todasLasOrdenes   Órdenes activas del sistema (estados activos)
@@ -379,8 +380,8 @@ export function rankearMotorizados(
   todasLasOrdenes: OrdenActivaRanking[],
   nuevaOrden: NuevaOrdenRanking
 ): MotorizadoRankeado[] {
-  // Solo motorizados activos
-  const activos = motorizados.filter((m) => m.activo !== false)
+  // Solo motorizados activos y en línea
+  const activos = motorizados.filter((m) => m.activo !== false && esMotorizadoEnLinea(m.estado))
 
   return activos
     .map((moto) => {

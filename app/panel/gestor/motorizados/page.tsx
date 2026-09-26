@@ -28,16 +28,19 @@ import { clasificarPuntoEnZona } from '@/lib/zonas'
 import type { ZonaGeografica } from '@/lib/zonas'
 import { X, Bike, Plus, TrendingUp, AlertCircle, MapPin, KeyRound } from 'lucide-react'
 import { vistaAcceso, estadoSinConsultar, type EstadoAcceso } from '@/lib/acceso-motorizado-ui'
+import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type EstadoMoto = 'disponible' | 'ocupado'
+// Presencia que se puede ELEGIR. `ocupado` es un valor legacy: se lee como "en línea"
+// pero ya no se escribe (MOTO-DISPONIBILIDAD-CONTRATO-1).
+type EstadoMoto = 'disponible' | 'inactivo'
 
 type Motorizado = {
   id: string
   nombre: string
   telefono?: string
-  estado?: EstadoMoto
+  estado?: EstadoMoto | 'ocupado'
   activo?: boolean
   authUid?: string
   createdAt?: any
@@ -72,8 +75,8 @@ type Stats = {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const estadoConfig = {
-  disponible: { label: 'Disponible', cls: 'bg-green-50 text-green-700 border-green-200' },
-  ocupado:    { label: 'Ocupado',    cls: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
+  disponible: { label: 'En línea', cls: 'bg-green-50 text-green-700 border-green-200' },
+  inactivo:   { label: 'Fuera de línea', cls: 'bg-gray-100 text-gray-600 border-gray-200' },
 }
 
 async function fetchStats(motorizadoId: string): Promise<Stats> {
@@ -350,8 +353,9 @@ function MotorizadosPageContent() {
 
   // Summary counts
   const totalCount = motorizados.length
-  const disponibles = motorizados.filter((m) => m.activo !== false && m.estado === 'disponible').length
-  const ocupados = motorizados.filter((m) => m.activo !== false && m.estado === 'ocupado').length
+  // Presencia, no carga: la carga sale de las órdenes activas (un motorizado en línea puede tener varias).
+  const disponibles = motorizados.filter((m) => m.activo !== false && esMotorizadoEnLinea(m.estado)).length
+  const fueraDeLinea = motorizados.filter((m) => m.activo !== false && !esMotorizadoEnLinea(m.estado)).length
   const inactivos = motorizados.filter((m) => m.activo === false).length
 
   // Estado real del acceso: una llamada al servidor al abrir el detalle. Sin
@@ -467,7 +471,7 @@ function MotorizadosPageContent() {
     setEName(m.nombre || '')
     setEPhone(m.telefono || '')
     setEActivo(m.activo !== false)
-    setEEstado(m.estado || 'disponible')
+    setEEstado(esMotorizadoEnLinea(m.estado) || !m.estado ? 'disponible' : 'inactivo')
     setETieneBolso(m.tieneBolso ?? false)
     setEUbicacionBase(m.ubicacionBase ?? null)
     setEDireccionBase(m.direccionBase ?? null)
@@ -586,7 +590,9 @@ function MotorizadosPageContent() {
         await updateDoc(doc(db, 'motorizado', selected.id), {
           nombre: eName.trim(),
           telefono: ePhone.trim(),
-          estado: eEstado,
+          // La presencia solo se escribe si el gestor la cambió: un registro legacy
+          // `ocupado` no se migra por editar otro dato.
+          ...(eEstado !== (esMotorizadoEnLinea(selected.estado) || !selected.estado ? 'disponible' : 'inactivo') ? { estado: eEstado } : {}),
           activo: eActivo,
           tieneBolso: eTieneBolso,
           fotoUrl,
@@ -625,8 +631,8 @@ function MotorizadosPageContent() {
       <div className="grid grid-cols-4 gap-3">
         {[
           { label: 'Total', value: totalCount, color: 'text-gray-900', bg: 'bg-white' },
-          { label: 'Disponibles', value: disponibles, color: 'text-green-700', bg: 'bg-green-50' },
-          { label: 'Ocupados', value: ocupados, color: 'text-yellow-700', bg: 'bg-yellow-50' },
+          { label: 'En línea', value: disponibles, color: 'text-green-700', bg: 'bg-green-50' },
+          { label: 'Fuera de línea', value: fueraDeLinea, color: 'text-gray-600', bg: 'bg-gray-50' },
           { label: 'Inactivos', value: inactivos, color: 'text-red-600', bg: 'bg-red-50' },
         ].map((s) => (
           <div key={s.label} className={`${s.bg} rounded-xl border border-gray-200 px-4 py-3`}>
@@ -660,7 +666,7 @@ function MotorizadosPageContent() {
             <tbody className="divide-y divide-gray-100">
               {motorizados.map((m) => {
                 const activo = m.activo !== false
-                const cfg = estadoConfig[m.estado || 'disponible'] || estadoConfig.disponible
+                const cfg = esMotorizadoEnLinea(m.estado) || !m.estado ? estadoConfig.disponible : estadoConfig.inactivo
                 return (
                   <tr key={m.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-4 py-3">
@@ -682,7 +688,7 @@ function MotorizadosPageContent() {
                     <td className="px-4 py-3">
                       {activo ? (
                         <span className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full border ${cfg.cls}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${m.estado === 'ocupado' ? 'bg-yellow-500' : 'bg-green-500'}`} />
+                          <span className={`w-1.5 h-1.5 rounded-full ${cfg === estadoConfig.inactivo ? 'bg-gray-400' : 'bg-green-500'}`} />
                           {cfg.label}
                         </span>
                       ) : (
@@ -962,18 +968,18 @@ function MotorizadosPageContent() {
 
           {/* Estado */}
           <section className="space-y-3">
-            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wide">Estado operativo</h3>
+            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wide">Presencia</h3>
             <div className="flex gap-2">
-              {(['disponible', 'ocupado'] as EstadoMoto[]).map((e) => (
+              {(['disponible', 'inactivo'] as EstadoMoto[]).map((e) => (
                 <button
                   key={e}
                   onClick={() => setEEstado(e)}
                   className={`flex-1 py-2 rounded-xl text-sm font-semibold border transition ${eEstado === e
-                    ? e === 'disponible' ? 'bg-green-50 text-green-700 border-green-300' : 'bg-yellow-50 text-yellow-700 border-yellow-300'
+                    ? e === 'disponible' ? 'bg-green-50 text-green-700 border-green-300' : 'bg-gray-100 text-gray-700 border-gray-300'
                     : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
                   }`}
                 >
-                  {e === 'disponible' ? '🟢 Disponible' : '🟡 Ocupado'}
+                  {e === 'disponible' ? '🟢 En línea' : '⚪ Fuera de línea'}
                 </button>
               ))}
             </div>

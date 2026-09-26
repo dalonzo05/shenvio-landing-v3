@@ -21,6 +21,7 @@ import {
 } from 'firebase/firestore'
 import { db, auth } from '@/fb/config'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
+import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia'
 // VIAJE-ENTREGADO-SIN-COBRO-1 — el viaje lo mueve el motorizado.
 import {
   puedeGestorCambiarEstadoCliente,
@@ -553,7 +554,7 @@ export function SolicitudDrawer({
       setMotorizados(
         snap.docs
           .map((d) => ({ id: d.id, ...(d.data() as any) }))
-          .sort((a, b) => (b.estado === 'disponible' ? 1 : 0) - (a.estado === 'disponible' ? 1 : 0))
+          .sort((a, b) => (esMotorizadoEnLinea(b.estado) ? 1 : 0) - (esMotorizadoEnLinea(a.estado) ? 1 : 0))
       )
     })
   }, [])
@@ -831,18 +832,15 @@ export function SolicitudDrawer({
   const rebotarAsignacion = async () => {
     if (!solicitud) return
     if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
-    const motorizadoId = solicitud.asignacion?.motorizadoId
     try {
       const b = writeBatch(db)
       b.update(doc(db, 'solicitudes_envio', solicitud.id), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() } as any)
-      if (motorizadoId) b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
       await b.commit()
     } catch { setErr('No se pudo rebotar.') }
   }
 
   const reactivarOrden = async () => {
     if (!solicitud) return
-    const motorizadoId = solicitud.asignacion?.motorizadoId
     try {
       const b = writeBatch(db)
       b.update(doc(db, 'solicitudes_envio', solicitud.id), {
@@ -851,7 +849,6 @@ export function SolicitudDrawer({
         asignacion: null,
         updatedAt: serverTimestamp(),
       } as any)
-      if (motorizadoId) b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
       await b.commit()
       setErr(null)
     } catch { setErr('No se pudo reactivar la orden.') }
@@ -864,7 +861,6 @@ export function SolicitudDrawer({
       setErr('El detalle es obligatorio cuando el motivo es "Otro".')
       return
     }
-    const motorizadoId = solicitud.asignacion?.motorizadoId
     try {
       const b = writeBatch(db)
       b.update(doc(db, 'solicitudes_envio', solicitud.id), {
@@ -881,7 +877,6 @@ export function SolicitudDrawer({
         updatedAt: serverTimestamp(),
         'historial.rechazadaAt': serverTimestamp(),
       } as any)
-      if (motorizadoId) b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
       await b.commit()
       setShowRechazarModal(false)
       setMotivoCodigo('')
@@ -1876,12 +1871,12 @@ export function SolicitudDrawer({
                             >
                               {/* Badge estado */}
                               <span className={`shrink-0 inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full border ${
-                                m.estado === 'disponible'
+                                esMotorizadoEnLinea(m.estado)
                                   ? 'bg-green-50 text-green-700 border-green-200'
                                   : 'bg-yellow-50 text-yellow-700 border-yellow-200'
                               }`}>
-                                <span className={`w-1.5 h-1.5 rounded-full ${m.estado === 'disponible' ? 'bg-green-500' : 'bg-yellow-500'}`} />
-                                {m.estado === 'disponible' ? 'Disp.' : (m.estado || 'Ocup.')}
+                                <span className={`w-1.5 h-1.5 rounded-full ${esMotorizadoEnLinea(m.estado) ? 'bg-green-500' : 'bg-yellow-500'}`} />
+                                {esMotorizadoEnLinea(m.estado) ? 'Disp.' : 'Fuera'}
                               </span>
 
                               {/* Nombre + explicacion */}

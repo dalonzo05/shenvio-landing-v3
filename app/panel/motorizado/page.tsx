@@ -8,6 +8,7 @@ import {
   runTransaction, increment, arrayUnion, limit,
 } from 'firebase/firestore';
 import { auth, db, functions } from '@/fb/config';
+import { esMotorizadoEnLinea, presenciaAlAlternar } from '@/lib/motorizado-presencia';
 import { httpsCallable } from 'firebase/functions';
 import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBoucher, uploadVersionBoucherDeposito, type TipoEvidencia } from '@/fb/storage'
 import { registrarMovimiento } from '@/lib/financial-writes';
@@ -596,11 +597,11 @@ export default function PanelMotorizadoPage() {
     setErr(null); setActionId(o.id);
     try {
       await responderAsignacionCallable({ solicitudId: o.id, accion: 'aceptar' });
-      // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
-      // — best-effort, nunca fue atómico con la escritura de la solicitud
-      // (ni antes ni ahora): si falla, no revierte la aceptación.
+      // MOTO-DISPONIBILIDAD-CONTRATO-1: aceptar UNA orden no cambia la presencia
+      // (`estado`): el motorizado puede tener otras órdenes activas y la carga se
+      // deriva de ellas. Solo se registra la métrica de aceptación (best-effort:
+      // si falla, no revierte la aceptación).
       if (motorizadoDocId) {
-        await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: 'ocupado', updatedAt: serverTimestamp() });
         registrarAceptacion(motorizadoDocId, o.asignacion?.asignadoAt ?? null);
       }
     } catch (e) { console.error(e); setErr('No se pudo aceptar.'); }
@@ -612,9 +613,9 @@ export default function PanelMotorizadoPage() {
     setErr(null); setActionId(o.id);
     try {
       await responderAsignacionCallable({ solicitudId: o.id, accion: 'rechazar' });
-      // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
+      // Rechazar UNA orden no cambia la presencia (`estado`): puede tener otras
+      // órdenes activas. Solo se registra la métrica de rechazo.
       if (motorizadoDocId) {
-        await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: 'disponible', updatedAt: serverTimestamp() });
         registrarRechazo(motorizadoDocId);
       }
     } catch (e) { console.error(e); setErr('No se pudo rechazar.'); }
@@ -623,10 +624,11 @@ export default function PanelMotorizadoPage() {
 
   async function toggleActivarse() {
     if (!motorizadoDocId || toggling) return;
-    if (motorizadoEstado === 'ocupado') return;
     setToggling(true);
     try {
-      const nuevoEstado = motorizadoEstado === 'disponible' ? 'inactivo' : 'disponible';
+      // Presencia explícita: en línea ↔ fuera de línea. Se puede salir de línea con
+      // órdenes activas (afecta órdenes NUEVAS; las que ya tiene siguen siendo suyas).
+      const nuevoEstado = presenciaAlAlternar(motorizadoEstado);
       await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: nuevoEstado, updatedAt: serverTimestamp() });
     } catch (e) { console.error(e); }
     finally { setToggling(false); }
@@ -660,13 +662,8 @@ export default function PanelMotorizadoPage() {
       // mismo que antes y las Rules lo denegarían igual.
 
       await updateDoc(doc(db, 'solicitudes_envio', o.id), p);
-      // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
-      if (motorizadoDocId) {
-        await updateDoc(doc(db, 'motorizado', motorizadoDocId), {
-          estado: nuevo === 'entregado' ? 'disponible' : 'ocupado',
-          updatedAt: serverTimestamp(),
-        });
-      }
+      // Avanzar o entregar UNA orden no cambia la presencia (`estado`): puede tener
+      // otras órdenes activas. Solo se actualiza su ubicación operativa.
       if (nuevo === 'retirado' && motorizadoDocId && o.recoleccion?.coord) {
         actualizarUbicacionOperativa(motorizadoDocId, o.recoleccion.coord);
       }
@@ -702,13 +699,8 @@ export default function PanelMotorizadoPage() {
         ...(cobros ? { cobros } : {}),
         ...(cargotransCobro ? { cargotransCobro } : {}),
       });
-      // Actualizar estado del motorizado usando el doc propio (authUid garantizado)
-      if (motorizadoDocId) {
-        await updateDoc(doc(db, 'motorizado', motorizadoDocId), {
-          estado: nuevo === 'entregado' ? 'disponible' : 'ocupado',
-          updatedAt: serverTimestamp(),
-        });
-      }
+      // Avanzar o entregar UNA orden no cambia la presencia (`estado`): puede tener
+      // otras órdenes activas. Solo se actualiza su ubicación operativa.
       if (nuevo === 'retirado' && motorizadoDocId && o.recoleccion?.coord) {
         actualizarUbicacionOperativa(motorizadoDocId, o.recoleccion.coord);
       }
@@ -1274,41 +1266,33 @@ export default function PanelMotorizadoPage() {
           <span style={{ fontSize: 15, fontWeight: 700, color: '#374151' }}>Motorizado</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {/* Badge de estado */}
-            {motorizadoEstado === 'disponible' && (
+            {esMotorizadoEnLinea(motorizadoEstado) && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 20, padding: '5px 10px' }}>
                 <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#16a34a', display: 'inline-block' }} />
                 <span style={{ fontSize: 12, color: '#16a34a', fontWeight: 600 }}>En línea</span>
               </div>
             )}
-            {motorizadoEstado === 'ocupado' && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 20, padding: '5px 10px' }}>
-                <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#d97706', display: 'inline-block' }} />
-                <span style={{ fontSize: 12, color: '#d97706', fontWeight: 600 }}>En turno</span>
-              </div>
-            )}
-            {(motorizadoEstado === 'inactivo' || motorizadoEstado === null) && (
+            {!esMotorizadoEnLinea(motorizadoEstado) && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 20, padding: '5px 10px' }}>
                 <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#9ca3af', display: 'inline-block' }} />
                 <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600 }}>Fuera de línea</span>
               </div>
             )}
             {/* Botón toggle */}
-            {motorizadoEstado !== 'ocupado' && (
-              <button
-                onClick={toggleActivarse}
-                disabled={toggling || !motorizadoDocId}
-                style={{
-                  fontSize: 12, fontWeight: 600, borderRadius: 20, padding: '5px 12px', border: 'none',
-                  cursor: toggling || !motorizadoDocId ? 'not-allowed' : 'pointer',
-                  opacity: toggling || !motorizadoDocId ? 0.6 : 1,
-                  background: motorizadoEstado === 'disponible' ? '#e5e7eb' : '#004aad',
-                  color: motorizadoEstado === 'disponible' ? '#374151' : '#fff',
-                  transition: 'opacity 0.15s',
-                }}
-              >
-                {motorizadoEstado === 'disponible' ? 'Desactivarme' : 'Activarme'}
-              </button>
-            )}
+            <button
+              onClick={toggleActivarse}
+              disabled={toggling || !motorizadoDocId}
+              style={{
+                fontSize: 12, fontWeight: 600, borderRadius: 20, padding: '5px 12px', border: 'none',
+                cursor: toggling || !motorizadoDocId ? 'not-allowed' : 'pointer',
+                opacity: toggling || !motorizadoDocId ? 0.6 : 1,
+                background: esMotorizadoEnLinea(motorizadoEstado) ? '#e5e7eb' : '#004aad',
+                color: esMotorizadoEnLinea(motorizadoEstado) ? '#374151' : '#fff',
+                transition: 'opacity 0.15s',
+              }}
+            >
+              {esMotorizadoEnLinea(motorizadoEstado) ? 'Desactivarme' : 'Activarme'}
+            </button>
           </div>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>

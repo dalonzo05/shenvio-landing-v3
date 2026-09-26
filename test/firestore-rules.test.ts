@@ -2601,7 +2601,7 @@ test('UR6 · ningún cliente escribe el vínculo de la cuenta: authUid lo pone s
 test('UR7 · el gestor conserva crear y editar motorizados sin tocar el vínculo ⇒ ALLOW', async () => {
   const id = await motorizadoConCuenta('mot_ur7')
   const ref = doc(como(UID_GESTOR), 'motorizado', id)
-  await assertSucceeds(updateDoc(ref, { nombre: 'Luigi A.', telefono: '70000000', tieneBolso: true, estado: 'ocupado' }))
+  await assertSucceeds(updateDoc(ref, { nombre: 'Luigi A.', telefono: '70000000', tieneBolso: true, estado: 'inactivo' }))
   // Un motorizado nuevo se crea SIN cuenta (authUid ausente o null).
   await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'motorizado', 'mot_nuevo'), { nombre: 'Nuevo', telefono: '1', estado: 'disponible', activo: true, tieneBolso: false }))
   await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'motorizado', 'mot_nuevo_null'), { nombre: 'Nuevo', telefono: '1', estado: 'disponible', activo: true, authUid: null }))
@@ -2610,7 +2610,41 @@ test('UR7 · el gestor conserva crear y editar motorizados sin tocar el vínculo
 test('UR8 · el motorizado conserva sus escrituras propias y no puede tocar su vínculo ⇒ ALLOW / DENY', async () => {
   const id = await motorizadoConCuenta('mot_ur8')
   const ref = doc(como(UID_MOTO), 'motorizado', id)
-  await assertSucceeds(updateDoc(ref, { estado: 'ocupado', updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(ref, { estado: 'inactivo', updatedAt: serverTimestamp() }))
   await assertFails(updateDoc(ref, { authUid: 'otro_uid', updatedAt: serverTimestamp() }))
   await assertFails(updateDoc(ref, { nombre: 'Otro nombre', updatedAt: serverTimestamp() }))
+})
+
+// MOTO-DISPONIBILIDAD-CONTRATO-1 — `estado` es presencia: disponible / inactivo.
+// `ocupado` es legacy: se conserva donde ya está, pero nadie lo escribe de nuevo.
+async function motorizadoConEstado(id: string, estado: string) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'motorizado', id), { nombre: 'Luigi Alonzo', telefono: '77889911', estado, activo: true, authUid: UID_MOTO })
+  })
+  return id
+}
+
+test('MDR1 · la presencia se alterna en ambos sentidos: motorizado, gestor y admin ⇒ ALLOW', async () => {
+  const id = await motorizadoConEstado('mot_mdr1', 'disponible')
+  const propio = doc(como(UID_MOTO), 'motorizado', id)
+  await assertSucceeds(updateDoc(propio, { estado: 'inactivo', updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(propio, { estado: 'disponible', updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'motorizado', id), { estado: 'inactivo' }))
+  await assertSucceeds(updateDoc(doc(como(UID_ADMIN), 'motorizado', id), { estado: 'disponible' }))
+})
+
+test('MDR2 · nadie fabrica un `ocupado` nuevo: ni al editar ni al crear ⇒ DENY', async () => {
+  const id = await motorizadoConEstado('mot_mdr2', 'disponible')
+  for (const uid of [UID_MOTO, UID_GESTOR, UID_ADMIN]) {
+    await assertFails(updateDoc(doc(como(uid), 'motorizado', id), { estado: 'ocupado', updatedAt: serverTimestamp() }))
+  }
+  await assertFails(setDoc(doc(como(UID_GESTOR), 'motorizado', 'mot_mdr2_nuevo'), { nombre: 'X', telefono: '1', estado: 'ocupado', activo: true }))
+  await assertFails(updateDoc(doc(como(UID_MOTO), 'motorizado', id), { estado: 'cualquiera', updatedAt: serverTimestamp() }))
+})
+
+test('MDR3 · un documento legacy `ocupado` recibe cambios ajenos sin migrarlo, y puede salir de ese valor ⇒ ALLOW', async () => {
+  const id = await motorizadoConEstado('mot_mdr3', 'ocupado')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'motorizado', id), { telefono: '70000000' }))
+  await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'motorizado', id), { totalAceptadas: 3, updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'motorizado', id), { estado: 'inactivo', updatedAt: serverTimestamp() }))
 })

@@ -428,11 +428,26 @@ service cloud.firestore {
         return ['authUid', 'accesoProvisionAuthUid', 'accesoEmail', 'welcomeAttempts'];
       }
 
+      // MOTO-DISPONIBILIDAD-CONTRATO-1: `estado` es PRESENCIA (disponible = en
+      // línea, inactivo = fuera de línea). `ocupado` es un valor legacy: los
+      // documentos que ya lo traen siguen siendo válidos y pueden recibir cambios
+      // de otros campos sin migrarlos, pero NADIE escribe ya un `ocupado` nuevo (la
+      // carga se deriva de las órdenes activas, no de este campo).
+      function presenciaEscribible(valor) {
+        return valor in ['disponible', 'inactivo'];
+      }
+      function estadoSoloPresencia() {
+        return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['estado'])
+          || presenciaEscribible(request.resource.data.get('estado', null));
+      }
+
       allow create: if isAdminOrGestor()
         && request.resource.data.get('authUid', null) == null
-        && !request.resource.data.keys().hasAny(['accesoProvisionAuthUid', 'accesoEmail', 'welcomeAttempts']);
+        && !request.resource.data.keys().hasAny(['accesoProvisionAuthUid', 'accesoEmail', 'welcomeAttempts'])
+        && presenciaEscribible(request.resource.data.get('estado', 'disponible'));
 
-      allow update: if (
+      allow update: if estadoSoloPresencia() && (
+        (
           isAdminOrGestor()
           && !request.resource.data.diff(resource.data).affectedKeys().hasAny(camposDeAccesoServidor())
         )
@@ -451,7 +466,7 @@ service cloud.firestore {
             'totalRechazos',
             'ultimaUbicacionOperativa'
           ])
-        );
+        ));
 
       allow delete: if false;
     }

@@ -33,6 +33,7 @@ import {
 } from 'firebase/firestore'
 import { db, auth } from '@/fb/config'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
+import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia'
 // VIAJE-ENTREGADO-SIN-COBRO-1 — Base de datos no es una puerta para escribir
 // estados operativos: eso es del flujo del motorizado.
 import {
@@ -393,7 +394,7 @@ function SolicitudDrawer({
       setMotorizados(
         snap.docs
           .map((d) => ({ id: d.id, ...(d.data() as any) }))
-          .sort((a, b) => (b.estado === 'disponible' ? 1 : 0) - (a.estado === 'disponible' ? 1 : 0))
+          .sort((a, b) => (esMotorizadoEnLinea(b.estado) ? 1 : 0) - (esMotorizadoEnLinea(a.estado) ? 1 : 0))
       )
     })
   }, [])
@@ -732,7 +733,7 @@ function SolicitudDrawer({
                       <option value="">-- No asignar todavía --</option>
                       {motorizados.map((m) => (
                         <option key={m.id} value={m.id}>
-                          {m.estado === 'disponible' ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}
+                          {esMotorizadoEnLinea(m.estado) ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}
                         </option>
                       ))}
                     </select>

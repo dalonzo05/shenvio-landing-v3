@@ -40,6 +40,7 @@ import {
   MSG_CANCELAR_OPERACION_EN_CURSO,
 } from '@/lib/transiciones-viaje'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
+import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia'
 import { esEntregadaHoy, esEntregadaEnRango, entregaSinFecha, rangoDiasDeFiltro } from '@/lib/dia-operativo'
 import {
   Search,
@@ -625,8 +626,8 @@ function GestorSolicitudesPageContent() {
           ...(d.data() as any),
         }))
         list.sort((a, b) => {
-          const aDisp = a.estado === 'disponible' ? 1 : 0
-          const bDisp = b.estado === 'disponible' ? 1 : 0
+          const aDisp = esMotorizadoEnLinea(a.estado) ? 1 : 0
+          const bDisp = esMotorizadoEnLinea(b.estado) ? 1 : 0
           return bDisp - aDisp
         })
         setMotorizados(list)
@@ -1081,7 +1082,7 @@ function GestorSolicitudesPageContent() {
     setToast({ type: 'success', message })
   }
 
-  const rebotarAsignacion = async (id: string, motorizadoId?: string) => {
+  const rebotarAsignacion = async (id: string) => {
     setErr(null)
     // A-FIX1: guard defensivo. cambiarEstado() ya consulta
     // TRANSICIONES_VALIDAS, pero este handler y los de asignación la evaden
@@ -1098,9 +1099,6 @@ function GestorSolicitudesPageContent() {
         asignacion: null,
         updatedAt: serverTimestamp(),
       } as any)
-      if (motorizadoId) {
-        b.update(doc(db, 'motorizado', motorizadoId), { estado: 'disponible', updatedAt: serverTimestamp() })
-      }
       await b.commit()
       setToast({ type: 'success', message: 'Asignación rebotada' })
     } catch (e) {
@@ -2146,7 +2144,7 @@ function GestorSolicitudesPageContent() {
                                   Reasignar
                                 </button>
                                 <button
-                                  onClick={() => rebotarAsignacion(s.id, s.asignacion?.motorizadoId)}
+                                  onClick={() => rebotarAsignacion(s.id)}
                                   className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-[11px] font-medium text-gray-700 hover:bg-gray-100"
                                   title="Rebotar asignación"
                                 >
@@ -2416,7 +2414,7 @@ function GestorSolicitudesPageContent() {
                         </button>
 
                         <button
-                          onClick={() => rebotarAsignacion(s.id, s.asignacion?.motorizadoId)}
+                          onClick={() => rebotarAsignacion(s.id)}
                           className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700"
                         >
                           Rebotar
@@ -2564,7 +2562,7 @@ function GestorSolicitudesPageContent() {
                     const scoreLabel = score !== undefined ? ` [${score}]` : ''
                     return (
                       <option key={m.id} value={m.id}>
-                        {m.estado === 'disponible' ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}{scoreLabel}
+                        {esMotorizadoEnLinea(m.estado) ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}{scoreLabel}
                       </option>
                     )
                   })
