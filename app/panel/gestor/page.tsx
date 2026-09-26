@@ -38,6 +38,7 @@ import { useModuleGuard } from '../_hooks/useModuleGuard'
 // listener; acá solo se lee y se le pone copy.
 import { useDepositosPorRevisar } from './_components/DepositosPorRevisar'
 import { avisoRevisionGestor } from '@/lib/revision-depositos-gestor'
+import { categoriaPresencia, resumenPresencia, type CategoriaPresencia } from '@/lib/motorizado-presencia'
 
 type OrdenActiva = {
   id: string
@@ -79,22 +80,25 @@ type Motorizado = {
   zonaOperativa?: string
 }
 
-type FiltroEstado = 'todos' | 'disponible' | 'ocupado' | 'inactivo'
+type FiltroEstado = 'todos' | 'en_linea' | 'fuera_de_linea' | 'inactivo'
 
+// Presencia (no carga): en línea = disponible o el legacy ocupado; fuera de línea = inactivo.
 function estadoColor(estado?: string, activo?: boolean) {
-  if (!activo) return 'bg-red-50 text-red-700 border-red-200'
-  switch ((estado || '').toLowerCase()) {
-    case 'disponible': return 'bg-green-50 text-green-700 border-green-200'
-    case 'ocupado': return 'bg-yellow-50 text-yellow-700 border-yellow-200'
+  switch (categoriaPresencia({ activo, estado })) {
+    case 'en_linea': return 'bg-green-50 text-green-700 border-green-200'
+    case 'fuera_de_linea': return 'bg-gray-100 text-gray-600 border-gray-200'
     case 'inactivo': return 'bg-red-50 text-red-700 border-red-200'
     default: return 'bg-gray-50 text-gray-700 border-gray-200'
   }
 }
 
 function estadoTexto(estado?: string, activo?: boolean) {
-  if (!activo) return 'Inactivo'
-  if (!estado) return 'Sin estado'
-  return estado.charAt(0).toUpperCase() + estado.slice(1)
+  switch (categoriaPresencia({ activo, estado })) {
+    case 'en_linea': return 'En línea'
+    case 'fuera_de_linea': return 'Fuera de línea'
+    case 'inactivo': return 'Inactivo'
+    default: return 'Sin estado'
+  }
 }
 
 function formatUbicacion(ubicacion: any): string | null {
@@ -107,16 +111,12 @@ function formatUbicacion(ubicacion: any): string | null {
   return null
 }
 
-function normalizarEstado(m: Motorizado): 'disponible' | 'ocupado' | 'inactivo' | 'sin_estado' {
-  if (!m.activo) return 'inactivo'
-  const estado = (m.estado || '').toLowerCase()
-  if (estado === 'disponible') return 'disponible'
-  if (estado === 'ocupado') return 'ocupado'
-  return 'sin_estado'
+function normalizarEstado(m: Motorizado): CategoriaPresencia {
+  return categoriaPresencia(m)
 }
 
 function ordenarMotorizados(arr: Motorizado[]) {
-  const prioridad: Record<string, number> = { disponible: 0, ocupado: 1, inactivo: 2, sin_estado: 3 }
+  const prioridad: Record<string, number> = { en_linea: 0, fuera_de_linea: 1, inactivo: 2, sin_estado: 3 }
   return [...arr].sort((a, b) => {
     const ea = normalizarEstado(a)
     const eb = normalizarEstado(b)
@@ -287,10 +287,7 @@ function PanelGestorPageContent() {
   }, [])
 
   const resumenMotorizados = useMemo(() => {
-    const disponibles = motorizados.filter(m => m.activo === true && (m.estado || '').toLowerCase() === 'disponible').length
-    const ocupados = motorizados.filter(m => m.activo === true && (m.estado || '').toLowerCase() === 'ocupado').length
-    const inactivos = motorizados.filter(m => m.activo !== true).length
-    return { total: motorizados.length, disponibles, ocupados, inactivos }
+    return resumenPresencia(motorizados)
   }, [motorizados])
 
   const motorizadosFiltrados = useMemo(() => {
@@ -781,8 +778,8 @@ function PanelGestorPageContent() {
               <h2 className="text-sm font-black text-gray-900">Motorizados operativos</h2>
             </div>
             <div className="flex items-center gap-2 text-xs">
-              <span className="bg-green-50 text-green-700 border border-green-200 rounded-full px-2 py-0.5 font-semibold">{resumenMotorizados.disponibles} disponibles</span>
-              <span className="bg-yellow-50 text-yellow-700 border border-yellow-200 rounded-full px-2 py-0.5 font-semibold">{resumenMotorizados.ocupados} ocupados</span>
+              <span className="bg-green-50 text-green-700 border border-green-200 rounded-full px-2 py-0.5 font-semibold">{resumenMotorizados.enLinea} en línea</span>
+              <span className="bg-gray-100 text-gray-600 border border-gray-200 rounded-full px-2 py-0.5 font-semibold">{resumenMotorizados.fueraDeLinea} fuera de línea</span>
               <span className="bg-red-50 text-red-700 border border-red-200 rounded-full px-2 py-0.5 font-semibold">{resumenMotorizados.inactivos} inactivos</span>
             </div>
           </div>
@@ -802,8 +799,8 @@ function PanelGestorPageContent() {
               className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs outline-none focus:border-blue-300"
             >
               <option value="todos">Todos</option>
-              <option value="disponible">Disponibles</option>
-              <option value="ocupado">Ocupados</option>
+              <option value="en_linea">En línea</option>
+              <option value="fuera_de_linea">Fuera de línea</option>
               <option value="inactivo">Inactivos</option>
             </select>
           </div>

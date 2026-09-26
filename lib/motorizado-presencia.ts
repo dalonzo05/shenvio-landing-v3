@@ -33,3 +33,30 @@ export function presenciaAlAlternar(estado: unknown): PresenciaEscribible {
 export function tieneCargaOperativa(ordenesActivas: readonly unknown[]): boolean {
   return ordenesActivas.length > 0
 }
+
+// ─── Resumen de presencia (dashboard del gestor) ──────────────────────────────
+
+export type CategoriaPresencia = 'en_linea' | 'fuera_de_linea' | 'inactivo' | 'sin_estado'
+
+/**
+ * Categoría operativa de un motorizado para el dashboard. `activo` es la cuenta
+ * (activo === false = desactivada); `estado` es la presencia. Una cuenta que no
+ * está activa es `inactivo` sea cual sea su presencia; sin `estado` no se asume
+ * ninguna presencia.
+ */
+export function categoriaPresencia(m: { activo?: boolean | null; estado?: unknown }): CategoriaPresencia {
+  if (m.activo !== true) return 'inactivo'
+  if (esMotorizadoEnLinea(m.estado)) return 'en_linea'
+  if (m.estado === 'inactivo') return 'fuera_de_linea'
+  return 'sin_estado'
+}
+
+export function resumenPresencia(motorizados: ReadonlyArray<{ activo?: boolean | null; estado?: unknown }>) {
+  const cuenta = (c: CategoriaPresencia) => motorizados.filter((m) => categoriaPresencia(m) === c).length
+  return {
+    total: motorizados.length,
+    enLinea: cuenta('en_linea'),
+    fueraDeLinea: cuenta('fuera_de_linea'),
+    inactivos: cuenta('inactivo'),
+  }
+}

@@ -10,6 +10,8 @@ import {
   presenciaAlAlternar,
   tieneCargaOperativa,
   PRESENCIAS_ESCRIBIBLES,
+  categoriaPresencia,
+  resumenPresencia,
 } from './motorizado-presencia'
 import {
   rankearMotorizados,
@@ -182,4 +184,44 @@ test('presencia · valores desconocidos o ausentes no cuentan como en línea', (
   for (const v of [undefined, null, '', 'otro', 'Disponible']) assert.equal(esMotorizadoEnLinea(v), false)
   assert.equal(tieneCargaOperativa([]), false)
   assert.equal(tieneCargaOperativa([{}]), true)
+})
+
+// ─── Dashboard del gestor: presencia, no carga ─────────────────────────────────
+
+test('MDD1 · disponible → cuenta como En línea', () => {
+  assert.equal(categoriaPresencia({ activo: true, estado: 'disponible' }), 'en_linea')
+  assert.equal(resumenPresencia([{ activo: true, estado: 'disponible' }]).enLinea, 1)
+})
+
+test('MDD2 · ocupado legacy → cuenta como En línea (no se migra ni se oculta)', () => {
+  assert.equal(categoriaPresencia({ activo: true, estado: 'ocupado' }), 'en_linea')
+  const r = resumenPresencia([{ activo: true, estado: 'ocupado' }, { activo: true, estado: 'disponible' }])
+  assert.deepEqual(r, { total: 2, enLinea: 2, fueraDeLinea: 0, inactivos: 0 })
+})
+
+test('MDD3 · inactivo con cuenta activa → Fuera de línea, distinto de la cuenta desactivada', () => {
+  assert.equal(categoriaPresencia({ activo: true, estado: 'inactivo' }), 'fuera_de_linea')
+  const r = resumenPresencia([{ activo: true, estado: 'inactivo' }])
+  assert.deepEqual(r, { total: 1, enLinea: 0, fueraDeLinea: 1, inactivos: 0 })
+})
+
+test('MDD4 · activo=false → Inactivo de cuenta, sea cual sea su presencia', () => {
+  for (const estado of ['disponible', 'ocupado', 'inactivo', undefined]) {
+    assert.equal(categoriaPresencia({ activo: false, estado }), 'inactivo')
+  }
+  assert.deepEqual(resumenPresencia([{ activo: false, estado: 'disponible' }, { activo: false, estado: 'inactivo' }]), { total: 2, enLinea: 0, fueraDeLinea: 0, inactivos: 2 })
+})
+
+test('MDD5 · estado ausente o desconocido → NO cuenta como En línea ni como Fuera de línea', () => {
+  for (const estado of [undefined, null, '', 'otro']) {
+    assert.equal(categoriaPresencia({ activo: true, estado }), 'sin_estado')
+  }
+  assert.deepEqual(resumenPresencia([{ activo: true }, { activo: true, estado: 'otro' }]), { total: 2, enLinea: 0, fueraDeLinea: 0, inactivos: 0 })
+})
+
+test('MDD6 · el dashboard ya no trata ocupado como categoría operativa vigente y usa el helper de presencia', () => {
+  const src = readFileSync(join(__dirname, '..', 'app', 'panel', 'gestor', 'page.tsx'), 'utf8')
+  assert.ok(!src.includes("'ocupado'"), "sin literal 'ocupado'")
+  assert.ok(!/resumenMotorizados.ocupados|>s*Ocupados/.test(src), 'sin contador ni filtro Ocupados')
+  assert.ok(src.includes('resumenPresencia(motorizados)') && src.includes('categoriaPresencia('))
 })
