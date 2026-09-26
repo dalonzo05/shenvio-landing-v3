@@ -93,3 +93,23 @@ export function evaluarConfirmacionMotorizado(input: MotorizadoTargetInput): Dec
 
   return { tipo: 'confirmar', yaVerificado: input.authUserEmailVerified === true }
 }
+
+// ─── MOTO-ALTA-AUTH-ROL-1 · invitación de activación ─────────────────────────
+//
+// El alta server-side (crearAccesoMotorizado) deja la cuenta sin contraseña y
+// sin verificar; el motorizado la activa con el enlace de /crear-password, igual
+// que un comercio. Enviar ese enlace exige la MISMA cadena de evidencia que
+// confirmar un acceso —el motorizado apunta a la cuenta, el perfil tiene rol y
+// está activo, Auth existe y los correos coinciden—, así que se reutiliza tal
+// cual. Lo único nuevo: si la cuenta ya está verificada no hay nada que activar.
+
+export type DecisionInvitacion =
+  | { tipo: 'rechazar'; motivo: MotivoRechazo }
+  | { tipo: 'ya_activo' }
+  | { tipo: 'enviar' }
+
+export function evaluarInvitacionMotorizado(input: MotorizadoTargetInput): DecisionInvitacion {
+  const decision = evaluarConfirmacionMotorizado(input)
+  if (decision.tipo === 'rechazar') return decision
+  return decision.yaVerificado ? { tipo: 'ya_activo' } : { tipo: 'enviar' }
+}

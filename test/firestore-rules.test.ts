@@ -2472,3 +2472,145 @@ test('VR24 · la subcolección no afloja la solicitud raíz: el comercio sigue s
     updatedAt: serverTimestamp(),
   }))
 })
+
+// ─── UR · MOTO-ALTA-AUTH-ROL-1: la identidad con rol es server-authoritative ──
+//
+// El alta del acceso de un motorizado pasó a la Cloud Function
+// crearAccesoMotorizado (Admin SDK, que no evalúa este archivo). Estas pruebas
+// fijan lo que los CLIENTES ya no pueden hacer y lo que conservan.
+
+const PERFIL_MOTORIZADO_VIEJO = {
+  name: 'Luigi Alonzo',
+  email: 'luigi@example.com',
+  rol: 'motorizado',
+  activo: true,
+  creadoPorGestor: true,
+}
+
+test('UR1 · el gestor ya no fabrica un perfil de motorizado desde el cliente ⇒ DENY', async () => {
+  // Es exactamente el payload que escribía el alta anterior desde el navegador.
+  await assertFails(setDoc(doc(como(UID_GESTOR), 'usuarios', 'uid_nuevo_moto'), {
+    ...PERFIL_MOTORIZADO_VIEJO,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }))
+  // Ni con otro rol, ni con el rol de un privilegiado.
+  for (const rol of ['motorizado', 'Comercio', 'cliente', 'gestor', 'admin', 'digitador']) {
+    await assertFails(setDoc(doc(como(UID_GESTOR), 'usuarios', 'uid_otro_' + rol), {
+      ...PERFIL_MOTORIZADO_VIEJO,
+      rol,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }))
+  }
+})
+
+test('UR2 · nadie se autoasigna un rol: ni al crear su perfil ni al editarlo', async () => {
+  // El auto-registro sin rol sigue permitido (es el perfil mínimo del login).
+  await assertSucceeds(setDoc(doc(como('uid_recien_llegado'), 'usuarios', 'uid_recien_llegado'), {
+    email: 'nuevo@example.com',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }))
+  // Pero con rol o con activo, no.
+  await assertFails(setDoc(doc(como('uid_intruso'), 'usuarios', 'uid_intruso'), {
+    email: 'x@example.com',
+    rol: 'admin',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }))
+  await assertFails(setDoc(doc(como('uid_intruso2'), 'usuarios', 'uid_intruso2'), {
+    email: 'x@example.com',
+    activo: true,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }))
+  // Un perfil sin rol (el caso del motorizado sin acceso completo) no puede
+  // dárselo él mismo.
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'usuarios', 'uid_sin_rol'), { email: 'sr@example.com', createdAt: new Date(), updatedAt: new Date() })
+  })
+  await assertFails(updateDoc(doc(como('uid_sin_rol'), 'usuarios', 'uid_sin_rol'), { rol: 'motorizado', activo: true, updatedAt: serverTimestamp() }))
+})
+
+test('UR3 · un motorizado no puede cambiar su propio rol ni su estado de activación ⇒ DENY', async () => {
+  const ref = doc(como(UID_MOTO), 'usuarios', UID_MOTO)
+  await assertFails(updateDoc(ref, { rol: 'admin', updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(ref, { rol: 'gestor', updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(ref, { activo: false, updatedAt: serverTimestamp() }))
+})
+
+test('UR4 · el admin conserva su capacidad administrativa sobre usuarios ⇒ ALLOW', async () => {
+  await assertSucceeds(setDoc(doc(como(UID_ADMIN), 'usuarios', 'uid_creado_por_admin'), {
+    ...PERFIL_MOTORIZADO_VIEJO,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }))
+  await assertSucceeds(updateDoc(doc(como(UID_ADMIN), 'usuarios', 'uid_creado_por_admin'), { rol: 'motorizado', activo: true, updatedAt: serverTimestamp() }))
+})
+
+test('UR5 · el gestor conserva editar el nombre de un perfil operativo y nada más; los demás roles no ganan acceso', async () => {
+  // Retenido: saveProfile() sincroniza solo `name` en perfiles que ya tienen rol.
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'usuarios', UID_MOTO), { name: 'Otro nombre', updatedAt: serverTimestamp() }))
+  // No puede tocar rol ni activo de un perfil existente.
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'usuarios', UID_MOTO), { rol: 'admin', updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'usuarios', UID_MOTO), { activo: false, updatedAt: serverTimestamp() }))
+  // Y un perfil sin rol no lo puede reparar un gestor: es cosa del admin (Function).
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'usuarios', 'uid_sin_rol2'), { email: 'sr@example.com', createdAt: new Date(), updatedAt: new Date() })
+  })
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'usuarios', 'uid_sin_rol2'), { rol: 'motorizado', activo: true, updatedAt: serverTimestamp() }))
+  // Comercio, motorizado y digitador no crean perfiles ajenos.
+  for (const uid of [UID_COMERCIO, UID_MOTO, UID_DIGITADOR]) {
+    await assertFails(setDoc(doc(como(uid), 'usuarios', 'uid_ajeno_' + uid), {
+      ...PERFIL_MOTORIZADO_VIEJO,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }))
+  }
+})
+
+async function motorizadoConCuenta(id: string) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'motorizado', id), {
+      nombre: 'Luigi Alonzo',
+      telefono: '77889911',
+      estado: 'disponible',
+      activo: true,
+      authUid: UID_MOTO,
+    })
+  })
+  return id
+}
+
+test('UR6 · ningún cliente escribe el vínculo de la cuenta: authUid lo pone solo el servidor ⇒ DENY', async () => {
+  const id = await motorizadoConCuenta('mot_ur6')
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    const ref = doc(como(uid), 'motorizado', id)
+    await assertFails(updateDoc(ref, { authUid: 'uid_pegado_a_mano' }))
+    await assertFails(updateDoc(ref, { authUid: null }))
+    await assertFails(updateDoc(ref, { accesoProvisionAuthUid: 'x' }))
+    await assertFails(updateDoc(ref, { accesoEmail: 'a@b.com' }))
+    await assertFails(updateDoc(ref, { welcomeAttempts: [1] }))
+  }
+  // Crear un motorizado con un authUid ya puesto tampoco.
+  await assertFails(setDoc(doc(como(UID_GESTOR), 'motorizado', 'mot_nuevo_con_uid'), { nombre: 'X', telefono: '1', estado: 'disponible', activo: true, authUid: 'uid_pegado_a_mano' }))
+  await assertFails(setDoc(doc(como(UID_ADMIN), 'motorizado', 'mot_nuevo_con_uid2'), { nombre: 'X', telefono: '1', estado: 'disponible', activo: true, authUid: 'uid_pegado_a_mano' }))
+})
+
+test('UR7 · el gestor conserva crear y editar motorizados sin tocar el vínculo ⇒ ALLOW', async () => {
+  const id = await motorizadoConCuenta('mot_ur7')
+  const ref = doc(como(UID_GESTOR), 'motorizado', id)
+  await assertSucceeds(updateDoc(ref, { nombre: 'Luigi A.', telefono: '70000000', tieneBolso: true, estado: 'ocupado' }))
+  // Un motorizado nuevo se crea SIN cuenta (authUid ausente o null).
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'motorizado', 'mot_nuevo'), { nombre: 'Nuevo', telefono: '1', estado: 'disponible', activo: true, tieneBolso: false }))
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'motorizado', 'mot_nuevo_null'), { nombre: 'Nuevo', telefono: '1', estado: 'disponible', activo: true, authUid: null }))
+})
+
+test('UR8 · el motorizado conserva sus escrituras propias y no puede tocar su vínculo ⇒ ALLOW / DENY', async () => {
+  const id = await motorizadoConCuenta('mot_ur8')
+  const ref = doc(como(UID_MOTO), 'motorizado', id)
+  await assertSucceeds(updateDoc(ref, { estado: 'ocupado', updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(ref, { authUid: 'otro_uid', updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(ref, { nombre: 'Otro nombre', updatedAt: serverTimestamp() }))
+})

@@ -7,7 +7,7 @@ import {
   doc,
   addDoc,
   updateDoc,
-  setDoc,
+  getDoc,
   query,
   where,
   orderBy,
@@ -17,7 +17,9 @@ import {
   serverTimestamp,
   Timestamp,
 } from 'firebase/firestore'
-import { auth, db } from '@/fb/config'
+import { onAuthStateChanged } from 'firebase/auth'
+import { httpsCallable } from 'firebase/functions'
+import { auth, db, functions } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { compressImage, uploadFotoMotorizado } from '@/fb/storage'
 import { getMapsLoader } from '@/lib/googleMaps'
@@ -25,7 +27,7 @@ import { getZonasActivas } from '@/fb/zonas'
 import { clasificarPuntoEnZona } from '@/lib/zonas'
 import type { ZonaGeografica } from '@/lib/zonas'
 import { X, Bike, Plus, TrendingUp, AlertCircle, MapPin, KeyRound } from 'lucide-react'
-import { createAuthUser } from '@/fb/createAuthUser'
+import { vistaAcceso, estadoSinConsultar, type EstadoAcceso } from '@/lib/acceso-motorizado-ui'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -155,7 +157,6 @@ function MotorizadosPageContent() {
   // Edit fields
   const [eName, setEName] = useState('')
   const [ePhone, setEPhone] = useState('')
-  const [eAuthUid, setEAuthUid] = useState('')
   const [eActivo, setEActivo] = useState(true)
   const [eEstado, setEEstado] = useState<EstadoMoto>('disponible')
   const [eTieneBolso, setETieneBolso] = useState(false)
@@ -167,14 +168,35 @@ function MotorizadosPageContent() {
   const [ePhotoPreview, setEPhotoPreview] = useState<string | null>(null)
   const [ePhotoRemoved, setEPhotoRemoved] = useState(false)
 
-  // Crear acceso Auth (en drawer, cualquier motorizado)
+  // Acceso al sistema (MOTO-ALTA-AUTH-ROL-1). La cuenta, el perfil con rol y el
+  // vínculo los crea y los repara el SERVIDOR; acá solo se pide la operación. El
+  // estado real se consulta una vez al abrir el detalle, no por cada fila.
   const [caEmail, setCaEmail] = useState('')
-  const [caPassword, setCaPassword] = useState('')
   const [caSaving, setCaSaving] = useState(false)
   const [caMsg, setCaMsg] = useState<string | null>(null)
   // Ref además del state: bloquea sincrónicamente un doble clic antes de que
-  // React re-renderice el botón con `disabled`, evitando dos createAuthUser.
+  // React re-renderice el botón con `disabled`.
   const caSavingRef = useRef(false)
+  const [rolActor, setRolActor] = useState<string | null>(null)
+  const [acceso, setAcceso] = useState<{
+    estado: EstadoAcceso | null
+    reparable: boolean
+    detalle: string[]
+    emailAcceso: string | null
+    authUid: string | null
+  }>({ estado: null, reparable: false, detalle: [], emailAcceso: null, authUid: null })
+
+  // Rol de quien mira: decide qué acciones se le ofrecen. La autoridad real
+  // sigue siendo el servidor; esto solo evita mostrar botones que va a rechazar.
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => {
+      if (!u) { setRolActor(null); return }
+      getDoc(doc(db, 'usuarios', u.uid))
+        .then((snap) => { const r = snap.data()?.rol; setRolActor(typeof r === 'string' ? r : null) })
+        .catch(() => setRolActor(null))
+    })
+    return () => unsub()
+  }, [])
 
   // Ubicación base
   const [eUbicacionBase,        setEUbicacionBase]        = useState<{ lat: number; lng: number } | null>(null)
@@ -332,63 +354,95 @@ function MotorizadosPageContent() {
   const ocupados = motorizados.filter((m) => m.activo !== false && m.estado === 'ocupado').length
   const inactivos = motorizados.filter((m) => m.activo === false).length
 
+  // Estado real del acceso: una llamada al servidor al abrir el detalle. Sin
+  // authUid no hay nada que preguntar.
+  async function cargarAcceso(m: Motorizado) {
+    const local = estadoSinConsultar(m.authUid)
+    if (local) {
+      setAcceso({ estado: local, reparable: false, detalle: [], emailAcceso: null, authUid: null })
+      return
+    }
+    setAcceso({ estado: null, reparable: false, detalle: [], emailAcceso: null, authUid: m.authUid ?? null })
+    try {
+      const fn = httpsCallable<{ motorizadoId: string }, {
+        estado: EstadoAcceso; reparable: boolean; detalle: string[]; emailAcceso: string | null; authUid: string | null
+      }>(functions, 'diagnosticarAccesoMotorizado')
+      const { data } = await fn({ motorizadoId: m.id })
+      setAcceso({ estado: data.estado, reparable: data.reparable, detalle: data.detalle, emailAcceso: data.emailAcceso, authUid: data.authUid })
+    } catch (e) {
+      console.error('[motorizados] no se pudo consultar el acceso:', e)
+      setCaMsg('⚠️ No se pudo verificar el estado del acceso.')
+    }
+  }
+
+  function mensajeDeError(e: unknown, porDefecto: string): string {
+    const msg = (e as { message?: string })?.message
+    return typeof msg === 'string' && msg.trim() ? `❌ ${msg}` : `❌ ${porDefecto}`
+  }
+
+  // El servidor crea la cuenta y el perfil con rol y la vincula; el correo con el
+  // enlace para elegir su contraseña sale por la ruta de invitación.
   async function crearAccesoMotorizado() {
     if (caSavingRef.current) return
     if (!selected) { setCaMsg('❌ No hay un motorizado seleccionado. Cerrá y volvé a abrir el drawer con "Editar".'); return }
     if (!caEmail.trim()) { setCaMsg('❌ El correo es obligatorio'); return }
-    if (caPassword.length < 6) { setCaMsg('❌ Mínimo 6 caracteres'); return }
     caSavingRef.current = true
     setCaSaving(true); setCaMsg(null)
     try {
-      const authUid = await createAuthUser(caEmail.trim(), caPassword)
-      await setDoc(doc(db, 'usuarios', authUid), {
-        name: selected.nombre,
-        email: caEmail.trim(),
-        rol: 'motorizado',
-        activo: selected.activo !== false,
-        creadoPorGestor: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      })
-      await updateDoc(doc(db, 'motorizado', selected.id), {
-        authUid,
-      })
-      setSelected((prev) => prev ? { ...prev, authUid } : prev)
-      setEAuthUid(authUid)
+      const fn = httpsCallable<{ motorizadoId: string; email: string }, { authUid: string; estado: EstadoAcceso; mensaje: string }>(functions, 'crearAccesoMotorizado')
+      const { data } = await fn({ motorizadoId: selected.id, email: caEmail.trim() })
+      setSelected((prev) => prev ? { ...prev, authUid: data.authUid } : prev)
+      const enviado = await enviarInvitacionApi(selected.id)
+      setCaMsg(enviado ? '✅ Acceso creado e invitación enviada' : '⚠️ Acceso creado, pero no se pudo enviar la invitación. Usá "Reenviar invitación".')
+      setCaEmail('')
+      await cargarAcceso({ ...selected, authUid: data.authUid })
+    } catch (e) {
+      setCaMsg(mensajeDeError(e, 'Error al crear el acceso'))
+    } finally {
+      caSavingRef.current = false
+      setCaSaving(false)
+    }
+  }
 
-      // MOTORIZADO EMAIL VERIFIED V1: el alta de arriba usa el SDK cliente
-      // (createAuthUser → app secundaria, para no pisar la sesión del
-      // Gestor), que deja emailVerified=false — y el guard global de
-      // /panel/** lo mandaría a /login?reason=verify. Este paso lo confirma
-      // server-side con el token del auth PRINCIPAL (el del Gestor, no el
-      // secundario). Va después de que Auth + usuarios/{uid} +
-      // motorizado.authUid ya existen, porque el endpoint valida esa cadena
-      // de evidencia completa antes de marcar nada.
-      //
-      // Fallo parcial a propósito NO silencioso: si esto falla, el acceso YA
-      // quedó creado y no se revierte nada — se avisa explícitamente para
-      // que el Gestor sepa que falta reintentar la activación, en vez de
-      // mostrar un "✅ Acceso creado" que ocultaría que el motorizado todavía
-      // no puede entrar. El endpoint es idempotente: reintentar es seguro.
-      try {
-        const idToken = await auth.currentUser?.getIdToken()
-        if (!idToken) throw new Error('sesión del gestor no disponible')
-        const resp = await fetch('/api/motorizado/confirmar-acceso', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
-          body: JSON.stringify({ motorizadoId: selected.id }),
-        })
-        if (!resp.ok) throw new Error(`confirmación rechazada (${resp.status})`)
-        setCaMsg('✅ Acceso creado')
-      } catch (errConfirm) {
-        console.error('[motorizados] no se pudo confirmar el acceso:', errConfirm)
-        setCaMsg('⚠️ Acceso creado, pero no se pudo activar el ingreso. El motorizado TODAVÍA no puede iniciar sesión — avisá a un admin para completar la activación. No vuelvas a crear el acceso: la cuenta ya existe.')
-      }
-      setCaEmail(''); setCaPassword('')
-    } catch (e: any) {
-      const code = e?.code
-      if (code === 'auth/email-already-in-use') setCaMsg('❌ Ese correo ya está registrado')
-      else setCaMsg('❌ Error al crear el acceso')
+  async function enviarInvitacionApi(motorizadoId: string): Promise<boolean> {
+    try {
+      const idToken = await auth.currentUser?.getIdToken()
+      if (!idToken) return false
+      const resp = await fetch('/api/motorizado/enviar-activacion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ motorizadoId }),
+      })
+      return resp.ok
+    } catch {
+      return false
+    }
+  }
+
+  async function reenviarInvitacion() {
+    if (caSavingRef.current || !selected) return
+    caSavingRef.current = true
+    setCaSaving(true); setCaMsg(null)
+    try {
+      setCaMsg((await enviarInvitacionApi(selected.id)) ? '✅ Invitación enviada' : '❌ No se pudo enviar la invitación')
+    } finally {
+      caSavingRef.current = false
+      setCaSaving(false)
+    }
+  }
+
+  // Solo admin: completa un acceso a medias cuando la cadena es inequívoca.
+  async function repararAccesoMotorizado() {
+    if (caSavingRef.current || !selected) return
+    caSavingRef.current = true
+    setCaSaving(true); setCaMsg(null)
+    try {
+      const fn = httpsCallable<{ motorizadoId: string }, { mensaje: string }>(functions, 'repararAccesoMotorizado')
+      const { data } = await fn({ motorizadoId: selected.id })
+      setCaMsg(`✅ ${data.mensaje}`)
+      await cargarAcceso(selected)
+    } catch (e) {
+      setCaMsg(mensajeDeError(e, 'No se pudo reparar el acceso'))
     } finally {
       caSavingRef.current = false
       setCaSaving(false)
@@ -412,7 +466,6 @@ function MotorizadosPageContent() {
     setSelected(m)
     setEName(m.nombre || '')
     setEPhone(m.telefono || '')
-    setEAuthUid(m.authUid || '')
     setEActivo(m.activo !== false)
     setEEstado(m.estado || 'disponible')
     setETieneBolso(m.tieneBolso ?? false)
@@ -432,9 +485,9 @@ function MotorizadosPageContent() {
     setMsg(null)
     setStats(null)
     setCaEmail('')
-    setCaPassword('')
     setCaMsg(null)
     setDrawerOpen(true)
+    cargarAcceso(m)
     // Load stats
     setLoadingStats(true)
     fetchStats(m.id).then((s) => { setStats(s); setLoadingStats(false) }).catch(() => setLoadingStats(false))
@@ -445,7 +498,6 @@ function MotorizadosPageContent() {
     setSelected(null)
     setEName('')
     setEPhone('')
-    setEAuthUid('')
     setEActivo(true)
     setEEstado('disponible')
     setETieneBolso(false)
@@ -463,7 +515,6 @@ function MotorizadosPageContent() {
     setMsg(null)
     setStats(null)
     setCaEmail('')
-    setCaPassword('')
     setCaMsg(null)
     setDrawerOpen(true)
   }
@@ -491,7 +542,6 @@ function MotorizadosPageContent() {
           telefono: ePhone.trim(),
           estado: eEstado,
           activo: eActivo,
-          authUid: eAuthUid.trim() || null,
           tieneBolso: eTieneBolso,
           fotoUrl: null,
           createdAt: serverTimestamp(),
@@ -516,7 +566,6 @@ function MotorizadosPageContent() {
           telefono: ePhone.trim(),
           estado: eEstado,
           activo: eActivo,
-          authUid: eAuthUid.trim() || undefined,
           tieneBolso: eTieneBolso,
           fotoUrl: fotoUrlCreado,
           ...ubicacionBasePayload,
@@ -539,7 +588,6 @@ function MotorizadosPageContent() {
           telefono: ePhone.trim(),
           estado: eEstado,
           activo: eActivo,
-          authUid: eAuthUid.trim() || null,
           tieneBolso: eTieneBolso,
           fotoUrl,
           ...ubicacionBasePayload,
@@ -784,34 +832,41 @@ function MotorizadosPageContent() {
           )}
 
           {/* ── Acceso al sistema ── */}
-          {!isNew && (
-            <section className={`rounded-xl border p-4 space-y-3 ${selected?.authUid ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}`}>
-              <div className="flex items-center gap-2">
-                <KeyRound className={`h-4 w-4 ${selected?.authUid ? 'text-green-600' : 'text-amber-600'}`} />
-                <h3 className={`text-xs font-bold uppercase tracking-wide ${selected?.authUid ? 'text-green-700' : 'text-amber-700'}`}>
-                  Acceso al sistema
-                </h3>
-                <span className={`ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full border ${selected?.authUid ? 'bg-green-100 text-green-700 border-green-300' : 'bg-amber-100 text-amber-700 border-amber-300'}`}>
-                  {selected?.authUid ? 'Con acceso' : 'Sin acceso'}
-                </span>
-              </div>
+          {!isNew && (() => {
+            const v = vistaAcceso(acceso.estado, rolActor, { reparable: acceso.reparable })
+            const tono = {
+              gris: 'bg-gray-50 border-gray-200 text-gray-600',
+              ambar: 'bg-amber-50 border-amber-200 text-amber-700',
+              azul: 'bg-blue-50 border-blue-200 text-blue-700',
+              verde: 'bg-green-50 border-green-200 text-green-700',
+              rojo: 'bg-red-50 border-red-200 text-red-700',
+            }[v.tono]
+            return (
+              <section className={`rounded-xl border p-4 space-y-3 ${tono}`}>
+                <div className="flex items-center gap-2">
+                  <KeyRound className="h-4 w-4" />
+                  <h3 className="text-xs font-bold uppercase tracking-wide">Acceso al sistema</h3>
+                  <span className="ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full border bg-white/60">{v.etiqueta}</span>
+                </div>
 
-              {selected?.authUid ? (
-                <p className="text-xs text-green-700 font-mono break-all">{selected.authUid}</p>
-              ) : (
-                <>
-                  <p className="text-xs text-amber-700">Este motorizado no tiene cuenta. Podés crearle acceso a la app con un correo y contraseña.</p>
+                {v.explicacion && <p className="text-xs">{v.explicacion}</p>}
+                {acceso.detalle.length > 0 && (
+                  <ul className="text-xs list-disc pl-4 space-y-0.5">
+                    {acceso.detalle.map((d) => <li key={d}>{d}</li>)}
+                  </ul>
+                )}
+                {v.mostrarUid && acceso.authUid && (
+                  <p className="text-[11px] font-mono break-all opacity-80" title="Solo lectura: la cuenta la vincula el servidor">
+                    {acceso.emailAcceso ? `${acceso.emailAcceso} · ` : ''}{acceso.authUid}
+                  </p>
+                )}
+
+                {v.puedeCrear && (
                   <div className="space-y-2">
                     <div>
                       <label className={S.label}>Correo <span className="text-red-500">*</span></label>
                       <input type="email" value={caEmail} onChange={(e) => setCaEmail(e.target.value)} placeholder="motorizado@ejemplo.com" className={S.input} />
                     </div>
-                    <div>
-                      <label className={S.label}>Contraseña <span className="text-red-500">*</span></label>
-                      <input type="password" value={caPassword} onChange={(e) => setCaPassword(e.target.value)} placeholder="Mínimo 6 caracteres" className={S.input} />
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3">
                     <button
                       onClick={crearAccesoMotorizado}
                       disabled={caSaving}
@@ -819,14 +874,32 @@ function MotorizadosPageContent() {
                     >
                       {caSaving ? 'Creando acceso…' : 'Crear acceso'}
                     </button>
-                    {caMsg && (
-                      <span className={`text-xs font-semibold ${caMsg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>{caMsg}</span>
-                    )}
                   </div>
-                </>
-              )}
-            </section>
-          )}
+                )}
+                {v.puedeEnviarInvitacion && (
+                  <button
+                    onClick={reenviarInvitacion}
+                    disabled={caSaving}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-40"
+                  >
+                    {caSaving ? 'Enviando…' : 'Reenviar invitación'}
+                  </button>
+                )}
+                {v.puedeReparar && (
+                  <button
+                    onClick={repararAccesoMotorizado}
+                    disabled={caSaving}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-40"
+                  >
+                    {caSaving ? 'Reparando…' : 'Reparar acceso'}
+                  </button>
+                )}
+                {caMsg && (
+                  <p className={`text-xs font-semibold ${caMsg.startsWith('✅') ? 'text-green-700' : 'text-red-700'}`}>{caMsg}</p>
+                )}
+              </section>
+            )
+          })()}
 
           {/* Foto de perfil */}
           <section className="space-y-3">
@@ -885,13 +958,6 @@ function MotorizadosPageContent() {
               <label className={S.label}>Teléfono</label>
               <input value={ePhone} onChange={(e) => setEPhone(e.target.value)} placeholder="8888-8888" className={S.input} />
             </div>
-            {!isNew && (
-              <div>
-                <label className={S.label}>UID de Firebase Auth <span className="text-gray-400 font-normal normal-case">(opcional)</span></label>
-                <input value={eAuthUid} onChange={(e) => setEAuthUid(e.target.value)} placeholder="abc123xyz..." className={S.input} />
-                <p className="text-xs text-gray-400 mt-1">Vincula la cuenta de Firebase Auth con este motorizado.</p>
-              </div>
-            )}
           </section>
 
           {/* Estado */}

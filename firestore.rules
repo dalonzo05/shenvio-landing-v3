@@ -196,9 +196,9 @@ service cloud.firestore {
       // El perfil autoregistrado queda SIN rol, y sin rol no obtiene ningún
       // privilegio operativo — hasKnownActiveRole() y los helpers de rol lo
       // dejan fuera de todas las ramas. Los accesos operativos se provisionan
-      // por flujos propios y acotados: crearAccesoMotorizado escribe el perfil
-      // con rol 'motorizado' fijo, y el acceso de Comercio lo crea la Cloud
-      // Function crearAccesoComercio con Admin SDK.
+      // por flujos propios y acotados, ambos server-side: la Cloud Function
+      // crearAccesoMotorizado escribe el perfil con rol 'motorizado' fijo y
+      // crearAccesoComercio el de Comercio, las dos con Admin SDK.
       //
       // Este bloque NO implementa un proceso de aprobación para las cuentas
       // sin rol: quedan inertes hasta que uno de esos flujos, o un admin, las
@@ -244,16 +244,12 @@ service cloud.firestore {
         return valor == 'admin' || valor == 'gestor';
       }
 
-      // Lista CERRADA, no lista de bloqueo: un rol desconocido no queda
-      // autorizado por omisión. El único rol que la interfaz del gestor asigna
-      // hoy es 'motorizado' (crearAccesoMotorizado en gestor/motorizados). El
-      // acceso de un Comercio lo crea la Cloud Function crearAccesoComercio
-      // con Admin SDK, que no pasa por estas reglas, y ningún flujo de gestor
-      // crea 'cliente'. Autorizar más sería ampliar superficie sin un flujo
-      // real que la respalde.
-      function esRolCreablePorGestor(valor) {
-        return valor is string && valor in ['motorizado'];
-      }
+      // MOTO-ALTA-AUTH-ROL-1: el gestor ya NO crea perfiles de usuario desde el
+      // cliente. Antes podía crear `usuarios/{uid}` con rol 'motorizado'
+      // (esRolCreablePorGestor + payloadMotorizadoValido) porque el alta del
+      // acceso la hacía el navegador. Ahora la hace la Cloud Function
+      // crearAccesoMotorizado con Admin SDK, que no pasa por estas reglas: la
+      // identidad con rol es server-authoritative y esa vía cliente se cerró.
 
       // Lista CERRADA de los perfiles que el gestor puede editar, por el mismo
       // criterio que esRolCreablePorGestor. Sustituye a !esRolPrivilegiado(),
@@ -303,24 +299,6 @@ service cloud.firestore {
       // positivas — lo que no está enumerado queda denegado, así que un campo
       // de autorización que se añada en el futuro no se cuela por omisión.
 
-      // Payload exacto de crearAccesoMotorizado()
-      // (app/panel/gestor/motorizados/page.tsx). activo se comprueba solo como
-      // booleano porque el flujo envía `selected.activo !== false`, que puede
-      // ser true o false según el estado del motorizado.
-      function payloadMotorizadoValido() {
-        return request.resource.data.keys().hasOnly([
-          'name', 'email', 'rol', 'activo', 'creadoPorGestor', 'createdAt', 'updatedAt'
-        ])
-          && request.resource.data.get('name', '') is string
-          && request.resource.data.get('name', '').size() > 0
-          && request.resource.data.get('email', '') is string
-          && request.resource.data.get('email', '').size() > 0
-          && request.resource.data.get('activo', null) is bool
-          && request.resource.data.get('creadoPorGestor', false) == true
-          && request.resource.data.get('createdAt', null) == request.time
-          && request.resource.data.get('updatedAt', null) == request.time;
-      }
-
       // Payload exacto de saveProfile() (app/panel/gestor/comercios/page.tsx):
       // solo sincroniza el nombre. Deja fuera rol, activo, comercioId, uid,
       // email, createdAt, creadoPorGestor, theme y cualquier clave desconocida.
@@ -337,29 +315,17 @@ service cloud.firestore {
 
       allow read: if isOwner(userId) || isAdminOrGestor();
 
-      // Las 2 pantallas que todavía escriben usuarios/ directamente desde el
-      // cliente con sesión de gestor:
-      //   - app/panel/gestor/motorizados/page.tsx: crearAccesoMotorizado()
-      //     crea el doc completo (setDoc) al otorgar acceso a un motorizado,
-      //     con rol:'motorizado' fijo en el código.
-      //   - app/panel/gestor/comercios/page.tsx: saveProfile() sincroniza
-      //     solo el campo `name` (updateDoc) cuando el comercio ya tiene
-      //     acceso activo — la creación/reemplazo de ese acceso en sí ya NO
-      //     se hace aquí, pasa por la Cloud Function crearAccesoComercio
-      //     (Bloque B/C).
-      // ingresar-orden/page.tsx YA NO escribe usuarios/ en absoluto.
-      // PENDIENTE: mover también estas dos escrituras a Cloud Functions;
-      // mientras tanto, cada una tiene su allowlist exacta arriba.
+      // La única pantalla que todavía escribe usuarios/ desde el cliente con
+      // sesión de gestor es app/panel/gestor/comercios/page.tsx: saveProfile()
+      // sincroniza solo el campo `name` (updateDoc) cuando el comercio ya tiene
+      // acceso activo; su allowlist exacta está arriba. Crear o reemplazar un
+      // acceso —de comercio o de motorizado— pasa por Cloud Functions.
+      // PENDIENTE: mover también saveProfile() a una Function.
       //
-      // El admin conserva exactamente la capacidad que tenía: sin lista
-      // cerrada, igual que antes de 0C-A/0C-B.
+      // El gestor no puede CREAR ningún perfil. El admin conserva exactamente la
+      // capacidad que tenía: sin lista cerrada, igual que antes de 0C-A/0C-B.
       allow create: if (isOwner(userId) && autoRegistroValido())
-        || isAdmin()
-        || (
-          isGestor()
-          && esRolCreablePorGestor(rolEntrante())
-          && payloadMotorizadoValido()
-        );
+        || isAdmin();
 
       // La rama del propio usuario ya impedía tocar el rol: camposEditables
       // AutoUsuario() usa hasOnly(['name','theme','updatedAt']), así que 'rol'
@@ -450,9 +416,26 @@ service cloud.firestore {
         || (isMotorizadoRole() && isOwnMotorizadoDoc())
         || isDigitador();
 
-      allow create: if isAdminOrGestor();
+      // MOTO-ALTA-AUTH-ROL-1: el vínculo con la cuenta de acceso NO lo escribe
+      // ningún cliente. `authUid` significa "esta persona puede entrar" solo si
+      // detrás hay una cuenta de Auth y un perfil con rol, y eso lo garantiza
+      // la Cloud Function crearAccesoMotorizado (Admin SDK, que no pasa por
+      // estas reglas). Antes el gestor podía pegar cualquier UID a mano: nada lo
+      // validaba y la pantalla decía "Con acceso" igual. Tampoco se escriben
+      // desde el cliente la evidencia de provisión ni el correo/contador de
+      // invitación.
+      function camposDeAccesoServidor() {
+        return ['authUid', 'accesoProvisionAuthUid', 'accesoEmail', 'welcomeAttempts'];
+      }
 
-      allow update: if isAdminOrGestor()
+      allow create: if isAdminOrGestor()
+        && request.resource.data.get('authUid', null) == null
+        && !request.resource.data.keys().hasAny(['accesoProvisionAuthUid', 'accesoEmail', 'welcomeAttempts']);
+
+      allow update: if (
+          isAdminOrGestor()
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(camposDeAccesoServidor())
+        )
         || (
           isMotorizadoRole()
           && isOwnMotorizadoDoc()
