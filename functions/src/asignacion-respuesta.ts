@@ -54,6 +54,18 @@
 // episodio nuevo. El guard `pendiente` + la transacción impiden que un retry
 // duplique evento o contadores. Cliente y motorizado ya no escriben ninguna
 // métrica (Rules).
+//
+// ROLLOUT — quién escribe el ESPEJO LEGACY. El cliente anterior seguía acreditando el
+// legacy por su cuenta después de la callable (registrarAceptacion / registrarRechazo).
+// Si el servidor también lo escribiera, ese cliente lo duplicaría. Por eso el servidor
+// escribe el espejo solo cuando el cliente declara el protocolo 2 (`protocolo: 2` en el
+// payload: "yo no acredito nada, hazlo tú"); sin `protocolo` (cliente anterior, o una
+// pestaña vieja abierta) asume que el cliente lo hará y NO lo escribe. En ambos casos
+// el legacy avanza EXACTAMENTE una vez por decisión.
+//
+// El protocolo NUNCA controla lo canónico: el evento y `metricasAceptacion` se escriben
+// siempre, con o sin `protocolo`. Un cliente que omita el campo solo se quita a sí
+// mismo el espejo (que no es una fuente de verdad); no puede evitar el registro canónico.
 
 import { HttpsError } from 'firebase-functions/v2/https';
 import { FieldValue, type DocumentData } from 'firebase-admin/firestore';
@@ -71,6 +83,35 @@ export const EVENTO_ACEPTACION_MOTORIZADO = 'aceptacion_motorizado';
 
 /** Versión de la proyección canónica de aceptación. */
 export const VERSION_METRICAS_ACEPTACION = 2;
+
+/** Valor de `protocolo`: el cliente no acredita métricas; el servidor escribe también el espejo legacy. */
+export const PROTOCOLO_METRICAS_SERVIDOR = 2;
+
+/**
+ * Lee el campo opcional `protocolo` del payload. Ausente → false (cliente anterior: él
+ * acredita el legacy). Solo se acepta exactamente 2; cualquier otro valor es inválido.
+ */
+export function leerProtocoloRespuesta(data: Record<string, unknown>): boolean {
+  if (!('protocolo' in data)) return false;
+  if (data.protocolo !== PROTOCOLO_METRICAS_SERVIDOR) {
+    throw new HttpsError('invalid-argument', 'protocolo inválido.');
+  }
+  return true;
+}
+
+/** Por qué no se acreditó la proyección a un motorizado (para diagnosticarlo en el log). */
+export type MotivoMetricasOmitidas = 'sin_motorizado_id' | 'sin_documento' | 'authuid_distinto';
+
+export interface ResultadoRespuesta {
+  /** true si la proyección canónica se acreditó al documento del motorizado. */
+  metricasAcreditadas: boolean;
+  motivoOmision?: MotivoMetricasOmitidas;
+}
+
+export interface OpcionesRespuesta {
+  /** Escribir también el espejo legacy (solo con `protocolo: 2`). Por defecto no. */
+  espejoLegacy?: boolean;
+}
 
 /** Lo mínimo que se usa de la referencia a la solicitud. */
 export interface RefSolicitud {
@@ -225,8 +266,9 @@ export async function responderAsignacionEnTransaccion(
   accion: AccionAsignacion,
   /** Referencia al documento `motorizado/{id}` de la asignación, para su proyección de métricas. */
   refMotorizado: (motorizadoId: string) => unknown,
+  opciones: OpcionesRespuesta = {},
   ahoraMs: number = Date.now(),
-): Promise<void> {
+): Promise<ResultadoRespuesta> {
   const snap = await tx.get(solicitudRef);
   if (!snap.exists) throw new HttpsError('not-found', 'La solicitud no existe.');
   const solicitud = snap.data()!;
@@ -261,11 +303,14 @@ export async function responderAsignacionEnTransaccion(
   const motorizadoId = texto(asignacion.motorizadoId);
   let refMoto: unknown = null;
   let datosMoto: DocumentData | null = null;
+  let motivoOmision: MotivoMetricasOmitidas | undefined = motorizadoId === null ? 'sin_motorizado_id' : undefined;
   if (motorizadoId !== null) {
     refMoto = refMotorizado(motorizadoId);
     const motoSnap = await tx.get(refMoto);
     const d = motoSnap.exists ? motoSnap.data() ?? null : null;
-    if (d !== null && d.authUid === motorizadoUid) datosMoto = d;
+    if (d === null) motivoOmision = 'sin_documento';
+    else if (d.authUid !== motorizadoUid) motivoOmision = 'authuid_distinto';
+    else datosMoto = d;
   }
 
   const ahora = FieldValue.serverTimestamp();
@@ -297,9 +342,13 @@ export async function responderAsignacionEnTransaccion(
 
   if (refMoto !== null && datosMoto !== null) {
     tx.update(refMoto, {
+      // Canónico: SIEMPRE, sin depender de lo que mande o haga el cliente.
       metricasAceptacion: proyectarMetricasAceptacion(datosMoto.metricasAceptacion, accion, ahora),
-      ...espejoLegacy(datosMoto, accion, aMillis(asignacion.asignadoAt), ahoraMs),
+      // Legacy: solo si el cliente declaró el protocolo 2; si no, lo acredita el cliente anterior.
+      ...(opciones.espejoLegacy === true ? espejoLegacy(datosMoto, accion, aMillis(asignacion.asignadoAt), ahoraMs) : {}),
       updatedAt: ahora,
     });
+    return { metricasAcreditadas: true };
   }
+  return { metricasAcreditadas: false, motivoOmision };
 }

@@ -47,7 +47,7 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { FieldValue } from 'firebase-admin/firestore';
 import { semanaKeyDeFecha } from './cobro-semanal';
-import { responderAsignacionEnTransaccion } from './asignacion-respuesta';
+import { responderAsignacionEnTransaccion, leerProtocoloRespuesta } from './asignacion-respuesta';
 import {
   resolverFormaPago,
   permiteCierreSinConfirmaciones,
@@ -66,6 +66,8 @@ type AccionAsignacion = 'aceptar' | 'rechazar';
 interface ResponderAsignacionData {
   solicitudId?: unknown;
   accion?: unknown;
+  /** Opcional. 2 = el cliente no acredita métricas (ver asignacion-respuesta.ts). */
+  protocolo?: unknown;
 }
 
 interface ResponderAsignacionResultado {
@@ -105,9 +107,11 @@ export const responderAsignacion = onCall<ResponderAsignacionData>(async (reques
     throw new HttpsError('invalid-argument', 'Payload inválido.');
   }
   const claves = Object.keys(data);
-  if (claves.length !== 2 || !claves.includes('solicitudId') || !claves.includes('accion')) {
-    throw new HttpsError('invalid-argument', 'Solo se aceptan los campos solicitudId y accion.');
+  const sobrantes = claves.filter((c) => c !== 'solicitudId' && c !== 'accion' && c !== 'protocolo');
+  if (sobrantes.length > 0 || !claves.includes('solicitudId') || !claves.includes('accion')) {
+    throw new HttpsError('invalid-argument', 'Solo se aceptan los campos solicitudId, accion y protocolo.');
   }
+  const espejoLegacy = leerProtocoloRespuesta(data as Record<string, unknown>);
   const solicitudId = leerSolicitudId(data as Record<string, unknown>);
   const accion = (data as Record<string, unknown>).accion;
   if (accion !== 'aceptar' && accion !== 'rechazar') {
@@ -126,9 +130,15 @@ export const responderAsignacion = onCall<ResponderAsignacionData>(async (reques
   // y las escrituras viven en asignacion-respuesta.ts, con la transacción
   // inyectada para poder probarlos sin emulador.
   // Decisión + evento + métricas en UNA transacción (MOTO-STATS-ACEPTACION-TRAZA-1).
-  await db.runTransaction((tx) =>
-    responderAsignacionEnTransaccion(tx, solicitudRef, motorizadoUid, accion, (id) => db.collection('motorizado').doc(id)),
+  const resultadoTx = await db.runTransaction((tx) =>
+    responderAsignacionEnTransaccion(tx, solicitudRef, motorizadoUid, accion, (id) => db.collection('motorizado').doc(id), { espejoLegacy }),
   );
+  // La decisión y su evento se registraron; si la proyección no se pudo acreditar al
+  // documento del motorizado (sin vínculo, o de otro authUid), queda dicho aquí para
+  // poder diagnosticarlo. Sin PII más allá de los ids que ya se loguean.
+  if (!resultadoTx.metricasAcreditadas) {
+    console.warn(JSON.stringify({ fn: 'responderAsignacion', aviso: 'metricas_omitidas', motivo: resultadoTx.motivoOmision, solicitudId, motorizadoUid, accion }));
+  }
 
   console.log(JSON.stringify({ fn: 'responderAsignacion', solicitudId, motorizadoUid, accion }));
 

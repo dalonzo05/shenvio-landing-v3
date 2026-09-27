@@ -21,6 +21,9 @@ import {
   construirAceptacion,
   proyectarMetricasAceptacion,
   espejoLegacy,
+  leerProtocoloRespuesta,
+  PROTOCOLO_METRICAS_SERVIDOR,
+  type OpcionesRespuesta,
   EVENTO_RECHAZO_MOTORIZADO,
   EVENTO_ACEPTACION_MOTORIZADO,
   VERSION_METRICAS_ACEPTACION,
@@ -100,8 +103,13 @@ function crearTx(inicial: Doc | null, motoInicial?: Doc | null) {
   return { tx, escrituras, motoEscrituras, sets, estado: () => actual, moto: () => moto, reemplazar };
 }
 
-const responder = (tx: TransaccionRespuesta, ref: Parameters<typeof responderAsignacionEnTransaccion>[1], uid: string, accion: 'aceptar' | 'rechazar') =>
-  responderAsignacionEnTransaccion(tx, ref, uid, accion, REFMOTO, AHORA_MS);
+const responder = (
+  tx: TransaccionRespuesta,
+  ref: Parameters<typeof responderAsignacionEnTransaccion>[1],
+  uid: string,
+  accion: 'aceptar' | 'rechazar',
+  opciones: OpcionesRespuesta = { espejoLegacy: true },
+) => responderAsignacionEnTransaccion(tx, ref, uid, accion, REFMOTO, opciones, AHORA_MS);
 
 function orden(extra: Doc = {}): Doc {
   return {
@@ -657,4 +665,193 @@ test('MAT-ranking · el ranking sigue leyendo los campos legacy y sus coeficient
   for (const c of ['PESO_CARGA      = 0.40', 'PESO_CERCANIA   = 0.30', 'PESO_COMPAT     = 0.20', 'PESO_ACEPTACION = 0.10']) assert.ok(r.includes(c), c);
   assert.ok(r.includes('Math.max(0, 1 - cargaActual * 0.25)'));
   assert.ok(!r.includes('metricasAceptacion'), 'el ranking todavía no migra a la fuente canónica');
+});
+
+// ─── MOTO-STATS-ACEPTACION-TRAZA-1 · compatibilidad de rollout ────────────────
+//
+// El cliente anterior acredita el legacy por su cuenta después de la callable
+// (registrarAceptacion / registrarRechazo, sin payload `protocolo`). El cliente nuevo
+// envía `protocolo: 2` y no acredita nada. El servidor escribe el espejo legacy
+// SOLO con `protocolo: 2`; lo canónico se escribe siempre. Así el legacy avanza
+// exactamente una vez por decisión con cualquier combinación de web y Functions.
+
+const LEGACY_INICIAL = { totalAsignaciones: 10, totalAceptadas: 7, totalRechazos: 3, tasaAceptacion: 0.7 };
+
+/** Réplica literal de lo que hacía el cliente anterior (lib/motorizado-stats.ts) sobre el documento del motorizado. */
+function clienteAnteriorAcredita(m: Doc, accion: 'aceptar' | 'rechazar'): void {
+  if (accion === 'aceptar') {
+    const totalAceptadas = (m.totalAceptadas ?? 0) + 1;
+    const totalAsignaciones = (m.totalAsignaciones ?? 0) + 1;
+    m.totalAceptadas = totalAceptadas;
+    m.totalAsignaciones = totalAsignaciones;
+    m.tasaAceptacion = totalAceptadas / totalAsignaciones;
+  } else {
+    const totalAceptadas = m.totalAceptadas ?? 0;
+    const totalAsignaciones = (m.totalAsignaciones ?? 0) + 1;
+    m.totalRechazos = (m.totalRechazos ?? 0) + 1;
+    m.totalAsignaciones = totalAsignaciones;
+    m.tasaAceptacion = totalAceptadas / totalAsignaciones;
+  }
+}
+
+const SIN_PROTOCOLO = {}; // el payload del cliente anterior: solo { solicitudId, accion }
+const PROTOCOLO_2 = { espejoLegacy: true }; // el payload del cliente nuevo: { …, protocolo: 2 }
+
+test('ROL1 · web anterior + Functions nuevas + aceptación → el legacy avanza exactamente UNA vez (lo acredita el cliente), lo canónico lo registra el servidor', async () => {
+  const t = crearTx(pendienteDe(UID_A, 'moto_a'), { authUid: UID_A, ...LEGACY_INICIAL });
+  await responder(t.tx, crearRef(), UID_A, 'aceptar', SIN_PROTOCOLO);
+
+  // El servidor NO tocó el legacy: sigue igual hasta que el cliente anterior acredite.
+  for (const k of Object.keys(LEGACY_INICIAL)) assert.equal(t.moto()![k], (LEGACY_INICIAL as Doc)[k], `servidor sin protocolo no escribe ${k}`);
+  // Sí quedó lo canónico.
+  assert.deepEqual([metricas(t.moto()).totalDecisiones, metricas(t.moto()).totalAceptadas], [1, 1]);
+  assert.equal(t.sets.length, 1);
+
+  clienteAnteriorAcredita(t.moto()!, 'aceptar'); // el cliente anterior, después de la callable
+  assert.equal(t.moto()!.totalAsignaciones, 11, '+1, no +2');
+  assert.equal(t.moto()!.totalAceptadas, 8, '+1, no +2');
+  assert.equal(t.moto()!.totalRechazos, 3);
+});
+
+test('ROL2 · web anterior + Functions nuevas + rechazo → el legacy avanza exactamente UNA vez', async () => {
+  const t = crearTx(pendienteDe(UID_A, 'moto_a'), { authUid: UID_A, ...LEGACY_INICIAL });
+  await responder(t.tx, crearRef(), UID_A, 'rechazar', SIN_PROTOCOLO);
+  for (const k of Object.keys(LEGACY_INICIAL)) assert.equal(t.moto()![k], (LEGACY_INICIAL as Doc)[k], k);
+  assert.deepEqual([metricas(t.moto()).totalDecisiones, metricas(t.moto()).totalRechazadas], [1, 1]);
+  assert.equal(t.sets.length, 1);
+
+  clienteAnteriorAcredita(t.moto()!, 'rechazar');
+  assert.equal(t.moto()!.totalAsignaciones, 11, '+1, no +2');
+  assert.equal(t.moto()!.totalRechazos, 4, '+1, no +2');
+  assert.equal(t.moto()!.totalAceptadas, 7);
+});
+
+test('ROL3 · web nueva + Functions nuevas + aceptación → exactamente UNA vez (la del servidor), sin segunda escritura del cliente', async () => {
+  const t = crearTx(pendienteDe(UID_A, 'moto_a'), { authUid: UID_A, ...LEGACY_INICIAL });
+  await responder(t.tx, crearRef(), UID_A, 'aceptar', PROTOCOLO_2);
+  assert.equal(t.moto()!.totalAsignaciones, 11);
+  assert.equal(t.moto()!.totalAceptadas, 8);
+  assert.equal(t.motoEscrituras.length, 1, 'una sola escritura al motorizado');
+  assert.deepEqual([metricas(t.moto()).totalDecisiones, metricas(t.moto()).totalAceptadas], [1, 1]);
+});
+
+test('ROL4 · web nueva + Functions nuevas + rechazo → exactamente UNA vez', async () => {
+  const t = crearTx(pendienteDe(UID_A, 'moto_a'), { authUid: UID_A, ...LEGACY_INICIAL });
+  await responder(t.tx, crearRef(), UID_A, 'rechazar', PROTOCOLO_2);
+  assert.equal(t.moto()!.totalAsignaciones, 11);
+  assert.equal(t.moto()!.totalRechazos, 4);
+  assert.equal(t.motoEscrituras.length, 1);
+  assert.deepEqual([metricas(t.moto()).totalDecisiones, metricas(t.moto()).totalRechazadas], [1, 1]);
+});
+
+test('ROL5 · retry de la callable después de una decisión exitosa no duplica nada, con o sin protocolo', async () => {
+  for (const opciones of [SIN_PROTOCOLO, PROTOCOLO_2]) {
+    for (const accion of ['aceptar', 'rechazar'] as const) {
+      const t = crearTx(pendienteDe(UID_A, 'moto_a'), { authUid: UID_A, ...LEGACY_INICIAL });
+      await responder(t.tx, crearRef(), UID_A, accion, opciones);
+      const antes = JSON.stringify(t.moto());
+      for (const otra of ['aceptar', 'rechazar'] as const) {
+        await assert.rejects(responder(t.tx, crearRef(), UID_A, otra, opciones), (e) => ['failed-precondition', 'permission-denied'].includes((e as { code?: string }).code ?? ''));
+      }
+      assert.equal(JSON.stringify(t.moto()), antes, `${accion}/${JSON.stringify(opciones)}`);
+      assert.equal(t.sets.length, 1);
+      assert.equal(t.motoEscrituras.length, 1);
+    }
+  }
+});
+
+test('ROL6 · el protocolo: ausente = cliente anterior; 2 = el servidor escribe el espejo; cualquier otro valor se rechaza; el cliente nuevo no llama a los helpers', () => {
+  assert.equal(leerProtocoloRespuesta({ solicitudId: 's', accion: 'aceptar' }), false);
+  assert.equal(leerProtocoloRespuesta({ solicitudId: 's', accion: 'aceptar', protocolo: 2 }), true);
+  for (const malo of [1, 3, '2', true, null, undefined, {}, 0]) {
+    assert.throws(() => leerProtocoloRespuesta({ solicitudId: 's', accion: 'aceptar', protocolo: malo }), codigo('invalid-argument'), String(malo));
+  }
+  assert.equal(PROTOCOLO_METRICAS_SERVIDOR, 2);
+  const pagina = fuenteRaiz('app', 'panel', 'motorizado', 'page.tsx');
+  assert.ok(pagina.includes("accion: 'aceptar', protocolo: 2") && pagina.includes("accion: 'rechazar', protocolo: 2"));
+  assert.ok(!pagina.includes('registrarAceptacion(') && !pagina.includes('registrarRechazo('), 'sin segunda escritura de cliente');
+  // La callable sigue aceptando el payload del cliente anterior (exactamente solicitudId + accion).
+  const callable = readFileSync(join(__dirname, '..', '..', 'src', 'motorizado-transiciones.ts'), 'utf8');
+  assert.ok(callable.includes("c !== 'solicitudId' && c !== 'accion' && c !== 'protocolo'"));
+  assert.ok(callable.includes('leerProtocoloRespuesta('));
+});
+
+test('ROL7 · la proyección canónica nunca depende del cliente: es la misma con o sin protocolo, y no lee el legacy', async () => {
+  const resultados: unknown[] = [];
+  for (const opciones of [SIN_PROTOCOLO, PROTOCOLO_2]) {
+    // Legacy corrupto a propósito: lo canónico no debe enterarse.
+    const t = crearTx(pendienteDe(UID_A, 'moto_a'), { authUid: UID_A, totalAsignaciones: 9999, totalAceptadas: -5, tasaAceptacion: 'basura' });
+    await responder(t.tx, crearRef(), UID_A, 'aceptar', opciones);
+    const m = metricas(t.moto());
+    resultados.push([m.version, m.totalDecisiones, m.totalAceptadas, m.totalRechazadas, m.tasaAceptacion]);
+    assert.equal(t.sets.length, 1, 'el evento se escribe siempre');
+  }
+  assert.deepEqual(resultados[0], resultados[1]);
+  assert.deepEqual(resultados[0], [VERSION_METRICAS_ACEPTACION, 1, 1, 0, 1]);
+  // El código que arma la proyección no toca los campos legacy ni el payload del cliente.
+  const src = readFileSync(join(__dirname, '..', '..', 'src', 'asignacion-respuesta.ts'), 'utf8');
+  const iProy = src.indexOf('export function proyectarMetricasAceptacion');
+  const iFin = src.indexOf('export function espejoLegacy');
+  assert.ok(iProy > 0 && iFin > iProy);
+  assert.ok(!/totalAsignaciones|totalRechazos|tasaAceptacion:\s*contador|opciones/.test(src.slice(iProy, iFin)));
+});
+
+test('ROL8 · las Rules siguen impidiendo fabricar métricas: el motorizado ya no lista los contadores y nadie escribe la proyección', () => {
+  const rules = fuenteRaiz('firestore.rules');
+  const iMoto = rules.indexOf('match /motorizado/{docId}');
+  const iFin = rules.indexOf('match /cotizaciones/{docId}');
+  assert.ok(iMoto > 0 && iFin > iMoto);
+  const bloque = rules.slice(iMoto, iFin);
+  for (const campo of ['totalAsignaciones', 'totalAceptadas', 'totalRechazos', 'tasaAceptacion', 'tiempoPromedioAceptacion']) {
+    assert.ok(!bloque.includes(`'${campo}'`), `el motorizado no puede escribir ${campo}`);
+  }
+  assert.ok(bloque.includes("return ['metricasAceptacion']"));
+  assert.ok(bloque.includes('!request.resource.data.keys().hasAny(camposDeMetricasServidor())'));
+  assert.ok(bloque.includes('!request.resource.data.diff(resource.data).affectedKeys().hasAny(camposDeMetricasServidor())'));
+});
+
+test('ROL9 · el ranking sigue sin diff: mismos coeficientes y sigue leyendo el legacy', () => {
+  const r = fuenteRaiz('lib', 'motorizado-ranking.ts');
+  assert.ok(r.includes('const scoreAceptacion = motorizado.tasaAceptacion ?? 1.0'));
+  for (const c of ['PESO_CARGA      = 0.40', 'PESO_CERCANIA   = 0.30', 'PESO_COMPAT     = 0.20', 'PESO_ACEPTACION = 0.10']) assert.ok(r.includes(c), c);
+  assert.ok(!r.includes('metricasAceptacion') && !r.includes('protocolo'));
+});
+
+test('ROL10 · el cliente anterior no entra en falso error: sus helpers nunca lanzan y se llaman sin await; y las Functions nuevas aceptan su payload', () => {
+  const stats = fuenteRaiz('lib', 'motorizado-stats.ts');
+  for (const fn of ['registrarAceptacion', 'registrarRechazo']) {
+    const i = stats.indexOf(`export async function ${fn}`);
+    assert.ok(i > 0, fn);
+    const cuerpo = stats.slice(i, stats.indexOf('\n}\n', i));
+    assert.ok(/try \{/.test(cuerpo) && /catch \(e\) \{\s*console\.error/.test(cuerpo), `${fn} captura todo y solo loguea`);
+  }
+  // Las pestañas del cliente anterior (copias DAPC = misma forma) los llaman sin await ni .then.
+  for (const copia of ['page-DAPC.tsx', 'page-DAPC-2.tsx']) {
+    const src = fuenteRaiz('app', 'panel', 'motorizado', copia);
+    assert.ok(/^\s+registrarAceptacion\(motorizadoDocId/m.test(src) && /^\s+registrarRechazo\(motorizadoDocId/m.test(src), copia);
+    assert.ok(!/await registrar(Aceptacion|Rechazo)\(/.test(src), `${copia}: sin await`);
+  }
+  // Lo único que ese cliente ve de la callable es su payload de siempre, que el servidor sigue aceptando.
+  assert.equal(leerProtocoloRespuesta({ solicitudId: 's', accion: 'rechazar' }), false);
+});
+
+test('diagnóstico · si la proyección no se puede acreditar (sin documento, otro authUid o sin id), el resultado lo dice y la decisión y el evento se registran igual', async () => {
+  const casos: [string, Doc | null, string][] = [
+    ['sin documento', null, 'sin_documento'],
+    ['otro authUid', { authUid: UID_B }, 'authuid_distinto'],
+  ];
+  for (const [nombre, moto, motivo] of casos) {
+    const t = crearTx(pendienteDe(UID_A, 'moto_a'), moto);
+    const r = await responderAsignacionEnTransaccion(t.tx, crearRef(), UID_A, 'aceptar', REFMOTO, PROTOCOLO_2, AHORA_MS);
+    assert.deepEqual(r, { metricasAcreditadas: false, motivoOmision: motivo }, nombre);
+    assert.equal(t.sets.length, 1, nombre);
+    assert.equal(t.motoEscrituras.length, 0, nombre);
+  }
+  const sinId = crearTx({ ...pendienteDe(UID_A, 'moto_a'), asignacion: { ...pendienteDe(UID_A, 'moto_a').asignacion, motorizadoId: '' } });
+  const r = await responderAsignacionEnTransaccion(sinId.tx, crearRef(), UID_A, 'aceptar', REFMOTO, PROTOCOLO_2, AHORA_MS);
+  assert.deepEqual(r, { metricasAcreditadas: false, motivoOmision: 'sin_motorizado_id' });
+  const ok = crearTx(pendienteDe(UID_A, 'moto_a'), { authUid: UID_A });
+  assert.deepEqual(await responderAsignacionEnTransaccion(ok.tx, crearRef(), UID_A, 'aceptar', REFMOTO, PROTOCOLO_2, AHORA_MS), { metricasAcreditadas: true });
+  const callable = readFileSync(join(__dirname, '..', '..', 'src', 'motorizado-transiciones.ts'), 'utf8');
+  assert.ok(callable.includes("aviso: 'metricas_omitidas'"), 'la callable deja el aviso en el log');
 });

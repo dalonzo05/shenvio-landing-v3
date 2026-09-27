@@ -334,8 +334,10 @@ const acumularCallable = httpsCallable<{ ordenId: string }, { ok: true; yaAcumul
 
 type RespuestaCobroPayload = { recibio: boolean; justificacion?: string }
 
+// `protocolo: 2` declara que este cliente NO acredita métricas: el servidor escribe también el
+// espejo legacy (MOTO-STATS-ACEPTACION-TRAZA-1). Lo canónico se registra siempre, con o sin él.
 const responderAsignacionCallable = httpsCallable<
-  { solicitudId: string; accion: 'aceptar' | 'rechazar' },
+  { solicitudId: string; accion: 'aceptar' | 'rechazar'; protocolo: 2 },
   { ok: true; accion: 'aceptar' | 'rechazar' }
 >(functions, 'responderAsignacion')
 
@@ -595,7 +597,7 @@ export default function PanelMotorizadoPage() {
     if (!o.id) return;
     setErr(null); setActionId(o.id);
     try {
-      await responderAsignacionCallable({ solicitudId: o.id, accion: 'aceptar' });
+      await responderAsignacionCallable({ solicitudId: o.id, accion: 'aceptar', protocolo: 2 });
       // Aceptar UNA orden no cambia la presencia (`estado`): el motorizado puede
       // tener otras órdenes activas y la carga se deriva de ellas. La decisión, su
       // evento y las métricas de aceptación las registra el servidor, en la misma
@@ -608,7 +610,7 @@ export default function PanelMotorizadoPage() {
     if (!o.id) return;
     setErr(null); setActionId(o.id);
     try {
-      await responderAsignacionCallable({ solicitudId: o.id, accion: 'rechazar' });
+      await responderAsignacionCallable({ solicitudId: o.id, accion: 'rechazar', protocolo: 2 });
       // Rechazar UNA orden no cambia la presencia (`estado`): puede tener otras
       // órdenes activas. El evento y las métricas del rechazo los registra el
       // servidor en la misma transacción; el cliente no acredita nada.
