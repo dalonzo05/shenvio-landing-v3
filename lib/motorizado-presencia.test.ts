@@ -485,6 +485,16 @@ test('UF9 · con orden activa, presenciaUpdatedAt posterior a la ubicación → 
   assert.deepEqual(getProximoPuntoOperativo(m, [A], AHORA), RETIRO_A)
 })
 
+test('UF9b · con orden activa Y ubicación operativa genuinamente fresca → igual usa el punto de la orden (la frescura nunca sustituye a la carga real)', () => {
+  const m = motoConUbicacion({
+    ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: HOY_16H },
+    presenciaUpdatedAt: HOY_09H, // cumple TODAS las condiciones de frescura
+  })
+  assert.equal(ubicacionOperativaFresca(m, AHORA), true, 'esta ubicación sí sería fresca sin la orden')
+  const A = orden('a', 'm1', 'asignada')
+  assert.deepEqual(getProximoPuntoOperativo(m, [A], AHORA), RETIRO_A, 'pero con orden activa, la frescura no debe consultarse')
+})
+
 test('UF10 · fuera de línea → no entra como candidato (sin cambios respecto al contrato de presencia)', () => {
   const m = motoConUbicacion({
     estado: 'inactivo',
