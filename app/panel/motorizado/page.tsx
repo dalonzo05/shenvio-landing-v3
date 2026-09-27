@@ -8,7 +8,7 @@ import {
   runTransaction, increment, arrayUnion, limit,
 } from 'firebase/firestore';
 import { auth, db, functions } from '@/fb/config';
-import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia';
+import { presenciaVisible } from '@/lib/motorizado-presencia';
 import { httpsCallable } from 'firebase/functions';
 import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBoucher, uploadVersionBoucherDeposito, type TipoEvidencia } from '@/fb/storage'
 import { registrarMovimiento } from '@/lib/financial-writes';
@@ -474,7 +474,7 @@ export default function PanelMotorizadoPage() {
   // se guarda como motorizadoNombre al crear un depósito: Auth no tiene
   // displayName y el writer terminaba guardando el correo.
   const [motorizadoNombrePerfil, setMotorizadoNombrePerfil] = useState<string | null>(null);
-  const [motorizadoEstado, setMotorizadoEstado] = useState<'disponible' | 'ocupado' | 'inactivo' | null>(null);
+  const [motorizadoEstado, setMotorizadoEstado] = useState<unknown>(null);
 
   // Historial filters
   const [histFecha, setHistFecha] = useState<'hoy' | 'ayer' | 'personalizado'>('hoy');
@@ -519,7 +519,7 @@ export default function PanelMotorizadoPage() {
       if (!s.empty) {
         const d = s.docs[0];
         setMotorizadoDocId(d.id);
-        setMotorizadoEstado((d.data() as any).estado ?? 'inactivo');
+        setMotorizadoEstado((d.data() as { estado?: unknown }).estado ?? null);
         const nombrePerfil = (d.data() as { nombre?: unknown }).nombre;
         setMotorizadoNombrePerfil(typeof nombrePerfil === 'string' ? nombrePerfil : null);
       }
@@ -1253,16 +1253,22 @@ export default function PanelMotorizadoPage() {
           <span style={{ fontSize: 15, fontWeight: 700, color: '#374151' }}>Motorizado</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {/* Badge de estado */}
-            {esMotorizadoEnLinea(motorizadoEstado) && (
+            {motorizadoDocId && presenciaVisible(motorizadoEstado) === 'en_linea' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 20, padding: '5px 10px' }}>
                 <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#16a34a', display: 'inline-block' }} />
                 <span style={{ fontSize: 12, color: '#16a34a', fontWeight: 600 }}>En línea</span>
               </div>
             )}
-            {!esMotorizadoEnLinea(motorizadoEstado) && (
+            {motorizadoDocId && presenciaVisible(motorizadoEstado) === 'fuera_de_linea' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 20, padding: '5px 10px' }}>
                 <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#9ca3af', display: 'inline-block' }} />
                 <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600 }}>Fuera de línea</span>
+              </div>
+            )}
+            {motorizadoDocId && presenciaVisible(motorizadoEstado) === 'sin_estado' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fffbeb', border: '1px dashed #fcd34d', borderRadius: 20, padding: '5px 10px' }}>
+                <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#d1d5db', display: 'inline-block' }} />
+                <span style={{ fontSize: 12, color: '#92400e', fontWeight: 600 }}>Sin estado</span>
               </div>
             )}
           </div>

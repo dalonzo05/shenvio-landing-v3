@@ -38,6 +38,19 @@ export function tieneCargaOperativa(ordenesActivas: readonly unknown[]): boolean
 
 export type CategoriaPresencia = 'en_linea' | 'fuera_de_linea' | 'inactivo' | 'sin_estado'
 
+export type PresenciaVisible = 'en_linea' | 'fuera_de_linea' | 'sin_estado'
+
+/**
+ * Presencia tal como se le muestra al motorizado. `Fuera de línea` es SOLO una
+ * presencia explícita (`estado === 'inactivo'`): un estado ausente o desconocido es
+ * `sin_estado` y no se infiere ninguna presencia (ni en línea ni fuera de línea).
+ */
+export function presenciaVisible(estado: unknown): PresenciaVisible {
+  if (esMotorizadoEnLinea(estado)) return 'en_linea'
+  if (estado === 'inactivo') return 'fuera_de_linea'
+  return 'sin_estado'
+}
+
 /**
  * Categoría operativa de un motorizado para el dashboard. `activo` es la cuenta
  * (activo === false = desactivada); `estado` es la presencia. Una cuenta que no
@@ -46,9 +59,7 @@ export type CategoriaPresencia = 'en_linea' | 'fuera_de_linea' | 'inactivo' | 's
  */
 export function categoriaPresencia(m: { activo?: boolean | null; estado?: unknown }): CategoriaPresencia {
   if (m.activo !== true) return 'inactivo'
-  if (esMotorizadoEnLinea(m.estado)) return 'en_linea'
-  if (m.estado === 'inactivo') return 'fuera_de_linea'
-  return 'sin_estado'
+  return presenciaVisible(m.estado)
 }
 
 export function resumenPresencia(motorizados: ReadonlyArray<{ activo?: boolean | null; estado?: unknown }>) {
@@ -69,6 +80,7 @@ export function resumenPresencia(motorizados: ReadonlyArray<{ activo?: boolean |
 
 export const ETIQUETA_EN_LINEA = 'En línea'
 export const ETIQUETA_FUERA_DE_LINEA = 'Fuera de línea'
+export const ETIQUETA_SIN_ESTADO = 'Sin estado'
 
 export const COPY_CONFIRMAR_FUERA_DE_LINEA = {
   titulo: '¿Querés ponerte fuera de línea?',
@@ -78,9 +90,13 @@ export const COPY_CONFIRMAR_FUERA_DE_LINEA = {
   confirmar: 'Ponerme fuera de línea',
 } as const
 
-/** Lo que ve el motorizado: sin `estado` (o desconocido) se muestra fuera de línea, sin inventar "en línea". */
+/** Lo que ve el motorizado: en línea, fuera de línea (solo si es explícito) o sin estado. */
 export function etiquetaPresencia(estado: unknown): string {
-  return esMotorizadoEnLinea(estado) ? ETIQUETA_EN_LINEA : ETIQUETA_FUERA_DE_LINEA
+  switch (presenciaVisible(estado)) {
+    case 'en_linea': return ETIQUETA_EN_LINEA
+    case 'fuera_de_linea': return ETIQUETA_FUERA_DE_LINEA
+    default: return ETIQUETA_SIN_ESTADO
+  }
 }
 
 export interface AccionPresencia {

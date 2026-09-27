@@ -13,6 +13,7 @@ import {
   categoriaPresencia,
   resumenPresencia,
   accionPresencia,
+  presenciaVisible,
   aplicarPresencia,
   etiquetaPresencia,
   pulsarPresencia,
@@ -309,7 +310,7 @@ test('MPUX10 · legacy ocupado se presenta En línea y ofrece "Ponerse fuera de 
   assert.equal(etiquetaPresencia('ocupado'), 'En línea')
   assert.equal(accionPresencia('ocupado').etiqueta, 'Ponerse fuera de línea')
   assert.ok(!/Ocupado/.test(HEADER_PAGE() + CONTROL() + LAYOUT()), 'no se muestra "Ocupado"')
-  assert.equal(etiquetaPresencia(undefined), 'Fuera de línea', 'sin estado no se inventa En línea')
+  assert.equal(etiquetaPresencia(undefined), 'Sin estado', 'sin estado no se inventa En línea ni Fuera de línea')
 })
 
 test('MPUX11 · no queda copy operativo Activarme/Desactivarme en el panel motorizado vigente', () => {
@@ -323,4 +324,50 @@ test('MPUX12 · cerrar sesión sigue funcionando y no comparte acción con la pr
   assert.ok(layout.includes('signOut(); }') && layout.includes('onClick={signOut}'))
   assert.ok(layout.includes('<ControlPresencia variante="sheet" />') && layout.includes('<ControlPresencia variante="sidebar" />'))
   assert.ok(!CONTROL().includes('signOut'))
+})
+
+// ─── MOTO-PRESENCIA-UX-1 (microfix): ausente o desconocido ≠ fuera de línea ────
+
+test('MPUX13 · estado ausente → se muestra "Sin estado"', () => {
+  assert.equal(etiquetaPresencia(undefined), 'Sin estado')
+  assert.equal(etiquetaPresencia(null), 'Sin estado')
+  assert.equal(presenciaVisible(undefined), 'sin_estado')
+})
+
+test('MPUX14 · estado desconocido → se muestra "Sin estado"', () => {
+  for (const v of ['', 'otro', 'Disponible', 'INACTIVO', 42, {}]) {
+    assert.equal(etiquetaPresencia(v), 'Sin estado')
+    assert.equal(presenciaVisible(v), 'sin_estado')
+  }
+})
+
+test('MPUX15 · estado ausente NO se muestra "Fuera de línea" (ni en el helper ni en el header)', () => {
+  for (const v of [undefined, null, '', 'otro']) assert.notEqual(etiquetaPresencia(v), 'Fuera de línea')
+  const page = fuente('app', 'panel', 'motorizado', 'page.tsx')
+  assert.ok(!page.includes("?? 'inactivo'"), 'la página ya no convierte la ausencia en inactivo')
+  assert.ok(page.includes("presenciaVisible(motorizadoEstado) === 'sin_estado'") && page.includes('Sin estado'))
+  assert.ok(!page.includes('!esMotorizadoEnLinea('), 'Fuera de línea ya no es "lo que no está en línea"')
+})
+
+test('MPUX16 · desde Sin estado, "Ponerse en línea" escribe disponible directo (sin modal)', async () => {
+  for (const v of [undefined, null, 'otro']) {
+    assert.equal(accionPresencia(v).etiqueta, 'Ponerse en línea')
+    const paso = pulsarPresencia(v)
+    assert.deepEqual(paso, { tipo: 'aplicar', destino: 'disponible' })
+    const escrituras: string[] = []
+    await aplicarPresencia(async (d) => { escrituras.push(d) }, paso.destino)
+    assert.deepEqual(escrituras, ['disponible'])
+  }
+  // La salida de línea conserva su confirmación.
+  assert.deepEqual(pulsarPresencia('disponible'), { tipo: 'confirmar', destino: 'inactivo' })
+  assert.deepEqual(pulsarPresencia('ocupado'), { tipo: 'confirmar', destino: 'inactivo' })
+})
+
+test('MPUX17 · solo inactivo se presenta como "Fuera de línea"', () => {
+  assert.equal(etiquetaPresencia('inactivo'), 'Fuera de línea')
+  assert.equal(presenciaVisible('inactivo'), 'fuera_de_linea')
+  for (const v of ['disponible', 'ocupado', undefined, null, '', 'otro']) assert.notEqual(etiquetaPresencia(v), 'Fuera de línea')
+  // Mismo contrato que el dashboard del gestor.
+  assert.equal(categoriaPresencia({ activo: true, estado: undefined }), 'sin_estado')
+  assert.equal(categoriaPresencia({ activo: true, estado: 'inactivo' }), 'fuera_de_linea')
 })
