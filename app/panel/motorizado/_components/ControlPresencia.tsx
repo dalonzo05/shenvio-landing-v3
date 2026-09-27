@@ -2,13 +2,18 @@
 
 // MOTO-PRESENCIA-UX-1 — control de presencia del motorizado, dentro del menú de
 // perfil (bottom sheet móvil y pie del sidebar de escritorio). Es el ÚNICO lugar que
-// escribe `motorizado.estado` desde el panel; la página solo muestra el indicador.
-// Toda la decisión (qué acción ofrecer, cuándo confirmar) vive en
-// lib/motorizado-presencia.ts.
+// cambia la presencia desde el panel; la página solo muestra el indicador. Toda la
+// decisión (qué acción ofrecer, cuándo confirmar) vive en lib/motorizado-presencia.ts.
+//
+// MOTO-RANKING-UBICACION-FRESCA-1 — la escritura ya no es un updateDoc directo:
+// pasa por la callable actualizarPresenciaMotorizado, que además sella
+// `presenciaUpdatedAt` (server-side) para que el ranking sepa si la última
+// ubicación operativa es de esta sesión de presencia o de una anterior.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { collection, doc, limit, onSnapshot, query, serverTimestamp, updateDoc, where } from 'firebase/firestore'
-import { db } from '@/fb/config'
+import { collection, limit, onSnapshot, query, where } from 'firebase/firestore'
+import { httpsCallable } from 'firebase/functions'
+import { db, functions } from '@/fb/config'
 import { useUser } from '@/app/Components/UserProvider'
 import {
   COPY_CONFIRMAR_FUERA_DE_LINEA,
@@ -19,6 +24,11 @@ import {
   pulsarPresencia,
   type PresenciaEscribible,
 } from '@/lib/motorizado-presencia'
+
+const actualizarPresenciaCallable = httpsCallable<
+  { estado: PresenciaEscribible },
+  { ok: true; estado: PresenciaEscribible }
+>(functions, 'actualizarPresenciaMotorizado')
 
 function usePresencia() {
   const { authUser } = useUser()
@@ -40,9 +50,10 @@ function usePresencia() {
   }, [uid])
 
   const escribir = useCallback(async (destino: PresenciaEscribible) => {
-    if (!docId) throw new Error('sin documento de motorizado')
-    await updateDoc(doc(db, 'motorizado', docId), { estado: destino, updatedAt: serverTimestamp() })
-  }, [docId])
+    // El servidor resuelve el documento por authUid: no depende de que `docId`
+    // ya haya llegado del listener (aunque el botón sigue deshabilitado sin él).
+    await actualizarPresenciaCallable({ estado: destino })
+  }, [])
 
   const cambiar = useCallback(async (destino: PresenciaEscribible) => {
     if (enCurso.current) return false // sin doble envío

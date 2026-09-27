@@ -10,6 +10,7 @@ export { responderAsignacion, confirmarTransicionConCobro } from './motorizado-t
 export { confirmarPropuestaAbono, rechazarPropuestaAbono } from './propuestas-abono';
 export { asignarCodigoOrden, asignarCodigoDeposito } from './codigos';
 export { crearAccesoMotorizado, repararAccesoMotorizado, diagnosticarAccesoMotorizado, finalizarActivacionMotorizado } from './acceso-motorizado-callables';
+export { actualizarPresenciaMotorizado } from './presencia-motorizado-callable';
 
 /**
  * Daily report (DRY-RUN / LOG-ONLY): lists orders delivered more than 45

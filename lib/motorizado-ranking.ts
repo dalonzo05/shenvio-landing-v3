@@ -4,6 +4,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { esMotorizadoEnLinea, tieneCargaOperativa } from './motorizado-presencia'
+import { diaOperativoDe, hoyOperativo } from './dia-operativo'
+import { normalizarFecha } from './timeline-orden'
 
 // ─── Tipos ───────────────────────────────────────────────────────────────────
 
@@ -16,7 +18,17 @@ export interface MotorizadoConRanking {
   authUid?: string
   // Nuevos campos opcionales — Firestore los devolverá cuando existan en el doc:
   ubicacionBase?: { lat: number; lng: number } | null
-  ultimaUbicacionOperativa?: { lat: number; lng: number } | null
+  // MOTO-RANKING-UBICACION-FRESCA-1 — `timestamp` es lo que la trae del writer
+  // real (lib/motorizado-stats.ts): un Timestamp de Firestore. Tipado `unknown`
+  // a propósito (este módulo no depende de Firebase); se lee con normalizarFecha.
+  ultimaUbicacionOperativa?: { lat: number; lng: number; timestamp?: unknown } | null
+  // Sello server-side de la última transición EXPLÍCITA de presencia (disponible
+  // / inactivo), puesto por la callable actualizarPresenciaMotorizado. Un
+  // documento que todavía no la tiene no demuestra ninguna sesión vigente —ver
+  // ubicacionOperativaFresca— y eso es intencional: no se infiere de `updatedAt`,
+  // que tocan otros escritores (ubicación operativa, edición del gestor, el
+  // espejo legacy de responderAsignacion).
+  presenciaUpdatedAt?: unknown
   tasaAceptacion?: number         // 0-1, asumir 1.0 si ausente
   totalRechazos?: number          // acumulado histórico de rechazos
   totalAsignaciones?: number      // acumulado histórico de asignaciones procesadas
@@ -147,21 +159,59 @@ export function haversine(
   return R * 2 * Math.atan2(Math.sqrt(aVal), Math.sqrt(1 - aVal))
 }
 
+// ─── Frescura de ultimaUbicacionOperativa ──────────────────────────────────────
+
+/**
+ * ¿La última ubicación operativa de un motorizado SIN órdenes activas puede
+ * usarse como referencia geográfica vigente? TODAS las condiciones:
+ *
+ *   1. lat/lng válidos y timestamp legible;
+ *   2. el timestamp cae en el día operativo actual de Managua (dia-operativo.ts);
+ *   3. existe `presenciaUpdatedAt` — sin él NO se considera demostrada una sesión
+ *      vigente (contrato conservador: preferimos ubicacionBase a una posición que
+ *      podría ser de una sesión ya cerrada); no se infiere de `updatedAt`;
+ *   4. la ubicación es de esa sesión: su timestamp >= presenciaUpdatedAt.
+ *
+ * Con órdenes activas esto no se consulta: la referencia sale de las órdenes
+ * (ver getProximoPuntoOperativo), sin cambios.
+ */
+export function ubicacionOperativaFresca(
+  motorizado: MotorizadoConRanking,
+  ahoraMs: number
+): boolean {
+  const ub = motorizado.ultimaUbicacionOperativa
+  if (!ub || typeof ub.lat !== 'number' || typeof ub.lng !== 'number') return false
+  const ubicacionAt = normalizarFecha(ub.timestamp)
+  if (!ubicacionAt) return false
+  if (diaOperativoDe(ubicacionAt.getTime()) !== hoyOperativo(ahoraMs)) return false
+  const presenciaAt = normalizarFecha(motorizado.presenciaUpdatedAt)
+  if (!presenciaAt) return false
+  return ubicacionAt.getTime() >= presenciaAt.getTime()
+}
+
 // ─── getProximoPuntoOperativo ─────────────────────────────────────────────────
 
 /**
  * Deriva el próximo punto operativo relevante de un motorizado según sus
  * órdenes activas (la carga se deriva de ellas, no de `motorizado.estado`).
  *
- * - sin órdenes activas → ultimaUbicacionOperativa ?? ubicacionBase ?? null
- * - con órdenes activas → punto de la orden activa más avanzada en su ciclo de vida:
+ * - sin órdenes activas → ultimaUbicacionOperativa SOLO si ubicacionOperativaFresca
+ *   (hoy Managua + de la sesión de presencia vigente); si no, ubicacionBase
+ * - con órdenes activas → punto de la orden activa más avanzada en su ciclo de vida
+ *   (SIN CAMBIOS: la frescura no aplica aquí):
  *     · asignada | en_camino_retiro  → recoleccion.coord (aún va a buscar)
  *     · retirado | en_camino_entrega → entrega.coord (ya lo tiene, va a entregar)
- * - fallback   → ultimaUbicacionOperativa ?? ubicacionBase ?? null
+ * - fallback (orden activa sin coord utilizable) → ultimaUbicacionOperativa ?? ubicacionBase ?? null,
+ *   igual que siempre: hay carga real, la frescura no decide acá.
+ *
+ * @param ahoraMs  Instante de referencia para la frescura. Inyectado para
+ *                  mantener el módulo determinista en tests; en producción se
+ *                  omite y usa el reloj real.
  */
 export function getProximoPuntoOperativo(
   motorizado: MotorizadoConRanking,
-  todasLasOrdenes: OrdenActivaRanking[]
+  todasLasOrdenes: OrdenActivaRanking[],
+  ahoraMs: number = Date.now()
 ): { lat: number; lng: number } | null {
   // Con o sin trabajo: sus órdenes activas mandan, sea cual sea el `estado` crudo
   // (disponible, o el legacy ocupado).
@@ -182,10 +232,15 @@ export function getProximoPuntoOperativo(
       : (ordenRel.entrega?.coord ?? ordenRel.cotizacion?.destinoCoord ?? null)
 
     if (coord) return coord
+    // Hay carga real pero la orden no trae coord utilizable: mismo fallback de
+    // siempre, sin pasar por frescura (no es el caso "sin órdenes activas").
+    return motorizado.ultimaUbicacionOperativa ?? motorizado.ubicacionBase ?? null
   }
 
-  // Fallback a ubicación base si no hay coords en las órdenes
-  return motorizado.ultimaUbicacionOperativa ?? motorizado.ubicacionBase ?? null
+  // Sin órdenes activas: la última ubicación operativa solo cuenta si es de HOY
+  // y de la sesión de presencia vigente; si no, ubicación base.
+  if (ubicacionOperativaFresca(motorizado, ahoraMs)) return motorizado.ultimaUbicacionOperativa!
+  return motorizado.ubicacionBase ?? null
 }
 
 // ─── calcularScore ────────────────────────────────────────────────────────────
@@ -198,7 +253,8 @@ export function calcularScore(
   motorizado: MotorizadoConRanking,
   ordenesDelMoto: OrdenActivaRanking[],
   nuevaOrden: NuevaOrdenRanking,
-  todasLasOrdenes: OrdenActivaRanking[]
+  todasLasOrdenes: OrdenActivaRanking[],
+  ahoraMs: number = Date.now()
 ): ScoreResult {
   // ── 1. Carga (40%) ──────────────────────────────────────────────────────────
   const cargaActual = ordenesDelMoto.length
@@ -206,7 +262,7 @@ export function calcularScore(
   const scoreCarga = Math.max(0, 1 - cargaActual * 0.25)
 
   // ── 2. Cercanía al próximo punto operativo (30%) ────────────────────────────
-  const proximoPunto = getProximoPuntoOperativo(motorizado, todasLasOrdenes)
+  const proximoPunto = getProximoPuntoOperativo(motorizado, todasLasOrdenes, ahoraMs)
   const coordRetiroNueva =
     nuevaOrden.recoleccion?.coord ?? nuevaOrden.cotizacion?.origenCoord ?? null
 
@@ -378,7 +434,8 @@ export function calcularScore(
 export function rankearMotorizados(
   motorizados: MotorizadoConRanking[],
   todasLasOrdenes: OrdenActivaRanking[],
-  nuevaOrden: NuevaOrdenRanking
+  nuevaOrden: NuevaOrdenRanking,
+  ahoraMs: number = Date.now()
 ): MotorizadoRankeado[] {
   // Solo motorizados activos y en línea
   const activos = motorizados.filter((m) => m.activo !== false && esMotorizadoEnLinea(m.estado))
@@ -390,7 +447,7 @@ export function rankearMotorizados(
           o.asignacion?.motorizadoId === moto.id &&
           ESTADOS_ACTIVOS.includes(o.estado as typeof ESTADOS_ACTIVOS[number])
       )
-      const scoreResult = calcularScore(moto, ordenesDelMoto, nuevaOrden, todasLasOrdenes)
+      const scoreResult = calcularScore(moto, ordenesDelMoto, nuevaOrden, todasLasOrdenes, ahoraMs)
       return { ...moto, scoreResult }
     })
     .sort((a, b) => b.scoreResult.score - a.scoreResult.score)

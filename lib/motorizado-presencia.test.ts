@@ -23,6 +23,7 @@ import {
   rankearMotorizados,
   calcularScore,
   getProximoPuntoOperativo,
+  ubicacionOperativaFresca,
   type MotorizadoConRanking,
   type OrdenActivaRanking,
   type NuevaOrdenRanking,
@@ -107,8 +108,11 @@ test('MD5/MD6 · aceptar y rechazar solo registran la métrica; el estado lo esc
   // Las métricas de aceptación ya no las acredita el cliente: las registra responderAsignacion (servidor).
   assert.ok(!src.includes('registrarAceptacion(') && !src.includes('registrarRechazo('))
   const ctl = fuente('app', 'panel', 'motorizado', '_components', 'ControlPresencia.tsx')
-  const escrituras = ctl.match(/updateDoc\(doc\(db, 'motorizado', docId\), \{ estado:/g) ?? []
-  assert.equal(escrituras.length, 1, 'una sola escritura de estado: el control explícito de presencia')
+  // MOTO-RANKING-UBICACION-FRESCA-1: ya no es un updateDoc directo, sino la callable
+  // server-side (que además sella presenciaUpdatedAt).
+  assert.ok(!ctl.includes('updateDoc('), 'sin escritura directa de Firestore')
+  const llamadas = ctl.match(/actualizarPresenciaCallable\(\{ estado: destino \}\)/g) ?? []
+  assert.equal(llamadas.length, 1, 'una sola escritura de estado: el control explícito de presencia')
 })
 
 // ─── MD10–MD11: presencia manual ──────────────────────────────────────────────
@@ -371,4 +375,208 @@ test('MPUX17 · solo inactivo se presenta como "Fuera de línea"', () => {
   // Mismo contrato que el dashboard del gestor.
   assert.equal(categoriaPresencia({ activo: true, estado: undefined }), 'sin_estado')
   assert.equal(categoriaPresencia({ activo: true, estado: 'inactivo' }), 'fuera_de_linea')
+})
+
+// ─── MOTO-RANKING-UBICACION-FRESCA-1 · frescura de ultimaUbicacionOperativa ────
+//
+// Sin órdenes activas, `ultimaUbicacionOperativa` solo cuenta si es de HOY
+// (Managua) y es posterior a `presenciaUpdatedAt` (la última transición
+// EXPLÍCITA de presencia). Sin `presenciaUpdatedAt` no se asume ninguna sesión
+// vigente: se usa `ubicacionBase`. Con órdenes activas nada de esto aplica.
+
+const AHORA = new Date('2026-09-20T20:00:00.000Z').getTime() // 14:00 Managua (UTC-6)
+const HOY_09H = new Date('2026-09-20T15:00:00.000Z') // 09:00 Managua, mismo día operativo
+const HOY_16H = new Date('2026-09-20T22:00:00.000Z') // 16:00 Managua, mismo día operativo
+const AYER = new Date('2026-09-19T15:00:00.000Z')
+const OTRA_BASE = { lat: 12.05, lng: -86.3 }
+
+function motoConUbicacion(extra: Partial<MotorizadoConRanking> = {}): MotorizadoConRanking {
+  return { id: 'm1', nombre: 'm1', estado: 'disponible', activo: true, ubicacionBase: OTRA_BASE, ...extra }
+}
+
+test('UF1 · sin órdenes, ubicación de hoy con presenciaUpdatedAt anterior → usa ultimaUbicacionOperativa', () => {
+  const m = motoConUbicacion({
+    ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: HOY_16H },
+    presenciaUpdatedAt: HOY_09H,
+  })
+  assert.equal(ubicacionOperativaFresca(m, AHORA), true)
+  assert.deepEqual(getProximoPuntoOperativo(m, [], AHORA), { lat: 12.2, lng: -86.1, timestamp: HOY_16H })
+})
+
+test('UF2 · sin órdenes, ubicación de ayer → usa ubicacionBase', () => {
+  const m = motoConUbicacion({
+    ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: AYER },
+    presenciaUpdatedAt: HOY_09H,
+  })
+  assert.equal(ubicacionOperativaFresca(m, AHORA), false)
+  assert.deepEqual(getProximoPuntoOperativo(m, [], AHORA), OTRA_BASE)
+})
+
+test('UF2b · ubicación de ayer con presenciaUpdatedAt también de ayer (la comparación de sesión SÍ se cumple) → igual usa ubicacionBase: aísla el chequeo de día Managua', () => {
+  const m = motoConUbicacion({
+    ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: AYER },
+    presenciaUpdatedAt: AYER,
+  })
+  assert.equal(ubicacionOperativaFresca(m, AHORA), false)
+  assert.deepEqual(getProximoPuntoOperativo(m, [], AHORA), OTRA_BASE)
+})
+
+test('UF3 · sin órdenes, ubicación de hoy pero presenciaUpdatedAt POSTERIOR → usa ubicacionBase', () => {
+  const m = motoConUbicacion({
+    ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: HOY_09H },
+    presenciaUpdatedAt: HOY_16H,
+  })
+  assert.equal(ubicacionOperativaFresca(m, AHORA), false)
+  assert.deepEqual(getProximoPuntoOperativo(m, [], AHORA), OTRA_BASE)
+})
+
+test('UF4 · sin órdenes, ubicación POSTERIOR a presenciaUpdatedAt (mismo día) → usa ultimaUbicacionOperativa', () => {
+  const m = motoConUbicacion({
+    ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: HOY_16H },
+    presenciaUpdatedAt: HOY_09H,
+  })
+  assert.equal(ubicacionOperativaFresca(m, AHORA), true)
+})
+
+test('UF5 · sin órdenes, ubicación de hoy, SIN presenciaUpdatedAt → usa ubicacionBase (contrato conservador)', () => {
+  const m = motoConUbicacion({ ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: HOY_09H } })
+  assert.equal(ubicacionOperativaFresca(m, AHORA), false)
+  assert.deepEqual(getProximoPuntoOperativo(m, [], AHORA), OTRA_BASE)
+})
+
+test('UF6 · sin órdenes, ubicación inválida o sin timestamp → usa ubicacionBase', () => {
+  const sinTimestamp = motoConUbicacion({ ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1 }, presenciaUpdatedAt: HOY_09H })
+  assert.equal(ubicacionOperativaFresca(sinTimestamp, AHORA), false)
+  assert.deepEqual(getProximoPuntoOperativo(sinTimestamp, [], AHORA), OTRA_BASE)
+
+  const sinLat = motoConUbicacion({ ultimaUbicacionOperativa: { lat: NaN as unknown as number, lng: -86.1, timestamp: HOY_16H }, presenciaUpdatedAt: HOY_09H })
+  assert.equal(ubicacionOperativaFresca(sinLat, AHORA), true, 'NaN sigue siendo typeof number: la validación es de tipo, no de rango')
+  const invalido = motoConUbicacion({ ultimaUbicacionOperativa: { lat: '12' as unknown as number, lng: -86.1, timestamp: HOY_16H }, presenciaUpdatedAt: HOY_09H })
+  assert.equal(ubicacionOperativaFresca(invalido, AHORA), false)
+
+  const timestampBasura = motoConUbicacion({ ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: 'no-es-fecha' }, presenciaUpdatedAt: HOY_09H })
+  assert.equal(ubicacionOperativaFresca(timestampBasura, AHORA), false)
+})
+
+test('UF7 · sin órdenes, ubicación vieja y SIN ubicacionBase → preserva el fallback actual (null)', () => {
+  const m: MotorizadoConRanking = {
+    id: 'm1', nombre: 'm1', estado: 'disponible', activo: true,
+    ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: AYER },
+    presenciaUpdatedAt: HOY_09H,
+  }
+  assert.equal(getProximoPuntoOperativo(m, [], AHORA), null)
+})
+
+test('UF8 · con orden activa, ubicación operativa vieja → sigue usando el punto de la orden (sin cambios)', () => {
+  const m = motoConUbicacion({
+    ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: AYER },
+    presenciaUpdatedAt: HOY_09H,
+  })
+  const A = orden('a', 'm1', 'en_camino_entrega', ENTREGA_A)
+  assert.deepEqual(getProximoPuntoOperativo(m, [A], AHORA), ENTREGA_A)
+})
+
+test('UF9 · con orden activa, presenciaUpdatedAt posterior a la ubicación → sigue usando el punto de la orden (frescura no aplica)', () => {
+  const m = motoConUbicacion({
+    ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: HOY_09H },
+    presenciaUpdatedAt: HOY_16H, // haría la ubicación NO fresca si se consultara; no debe consultarse
+  })
+  const A = orden('a', 'm1', 'asignada')
+  assert.deepEqual(getProximoPuntoOperativo(m, [A], AHORA), RETIRO_A)
+})
+
+test('UF10 · fuera de línea → no entra como candidato (sin cambios respecto al contrato de presencia)', () => {
+  const m = motoConUbicacion({
+    estado: 'inactivo',
+    ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: HOY_16H },
+    presenciaUpdatedAt: HOY_09H,
+  })
+  assert.deepEqual(ids(rankearMotorizados([m], [], NUEVA, AHORA)), [])
+})
+
+test('UF11 · legacy ocupado, con orden activa → comportamiento existente (frescura no aplica)', () => {
+  const m = motoConUbicacion({ estado: 'ocupado' })
+  const A = orden('a', 'm1', 'retirado', ENTREGA_B)
+  assert.deepEqual(getProximoPuntoOperativo(m, [A], AHORA), ENTREGA_B)
+  assert.deepEqual(ids(rankearMotorizados([m], [A], NUEVA, AHORA)), ['m1'])
+})
+
+test('UF12 · legacy ocupado, sin orden activa y sin presenciaUpdatedAt → usa ubicacionBase', () => {
+  const m = motoConUbicacion({
+    estado: 'ocupado',
+    ultimaUbicacionOperativa: { lat: 12.2, lng: -86.1, timestamp: HOY_09H },
+  })
+  assert.deepEqual(getProximoPuntoOperativo(m, [], AHORA), OTRA_BASE)
+})
+
+test('caso A · base Ciudad Jardín, última ubicación Carretera a Masaya de hoy 15:00, presenciaUpdatedAt hoy 09:00, sin órdenes → usa Carretera a Masaya', () => {
+  const CIUDAD_JARDIN = { lat: 12.11, lng: -86.28 }
+  const CARRETERA_MASAYA = { lat: 11.95, lng: -86.15 }
+  const hoy15h = new Date('2026-09-20T21:00:00.000Z') // 15:00 Managua
+  const m = motoConUbicacion({
+    ubicacionBase: CIUDAD_JARDIN,
+    ultimaUbicacionOperativa: { ...CARRETERA_MASAYA, timestamp: hoy15h },
+    presenciaUpdatedAt: HOY_09H,
+  })
+  assert.deepEqual(getProximoPuntoOperativo(m, [], AHORA), { ...CARRETERA_MASAYA, timestamp: hoy15h })
+})
+
+test('caso B · misma ubicación pero de AYER → usa Ciudad Jardín (base)', () => {
+  const CIUDAD_JARDIN = { lat: 12.11, lng: -86.28 }
+  const CARRETERA_MASAYA = { lat: 11.95, lng: -86.15 }
+  const m = motoConUbicacion({
+    ubicacionBase: CIUDAD_JARDIN,
+    ultimaUbicacionOperativa: { ...CARRETERA_MASAYA, timestamp: AYER },
+    presenciaUpdatedAt: HOY_09H,
+  })
+  assert.deepEqual(getProximoPuntoOperativo(m, [], AHORA), CIUDAD_JARDIN)
+})
+
+test('caso C · ubicación hoy 15:00, se desconecta/reconecta (presenciaUpdatedAt hoy 16:00) → usa Ciudad Jardín (base)', () => {
+  const CIUDAD_JARDIN = { lat: 12.11, lng: -86.28 }
+  const CARRETERA_MASAYA = { lat: 11.95, lng: -86.15 }
+  const hoy15h = new Date('2026-09-20T21:00:00.000Z')
+  const m = motoConUbicacion({
+    ubicacionBase: CIUDAD_JARDIN,
+    ultimaUbicacionOperativa: { ...CARRETERA_MASAYA, timestamp: hoy15h },
+    presenciaUpdatedAt: HOY_16H, // reconexión posterior a esa ubicación
+  })
+  assert.deepEqual(getProximoPuntoOperativo(m, [], AHORA), CIUDAD_JARDIN)
+})
+
+test('caso D · tras reconectar, completa un evento operativo y la nueva ubicación queda después → usa la nueva ubicación operativa', () => {
+  const CIUDAD_JARDIN = { lat: 12.11, lng: -86.28 }
+  const nuevaUbicacion = { lat: 12.0, lng: -86.2 }
+  const hoy1630 = new Date('2026-09-20T22:30:00.000Z') // 16:30 Managua
+  const m = motoConUbicacion({
+    ubicacionBase: CIUDAD_JARDIN,
+    ultimaUbicacionOperativa: { ...nuevaUbicacion, timestamp: hoy1630 },
+    presenciaUpdatedAt: HOY_16H, // reconectó a las 16:00; la ubicación es de las 16:30, posterior
+  })
+  assert.deepEqual(getProximoPuntoOperativo(m, [], AHORA), { ...nuevaUbicacion, timestamp: hoy1630 })
+})
+
+// ─── UI: la escritura de presencia pasa por la callable server-side ───────────
+
+test('UI1-UI2 · ControlPresencia ya no escribe Firestore directo: usa la callable actualizarPresenciaMotorizado', () => {
+  const ctl = fuente('app', 'panel', 'motorizado', '_components', 'ControlPresencia.tsx')
+  assert.ok(!ctl.includes('updateDoc('))
+  assert.ok(ctl.includes("httpsCallable") && ctl.includes("'actualizarPresenciaMotorizado'"))
+  assert.ok(ctl.includes('actualizarPresenciaCallable({ estado: destino })'))
+})
+
+test('UI3-UI4 · el modal de confirmación y la ausencia de confirmación para "ponerse en línea" se conservan', () => {
+  const ctl = fuente('app', 'panel', 'motorizado', '_components', 'ControlPresencia.tsx')
+  assert.ok(ctl.includes("paso.tipo === 'confirmar'") && ctl.includes('setConfirmando(paso.destino)'))
+  assert.ok(ctl.includes('role="dialog"') && ctl.includes('aria-modal="true"'))
+})
+
+test('UI5 · "Sin estado" conserva la recuperación vía "Ponerse en línea" (sin cambios de contrato)', () => {
+  assert.equal(accionPresencia(undefined).etiqueta, 'Ponerse en línea')
+  assert.deepEqual(pulsarPresencia(undefined), { tipo: 'aplicar', destino: 'disponible' })
+})
+
+test('UI6 · el header del panel motorizado no reincorpora ningún botón de presencia', () => {
+  const pagina = fuente('app', 'panel', 'motorizado', 'page.tsx')
+  assert.ok(!pagina.includes('toggleActivarse') && !pagina.includes('Activarme') && !pagina.includes('Desactivarme'))
 })
