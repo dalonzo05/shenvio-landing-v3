@@ -60,3 +60,61 @@ export function resumenPresencia(motorizados: ReadonlyArray<{ activo?: boolean |
     inactivos: cuenta('inactivo'),
   }
 }
+
+// ─── Control de presencia del motorizado (menú de perfil) ─────────────────────
+//
+// MOTO-PRESENCIA-UX-1. Solo cambia DÓNDE y CÓMO controla su presencia el motorizado;
+// la transición sigue siendo la misma escritura de `estado` (disponible / inactivo).
+// Tener órdenes activas no bloquea nada: fuera de línea afecta las órdenes NUEVAS.
+
+export const ETIQUETA_EN_LINEA = 'En línea'
+export const ETIQUETA_FUERA_DE_LINEA = 'Fuera de línea'
+
+export const COPY_CONFIRMAR_FUERA_DE_LINEA = {
+  titulo: '¿Querés ponerte fuera de línea?',
+  texto:
+    'Mientras estés fuera de línea no recibirás nuevas asignaciones. Las órdenes que ya tenés asignadas seguirán disponibles y podrás completarlas normalmente.',
+  cancelar: 'Cancelar',
+  confirmar: 'Ponerme fuera de línea',
+} as const
+
+/** Lo que ve el motorizado: sin `estado` (o desconocido) se muestra fuera de línea, sin inventar "en línea". */
+export function etiquetaPresencia(estado: unknown): string {
+  return esMotorizadoEnLinea(estado) ? ETIQUETA_EN_LINEA : ETIQUETA_FUERA_DE_LINEA
+}
+
+export interface AccionPresencia {
+  etiqueta: string
+  destino: PresenciaEscribible
+  requiereConfirmacion: boolean
+}
+
+/** La acción que ofrece el menú de perfil según la presencia actual. */
+export function accionPresencia(estado: unknown): AccionPresencia {
+  return esMotorizadoEnLinea(estado)
+    ? { etiqueta: 'Ponerse fuera de línea', destino: 'inactivo', requiereConfirmacion: true }
+    : { etiqueta: 'Ponerse en línea', destino: 'disponible', requiereConfirmacion: false }
+}
+
+export type PasoPresencia =
+  | { tipo: 'confirmar'; destino: PresenciaEscribible }
+  | { tipo: 'aplicar'; destino: PresenciaEscribible }
+
+/** Al pulsar la acción: salir de línea pide confirmación (no escribe); ponerse en línea aplica directo. */
+export function pulsarPresencia(estado: unknown): PasoPresencia {
+  const a = accionPresencia(estado)
+  return { tipo: a.requiereConfirmacion ? 'confirmar' : 'aplicar', destino: a.destino }
+}
+
+/** Escribe la presencia por el puerto dado. Un fallo no se disfraza de éxito. */
+export async function aplicarPresencia(
+  escribir: (destino: PresenciaEscribible) => Promise<void>,
+  destino: PresenciaEscribible,
+): Promise<{ ok: boolean }> {
+  try {
+    await escribir(destino)
+    return { ok: true }
+  } catch {
+    return { ok: false }
+  }
+}

@@ -7,6 +7,7 @@ import { auth } from '@/fb/config'
 import { useUser } from '@/app/Components/UserProvider'
 import { setPersistence, browserLocalPersistence } from 'firebase/auth'
 import { useRoleGuard, type Rol } from '../_hooks/useRoleGuard'
+import ControlPresencia from './_components/ControlPresencia'
 import {
   Home,
   ChevronLeft,
@@ -93,6 +94,7 @@ export default function MotorizadoLayout({ children }: { children: React.ReactNo
                 {profile.name}
               </p>
             )}
+            {!collapsed && <ControlPresencia variante="sidebar" />}
             <button
               onClick={signOut}
               title="Cerrar sesión"
@@ -146,6 +148,9 @@ export default function MotorizadoLayout({ children }: { children: React.ReactNo
                 <p style={{ fontSize: 16, fontWeight: 700, color: '#111827', margin: 0 }}>{profile.name}</p>
               </div>
             )}
+            <div style={{ height: 1, background: '#f3f4f6', marginBottom: 12 }} />
+            {/* Presencia: En línea / Fuera de línea (independiente del cierre de sesión) */}
+            <ControlPresencia variante="sheet" />
             <div style={{ height: 1, background: '#f3f4f6', marginBottom: 12 }} />
             {/* Cerrar sesión */}
             <button

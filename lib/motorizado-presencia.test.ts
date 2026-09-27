@@ -12,6 +12,11 @@ import {
   PRESENCIAS_ESCRIBIBLES,
   categoriaPresencia,
   resumenPresencia,
+  accionPresencia,
+  aplicarPresencia,
+  etiquetaPresencia,
+  pulsarPresencia,
+  COPY_CONFIRMAR_FUERA_DE_LINEA,
 } from './motorizado-presencia'
 import {
   rankearMotorizados,
@@ -95,12 +100,13 @@ for (const [nombre, ruta] of FLUJOS_DE_ORDEN) {
   })
 }
 
-test('MD5/MD6 · aceptar y rechazar solo registran la métrica; el estado lo escribe únicamente el toggle manual', () => {
+test('MD5/MD6 · aceptar y rechazar solo registran la métrica; el estado lo escribe únicamente el control de presencia', () => {
   const src = fuente('app', 'panel', 'motorizado', 'page.tsx')
-  const escrituras = src.match(/updateDoc\(doc\(db, 'motorizado', motorizadoDocId\), \{ estado:/g) ?? []
-  assert.equal(escrituras.length, 1, 'una sola escritura de estado: el toggle explícito')
-  assert.ok(src.includes('presenciaAlAlternar(motorizadoEstado)'))
+  assert.ok(!/updateDoc\(doc\(db, 'motorizado', motorizadoDocId\), \{ estado:/.test(src), 'la página ya no escribe presencia')
   assert.ok(src.includes('registrarAceptacion(motorizadoDocId') && src.includes('registrarRechazo(motorizadoDocId)'))
+  const ctl = fuente('app', 'panel', 'motorizado', '_components', 'ControlPresencia.tsx')
+  const escrituras = ctl.match(/updateDoc\(doc\(db, 'motorizado', docId\), \{ estado:/g) ?? []
+  assert.equal(escrituras.length, 1, 'una sola escritura de estado: el control explícito de presencia')
 })
 
 // ─── MD10–MD11: presencia manual ──────────────────────────────────────────────
@@ -224,4 +230,97 @@ test('MDD6 · el dashboard ya no trata ocupado como categoría operativa vigente
   assert.ok(!src.includes("'ocupado'"), "sin literal 'ocupado'")
   assert.ok(!/resumenMotorizados.ocupados|>s*Ocupados/.test(src), 'sin contador ni filtro Ocupados')
   assert.ok(src.includes('resumenPresencia(motorizados)') && src.includes('categoriaPresencia('))
+})
+
+// ─── MOTO-PRESENCIA-UX-1: control de presencia en el menú de perfil ───────────
+
+const HEADER_PAGE = () => fuente('app', 'panel', 'motorizado', 'page.tsx')
+const LAYOUT = () => fuente('app', 'panel', 'motorizado', 'layout.tsx')
+const CONTROL = () => fuente('app', 'panel', 'motorizado', '_components', 'ControlPresencia.tsx')
+
+test('MPUX1 · en línea: el header muestra "En línea" y ya no tiene botón Desactivarme', () => {
+  const src = HEADER_PAGE()
+  assert.equal(etiquetaPresencia('disponible'), 'En línea')
+  assert.ok(src.includes('En línea') && !src.includes('Desactivarme') && !src.includes('toggleActivarse'))
+})
+
+test('MPUX2 · fuera de línea: el header muestra "Fuera de línea" y ya no tiene botón Activarme', () => {
+  const src = HEADER_PAGE()
+  assert.equal(etiquetaPresencia('inactivo'), 'Fuera de línea')
+  assert.ok(src.includes('Fuera de línea') && !src.includes('Activarme'))
+})
+
+test('MPUX3 · menú con estado En línea → ofrece "Ponerse fuera de línea"', () => {
+  assert.equal(accionPresencia('disponible').etiqueta, 'Ponerse fuera de línea')
+  assert.equal(accionPresencia('disponible').destino, 'inactivo')
+})
+
+test('MPUX4 · menú con estado Fuera de línea → ofrece "Ponerse en línea"', () => {
+  assert.equal(accionPresencia('inactivo').etiqueta, 'Ponerse en línea')
+  assert.equal(accionPresencia('inactivo').destino, 'disponible')
+})
+
+test('MPUX5 · pulsar "Ponerse fuera de línea" abre la confirmación y NO escribe antes de confirmar', async () => {
+  const escrituras: string[] = []
+  const paso = pulsarPresencia('disponible')
+  assert.deepEqual(paso, { tipo: 'confirmar', destino: 'inactivo' })
+  // Solo un paso de tipo 'aplicar' llega a escribir; 'confirmar' no toca nada.
+  if (paso.tipo === 'aplicar') await aplicarPresencia(async (d) => { escrituras.push(d) }, paso.destino)
+  assert.deepEqual(escrituras, [])
+  const ctl = CONTROL()
+  assert.ok(ctl.includes("paso.tipo === 'confirmar'") && ctl.includes('setConfirmando(paso.destino)'))
+})
+
+test('MPUX6 · Cancelar (o Escape, o el fondo) cierra sin escribir', () => {
+  const ctl = CONTROL()
+  assert.ok(ctl.includes('onClick={() => setConfirmando(null)}'), 'Cancelar solo cierra')
+  assert.ok(ctl.includes("e.key === 'Escape'") && ctl.includes('setConfirmando(null)'))
+  assert.ok(ctl.includes('role="dialog"') && ctl.includes('aria-modal="true"') && ctl.includes('aria-labelledby'))
+  assert.equal(COPY_CONFIRMAR_FUERA_DE_LINEA.cancelar, 'Cancelar')
+})
+
+test('MPUX7 · confirmar escribe estado = inactivo por el flujo existente', async () => {
+  const escrituras: string[] = []
+  const paso = pulsarPresencia('disponible')
+  const r = await aplicarPresencia(async (d) => { escrituras.push(d) }, paso.destino)
+  assert.deepEqual(escrituras, ['inactivo'])
+  assert.equal(r.ok, true)
+  assert.equal(COPY_CONFIRMAR_FUERA_DE_LINEA.confirmar, 'Ponerme fuera de línea')
+  // Un fallo de Firestore no se reporta como éxito.
+  assert.deepEqual(await aplicarPresencia(async () => { throw new Error('permission-denied') }, 'inactivo'), { ok: false })
+})
+
+test('MPUX8 · "Ponerse en línea" escribe disponible directo, sin modal', async () => {
+  const escrituras: string[] = []
+  const paso = pulsarPresencia('inactivo')
+  assert.deepEqual(paso, { tipo: 'aplicar', destino: 'disponible' })
+  await aplicarPresencia(async (d) => { escrituras.push(d) }, paso.destino)
+  assert.deepEqual(escrituras, ['disponible'])
+})
+
+test('MPUX9 · con órdenes activas, salir de línea sigue disponible: la acción no depende de las órdenes', () => {
+  assert.equal(accionPresencia.length, 1, 'solo recibe el estado, no las órdenes')
+  assert.equal(accionPresencia('disponible').requiereConfirmacion, true)
+  assert.match(COPY_CONFIRMAR_FUERA_DE_LINEA.texto, /órdenes que ya tenés asignadas seguirán disponibles/)
+  assert.ok(!/ordenes|órdenes/i.test(CONTROL().replace(/COPY_CONFIRMAR_FUERA_DE_LINEA/g, '')), 'el control no condiciona nada por órdenes')
+})
+
+test('MPUX10 · legacy ocupado se presenta En línea y ofrece "Ponerse fuera de línea"', () => {
+  assert.equal(etiquetaPresencia('ocupado'), 'En línea')
+  assert.equal(accionPresencia('ocupado').etiqueta, 'Ponerse fuera de línea')
+  assert.ok(!/Ocupado/.test(HEADER_PAGE() + CONTROL() + LAYOUT()), 'no se muestra "Ocupado"')
+  assert.equal(etiquetaPresencia(undefined), 'Fuera de línea', 'sin estado no se inventa En línea')
+})
+
+test('MPUX11 · no queda copy operativo Activarme/Desactivarme en el panel motorizado vigente', () => {
+  for (const src of [HEADER_PAGE(), LAYOUT(), CONTROL()]) {
+    assert.ok(!/Activarme|Desactivarme/.test(src))
+  }
+})
+
+test('MPUX12 · cerrar sesión sigue funcionando y no comparte acción con la presencia; el menú vive en el layout compartido', () => {
+  const layout = LAYOUT()
+  assert.ok(layout.includes('signOut(); }') && layout.includes('onClick={signOut}'))
+  assert.ok(layout.includes('<ControlPresencia variante="sheet" />') && layout.includes('<ControlPresencia variante="sidebar" />'))
+  assert.ok(!CONTROL().includes('signOut'))
 })

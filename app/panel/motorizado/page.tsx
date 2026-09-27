@@ -8,7 +8,7 @@ import {
   runTransaction, increment, arrayUnion, limit,
 } from 'firebase/firestore';
 import { auth, db, functions } from '@/fb/config';
-import { esMotorizadoEnLinea, presenciaAlAlternar } from '@/lib/motorizado-presencia';
+import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia';
 import { httpsCallable } from 'firebase/functions';
 import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBoucher, uploadVersionBoucherDeposito, type TipoEvidencia } from '@/fb/storage'
 import { registrarMovimiento } from '@/lib/financial-writes';
@@ -475,7 +475,6 @@ export default function PanelMotorizadoPage() {
   // displayName y el writer terminaba guardando el correo.
   const [motorizadoNombrePerfil, setMotorizadoNombrePerfil] = useState<string | null>(null);
   const [motorizadoEstado, setMotorizadoEstado] = useState<'disponible' | 'ocupado' | 'inactivo' | null>(null);
-  const [toggling, setToggling] = useState(false);
 
   // Historial filters
   const [histFecha, setHistFecha] = useState<'hoy' | 'ayer' | 'personalizado'>('hoy');
@@ -620,18 +619,6 @@ export default function PanelMotorizadoPage() {
       }
     } catch (e) { console.error(e); setErr('No se pudo rechazar.'); }
     finally { setActionId(null); }
-  }
-
-  async function toggleActivarse() {
-    if (!motorizadoDocId || toggling) return;
-    setToggling(true);
-    try {
-      // Presencia explícita: en línea ↔ fuera de línea. Se puede salir de línea con
-      // órdenes activas (afecta órdenes NUEVAS; las que ya tiene siguen siendo suyas).
-      const nuevoEstado = presenciaAlAlternar(motorizadoEstado);
-      await updateDoc(doc(db, 'motorizado', motorizadoDocId), { estado: nuevoEstado, updatedAt: serverTimestamp() });
-    } catch (e) { console.error(e); }
-    finally { setToggling(false); }
   }
 
   // Transición SIN confirmación de cobro: no toca cobrosMotorizado ni
@@ -1278,21 +1265,6 @@ export default function PanelMotorizadoPage() {
                 <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600 }}>Fuera de línea</span>
               </div>
             )}
-            {/* Botón toggle */}
-            <button
-              onClick={toggleActivarse}
-              disabled={toggling || !motorizadoDocId}
-              style={{
-                fontSize: 12, fontWeight: 600, borderRadius: 20, padding: '5px 12px', border: 'none',
-                cursor: toggling || !motorizadoDocId ? 'not-allowed' : 'pointer',
-                opacity: toggling || !motorizadoDocId ? 0.6 : 1,
-                background: esMotorizadoEnLinea(motorizadoEstado) ? '#e5e7eb' : '#004aad',
-                color: esMotorizadoEnLinea(motorizadoEstado) ? '#374151' : '#fff',
-                transition: 'opacity 0.15s',
-              }}
-            >
-              {esMotorizadoEnLinea(motorizadoEstado) ? 'Desactivarme' : 'Activarme'}
-            </button>
           </div>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
