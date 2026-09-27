@@ -2645,6 +2645,50 @@ test('MDR2 · nadie fabrica un `ocupado` nuevo: ni al editar ni al crear ⇒ DEN
 test('MDR3 · un documento legacy `ocupado` recibe cambios ajenos sin migrarlo, y puede salir de ese valor ⇒ ALLOW', async () => {
   const id = await motorizadoConEstado('mot_mdr3', 'ocupado')
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'motorizado', id), { telefono: '70000000' }))
-  await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'motorizado', id), { totalAceptadas: 3, updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'motorizado', id), { ultimaUbicacionOperativa: { lat: 12.1, lng: -86.2 }, updatedAt: serverTimestamp() }))
   await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'motorizado', id), { estado: 'inactivo', updatedAt: serverTimestamp() }))
+})
+
+// MOTO-STATS-ACEPTACION-TRAZA-1 — las métricas de aceptación las escribe el servidor.
+async function motorizadoConMetricas(id: string) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'motorizado', id), {
+      nombre: 'Luigi Alonzo', telefono: '77889911', estado: 'disponible', activo: true, authUid: UID_MOTO,
+      totalAsignaciones: 4, totalAceptadas: 3, totalRechazos: 1, tasaAceptacion: 0.75, tiempoPromedioAceptacion: 20,
+      metricasAceptacion: { version: 2, totalDecisiones: 2, totalAceptadas: 1, totalRechazadas: 1, tasaAceptacion: 0.5 },
+    })
+  })
+  return id
+}
+
+test('MAT10 · el motorizado no puede fabricar sus contadores legacy (los que alimentan el ranking) ⇒ DENY', async () => {
+  const id = await motorizadoConMetricas('mot_mat10')
+  const ref = doc(como(UID_MOTO), 'motorizado', id)
+  for (const campo of ['totalAsignaciones', 'totalAceptadas', 'totalRechazos', 'tasaAceptacion', 'tiempoPromedioAceptacion']) {
+    await assertFails(updateDoc(ref, { [campo]: 999, updatedAt: serverTimestamp() }))
+  }
+  await assertFails(updateDoc(ref, { totalAceptadas: 10, totalAsignaciones: 10, tasaAceptacion: 1, updatedAt: serverTimestamp() }))
+})
+
+test('MAT11 · nadie desde el cliente escribe la proyección canónica: motorizado, gestor ni admin ⇒ DENY', async () => {
+  const id = await motorizadoConMetricas('mot_mat11')
+  const nueva = { version: 2, totalDecisiones: 100, totalAceptadas: 100, totalRechazadas: 0, tasaAceptacion: 1 }
+  await assertFails(updateDoc(doc(como(UID_MOTO), 'motorizado', id), { metricasAceptacion: nueva, updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(doc(como(UID_MOTO), 'motorizado', id), { 'metricasAceptacion.totalAceptadas': 100, updatedAt: serverTimestamp() }))
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await assertFails(updateDoc(doc(como(uid), 'motorizado', id), { metricasAceptacion: nueva }))
+    await assertFails(updateDoc(doc(como(uid), 'motorizado', id), { 'metricasAceptacion.totalAceptadas': 100 }))
+  }
+  // Ni siquiera al crear un motorizado.
+  await assertFails(setDoc(doc(como(UID_GESTOR), 'motorizado', 'mot_mat11_nuevo'), { nombre: 'X', telefono: '1', estado: 'disponible', activo: true, metricasAceptacion: nueva }))
+})
+
+test('MAT12 · lo que el motorizado sí conserva sigue permitido: presencia y ubicación; y el gestor edita sus campos sin tocar las métricas ⇒ ALLOW', async () => {
+  const id = await motorizadoConMetricas('mot_mat12')
+  const propio = doc(como(UID_MOTO), 'motorizado', id)
+  await assertSucceeds(updateDoc(propio, { estado: 'inactivo', updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(propio, { estado: 'disponible', ubicacion: { lat: 12, lng: -86 }, updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(propio, { ultimaUbicacionOperativa: { lat: 12.1, lng: -86.2 }, updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'motorizado', id), { telefono: '70000000' }))
+  await assertSucceeds(updateDoc(doc(como(UID_ADMIN), 'motorizado', id), { nombre: 'Luigi A.' }))
 })

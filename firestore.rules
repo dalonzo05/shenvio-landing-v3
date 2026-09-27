@@ -428,6 +428,16 @@ service cloud.firestore {
         return ['authUid', 'accesoProvisionAuthUid', 'accesoEmail', 'welcomeAttempts'];
       }
 
+      // MOTO-STATS-ACEPTACION-TRAZA-1: la proyección canónica de aceptación la escribe
+      // SOLO responderAsignacion (Admin SDK, en la misma transacción que la decisión).
+      // Ningún cliente la escribe. Los contadores legacy (totalAsignaciones,
+      // totalAceptadas, totalRechazos, tasaAceptacion, tiempoPromedioAceptacion) tampoco
+      // los escribe ya el motorizado: alimentan el ranking y eran fabricables desde el
+      // navegador; ahora los mantiene el servidor.
+      function camposDeMetricasServidor() {
+        return ['metricasAceptacion'];
+      }
+
       // MOTO-DISPONIBILIDAD-CONTRATO-1: `estado` es PRESENCIA (disponible = en
       // línea, inactivo = fuera de línea). `ocupado` es un valor legacy: los
       // documentos que ya lo traen siguen siendo válidos y pueden recibir cambios
@@ -444,12 +454,14 @@ service cloud.firestore {
       allow create: if isAdminOrGestor()
         && request.resource.data.get('authUid', null) == null
         && !request.resource.data.keys().hasAny(['accesoProvisionAuthUid', 'accesoEmail', 'welcomeAttempts'])
+        && !request.resource.data.keys().hasAny(camposDeMetricasServidor())
         && presenciaEscribible(request.resource.data.get('estado', 'disponible'));
 
       allow update: if estadoSoloPresencia() && (
         (
           isAdminOrGestor()
           && !request.resource.data.diff(resource.data).affectedKeys().hasAny(camposDeAccesoServidor())
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(camposDeMetricasServidor())
         )
         || (
           isMotorizadoRole()
@@ -458,12 +470,6 @@ service cloud.firestore {
             'estado',
             'updatedAt',
             'ubicacion',
-            // Métricas operativas que el motorizado actualiza al aceptar/rechazar/entregar
-            'totalAceptadas',
-            'totalAsignaciones',
-            'tasaAceptacion',
-            'tiempoPromedioAceptacion',
-            'totalRechazos',
             'ultimaUbicacionOperativa'
           ])
         ));

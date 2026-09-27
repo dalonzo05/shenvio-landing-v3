@@ -67,7 +67,7 @@ import { avisoNoCobrarMotorizado, descripcionCobroMotorizado, etiquetaDeliveryMo
 // Function; las dos señales siguen siendo updateDoc del cliente.
 import { rutaTransicionMotorizado } from '@/lib/transiciones-viaje';
 import type { DepositoRegistrado } from '@/lib/deposito-orden';
-import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
+import { actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -596,13 +596,10 @@ export default function PanelMotorizadoPage() {
     setErr(null); setActionId(o.id);
     try {
       await responderAsignacionCallable({ solicitudId: o.id, accion: 'aceptar' });
-      // MOTO-DISPONIBILIDAD-CONTRATO-1: aceptar UNA orden no cambia la presencia
-      // (`estado`): el motorizado puede tener otras órdenes activas y la carga se
-      // deriva de ellas. Solo se registra la métrica de aceptación (best-effort:
-      // si falla, no revierte la aceptación).
-      if (motorizadoDocId) {
-        registrarAceptacion(motorizadoDocId, o.asignacion?.asignadoAt ?? null);
-      }
+      // Aceptar UNA orden no cambia la presencia (`estado`): el motorizado puede
+      // tener otras órdenes activas y la carga se deriva de ellas. La decisión, su
+      // evento y las métricas de aceptación las registra el servidor, en la misma
+      // transacción (MOTO-STATS-ACEPTACION-TRAZA-1): el cliente no acredita nada.
     } catch (e) { console.error(e); setErr('No se pudo aceptar.'); }
     finally { setActionId(null); }
   }
@@ -613,10 +610,8 @@ export default function PanelMotorizadoPage() {
     try {
       await responderAsignacionCallable({ solicitudId: o.id, accion: 'rechazar' });
       // Rechazar UNA orden no cambia la presencia (`estado`): puede tener otras
-      // órdenes activas. Solo se registra la métrica de rechazo.
-      if (motorizadoDocId) {
-        registrarRechazo(motorizadoDocId);
-      }
+      // órdenes activas. El evento y las métricas del rechazo los registra el
+      // servidor en la misma transacción; el cliente no acredita nada.
     } catch (e) { console.error(e); setErr('No se pudo rechazar.'); }
     finally { setActionId(null); }
   }

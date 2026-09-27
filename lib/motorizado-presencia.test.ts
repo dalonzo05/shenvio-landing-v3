@@ -104,7 +104,8 @@ for (const [nombre, ruta] of FLUJOS_DE_ORDEN) {
 test('MD5/MD6 · aceptar y rechazar solo registran la métrica; el estado lo escribe únicamente el control de presencia', () => {
   const src = fuente('app', 'panel', 'motorizado', 'page.tsx')
   assert.ok(!/updateDoc\(doc\(db, 'motorizado', motorizadoDocId\), \{ estado:/.test(src), 'la página ya no escribe presencia')
-  assert.ok(src.includes('registrarAceptacion(motorizadoDocId') && src.includes('registrarRechazo(motorizadoDocId)'))
+  // Las métricas de aceptación ya no las acredita el cliente: las registra responderAsignacion (servidor).
+  assert.ok(!src.includes('registrarAceptacion(') && !src.includes('registrarRechazo('))
   const ctl = fuente('app', 'panel', 'motorizado', '_components', 'ControlPresencia.tsx')
   const escrituras = ctl.match(/updateDoc\(doc\(db, 'motorizado', docId\), \{ estado:/g) ?? []
   assert.equal(escrituras.length, 1, 'una sola escritura de estado: el control explícito de presencia')

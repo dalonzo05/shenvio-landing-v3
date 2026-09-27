@@ -125,7 +125,10 @@ export const responderAsignacion = onCall<ResponderAsignacionData>(async (reques
   // Los guards (existe → pertenencia → estado `asignada` → asignación pendiente)
   // y las escrituras viven en asignacion-respuesta.ts, con la transacción
   // inyectada para poder probarlos sin emulador.
-  await db.runTransaction((tx) => responderAsignacionEnTransaccion(tx, solicitudRef, motorizadoUid, accion));
+  // Decisión + evento + métricas en UNA transacción (MOTO-STATS-ACEPTACION-TRAZA-1).
+  await db.runTransaction((tx) =>
+    responderAsignacionEnTransaccion(tx, solicitudRef, motorizadoUid, accion, (id) => db.collection('motorizado').doc(id)),
+  );
 
   console.log(JSON.stringify({ fn: 'responderAsignacion', solicitudId, motorizadoUid, accion }));
 
