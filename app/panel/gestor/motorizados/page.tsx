@@ -29,6 +29,7 @@ import type { ZonaGeografica } from '@/lib/zonas'
 import { X, Bike, Plus, TrendingUp, AlertCircle, MapPin, KeyRound } from 'lucide-react'
 import { vistaAcceso, estadoSinConsultar, type EstadoAcceso } from '@/lib/acceso-motorizado-ui'
 import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia'
+import { estiloTasaAceptacion, formatearTasaAceptacion } from '@/lib/tasa-aceptacion'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -787,17 +788,22 @@ function MotorizadosPageContent() {
               </div>
 
               <div className="grid grid-cols-3 gap-2">
+                {/* Sin dato (stats nulo, valor ausente o inválido) es neutral: no es una tasa baja. */}
                 <div className={`border rounded-xl px-3 py-2.5 text-center ${
-                  !loadingStats && stats?.tasaAceptacion !== null && (stats?.tasaAceptacion ?? 0) < 70
-                    ? 'bg-red-50 border-red-200'
-                    : 'bg-green-50 border-green-200'
+                  loadingStats ? 'bg-green-50 border-green-200' : ({
+                    baja: 'bg-red-50 border-red-200',
+                    normal: 'bg-green-50 border-green-200',
+                    sin_dato: 'bg-gray-50 border-gray-200',
+                  })[estiloTasaAceptacion(stats?.tasaAceptacion)]
                 }`}>
                   <p className={`text-xl font-black ${
-                    !loadingStats && stats?.tasaAceptacion !== null && (stats?.tasaAceptacion ?? 0) < 70
-                      ? 'text-red-600'
-                      : 'text-green-700'
+                    loadingStats ? 'text-green-700' : ({
+                      baja: 'text-red-600',
+                      normal: 'text-green-700',
+                      sin_dato: 'text-gray-700',
+                    })[estiloTasaAceptacion(stats?.tasaAceptacion)]
                   }`}>
-                    {loadingStats ? '…' : stats?.tasaAceptacion !== null ? `${stats?.tasaAceptacion}%` : '—'}
+                    {loadingStats ? '…' : formatearTasaAceptacion(stats?.tasaAceptacion)}
                   </p>
                   <p className="text-[10px] font-semibold text-gray-500 mt-0.5">Tasa acept.</p>
                 </div>
