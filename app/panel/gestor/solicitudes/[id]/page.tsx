@@ -1,5 +1,8 @@
 'use client'
 
+import { guardarAsignacion, errorAsignacion } from '@/lib/asignacion-cliente'
+import { precioInicialAsignacion } from '@/lib/asignacion-precio'
+
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
@@ -653,6 +656,9 @@ function GestorSolicitudDetallePageContent() {
 
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
+  const [precioEditado, setPrecioEditado] = useState(false)
+  const [guardandoAsignacion, setGuardandoAsignacion] = useState(false)
+  const asignacionEnCurso = useRef(false)
   const [motorizadoSel, setMotorizadoSel] = useState('')
   const [ordenesActivas, setOrdenesActivas] = useState<OrdenActivaRanking[]>([])
   const [loadingOrdenes, setLoadingOrdenes] = useState(false)
@@ -728,7 +734,8 @@ function GestorSolicitudDetallePageContent() {
         const data = { id: snap.id, ...(snap.data() as any) } as Solicitud
         setComercioRequiereBolso(null)
         setSolicitud(data)
-        setPrecioFinal(data.confirmacion?.precioFinalCordobas ?? '')
+        setPrecioFinal(precioInicialAsignacion(data, data.confirmacion?.precioFinalCordobas))
+        setPrecioEditado(false)
         setMotorizadoSel(data.asignacion?.motorizadoId || '')
         setErr(null)
         setLoading(false)
@@ -975,54 +982,22 @@ function GestorSolicitudDetallePageContent() {
   const sem = semaforoForRemaining(tiempoRestante)
 
   const confirmarYAsignar = async () => {
-    if (!solicitud) return
-    setErr(null)
-
-    const user = auth.currentUser
-    if (!user) return setErr('No hay sesión iniciada.')
-    if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio final válido.')
-    // A-FIX1: guard defensivo — la UI ya oculta el botón para una orden
-    // cerrada, pero el handler no debe depender del render. Reactivar una
-    // rechazada/cancelada sigue disponible por su flujo explícito
-    // (reactivarOrden), que NO pasa por acá.
+    if (!solicitud || asignacionEnCurso.current) return
     if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
-
-    const m = motorizadoSel ? motorizados.find((x) => x.id === motorizadoSel) : null
-
+    if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio final válido.')
+    asignacionEnCurso.current = true
+    setGuardandoAsignacion(true)
+    setErr(null)
     try {
-      const now = new Date()
-      const aceptarAntesDe = new Date(now.getTime() + 10 * 60 * 1000)
-
-      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
-        estado: m ? 'asignada' : 'confirmada',
-        confirmacion: {
-          precioFinalCordobas: Number(precioFinal),
-          confirmadoPorUid: user.uid,
-          confirmadoAt: serverTimestamp(),
-        },
-        ...(m
-          ? {
-              asignacion: {
-                motorizadoId: m.id,
-                motorizadoAuthUid: (m.authUid || '').trim(),
-                motorizadoNombre: m.nombre,
-                motorizadoTelefono: m.telefono || '',
-                motorizadoFotoUrl: (m as any).fotoUrl || null,
-                asignadoPorUid: user.uid,
-                asignadoAt: serverTimestamp(),
-                estadoAceptacion: 'pendiente',
-                aceptadoAt: null,
-                rechazadoAt: null,
-                motivoRechazo: '',
-                aceptarAntesDe,
-              },
-            }
-          : { asignacion: null }),
-        updatedAt: serverTimestamp(),
-      } as any)
+      await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'detalle', precioFinal, precioEditado)
+      setPrecioEditado(false)
     } catch (e) {
-      console.error(e)
-      setErr('No se pudo guardar la orden.')
+      const error = errorAsignacion(e)
+      if (error.limpiarSeleccion) setMotorizadoSel('')
+      setErr(error.mensaje)
+    } finally {
+      asignacionEnCurso.current = false
+      setGuardandoAsignacion(false)
     }
   }
 
@@ -1636,6 +1611,7 @@ function GestorSolicitudDetallePageContent() {
                   value={precioFinal}
                   onChange={(e) => {
                     const v = e.target.value === '' ? '' : Number(e.target.value)
+                    setPrecioEditado(true)
                     setPrecioFinal(v === '' ? '' : Number(roundTo10(v)))
                   }}
                   className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300"
@@ -1668,7 +1644,7 @@ function GestorSolicitudDetallePageContent() {
                 <div className="space-y-1.5 max-h-[300px] overflow-y-auto pr-0.5">
                   {(() => {
                     const scoreMap = new Map(rankingCalculado.map((r) => [r.id, r.scoreResult]))
-                    const ordenMostrar = rankingCalculado.length > 0 ? rankingCalculado : motorizados
+                    const ordenMostrar = rankingCalculado.length > 0 ? rankingCalculado : motorizados.filter((m) => m.activo !== false && esMotorizadoEnLinea(m.estado))
                     return ordenMostrar.map((m, idx) => {
                       const sr = scoreMap.get(m.id)
                       const esSeleccionado = motorizadoSel === m.id
@@ -1733,7 +1709,7 @@ function GestorSolicitudDetallePageContent() {
                     vuelta atrás por flujo ordinario. */}
                 {!esEstadoCerrado(estado) && (
                   <button
-                    onClick={confirmarYAsignar}
+                    disabled={guardandoAsignacion} onClick={confirmarYAsignar}
                     className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-[#004aad] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003d94] transition shadow-sm"
                   >
                     <CheckCircle2 className="h-4 w-4" /> Guardar confirmación / asignación

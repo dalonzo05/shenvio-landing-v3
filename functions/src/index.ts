@@ -4,6 +4,8 @@ import { Timestamp } from 'firebase-admin/firestore';
 
 admin.initializeApp();
 
+export { asignarMotorizado } from './asignacion-motorizado-callable';
+
 export { crearAccesoComercio } from './comercio-acceso';
 export { acumularCobroSemanalPorOrden } from './cobro-semanal';
 export { responderAsignacion, confirmarTransicionConCobro } from './motorizado-transiciones';

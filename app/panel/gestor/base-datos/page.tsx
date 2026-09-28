@@ -1,5 +1,8 @@
 'use client'
 
+import { guardarAsignacion, errorAsignacion } from '@/lib/asignacion-cliente'
+import { precioInicialAsignacion } from '@/lib/asignacion-precio'
+
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { rutaOrden } from '@/lib/ruta-orden'
@@ -31,7 +34,7 @@ import {
   getDocs,
   serverTimestamp,
 } from 'firebase/firestore'
-import { db, auth } from '@/fb/config'
+import { db } from '@/fb/config'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia'
 // VIAJE-ENTREGADO-SIN-COBRO-1 — Base de datos no es una puerta para escribir
@@ -164,7 +167,7 @@ type Solicitud = {
   registro?: Registro
 }
 
-type Motorizado = { id: string; nombre: string; telefono?: string; estado?: string; authUid?: string }
+type Motorizado = { activo?: boolean; id: string; nombre: string; telefono?: string; estado?: string; authUid?: string }
 
 // ─── Column filter types ──────────────────────────────────────────────────────
 
@@ -381,6 +384,9 @@ function SolicitudDrawer({
   const [err, setErr] = useState<string | null>(null)
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
+  const [precioEditado, setPrecioEditado] = useState(false)
+  const [guardandoAsignacion, setGuardandoAsignacion] = useState(false)
+  const asignacionEnCurso = useRef(false)
   const [motorizadoSel, setMotorizadoSel] = useState('')
   const [tick, setTick] = useState(Date.now())
 
@@ -407,7 +413,8 @@ function SolicitudDrawer({
         if (!snap.exists()) { setErr('La orden no existe.'); setLoading(false); return }
         const data = { id: snap.id, ...(snap.data() as any) } as Solicitud
         setSolicitud(data)
-        setPrecioFinal(data.confirmacion?.precioFinalCordobas ?? '')
+        setPrecioFinal(precioInicialAsignacion(data, data.confirmacion?.precioFinalCordobas))
+        setPrecioEditado(false)
         setMotorizadoSel(data.asignacion?.motorizadoId || '')
         setLoading(false)
       },
@@ -436,24 +443,23 @@ function SolicitudDrawer({
   }, [solicitud, tick])
 
   const confirmarYAsignar = async () => {
-    if (!solicitud) return
-    const user = auth.currentUser
-    if (!user) return setErr('Sin sesión.')
-    if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio válido.')
-    // A-FIX1: guard defensivo — la UI ya oculta el botón para una orden
-    // cerrada, pero el handler no debe depender del render.
+    if (!solicitud || asignacionEnCurso.current) return
     if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
-    const m = motorizadoSel ? motorizados.find((x) => x.id === motorizadoSel) : null
+    if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio final válido.')
+    asignacionEnCurso.current = true
+    setGuardandoAsignacion(true)
+    setErr(null)
     try {
-      const aceptarAntesDe = new Date(Date.now() + 10 * 60 * 1000)
-      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), {
-        estado: m ? 'asignada' : 'confirmada',
-        confirmacion: { precioFinalCordobas: Number(precioFinal), confirmadoPorUid: user.uid, confirmadoAt: serverTimestamp() },
-        ...(m ? { asignacion: { motorizadoId: m.id, motorizadoAuthUid: m.authUid || '', motorizadoNombre: m.nombre, motorizadoTelefono: m.telefono || '', motorizadoFotoUrl: (m as any).fotoUrl || null, asignadoPorUid: user.uid, asignadoAt: serverTimestamp(), estadoAceptacion: 'pendiente', aceptadoAt: null, rechazadoAt: null, motivoRechazo: '', aceptarAntesDe } } : { asignacion: null }),
-        updatedAt: serverTimestamp(),
-      } as any)
-      setErr(null)
-    } catch (e) { console.error(e); setErr('No se pudo guardar.') }
+      await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'baseDatos', precioFinal, precioEditado)
+      setPrecioEditado(false)
+    } catch (e) {
+      const error = errorAsignacion(e)
+      if (error.limpiarSeleccion) setMotorizadoSel('')
+      setErr(error.mensaje)
+    } finally {
+      asignacionEnCurso.current = false
+      setGuardandoAsignacion(false)
+    }
   }
 
   const cambiarEstado = async (nuevo: EstadoSolicitud) => {
@@ -716,7 +722,7 @@ function SolicitudDrawer({
                       type="number"
                       step={10}
                       value={precioFinal}
-                      onChange={(e) => setPrecioFinal(e.target.value === '' ? '' : roundTo10(e.target.value))}
+                      onChange={(e) => { setPrecioEditado(true); setPrecioFinal(e.target.value === '' ? '' : roundTo10(e.target.value)) }}
                       className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
                       placeholder="Ej: 130"
                     />
@@ -731,7 +737,7 @@ function SolicitudDrawer({
                       className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
                     >
                       <option value="">-- No asignar todavía --</option>
-                      {motorizados.map((m) => (
+                      {motorizados.filter((m) => m.activo !== false && esMotorizadoEnLinea(m.estado)).map((m) => (
                         <option key={m.id} value={m.id}>
                           {esMotorizadoEnLinea(m.estado) ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}
                         </option>
@@ -745,7 +751,7 @@ function SolicitudDrawer({
                         era justamente este botón, sin gate de estado, el que
                         permitía devolver una orden entregada al principio. */}
                     {!esEstadoCerrado(estado) && (
-                      <button onClick={confirmarYAsignar} className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#004aad] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003d94]">
+                      <button disabled={guardandoAsignacion} onClick={confirmarYAsignar} className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#004aad] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003d94]">
                         <CheckCircle2 size={15} /> Guardar confirmación / asignación
                       </button>
                     )}

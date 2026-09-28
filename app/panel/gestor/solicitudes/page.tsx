@@ -1,5 +1,8 @@
 'use client'
 
+import { guardarAsignacion, errorAsignacion } from '@/lib/asignacion-cliente'
+import { precioInicialAsignacion } from '@/lib/asignacion-precio'
+
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
 import { rutaOrden } from '@/lib/ruta-orden'
@@ -30,7 +33,7 @@ import {
   type DocumentData,
   type UpdateData,
 } from 'firebase/firestore'
-import { auth, db } from '@/fb/config'
+import { db } from '@/fb/config'
 import {
   puedeGestorCambiarEstadoCliente,
   esEstadoOperativoDelMotorizado,
@@ -585,6 +588,10 @@ function GestorSolicitudesPageContent() {
   const [openId, setOpenId] = useState<string | null>(null)
   const [modalMode, setModalMode] = useState<ModalMode>('confirmar')
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
+  const [precioEditado, setPrecioEditado] = useState(false)
+  const [guardandoAsignacion, setGuardandoAsignacion] = useState(false)
+  const asignacionEnCurso = useRef(false)
+  const solicitudModalRef = useRef<Solicitud | null>(null)
   const [motorizados, setMotorizados] = useState<Motorizado[]>([])
   const [motorizadoSel, setMotorizadoSel] = useState('')
   const [ordenesActivas, setOrdenesActivas] = useState<OrdenActivaRanking[]>([])
@@ -1109,59 +1116,44 @@ function GestorSolicitudesPageContent() {
   }
 
   const asignarSugerido = async (solicitudId: string, m: MotorizadoConRanking) => {
-    const user = auth.currentUser
-    if (!user) return
-    if (esEstadoCerrado(allItems.find((x) => x.id === solicitudId)?.estado)) {
-      setToast({ type: 'error', message: MSG_ORDEN_CERRADA })
-      return
-    }
+    const solicitud = allItems.find((x) => x.id === solicitudId)
+    if (!solicitud || asignacionEnCurso.current) return
+    if (esEstadoCerrado(solicitud.estado)) return setToast({ type: 'error', message: MSG_ORDEN_CERRADA })
+    asignacionEnCurso.current = true
     setAsignandoId(solicitudId)
     try {
-      const now = new Date()
-      const aceptarAntesDe = new Date(now.getTime() + 10 * 60 * 1000)
-      await updateDoc(doc(db, 'solicitudes_envio', solicitudId), {
-        estado: 'asignada',
-        asignacion: {
-          motorizadoId: m.id,
-          motorizadoAuthUid: (m.authUid || '').trim(),
-          motorizadoNombre: m.nombre,
-          motorizadoTelefono: m.telefono || '',
-          asignadoPorUid: user.uid,
-          asignadoAt: serverTimestamp(),
-          estadoAceptacion: 'pendiente',
-          aceptadoAt: null,
-          rechazadoAt: null,
-          motivoRechazo: '',
-          aceptarAntesDe,
-        },
-        updatedAt: serverTimestamp(),
-      } as any)
-      setToast({ type: 'success', message: `Asignado a ${m.nombre}` })
+      await guardarAsignacion(solicitud, m.id, 'sugerido', 'solicitudes')
+      setToast({ type: 'success', message: 'Asignado a ' + m.nombre })
     } catch (e) {
-      console.error(e)
-      setToast({ type: 'error', message: 'No se pudo asignar' })
+      const error = errorAsignacion(e)
+      if (error.limpiarSeleccion) setMotorizadoSel('')
+      setToast({ type: 'error', message: error.mensaje })
     } finally {
+      asignacionEnCurso.current = false
       setAsignandoId(null)
     }
   }
 
   const abrirConfirmarYAsignar = (s: Solicitud) => {
+    solicitudModalRef.current = s
     setModalMode('confirmar')
     setOpenId(s.id)
-    const sugerido = s?.cotizacion?.precioSugerido ?? (s as any)?.pagoDelivery?.montoSugerido ?? null
-    const redondeado = typeof sugerido === 'number' ? roundTo10(sugerido) : ''
-    setPrecioFinal(redondeado === '' ? '' : Number(redondeado))
+    setPrecioFinal(precioInicialAsignacion(s, s.cotizacion?.precioSugerido ?? s.pagoDelivery?.montoSugerido))
+    setPrecioEditado(false)
     setMotorizadoSel(s.asignacion?.motorizadoId || '')
   }
 
   const abrirReasignar = (s: Solicitud) => {
+    solicitudModalRef.current = s
     setModalMode('reasignar')
     setOpenId(s.id)
     setPrecioFinal(s.confirmacion?.precioFinalCordobas ?? '')
+    setPrecioEditado(false)
     setMotorizadoSel(s.asignacion?.motorizadoId || '')
   }
 
   const cerrarModal = () => {
+    solicitudModalRef.current = null
     setOpenId(null)
     setPrecioFinal('')
     setMotorizadoSel('')
@@ -1169,100 +1161,49 @@ function GestorSolicitudesPageContent() {
   }
 
   const confirmarYAsignar = async (id: string) => {
-    setErr(null)
-    const user = auth.currentUser
-    if (!user) return setErr('No hay sesión iniciada.')
+    const solicitud = solicitudModalRef.current
+    if (!solicitud || solicitud.id !== id || asignacionEnCurso.current) return
+    if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
     if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio final válido.')
-    if (esEstadoCerrado(allItems.find((x) => x.id === id)?.estado)) {
-      setErr(MSG_ORDEN_CERRADA)
-      setToast({ type: 'error', message: MSG_ORDEN_CERRADA })
-      return
-    }
-
-    const m = motorizadoSel ? motorizados.find((x) => x.id === motorizadoSel) : null
-
+    asignacionEnCurso.current = true
+    setGuardandoAsignacion(true)
+    setErr(null)
     try {
-      const now = new Date()
-      const aceptarAntesDe = new Date(now.getTime() + 10 * 60 * 1000)
-
-      await updateDoc(doc(db, 'solicitudes_envio', id), {
-        estado: m ? 'asignada' : 'confirmada',
-        confirmacion: {
-          precioFinalCordobas: Number(precioFinal),
-          confirmadoPorUid: user.uid,
-          confirmadoAt: serverTimestamp(),
-        },
-        ...(m
-          ? {
-              asignacion: {
-                motorizadoId: m.id,
-                motorizadoAuthUid: (m.authUid || '').trim(),
-                motorizadoNombre: m.nombre,
-                motorizadoTelefono: m.telefono || '',
-                asignadoPorUid: user.uid,
-                asignadoAt: serverTimestamp(),
-                estadoAceptacion: 'pendiente',
-                aceptadoAt: null,
-                rechazadoAt: null,
-                motivoRechazo: '',
-                aceptarAntesDe,
-              },
-            }
-          : { asignacion: null }),
-        updatedAt: serverTimestamp(),
-      } as any)
-
+      await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'solicitudes', precioFinal, precioEditado)
       cerrarModal()
-      setToast({ type: 'success', message: m ? 'Orden confirmada y asignada' : 'Orden confirmada' })
+      setToast({ type: 'success', message: motorizadoSel ? 'Orden confirmada y asignada' : 'Orden confirmada' })
     } catch (e) {
-      console.error(e)
-      setErr('No se pudo confirmar/asignar.')
-      setToast({ type: 'error', message: 'No se pudo guardar la orden' })
+      const error = errorAsignacion(e)
+      if (error.limpiarSeleccion) setMotorizadoSel('')
+      setErr(error.mensaje)
+      setToast({ type: 'error', message: error.mensaje })
+    } finally {
+      asignacionEnCurso.current = false
+      setGuardandoAsignacion(false)
     }
   }
 
   const reasignarSolo = async (id: string) => {
-    setErr(null)
-    const user = auth.currentUser
-    if (!user) return setErr('No hay sesión iniciada.')
+    const solicitud = solicitudModalRef.current
+    if (!solicitud || solicitud.id !== id || asignacionEnCurso.current) return
     if (!motorizadoSel) return setErr('Elegí un motorizado.')
-
-    const m = motorizados.find((x) => x.id === motorizadoSel)
-    if (!m) return setErr('Motorizado inválido.')
-    if (esEstadoCerrado(allItems.find((x) => x.id === id)?.estado)) {
-      setErr(MSG_ORDEN_CERRADA)
-      setToast({ type: 'error', message: MSG_ORDEN_CERRADA })
-      return
-    }
-
+    if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
+    asignacionEnCurso.current = true
+    setGuardandoAsignacion(true)
+    setErr(null)
     try {
-      const now = new Date()
-      const aceptarAntesDe = new Date(now.getTime() + 10 * 60 * 1000)
-
-      await updateDoc(doc(db, 'solicitudes_envio', id), {
-        estado: 'asignada',
-        asignacion: {
-          motorizadoId: m.id,
-          motorizadoAuthUid: (m.authUid || '').trim(),
-          motorizadoNombre: m.nombre,
-          motorizadoTelefono: m.telefono || '',
-          asignadoPorUid: user.uid,
-          asignadoAt: serverTimestamp(),
-          estadoAceptacion: 'pendiente',
-          aceptadoAt: null,
-          rechazadoAt: null,
-          motivoRechazo: '',
-          aceptarAntesDe,
-        },
-        updatedAt: serverTimestamp(),
-      } as any)
-
+      // PRECIO-REASIGNACION-UX-INCONSISTENTE-1: el campo visible no se persiste.
+      await guardarAsignacion(solicitud, motorizadoSel, 'reasignar', 'solicitudes')
       cerrarModal()
       setToast({ type: 'success', message: 'Motorizado reasignado' })
     } catch (e) {
-      console.error(e)
-      setErr('No se pudo reasignar.')
-      setToast({ type: 'error', message: 'No se pudo reasignar' })
+      const error = errorAsignacion(e)
+      if (error.limpiarSeleccion) setMotorizadoSel('')
+      setErr(error.mensaje)
+      setToast({ type: 'error', message: error.mensaje })
+    } finally {
+      asignacionEnCurso.current = false
+      setGuardandoAsignacion(false)
     }
   }
 
@@ -2509,6 +2450,7 @@ function GestorSolicitudesPageContent() {
                 value={precioFinal}
                 onChange={(e) => {
                   const v = e.target.value === '' ? '' : Number(e.target.value)
+                  setPrecioEditado(true)
                   setPrecioFinal(v === '' ? '' : Number(roundTo10(v)))
                 }}
                 className="w-full border rounded-lg px-3 py-2"
@@ -2556,7 +2498,7 @@ function GestorSolicitudesPageContent() {
                 {modalMode === 'confirmar' && <option value="">-- No asignar todavía --</option>}
                 {(() => {
                   const scoreMap = new Map(rankingModal.map((r) => [r.id, r.scoreResult.score]))
-                  const lista = rankingModal.length > 0 ? rankingModal : motorizados
+                  const lista = rankingModal.length > 0 ? rankingModal : motorizados.filter((m) => m.activo !== false && esMotorizadoEnLinea(m.estado))
                   return lista.map((m) => {
                     const score = scoreMap.get(m.id)
                     const scoreLabel = score !== undefined ? ` [${score}]` : ''
@@ -2579,6 +2521,7 @@ function GestorSolicitudesPageContent() {
             <div className="mt-4 flex gap-2 flex-wrap">
               {modalMode === 'reasignar' ? (
                 <button
+                  disabled={guardandoAsignacion}
                   onClick={() => reasignarSolo(openId)}
                   className="rounded-full bg-[#004aad] text-white px-4 py-2 text-sm font-semibold"
                 >
@@ -2586,6 +2529,7 @@ function GestorSolicitudesPageContent() {
                 </button>
               ) : (
                 <button
+                  disabled={guardandoAsignacion}
                   onClick={() => confirmarYAsignar(openId)}
                   className="rounded-full bg-[#004aad] text-white px-4 py-2 text-sm font-semibold"
                 >
