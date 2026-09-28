@@ -83,7 +83,7 @@ test('MC6 · la corrección no toca las sugerencias: siguen el botón, "Ver opci
   assert.ok(!columna.includes('top.nombre'), 'la columna Motorizado no debe pintar al candidato sugerido')
 
   assert.ok(src.includes('const rankingTabla = useMemo<Map<string, MotorizadoRankeado>>'), 'el cálculo del sugerido cambió')
-  assert.ok(src.includes('rankearMotorizados(motorizados, ordenesActivas, nuevaOrden)[0]'), 'el ranking cambió')
+  assert.ok(src.includes('rankearMotorizados(motorizados, ordenesActivas, nuevaOrden, ahoraOperativo)[0]'), 'el ranking cambió')
   assert.ok(src.includes('asignarSugerido(s.id, top)'), 'el botón dejó de asignar al sugerido')
   assert.ok(src.includes("'Asignar sugerido'"), 'falta el botón "Asignar sugerido"')
   assert.ok(src.includes("top ? 'Ver opciones' : 'Asignar'"), 'falta el acceso a "Ver opciones"')

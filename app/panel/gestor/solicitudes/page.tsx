@@ -2,6 +2,10 @@
 
 import { guardarAsignacion, errorAsignacion } from '@/lib/asignacion-cliente'
 import { precioInicialAsignacion } from '@/lib/asignacion-precio'
+import { seleccionSigueValida, diaOperativoParaRecomputo } from '@/lib/motorizado-candidatos'
+import { useMotorizadosCandidatos } from '../_hooks/useMotorizadosCandidatos'
+import { useOrdenesActivasCandidatas } from '../_hooks/useOrdenesActivasCandidatas'
+import { useTickOperativo } from '../_hooks/useTickOperativo'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
@@ -13,7 +17,6 @@ import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
   rankearMotorizados,
   type MotorizadoConRanking,
-  type OrdenActivaRanking,
   type NuevaOrdenRanking,
   type MotorizadoRankeado,
 } from '@/lib/motorizado-ranking'
@@ -29,7 +32,6 @@ import {
   serverTimestamp,
   updateDoc,
   writeBatch,
-  where,
   type DocumentData,
   type UpdateData,
 } from 'firebase/firestore'
@@ -203,8 +205,6 @@ type Solicitud = {
     }
   }
 }
-
-type Motorizado = MotorizadoConRanking
 
 type FiltroCotizacion = 'todas' | 'con' | 'sin'
 type FiltroOrden = 'recientes' | 'antiguas' | 'prioritario'
@@ -592,10 +592,14 @@ function GestorSolicitudesPageContent() {
   const [guardandoAsignacion, setGuardandoAsignacion] = useState(false)
   const asignacionEnCurso = useRef(false)
   const solicitudModalRef = useRef<Solicitud | null>(null)
-  const [motorizados, setMotorizados] = useState<Motorizado[]>([])
+  // MOTO-RANKING-DATOS-REALTIME-1: roster y órdenes activas en vivo (antes,
+  // getDocs/onSnapshot mezclados y una lectura única de motorizados que quedaba
+  // stale mientras la pantalla seguía abierta).
+  const { motorizados, cargando: cargandoMotorizados } = useMotorizadosCandidatos()
+  const { ordenesActivas, cargando: cargandoOrdenes } = useOrdenesActivasCandidatas()
+  const loadingRanking = cargandoMotorizados || cargandoOrdenes
+  const ahoraOperativo = useTickOperativo()
   const [motorizadoSel, setMotorizadoSel] = useState('')
-  const [ordenesActivas, setOrdenesActivas] = useState<OrdenActivaRanking[]>([])
-  const [loadingRanking, setLoadingRanking] = useState(false)
   const [asignandoId, setAsignandoId] = useState<string | null>(null)
 
   const [cardsAnimating, setCardsAnimating] = useState<string[]>([])
@@ -623,48 +627,6 @@ function GestorSolicitudesPageContent() {
       setFechaHasta(hoyStr)
     }
   }, [estadoFiltro])
-
-  useEffect(() => {
-    ;(async () => {
-      try {
-        const snap = await getDocs(query(collection(db, 'motorizado')))
-        const list: Motorizado[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as any),
-        }))
-        list.sort((a, b) => {
-          const aDisp = esMotorizadoEnLinea(a.estado) ? 1 : 0
-          const bDisp = esMotorizadoEnLinea(b.estado) ? 1 : 0
-          return bDisp - aDisp
-        })
-        setMotorizados(list)
-      } catch (e) {
-        console.error(e)
-      }
-    })()
-  }, [])
-
-  // Suscripción en tiempo real a órdenes activas para el ranking de motorizado.
-  // Usando onSnapshot para que al rebotar/cancelar una orden asignada, el ranking
-  // recalcule automáticamente sin requerir recarga de página.
-  useEffect(() => {
-    setLoadingRanking(true)
-    const unsub = onSnapshot(
-      query(
-        collection(db, 'solicitudes_envio'),
-        where('estado', 'in', ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'])
-      ),
-      (snap) => {
-        setOrdenesActivas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
-        setLoadingRanking(false)
-      },
-      (e) => {
-        console.error('[ranking] Error en órdenes activas:', e)
-        setLoadingRanking(false)
-      }
-    )
-    return () => unsub()
-  }, [])
 
   useEffect(() => {
     ;(async () => {
@@ -1303,6 +1265,7 @@ function GestorSolicitudesPageContent() {
 
   // Ranking pre-computado para la tabla: top-1 motorizado por cada solicitud en estado "confirmada"
   // Se recalcula cuando cambia el roster de motorizados, las órdenes activas o la lista de solicitudes.
+  const diaOperativoRanking = diaOperativoParaRecomputo(ahoraOperativo)
   const rankingTabla = useMemo<Map<string, MotorizadoRankeado>>(() => {
     if (motorizados.length === 0 || loadingRanking) return new Map()
     const confirmadas = allItems.filter((s) => s.estado === 'confirmada')
@@ -1317,11 +1280,12 @@ function GestorSolicitudesPageContent() {
         },
         requiereBolso: s.requiereBolso ?? false,
       }
-      const top = rankearMotorizados(motorizados, ordenesActivas, nuevaOrden)[0]
+      const top = rankearMotorizados(motorizados, ordenesActivas, nuevaOrden, ahoraOperativo)[0]
       if (top) result.set(s.id, top)
     }
     return result
-  }, [motorizados, ordenesActivas, allItems, loadingRanking])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- diaOperativoRanking es la clave de invalidación diaria (mismo ahoraOperativo, solo cambia al cruzar el día Managua)
+  }, [motorizados, ordenesActivas, allItems, loadingRanking, diaOperativoRanking])
 
   // Ranking de motorizado para el modal actual
   const rankingModal = useMemo<MotorizadoRankeado[]>(() => {
@@ -1337,8 +1301,16 @@ function GestorSolicitudesPageContent() {
       },
       requiereBolso: solicitud.requiereBolso ?? false,
     }
-    return rankearMotorizados(motorizados, ordenesActivas, nuevaOrden)
-  }, [openId, motorizados, ordenesActivas, allItems])
+    return rankearMotorizados(motorizados, ordenesActivas, nuevaOrden, ahoraOperativo)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- diaOperativoRanking, ver rankingTabla
+  }, [openId, motorizados, ordenesActivas, allItems, diaOperativoRanking])
+
+  // Una selección que ya no es candidato elegible (pasó a inactivo, se desactivó, etc.)
+  // no debe quedar como un id fantasma: se limpia en cuanto el roster en vivo lo confirma.
+  useEffect(() => {
+    if (loadingRanking) return
+    if (!seleccionSigueValida(motorizadoSel, rankingModal)) setMotorizadoSel('')
+  }, [motorizadoSel, rankingModal, loadingRanking])
 
   return (
     <div className="flex-1 min-h-0 flex flex-col gap-3 min-w-0">
@@ -2493,13 +2465,15 @@ function GestorSolicitudesPageContent() {
               <select
                 value={motorizadoSel}
                 onChange={(e) => setMotorizadoSel(e.target.value)}
+                disabled={!loadingRanking && rankingModal.length === 0 && modalMode !== 'confirmar'}
                 className="w-full border rounded-lg px-3 py-2"
               >
                 {modalMode === 'confirmar' && <option value="">-- No asignar todavía --</option>}
                 {(() => {
                   const scoreMap = new Map(rankingModal.map((r) => [r.id, r.scoreResult.score]))
-                  const lista = rankingModal.length > 0 ? rankingModal : motorizados.filter((m) => m.activo !== false && esMotorizadoEnLinea(m.estado))
-                  return lista.map((m) => {
+                  // MOTO-RANKING-DATOS-REALTIME-1: sin fallback al roster completo. Sin
+                  // candidatos elegibles, la lista queda vacía (ver mensaje debajo del select).
+                  return rankingModal.map((m) => {
                     const score = scoreMap.get(m.id)
                     const scoreLabel = score !== undefined ? ` [${score}]` : ''
                     return (
@@ -2513,6 +2487,9 @@ function GestorSolicitudesPageContent() {
               {rankingModal.length > 0 && (
                 <div className="text-xs text-gray-400 mt-1">Ordenados por score · [100] = ideal</div>
               )}
+              {!loadingRanking && rankingModal.length === 0 && (
+                <div className="text-xs text-amber-600 mt-1">No hay motorizados en línea disponibles.</div>
+              )}
               <div className="text-xs text-gray-500 mt-1">
                 Si asignás ahora, el motorizado tendrá <strong>10 minutos</strong> para aceptar.
               </div>
@@ -2521,7 +2498,7 @@ function GestorSolicitudesPageContent() {
             <div className="mt-4 flex gap-2 flex-wrap">
               {modalMode === 'reasignar' ? (
                 <button
-                  disabled={guardandoAsignacion}
+                  disabled={guardandoAsignacion || !motorizadoSel}
                   onClick={() => reasignarSolo(openId)}
                   className="rounded-full bg-[#004aad] text-white px-4 py-2 text-sm font-semibold"
                 >

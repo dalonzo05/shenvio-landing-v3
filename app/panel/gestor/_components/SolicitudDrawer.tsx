@@ -2,6 +2,10 @@
 
 import { guardarAsignacion, errorAsignacion } from '@/lib/asignacion-cliente'
 import { precioInicialAsignacion } from '@/lib/asignacion-precio'
+import { seleccionSigueValida, diaOperativoParaRecomputo } from '@/lib/motorizado-candidatos'
+import { useMotorizadosCandidatos } from '../_hooks/useMotorizadosCandidatos'
+import { useOrdenesActivasCandidatas } from '../_hooks/useOrdenesActivasCandidatas'
+import { useTickOperativo } from '../_hooks/useTickOperativo'
 
 import { useEffect, useRef, useMemo, useState } from 'react'
 import Link from 'next/link'
@@ -517,15 +521,18 @@ export function SolicitudDrawer({
   const [solicitud, setSolicitud] = useState<SolicitudDetalle | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
-  const [motorizados, setMotorizados] = useState<Motorizado[]>([])
+  // MOTO-RANKING-DATOS-REALTIME-1: roster en vivo (antes, getDocs una sola vez al montar).
+  const { motorizados, cargando: cargandoMotorizados } = useMotorizadosCandidatos()
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
   const [precioEditado, setPrecioEditado] = useState(false)
   const [guardandoAsignacion, setGuardandoAsignacion] = useState(false)
   const asignacionEnCurso = useRef(false)
   const [motorizadoSel, setMotorizadoSel] = useState('')
   const [tick, setTick] = useState(Date.now())
-  const [ordenesActivas, setOrdenesActivas] = useState<OrdenActivaRanking[]>([])
-  const [loadingOrdenes, setLoadingOrdenes] = useState(false)
+  // Órdenes activas en vivo (antes, getDocs una sola vez).
+  const { ordenesActivas, cargando: cargandoOrdenesLive } = useOrdenesActivasCandidatas()
+  const loadingOrdenes = cargandoOrdenesLive
+  const ahoraOperativo = useTickOperativo()
   const [comercioRequiereBolso, setComercioRequiereBolso] = useState<boolean | null>(null)
   const [showRechazarModal, setShowRechazarModal] = useState(false)
   const [motivoCodigo, setMotivoCodigo] = useState('')
@@ -554,32 +561,6 @@ export function SolicitudDrawer({
   // B2-DRAWER-SLIM: acá había un onSnapshot sobre gastos_motorizado que solo
   // alimentaba la sección "Gastos operativos", ahora retirada. Sin consumidor,
   // el listener quedaba abierto en cada apertura de drawer sin pintar nada.
-
-  useEffect(() => {
-    getDocs(query(collection(db, 'motorizado'))).then((snap) => {
-      setMotorizados(
-        snap.docs
-          .map((d) => ({ id: d.id, ...(d.data() as any) }))
-          .sort((a, b) => (esMotorizadoEnLinea(b.estado) ? 1 : 0) - (esMotorizadoEnLinea(a.estado) ? 1 : 0))
-      )
-    })
-  }, [])
-
-  // Cargar órdenes activas del sistema para el cálculo de carga y ranking
-  useEffect(() => {
-    setLoadingOrdenes(true)
-    getDocs(
-      query(
-        collection(db, 'solicitudes_envio'),
-        where('estado', 'in', ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'])
-      )
-    )
-      .then((snap) =>
-        setOrdenesActivas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
-      )
-      .catch((e) => console.error('[SolicitudDrawer] Error cargando órdenes activas:', e))
-      .finally(() => setLoadingOrdenes(false))
-  }, [])
 
   useEffect(() => {
     setLoading(true)
@@ -772,8 +753,15 @@ export function SolicitudDrawer({
       macroZonaRetiroId: solicitud.macroZonaRetiroId ?? null,
       macroZonaEntregaId: solicitud.macroZonaEntregaId ?? null,
     }
-    return rankearMotorizados(motorizados as MotorizadoConRanking[], ordenesActivas, nuevaOrden)
-  }, [solicitud, motorizados, ordenesActivas, comercioRequiereBolso])
+    return rankearMotorizados(motorizados as MotorizadoConRanking[], ordenesActivas, nuevaOrden, ahoraOperativo)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- diaOperativoParaRecomputo(ahoraOperativo) fuerza recomputar al cruzar el día Managua
+  }, [solicitud, motorizados, ordenesActivas, comercioRequiereBolso, diaOperativoParaRecomputo(ahoraOperativo)])
+
+  // Una selección que dejó de ser candidato elegible no debe quedar como id fantasma.
+  useEffect(() => {
+    if (cargandoMotorizados) return
+    if (!seleccionSigueValida(motorizadoSel, rankingCalculado)) setMotorizadoSel('')
+  }, [motorizadoSel, rankingCalculado, cargandoMotorizados])
 
   const confirmarYAsignar = async () => {
     if (!solicitud || asignacionEnCurso.current) return
@@ -1850,12 +1838,16 @@ export function SolicitudDrawer({
                       <span className="text-xs font-semibold text-gray-500 italic">— No asignar todavía —</span>
                     </button>
 
+                    {!cargandoMotorizados && rankingCalculado.length === 0 && (
+                      <p className="text-xs text-amber-600 mb-2">No hay motorizados en línea disponibles.</p>
+                    )}
+
                     {/* Lista de candidatos */}
                     <div className="space-y-1.5 max-h-[280px] overflow-y-auto pr-0.5">
                       {(() => {
                         const scoreMap = new Map(rankingCalculado.map((r) => [r.id, r.scoreResult]))
-                        const ordenMostrar = rankingCalculado.length > 0 ? rankingCalculado : motorizados.filter((m) => m.activo !== false && esMotorizadoEnLinea(m.estado))
-                        return ordenMostrar.map((m, idx) => {
+                        // MOTO-RANKING-DATOS-REALTIME-1: sin fallback al roster completo.
+                        return rankingCalculado.map((m, idx) => {
                           const sr = scoreMap.get(m.id)
                           const esSeleccionado = motorizadoSel === m.id
                           const esMejor = idx === 0 && rankingCalculado.length > 0

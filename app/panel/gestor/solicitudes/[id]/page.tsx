@@ -2,6 +2,10 @@
 
 import { guardarAsignacion, errorAsignacion } from '@/lib/asignacion-cliente'
 import { precioInicialAsignacion } from '@/lib/asignacion-precio'
+import { seleccionSigueValida, diaOperativoParaRecomputo } from '@/lib/motorizado-candidatos'
+import { useMotorizadosCandidatos } from '../../_hooks/useMotorizadosCandidatos'
+import { useOrdenesActivasCandidatas } from '../../_hooks/useOrdenesActivasCandidatas'
+import { useTickOperativo } from '../../_hooks/useTickOperativo'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
@@ -654,14 +658,15 @@ function GestorSolicitudDetallePageContent() {
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
 
-  const [motorizados, setMotorizados] = useState<Motorizado[]>([])
+  // MOTO-RANKING-DATOS-REALTIME-1: roster en vivo (antes, getDocs una sola vez).
+  const { motorizados, cargando: cargandoMotorizados } = useMotorizadosCandidatos()
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
   const [precioEditado, setPrecioEditado] = useState(false)
   const [guardandoAsignacion, setGuardandoAsignacion] = useState(false)
   const asignacionEnCurso = useRef(false)
   const [motorizadoSel, setMotorizadoSel] = useState('')
-  const [ordenesActivas, setOrdenesActivas] = useState<OrdenActivaRanking[]>([])
-  const [loadingOrdenes, setLoadingOrdenes] = useState(false)
+  // Órdenes activas en vivo (antes, getDocs una sola vez).
+  const { ordenesActivas, cargando: loadingOrdenes } = useOrdenesActivasCandidatas()
   const [comercioRequiereBolso, setComercioRequiereBolso] = useState<boolean | null>(null)
   // B2.2 — evidencia abierta en el visor. null = cerrado.
   const [evidenciaAmpliada, setEvidenciaAmpliada] = useState<{ url: string; label: string } | null>(null)
@@ -690,29 +695,6 @@ function GestorSolicitudDetallePageContent() {
   useEffect(() => {
     const t = setInterval(() => setTick(Date.now()), 1000)
     return () => clearInterval(t)
-  }, [])
-
-  useEffect(() => {
-    getDocs(query(collection(db, 'motorizado'))).then((snap) => {
-      setMotorizados(
-        snap.docs
-          .map((d) => ({ id: d.id, ...(d.data() as any) }))
-          .sort((a, b) => (esMotorizadoEnLinea(b.estado) ? 1 : 0) - (esMotorizadoEnLinea(a.estado) ? 1 : 0))
-      )
-    }).catch(console.error)
-  }, [])
-
-  useEffect(() => {
-    setLoadingOrdenes(true)
-    getDocs(
-      query(
-        collection(db, 'solicitudes_envio'),
-        where('estado', 'in', ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'])
-      )
-    )
-      .then((snap) => setOrdenesActivas(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))))
-      .catch(console.error)
-      .finally(() => setLoadingOrdenes(false))
   }, [])
 
   useEffect(() => {
@@ -958,6 +940,7 @@ function GestorSolicitudDetallePageContent() {
     return null
   }, [solicitud, tick])
 
+  const ahoraOperativo = useTickOperativo()
   const rankingCalculado = useMemo<MotorizadoRankeado[]>(() => {
     if (!solicitud || motorizados.length === 0) return []
     const requiereBolso =
@@ -976,8 +959,15 @@ function GestorSolicitudDetallePageContent() {
       macroZonaRetiroId: solicitud.macroZonaRetiroId ?? null,
       macroZonaEntregaId: solicitud.macroZonaEntregaId ?? null,
     }
-    return rankearMotorizados(motorizados as MotorizadoConRanking[], ordenesActivas, nuevaOrden)
-  }, [solicitud, motorizados, ordenesActivas, comercioRequiereBolso])
+    return rankearMotorizados(motorizados as MotorizadoConRanking[], ordenesActivas, nuevaOrden, ahoraOperativo)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- diaOperativoParaRecomputo(ahoraOperativo) fuerza recomputar al cruzar el día Managua
+  }, [solicitud, motorizados, ordenesActivas, comercioRequiereBolso, diaOperativoParaRecomputo(ahoraOperativo)])
+
+  // Una selección que dejó de ser candidato elegible no debe quedar como id fantasma.
+  useEffect(() => {
+    if (cargandoMotorizados) return
+    if (!seleccionSigueValida(motorizadoSel, rankingCalculado)) setMotorizadoSel('')
+  }, [motorizadoSel, rankingCalculado, cargandoMotorizados])
 
   const sem = semaforoForRemaining(tiempoRestante)
 
@@ -1640,12 +1630,16 @@ function GestorSolicitudDetallePageContent() {
                   <span className="text-xs font-semibold text-gray-500 italic">— No asignar todavía —</span>
                 </button>
 
+                {!cargandoMotorizados && rankingCalculado.length === 0 && (
+                  <p className="text-xs text-amber-600 mb-2">No hay motorizados en línea disponibles.</p>
+                )}
+
                 {/* Lista rankeada de candidatos */}
                 <div className="space-y-1.5 max-h-[300px] overflow-y-auto pr-0.5">
                   {(() => {
                     const scoreMap = new Map(rankingCalculado.map((r) => [r.id, r.scoreResult]))
-                    const ordenMostrar = rankingCalculado.length > 0 ? rankingCalculado : motorizados.filter((m) => m.activo !== false && esMotorizadoEnLinea(m.estado))
-                    return ordenMostrar.map((m, idx) => {
+                    // MOTO-RANKING-DATOS-REALTIME-1: sin fallback al roster completo.
+                    return rankingCalculado.map((m, idx) => {
                       const sr = scoreMap.get(m.id)
                       const esSeleccionado = motorizadoSel === m.id
                       const esMejor = idx === 0 && rankingCalculado.length > 0

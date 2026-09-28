@@ -37,6 +37,8 @@ import {
 import { db } from '@/fb/config'
 import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
 import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia'
+import { seleccionSigueValida } from '@/lib/motorizado-candidatos'
+import { useMotorizadosCandidatos } from '../_hooks/useMotorizadosCandidatos'
 // VIAJE-ENTREGADO-SIN-COBRO-1 — Base de datos no es una puerta para escribir
 // estados operativos: eso es del flujo del motorizado.
 import {
@@ -382,27 +384,27 @@ function SolicitudDrawer({
   const [solicitud, setSolicitud] = useState<Solicitud | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
-  const [motorizados, setMotorizados] = useState<Motorizado[]>([])
+  // MOTO-RANKING-DATOS-REALTIME-1: roster en vivo (antes, getDocs una sola vez).
+  const { motorizados, cargando: cargandoMotorizados } = useMotorizadosCandidatos()
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
   const [precioEditado, setPrecioEditado] = useState(false)
   const [guardandoAsignacion, setGuardandoAsignacion] = useState(false)
   const asignacionEnCurso = useRef(false)
   const [motorizadoSel, setMotorizadoSel] = useState('')
+  const motorizadosElegibles = useMemo(
+    () => motorizados.filter((m) => m.activo !== false && esMotorizadoEnLinea(m.estado)),
+    [motorizados],
+  )
+  // Una selección que dejó de ser candidato elegible no debe quedar como id fantasma.
+  useEffect(() => {
+    if (cargandoMotorizados) return
+    if (!seleccionSigueValida(motorizadoSel, motorizadosElegibles)) setMotorizadoSel('')
+  }, [motorizadoSel, motorizadosElegibles, cargandoMotorizados])
   const [tick, setTick] = useState(Date.now())
 
   useEffect(() => {
     const t = setInterval(() => setTick(Date.now()), 1000)
     return () => clearInterval(t)
-  }, [])
-
-  useEffect(() => {
-    getDocs(query(collection(db, 'motorizado'))).then((snap) => {
-      setMotorizados(
-        snap.docs
-          .map((d) => ({ id: d.id, ...(d.data() as any) }))
-          .sort((a, b) => (esMotorizadoEnLinea(b.estado) ? 1 : 0) - (esMotorizadoEnLinea(a.estado) ? 1 : 0))
-      )
-    })
   }, [])
 
   useEffect(() => {
@@ -737,12 +739,15 @@ function SolicitudDrawer({
                       className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
                     >
                       <option value="">-- No asignar todavía --</option>
-                      {motorizados.filter((m) => m.activo !== false && esMotorizadoEnLinea(m.estado)).map((m) => (
+                      {motorizadosElegibles.map((m) => (
                         <option key={m.id} value={m.id}>
                           {esMotorizadoEnLinea(m.estado) ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}
                         </option>
                       ))}
                     </select>
+                    {!cargandoMotorizados && motorizadosElegibles.length === 0 && (
+                      <p className="text-xs text-amber-600 mt-1">No hay motorizados en línea disponibles.</p>
+                    )}
                   </div>
 
                   <div className="space-y-2 pt-1">
