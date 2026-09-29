@@ -10,6 +10,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { resumenOrden, type EntradaResumen } from './resumen-orden'
 import type { DepositoRegistrado } from './deposito-orden'
+import { calcularDeposito } from './calculo-deposito'
 
 const ADMIN = 'RKTw1pLfK5O8Y3A6IIwDU8J3yr43'
 const MOTO = 'John Pork 2'
@@ -189,6 +190,80 @@ test('R9c · entregada no genera pendiente operativo', () => {
   assert.equal(r.hechos.some((h) => h.id === 'ok:entrega'), true)
 })
 
+// ── AC · MOTO-ACEPTACION-REASIGNACION-CONSISTENCIA-1 ────────────────────────
+// El badge "Aceptada" lee asignacion.estadoAceptacion directo; ATENCIÓN y QUÉ
+// FALTA lo leen a través de pendienteOperativo() en este mismo archivo — un
+// contradictorio "Aceptada" + "debe aceptar" solo puede salir de acá.
+
+test('AC1 · asignación inicial pendiente: debe aceptar', () => {
+  const p = resumenOrden({ estado: 'asignada', asignacion: { motorizadoNombre: MOTO, estadoAceptacion: 'pendiente' } }).pendientes[0]
+  assert.equal(p.id, 'op:aceptar')
+  assert.equal(p.texto, `${MOTO} debe aceptar la asignación`)
+})
+
+test('AC2 · asignación inicial aceptada: NO debe aceptar', () => {
+  const r = resumenOrden({ estado: 'asignada', asignacion: { motorizadoNombre: MOTO, estadoAceptacion: 'aceptada' } })
+  assert.equal(r.pendientes.some((p) => p.id === 'op:aceptar'), false)
+  assert.equal(r.pendientes.some((p) => p.categoria === 'operativo'), false)
+})
+
+test('AC3 · reasignación a otro motorizado, pendiente: ese motorizado debe aceptar', () => {
+  const OTRO = 'Dickson'
+  const p = resumenOrden({ estado: 'asignada', asignacion: { motorizadoNombre: OTRO, estadoAceptacion: 'pendiente' } }).pendientes[0]
+  assert.equal(p.id, 'op:aceptar')
+  assert.equal(p.texto, `${OTRO} debe aceptar la asignación`)
+})
+
+test('AC4 · reasignado acepta: NO debe aceptar', () => {
+  const r = resumenOrden({ estado: 'asignada', asignacion: { motorizadoNombre: 'Dickson', estadoAceptacion: 'aceptada' } })
+  assert.equal(r.pendientes.some((p) => p.id === 'op:aceptar'), false)
+})
+
+test('AC5 · un motorizado anterior ya había aceptado; tras reasignar, el nuevo sigue pendiente', () => {
+  // pendienteOperativo() no mira historial: solo la asignación ACTUAL, que ya
+  // trae estadoAceptacion:'pendiente' recién reasignada (asignarMotorizadoCore
+  // siempre resetea ese campo — ver functions/src/asignacion-motorizado.ts).
+  const p = resumenOrden({ estado: 'asignada', asignacion: { motorizadoNombre: 'Dickson', estadoAceptacion: 'pendiente' } }).pendientes[0]
+  assert.equal(p.id, 'op:aceptar')
+})
+
+test('AC6 · acepta y pasa a en_camino_retiro: ya no pregunta por aceptación', () => {
+  const p = resumenOrden({ estado: 'en_camino_retiro', asignacion: { motorizadoNombre: MOTO, estadoAceptacion: 'aceptada' } }).pendientes[0]
+  assert.equal(p.id, 'op:retirar')
+  assert.notEqual(p.texto, `${MOTO} debe aceptar la asignación`)
+})
+
+test('AC7 · acepta y pasa a retirado: ya no pregunta por aceptación', () => {
+  const p = resumenOrden({ estado: 'retirado', asignacion: { motorizadoNombre: MOTO, estadoAceptacion: 'aceptada' } }).pendientes[0]
+  assert.equal(p.id, 'op:entregar')
+  assert.notEqual(p.texto, `${MOTO} debe aceptar la asignación`)
+})
+
+test('AC8 · Atención y Qué falta consumen la misma semántica (mismo array)', () => {
+  // Ambos bloques de la ficha completa leen resumenOrden(...).pendientes — uno
+  // directo (ResumenOrden.tsx), otro vía resumenEjecutivoOrden() (que a su vez
+  // llama resumenOrden). No hay una regla para cada uno: es un único array.
+  const aceptada = resumenOrden({ estado: 'asignada', asignacion: { motorizadoNombre: MOTO, estadoAceptacion: 'aceptada' } })
+  const pendiente = resumenOrden({ estado: 'asignada', asignacion: { motorizadoNombre: MOTO, estadoAceptacion: 'pendiente' } })
+  assert.equal(aceptada.pendientes.some((p) => p.id === 'op:aceptar'), false)
+  assert.equal(pendiente.pendientes.some((p) => p.id === 'op:aceptar'), true)
+})
+
+test('AC9 · badge Aceptada y pendientes nunca contradicen el mismo fixture', () => {
+  for (const estado of ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega']) {
+    const r = resumenOrden({ estado, asignacion: { motorizadoNombre: MOTO, estadoAceptacion: 'aceptada' } })
+    assert.equal(r.pendientes.some((p) => p.texto.includes('debe aceptar')), false, `estado ${estado}`)
+  }
+})
+
+test('AC10 · rechazada/expirada piden reasignar, nunca "debe aceptar" (regresión de R9b)', () => {
+  for (const ace of ['rechazada', 'expirada']) {
+    const r = resumenOrden({ estado: 'asignada', asignacion: { motorizadoNombre: MOTO, estadoAceptacion: ace } })
+    assert.equal(r.pendientes[0].id, 'op:reasignar')
+    assert.equal(r.pendientes.some((p) => p.id === 'op:aceptar'), false)
+  }
+})
+
 // ── R10 ─────────────────────────────────────────────────────────────────────
 test('R10 · entregada sin nada pendiente queda limpia', () => {
   const o: EntradaResumen = {
@@ -318,6 +393,105 @@ test('R14 · los anchors apuntan solo a bloques que existen en la ficha', () => 
   // Un pendiente operativo no promete un bloque al que llevar.
   const op = resumenOrden({ estado: 'confirmada' }).pendientes[0]
   assert.equal(op.anchor, undefined)
+})
+
+// ── DP · MOTO-ACEPTACION-REASIGNACION-CONSISTENCIA-1 (síntoma B) ────────────
+// Antes de que el motorizado confirme haber recibido el dinero,
+// cobrosMotorizado.producto/delivery no existen (confirmarTransicionConCobro
+// recién los escribe en la transición a 'entregado'): montoProducto y
+// precioDelivery son solo lo que la orden dice que VALE, no lo que el
+// motorizado tiene en la mano. Ver evidenciaDeConfirmacionDeCobro() en
+// resumen-orden.ts.
+
+const SIN_COBRO_CONFIRMAR: EntradaResumen = {
+  tipoCliente: 'contado',
+  asignacion: { motorizadoNombre: MOTO, estadoAceptacion: 'aceptada' },
+  cobroContraEntrega: { aplica: true, monto: 1000 },
+  confirmacion: { precioFinalCordobas: 80 },
+  pagoDelivery: { quienPaga: 'entrega', deducirDelCobroContraEntrega: false },
+  // cobrosMotorizado ausente a propósito: nadie respondió todavía.
+}
+
+test('DP1 · cobro contra entrega teórico + cobrosMotorizado ausente: NO debe depositar', () => {
+  const r = resumenOrden({ ...SIN_COBRO_CONFIRMAR, estado: 'asignada' })
+  assert.equal(r.pendientes.some((p) => p.categoria === 'deposito'), false)
+})
+
+test('DP2 · estado asignada + monto teórico: NO depósito', () => {
+  const ids2 = ids({ ...SIN_COBRO_CONFIRMAR, estado: 'asignada' })
+  assert.equal(ids2.some((i) => i.startsWith('deposito:')), false)
+})
+
+test('DP3 · estado en_camino_retiro + monto teórico: NO depósito', () => {
+  const ids2 = ids({ ...SIN_COBRO_CONFIRMAR, estado: 'en_camino_retiro' })
+  assert.equal(ids2.some((i) => i.startsWith('deposito:')), false)
+})
+
+test('DP4 · estado retirado + sin confirmación de cobro: NO depósito', () => {
+  // No confundir retiro del paquete con cobro del dinero: son eventos
+  // distintos y el segundo no se infiere del primero.
+  const ids2 = ids({ ...SIN_COBRO_CONFIRMAR, estado: 'retirado' })
+  assert.equal(ids2.some((i) => i.startsWith('deposito:')), false)
+})
+
+test('DP5 · cobro de delivery confirmado recibido: aparece obligación a StorkHub, aunque la orden no esté entregada', () => {
+  // Deliberadamente en 'retirado' (no 'entregado'): la obligación depende de
+  // cobrosMotorizado, no del estado operativo.
+  const o: EntradaResumen = {
+    ...SIN_COBRO_CONFIRMAR,
+    estado: 'retirado',
+    cobroContraEntrega: { aplica: false },
+    cobrosMotorizado: { delivery: { monto: 80, recibio: true } },
+  }
+  const d = resumenOrden(o).pendientes.find((p) => p.categoria === 'deposito')!
+  assert.equal(d.id, 'deposito:storkhub')
+  assert.equal(d.monto, 80)
+})
+
+test('DP6 · cobro de producto confirmado recibido: aparece obligación al comercio', () => {
+  const o: EntradaResumen = {
+    ...SIN_COBRO_CONFIRMAR,
+    estado: 'retirado',
+    pagoDelivery: { quienPaga: 'transferencia' },
+    cobrosMotorizado: { producto: { monto: 1000, recibio: true } },
+  }
+  const d = resumenOrden(o).pendientes.find((p) => p.categoria === 'deposito')!
+  assert.equal(d.id, 'deposito:comercio')
+  assert.equal(d.monto, 1000)
+})
+
+test('DP7 · recibio:false no alimenta obligación de ese componente', () => {
+  const o: EntradaResumen = {
+    ...SIN_COBRO_CONFIRMAR,
+    estado: 'entregado',
+    pagoDelivery: { quienPaga: 'transferencia' },
+    cobrosMotorizado: { producto: { monto: 1000, recibio: false, justificacion: 'x' } },
+  }
+  assert.equal(ids(o).some((i) => i.startsWith('deposito:')), false)
+})
+
+test('DP8 · aceptar la asignación por sí solo no genera depósito', () => {
+  const r = resumenOrden({ ...SIN_COBRO_CONFIRMAR, estado: 'asignada' })
+  assert.equal(r.pendientes.some((p) => p.id === 'op:aceptar'), false)
+  assert.equal(r.pendientes.some((p) => p.categoria === 'deposito'), false)
+})
+
+test('DP9 · reasignar por sí solo no genera depósito', () => {
+  const r = resumenOrden({ ...SIN_COBRO_CONFIRMAR, estado: 'asignada', asignacion: { motorizadoNombre: 'Dickson', estadoAceptacion: 'pendiente' } })
+  assert.equal(r.pendientes.some((p) => p.id === 'op:aceptar'), true)
+  assert.equal(r.pendientes.some((p) => p.categoria === 'deposito'), false)
+})
+
+test('DP10 · monto mostrado es exactamente la obligación calculada real', () => {
+  const o: EntradaResumen = {
+    ...SIN_COBRO_CONFIRMAR,
+    estado: 'entregado',
+    cobrosMotorizado: { delivery: { monto: 80, recibio: true }, producto: { monto: 1000, recibio: true } },
+  }
+  const calc = calcularDeposito(o)
+  const d = resumenOrden(o).pendientes.filter((p) => p.categoria === 'deposito')
+  assert.equal(d.find((p) => p.id === 'deposito:storkhub')!.monto, calc.totalAStorkhub)
+  assert.equal(d.find((p) => p.id === 'deposito:comercio')!.monto, calc.totalAlComercio)
 })
 
 // ── Volumen ─────────────────────────────────────────────────────────────────

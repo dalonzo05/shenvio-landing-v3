@@ -110,6 +110,45 @@ export interface EntradaResumen {
 const money = (n: number) => `C$ ${n.toLocaleString('es-NI')}`
 
 /**
+ * ¿Ya respondió el motorizado si recibió el dinero de esta orden?
+ *
+ * calcularDeposito() se diseñó para invocarse una vez `cobrosMotorizado` ya
+ * está consolidado (B1.3) — antes de eso, `cobrosMotorizado.producto`/
+ * `.delivery` sencillamente no existen: `confirmarTransicionConCobro` recién
+ * los escribe cuando el motorizado responde `{recibio, justificacion?}`, cada
+ * uno de forma independiente (ver functions/src/motorizado-transiciones.ts).
+ * Antes de esa respuesta, `montoProducto`/`precioDelivery` son solo lo que la
+ * orden dice que VALE — no lo que el motorizado tiene en la mano. Mostrar
+ * "debe depositar" con eso inventa una obligación.
+ *
+ * Por eso el gate es por componente, no uno solo para toda la orden:
+ * `totalAlComercio` sale del producto (y, si se deduce, también del
+ * delivery); `totalAStorkhub` sale del delivery (y, si se deduce, también
+ * del producto) — cada destino exige evidencia de las partes de las que
+ * depende su propio número.
+ */
+function evidenciaDeConfirmacionDeCobro(orden: EntradaResumen): { comercio: boolean; storkhub: boolean } {
+  const ceAplica = !!orden.cobroContraEntrega?.aplica
+  const productoAplica = ceAplica && (orden.cobroContraEntrega?.monto || 0) > 0
+  const productoConfirmado = !productoAplica || typeof orden.cobrosMotorizado?.producto?.recibio === 'boolean'
+
+  const quienPaga = orden.pagoDelivery?.quienPaga || ''
+  const esPorTransferencia = quienPaga === 'transferencia'
+  const esCredito = orden.tipoCliente === 'credito' || quienPaga === 'credito_semanal'
+  const precioDelivery =
+    orden.confirmacion?.precioFinalCordobas ||
+    (orden.tipoServicio === 'fuera_managua' ? (orden.pagoDelivery?.montoSugerido || 0) : 0)
+  const deliveryAplica = !esPorTransferencia && !esCredito && precioDelivery > 0
+  const deliveryConfirmado = !deliveryAplica || typeof orden.cobrosMotorizado?.delivery?.recibio === 'boolean'
+
+  const deducir = !!orden.pagoDelivery?.deducirDelCobroContraEntrega
+  return {
+    comercio: productoConfirmado && (!deducir || deliveryConfirmado),
+    storkhub: deliveryConfirmado && (!deducir || productoConfirmado),
+  }
+}
+
+/**
  * Paso operativo que la orden todavía tiene por delante.
  *
  * Sale del estado persistido, nunca de suponer qué "debería" venir después.
@@ -129,6 +168,10 @@ function pendienteOperativo(orden: EntradaResumen): Pendiente | null {
       // Rechazada o expirada: el motorizado ya no va a aceptar; hay que
       // reasignar. Decirlo como "debe aceptar" dejaría la orden colgada.
       if (ace === 'rechazada' || ace === 'expirada') return p('op:reasignar', 'Falta reasignar motorizado')
+      // Ya aceptó: no hay paso operativo que reclamar todavía (el retiro es
+      // un estado propio, más abajo en este switch). Devolver el pendiente de
+      // "debe aceptar" acá contradiría el badge, que lee el mismo campo.
+      if (ace === 'aceptada') return null
       return p('op:aceptar', moto ? `${moto} debe aceptar la asignación` : 'El motorizado debe aceptar la asignación')
     }
     case 'en_camino_retiro': return p('op:retirar', 'Falta retirar el paquete')
@@ -214,19 +257,25 @@ export function resumenOrden(
   // Solo cuando calcularDeposito() dice que el motorizado tiene ese efectivo.
   // Si nunca lo recibió no hay obligación, y por eso esto no duplica jamás al
   // cobro pendiente de arriba: son dos billetes distintos.
+  const evidencia = evidenciaDeConfirmacionDeCobro(orden)
   for (const l of lineasDeposito(orden, depositos)) {
     if (l.obligacion <= 0) continue
     const destino = l.destino === 'storkhub' ? 'a StorkHub' : 'al comercio'
 
     if (l.clave === 'sin_deposito') {
-      pendientes.push({
-        id: `deposito:${l.destino}`,
-        categoria: 'deposito',
-        texto: `Motorizado debe depositar ${money(l.obligacion)} ${destino}`,
-        monto: l.obligacion,
-        anchor: 'depositos',
-        severidad: 'alta',
-      })
+      // Sin que el motorizado haya confirmado que tiene ese dinero, la
+      // obligación es solo teórica (ver evidenciaDeConfirmacionDeCobro) — no
+      // se reclama un depósito que todavía no se sabe si corresponde.
+      if (l.destino === 'storkhub' ? evidencia.storkhub : evidencia.comercio) {
+        pendientes.push({
+          id: `deposito:${l.destino}`,
+          categoria: 'deposito',
+          texto: `Motorizado debe depositar ${money(l.obligacion)} ${destino}`,
+          monto: l.obligacion,
+          anchor: 'depositos',
+          severidad: 'alta',
+        })
+      }
       continue
     }
 
