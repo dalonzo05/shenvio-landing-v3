@@ -20,6 +20,7 @@ import {
   type NuevaOrdenRanking,
   type MotorizadoRankeado,
 } from '@/lib/motorizado-ranking'
+import { textoReferenciaGeografica } from '@/lib/motorizado-referencia-ux'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import {
@@ -2488,9 +2489,18 @@ function GestorSolicitudesPageContent() {
                   return rankingModal.map((m) => {
                     const score = scoreMap.get(m.id)
                     const scoreLabel = score !== undefined ? ` [${score}]` : ''
+                    // MOTO-RANKING-REFERENCIA-UX-1 — misma referencia/distancia que ya
+                    // calculó el ranking (scoreResult.detalles), solo compactada con el
+                    // mismo formateador que usan Drawer y ficha: el <option> nativo solo
+                    // admite texto plano, así que no hay dónde poner una segunda línea.
+                    const referenciaLabel = ` · ${textoReferenciaGeografica(
+                      m.scoreResult.detalles.referenciaGeografica,
+                      m.scoreResult.detalles.distanciaProximoKm,
+                      ahoraOperativo,
+                    )}`
                     return (
                       <option key={m.id} value={m.id}>
-                        {esMotorizadoEnLinea(m.estado) ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}{scoreLabel}
+                        {esMotorizadoEnLinea(m.estado) ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}{scoreLabel}{referenciaLabel}
                       </option>
                     )
                   })
