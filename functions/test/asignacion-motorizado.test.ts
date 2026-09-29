@@ -154,3 +154,145 @@ test('Payloads inválidos no escriben', async () => {
   }
 });
 test('Reoferta no excluye al último rechazante', async () => { const e = escenario(); e.orden({ ...e.actual(), ultimoRechazoMotorizado: { motorizadoId: 'm1' } }); await e.run(); assert.equal(e.actual().asignacion.motorizadoId, 'm1'); });
+
+// ── MOTO-REASIGNACION-POST-RETIRO-GUARD-1 ───────────────────────────────────
+//
+// P1 confirmado en diagnóstico previo: 'confirmar' solo exigía
+// estadosAbiertos, así que una solicitud 'retirado'/'en_camino_entrega' podía
+// volver a 'asignada' con un motorizado NUEVO desde el mismo botón que arma
+// el precio (Drawer/detalle/Base de datos, que solo usaban 'confirmar'). Acá
+// se fija la matriz completa: 'confirmar' es asignación INICIAL
+// (pendiente_confirmacion/confirmada); 'reasignar' es la única vía para
+// cambiar el motorizado de una solicitud que ya lo tiene, y solo ANTES del
+// retiro físico (asignada/en_camino_retiro) — nunca después.
+
+const motivo = (m: string) => (e: unknown) => (e as { details?: { motivo?: string } }).details?.motivo === m;
+
+// RG1-RG5: reasignar por estado.
+for (const [name, estado, permitido] of [
+  ['RG1 asignada', 'asignada', true],
+  ['RG2 en_camino_retiro', 'en_camino_retiro', true],
+  ['RG3 retirado', 'retirado', false],
+  ['RG4 en_camino_entrega', 'en_camino_entrega', false],
+] as const) {
+  test(name, async () => {
+    const e = escenario();
+    const anterior = { motorizadoId: 'anterior', motorizadoAuthUid: 'uid-anterior' };
+    e.orden({ estado, updatedAt: stamp(1), asignacion: anterior });
+    if (permitido) {
+      await e.run({ operacion: 'reasignar', estadoEsperado: estado });
+      assert.equal(e.writes.length, 1);
+      assert.equal(e.actual().asignacion.motorizadoId, 'm1');
+      assert.equal(e.actual().estado, 'asignada');
+    } else {
+      await assert.rejects(e.run({ operacion: 'reasignar', estadoEsperado: estado }), (err: unknown) => {
+        const e2 = err as { code: string };
+        return e2.code === 'failed-precondition' && motivo('solicitud_no_reasignable')(err);
+      });
+      assert.equal(e.writes.length, 0);
+      assert.deepEqual(e.actual().asignacion, anterior);
+      assert.equal(e.actual().estado, estado);
+    }
+  });
+}
+
+// RG5: 'entregado' no está en estadosAbiertos en absoluto — el payload ni
+// siquiera entra a la transacción, se rechaza más temprano (invalid-argument
+// en la validación de forma), que es una protección MÁS estricta, no menor.
+test('RG5 entregado — ni siquiera es un estadoEsperado válido, rechazo más temprano (invalid-argument)', async () => {
+  const e = escenario();
+  const anterior = { motorizadoId: 'anterior' };
+  e.orden({ estado: 'entregado', updatedAt: stamp(1), asignacion: anterior });
+  await assert.rejects(e.run({ operacion: 'reasignar', estadoEsperado: 'entregado' }), codigo('invalid-argument'));
+  assert.equal(e.writes.length, 0);
+  assert.deepEqual(e.actual().asignacion, anterior);
+});
+
+test('RG6 modal stale: asignada → retirado sin refrescar → backend rechaza por staleness', async () => {
+  const e = escenario();
+  const anterior = { motorizadoId: 'anterior' };
+  e.orden({ estado: 'retirado', updatedAt: stamp(2), asignacion: anterior });
+  // El cliente todavía cree que está en 'asignada' (modal abierto sin refrescar).
+  await assert.rejects(e.run({ operacion: 'reasignar', estadoEsperado: 'asignada' }), (err: unknown) => {
+    const e2 = err as { code: string };
+    return e2.code === 'failed-precondition' && motivo('solicitud_cambio')(err);
+  });
+  assert.equal(e.writes.length, 0);
+  assert.deepEqual(e.actual().asignacion, anterior);
+});
+
+test('RG7-RG11 intento prohibido conserva motorizado/estado/asignadoAt/aceptarAntesDe/estadoAceptacion originales', async () => {
+  const e = escenario();
+  const anterior = {
+    motorizadoId: 'anterior', motorizadoAuthUid: 'uid-anterior',
+    asignadoAt: stamp(500), estadoAceptacion: 'aceptado', aceptarAntesDe: stamp(999),
+  };
+  e.orden({ estado: 'retirado', updatedAt: stamp(1), asignacion: anterior });
+  await assert.rejects(e.run({ operacion: 'reasignar', estadoEsperado: 'retirado' }), codigo('failed-precondition'));
+  assert.equal(e.writes.length, 0);
+  assert.deepEqual(e.actual().asignacion, anterior); // RG7, RG9, RG10, RG11
+  assert.equal(e.actual().estado, 'retirado'); // RG8
+});
+
+test('RG12 intento prohibido no toca el precio confirmado', async () => {
+  const e = escenario();
+  const precioOriginal = e.actual().confirmacion;
+  e.orden({ estado: 'retirado', updatedAt: stamp(1), asignacion: { motorizadoId: 'anterior' }, confirmacion: precioOriginal });
+  await assert.rejects(e.run({ operacion: 'reasignar', estadoEsperado: 'retirado' }), codigo('failed-precondition'));
+  assert.deepEqual(e.actual().confirmacion, precioOriginal);
+  assert.equal(e.writes.length, 0);
+});
+
+test('RG13 confirmar NO sirve de bypass para reasignar una solicitud retirado', async () => {
+  const e = escenario();
+  const anterior = { motorizadoId: 'anterior' };
+  e.orden({ estado: 'retirado', updatedAt: stamp(1), asignacion: anterior });
+  await assert.rejects(e.run({ operacion: 'confirmar', estadoEsperado: 'retirado', motorizadoId: 'm1' }), (err: unknown) => {
+    const e2 = err as { code: string };
+    return e2.code === 'failed-precondition' && motivo('solicitud_no_reasignable')(err);
+  });
+  assert.equal(e.writes.length, 0);
+  assert.deepEqual(e.actual().asignacion, anterior);
+});
+
+test('RG14 confirmar NO sirve de bypass para reasignar una solicitud en_camino_entrega', async () => {
+  const e = escenario();
+  const anterior = { motorizadoId: 'anterior' };
+  e.orden({ estado: 'en_camino_entrega', updatedAt: stamp(1), asignacion: anterior });
+  await assert.rejects(e.run({ operacion: 'confirmar', estadoEsperado: 'en_camino_entrega', motorizadoId: 'm1' }), (err: unknown) => {
+    const e2 = err as { code: string };
+    return e2.code === 'failed-precondition' && motivo('solicitud_no_reasignable')(err);
+  });
+  assert.equal(e.writes.length, 0);
+  assert.deepEqual(e.actual().asignacion, anterior);
+});
+
+test('RG15 confirmar también queda bloqueado sobre una solicitud ya asignada (asignación inicial != reasignación)', async () => {
+  const e = escenario();
+  const anterior = { motorizadoId: 'anterior' };
+  e.orden({ estado: 'asignada', updatedAt: stamp(1), asignacion: anterior });
+  await assert.rejects(e.run({ operacion: 'confirmar', estadoEsperado: 'asignada', motorizadoId: 'm1' }), (err: unknown) => {
+    const e2 = err as { code: string };
+    return e2.code === 'failed-precondition' && motivo('solicitud_no_reasignable')(err);
+  });
+  assert.equal(e.writes.length, 0);
+  assert.deepEqual(e.actual().asignacion, anterior);
+});
+
+test('RG15b reasignar en en_camino_retiro vuelve a estado asignada (semántica ya existente de nueva asignación)', async () => {
+  const e = escenario();
+  e.orden({ estado: 'en_camino_retiro', updatedAt: stamp(1), asignacion: { motorizadoId: 'anterior' } });
+  await e.run({ operacion: 'reasignar', estadoEsperado: 'en_camino_retiro' });
+  assert.equal(e.actual().estado, 'asignada');
+  assert.equal(e.actual().asignacion.motorizadoId, 'm1');
+});
+
+test('confirmar sigue funcionando para asignación inicial desde pendiente_confirmacion y confirmada (sin regresión)', async () => {
+  for (const estado of ['pendiente_confirmacion', 'confirmada'] as const) {
+    const e = escenario();
+    e.orden({ estado, updatedAt: stamp(1) });
+    await e.run({ operacion: 'confirmar', estadoEsperado: estado, precioFinal: 130 });
+    assert.equal(e.writes.length, 1);
+    assert.equal(e.actual().estado, 'asignada');
+  }
+});

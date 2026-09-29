@@ -44,7 +44,7 @@ import {
   puedeGestorCancelarDesde,
   MSG_CANCELAR_OPERACION_EN_CURSO,
 } from '@/lib/transiciones-viaje'
-import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
+import { esEstadoCerrado, MSG_ORDEN_CERRADA, puedeReasignarMotorizado, MSG_ORDEN_NO_REASIGNABLE } from '@/lib/estados-solicitud'
 import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia'
 import { esEntregadaHoy, esEntregadaEnRango, entregaSinFecha, rangoDiasDeFiltro } from '@/lib/dia-operativo'
 import {
@@ -1149,7 +1149,11 @@ function GestorSolicitudesPageContent() {
     const solicitud = solicitudModalRef.current
     if (!solicitud || solicitud.id !== id || asignacionEnCurso.current) return
     if (!motorizadoSel) return setErr('Elegí un motorizado.')
-    if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
+    // MOTO-REASIGNACION-POST-RETIRO-GUARD-1: antes solo miraba esEstadoCerrado
+    // (que no incluye retirado/en_camino_entrega), confiando en que el botón
+    // solo apareciera para 'asignada'. El backend ya lo rechaza igual, pero
+    // este guard evita depender solo de la visibilidad del botón.
+    if (!puedeReasignarMotorizado(solicitud.estado)) return setErr(MSG_ORDEN_NO_REASIGNABLE)
     asignacionEnCurso.current = true
     setGuardandoAsignacion(true)
     setErr(null)
@@ -2046,7 +2050,11 @@ function GestorSolicitudesPageContent() {
                                 </>
                               )
                             })()}
-                            {s.estado === 'asignada' && (
+                            {/* MOTO-REASIGNACION-POST-RETIRO-GUARD-1: Reasignar
+                                ahora también se ofrece en en_camino_retiro
+                                (todavía no ocurrió el retiro físico) — Rebotar
+                                sigue exclusivo de 'asignada', sin ampliar. */}
+                            {puedeReasignarMotorizado(s.estado) && (
                               <div className="flex gap-1">
                                 <button
                                   onClick={() => abrirReasignar(s)}
@@ -2056,14 +2064,16 @@ function GestorSolicitudesPageContent() {
                                   <RefreshCcw className="h-3 w-3" />
                                   Reasignar
                                 </button>
-                                <button
-                                  onClick={() => rebotarAsignacion(s.id)}
-                                  className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-[11px] font-medium text-gray-700 hover:bg-gray-100"
-                                  title="Rebotar asignación"
-                                >
-                                  <RotateCcw className="h-3 w-3" />
-                                  Rebotar
-                                </button>
+                                {s.estado === 'asignada' && (
+                                  <button
+                                    onClick={() => rebotarAsignacion(s.id)}
+                                    className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-[11px] font-medium text-gray-700 hover:bg-gray-100"
+                                    title="Rebotar asignación"
+                                  >
+                                    <RotateCcw className="h-3 w-3" />
+                                    Rebotar
+                                  </button>
+                                )}
                               </div>
                             )}
 
@@ -2317,7 +2327,7 @@ function GestorSolicitudesPageContent() {
                       </button>
                     )}
 
-                    {s.estado === 'asignada' && (
+                    {puedeReasignarMotorizado(s.estado) && (
                       <>
                         <button
                           onClick={() => abrirReasignar(s)}
@@ -2326,12 +2336,14 @@ function GestorSolicitudesPageContent() {
                           Reasignar
                         </button>
 
-                        <button
-                          onClick={() => rebotarAsignacion(s.id)}
-                          className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700"
-                        >
-                          Rebotar
-                        </button>
+                        {s.estado === 'asignada' && (
+                          <button
+                            onClick={() => rebotarAsignacion(s.id)}
+                            className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700"
+                          >
+                            Rebotar
+                          </button>
+                        )}
                       </>
                     )}
 

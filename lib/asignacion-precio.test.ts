@@ -46,7 +46,12 @@ test('M6 auditoría AST: ningún payload directo Gestor crea/reemplaza asignaci�
     visit(src)
   }
 })
-test('Seis call sites migrados; selección no marca precio editado', () => {
+test('Nueve call sites migrados; selección no marca precio editado', () => {
+  // MOTO-REASIGNACION-POST-RETIRO-GUARD-1 — subió de 6 a 9: Drawer, detalle
+  // y base-datos ahora tienen DOS llamadas a guardarAsignacion cada uno
+  // (antes solo 'confirmar'; ahora 'confirmar' para asignación inicial +
+  // 'reasignar' para reasignar antes del retiro), en vez de una sola
+  // 'confirmar' que servía —indebidamente— para ambos casos.
   let llamadas = 0
   for (const path of superficies) {
     const s = readFileSync(join(root, 'app/panel/gestor', path), 'utf8')
@@ -57,7 +62,7 @@ test('Seis call sites migrados; selección no marca precio editado', () => {
     assert.ok(s.includes('asignacionEnCurso.current'), path)
     assert.ok(!/setMotorizadoSel\([^\n]*setPrecioEditado\(true\)/.test(s), path)
   }
-  assert.equal(llamadas, 6)
+  assert.equal(llamadas, 9)
 })
 test('P5 UI de reasignación no envía precio', () => {
   const s = readFileSync(join(root, 'app/panel/gestor/solicitudes/page.tsx'), 'utf8')

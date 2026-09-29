@@ -35,7 +35,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
-import { esEstadoCerrado, MSG_ORDEN_CERRADA } from '@/lib/estados-solicitud'
+import { esEstadoCerrado, MSG_ORDEN_CERRADA, puedeAsignarInicial, puedeReasignarMotorizado, puedeGestionarAsignacion, MSG_ORDEN_NO_REASIGNABLE } from '@/lib/estados-solicitud'
 import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia'
 import { seleccionSigueValida } from '@/lib/motorizado-candidatos'
 import { useMotorizadosCandidatos } from '../_hooks/useMotorizadosCandidatos'
@@ -444,16 +444,29 @@ function SolicitudDrawer({
     return null
   }, [solicitud, tick])
 
+  // MOTO-REASIGNACION-POST-RETIRO-GUARD-1 — ver el mismo comentario en
+  // SolicitudDrawer.tsx: antes esto siempre mandaba 'confirmar', lo que
+  // permitía reasignar una solicitud 'retirado'/'en_camino_entrega' aunque
+  // el motorizado original ya tuviera el paquete físico.
   const confirmarYAsignar = async () => {
     if (!solicitud || asignacionEnCurso.current) return
-    if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
-    if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio final válido.')
+    if (!puedeGestionarAsignacion(solicitud.estado)) return setErr(MSG_ORDEN_NO_REASIGNABLE)
+    const reasignando = puedeReasignarMotorizado(solicitud.estado) && !puedeAsignarInicial(solicitud.estado)
+    if (reasignando) {
+      if (!motorizadoSel) return setErr('Elegí un motorizado para reasignar.')
+    } else {
+      if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio final válido.')
+    }
     asignacionEnCurso.current = true
     setGuardandoAsignacion(true)
     setErr(null)
     try {
-      await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'baseDatos', precioFinal, precioEditado)
-      setPrecioEditado(false)
+      if (reasignando) {
+        await guardarAsignacion(solicitud, motorizadoSel, 'reasignar', 'baseDatos')
+      } else {
+        await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'baseDatos', precioFinal, precioEditado)
+        setPrecioEditado(false)
+      }
     } catch (e) {
       const error = errorAsignacion(e)
       if (error.limpiarSeleccion) setMotorizadoSel('')
@@ -709,15 +722,17 @@ function SolicitudDrawer({
                 </Section>
               )}
 
-              {/* Decisión rápida — oculta para estados terminales.
-                  B2-DRAWER-BASE-HOMOLOGACION: el drawer compartido ya la
-                  ocultaba para los tres cierres; acá seguía ofreciendo cambiar
-                  precio, reasignar y avanzar el estado sobre una orden ya
-                  entregada, que es un cierre del que no se vuelve. Se usa el
-                  predicado autoritativo en vez de repetir tres comparaciones. */}
-              {!esEstadoCerrado(estado) && (
-              <Section title="Decisión rápida" accent="blue">
+              {/* Decisión rápida — MOTO-REASIGNACION-POST-RETIRO-GUARD-1:
+                  B2-DRAWER-BASE-HOMOLOGACION ya la ocultaba para los tres
+                  cierres, pero seguía ofreciendo cambiar el motorizado en
+                  retirado/en_camino_entrega, con el paquete YA en manos del
+                  motorizado original — mismo hueco que en el Drawer y el
+                  detalle. puedeGestionarAsignacion() cierra los cinco
+                  estados que no admiten tocar la asignación. */}
+              {puedeGestionarAsignacion(estado) && (
+              <Section title={puedeAsignarInicial(estado) ? 'Decisión rápida' : 'Reasignar motorizado'} accent="blue">
                 <div className="space-y-3">
+                  {puedeAsignarInicial(estado) && (
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">Precio final (C$)</label>
                     <input
@@ -730,6 +745,7 @@ function SolicitudDrawer({
                     />
                     <div className="text-xs text-gray-400 mt-1">Se redondea a múltiplos de 10.</div>
                   </div>
+                  )}
 
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">Motorizado</label>
@@ -738,7 +754,7 @@ function SolicitudDrawer({
                       onChange={(e) => setMotorizadoSel(e.target.value)}
                       className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
                     >
-                      <option value="">-- No asignar todavía --</option>
+                      {puedeAsignarInicial(estado) && <option value="">-- No asignar todavía --</option>}
                       {motorizadosElegibles.map((m) => (
                         <option key={m.id} value={m.id}>
                           {esMotorizadoEnLinea(m.estado) ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}
@@ -751,15 +767,14 @@ function SolicitudDrawer({
                   </div>
 
                   <div className="space-y-2 pt-1">
-                    {/* A-FIX1: una orden cerrada (entregado/rechazada/cancelada) no
-                        se re-confirma ni se reasigna desde el flujo ordinario —
-                        era justamente este botón, sin gate de estado, el que
-                        permitía devolver una orden entregada al principio. */}
-                    {!esEstadoCerrado(estado) && (
-                      <button disabled={guardandoAsignacion} onClick={confirmarYAsignar} className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#004aad] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003d94]">
-                        <CheckCircle2 size={15} /> Guardar confirmación / asignación
-                      </button>
-                    )}
+                    {/* A-FIX1/MOTO-REASIGNACION-POST-RETIRO-GUARD-1: esta
+                        sección ya está condicionada arriba a
+                        puedeGestionarAsignacion, así que este botón siempre
+                        corresponde a un estado válido — solo cambia el texto
+                        y, en el handler, la operación que dispara. */}
+                    <button disabled={guardandoAsignacion} onClick={confirmarYAsignar} className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#004aad] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003d94]">
+                      <CheckCircle2 size={15} /> {puedeAsignarInicial(estado) ? 'Guardar confirmación / asignación' : 'Reasignar motorizado'}
+                    </button>
 
                     {estado === 'pendiente_confirmacion' && (
                       <button onClick={() => cambiarEstado('rechazada')} className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-700">

@@ -21,6 +21,28 @@ export interface PeticionAsignacion {
 }
 
 const estadosAbiertos = ['pendiente_confirmacion', 'confirmada', 'asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'];
+
+// MOTO-REASIGNACION-POST-RETIRO-GUARD-1 — 'confirmar' cubre la asignación
+// INICIAL (la solicitud todavía no tiene un motorizado confirmado); una vez
+// que ya lo tiene, cambiarlo es 'reasignar', nunca 'confirmar' otra vez. Antes
+// 'confirmar' solo exigía estadosAbiertos, así que una solicitud 'retirado' o
+// 'en_camino_entrega' podía volver a 'asignada' con un motorizado nuevo desde
+// el mismo botón que arma el precio — moviendo la custodia (asignacion.
+// motorizadoAuthUid, que storage.rules usa para autorizar evidencia) después
+// de que el motorizado original YA tiene el paquete en la mano. Esta lista es
+// la MISMA matriz que fija lib/estados-solicitud.test.ts del lado web
+// (duplicada a propósito: Functions no puede importar lib/, ver ese archivo
+// para el porqué) — cualquier cambio acá debe reflejarse allá.
+const estadosAsignacionInicial = ['pendiente_confirmacion', 'confirmada'];
+
+// 'reasignar' es la única vía para cambiar el motorizado de una solicitud que
+// YA tiene uno. Solo antes del retiro físico: en_camino_retiro es "va camino
+// a buscar el paquete", todavía sin custodia — reasignar ahí es indistinguible
+// de una asignación inicial tardía. retirado en adelante, el motorizado
+// original ya tiene el paquete: cambiar el destino de la asignación rompería
+// esa custodia sin que el paquete se haya movido con ella.
+const estadosReasignables = ['asignada', 'en_camino_retiro'];
+
 const precioValido = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
 const idValido = (v: unknown): v is string => typeof v === 'string' && v.trim() === v && v.length > 0 && v.length <= 200 && !v.includes('/');
 
@@ -70,9 +92,18 @@ export async function asignarMotorizadoCore(deps: DepsAsignacion, uid: string | 
     if (!s) throw new HttpsError('not-found', 'La solicitud no existe.');
     const version = typeof s.updatedAt?.toMillis === 'function' ? s.updatedAt.toMillis() : null;
     if (!estadosAbiertos.includes(s.estado) || s.estado !== p.estadoEsperado || version !== p.updatedAtEsperado ||
-        (p.operacion === 'sugerido' && (s.estado !== 'confirmada' || s.asignacion != null)) ||
-        (p.operacion === 'reasignar' && s.estado !== 'asignada')) {
+        (p.operacion === 'sugerido' && (s.estado !== 'confirmada' || s.asignacion != null))) {
       throw new HttpsError('failed-precondition', 'La solicitud cambió. Revisá sus datos antes de guardar.', { motivo: 'solicitud_cambio' });
+    }
+    // MOTO-REASIGNACION-POST-RETIRO-GUARD-1 — esto NO es staleness (arriba ya
+    // se confirmó que s.estado === p.estadoEsperado, con la versión exacta que
+    // el cliente tenía): es la solicitud en su estado REAL, evaluado dentro de
+    // la misma transacción, y ese estado real ya no admite la operación
+    // pedida. Motivo propio para no confundirlo con 'solicitud_cambio' (que
+    // sí es "tu pantalla está desactualizada, refrescá y reintentá").
+    if ((p.operacion === 'confirmar' && !estadosAsignacionInicial.includes(s.estado)) ||
+        (p.operacion === 'reasignar' && !estadosReasignables.includes(s.estado))) {
+      throw new HttpsError('failed-precondition', 'Esta orden ya avanzó y no permite reasignar el motorizado.', { motivo: 'solicitud_no_reasignable' });
     }
     const m = p.motorizadoId === null ? null : await tx.getMotorizado(p.motorizadoId);
     if (p.motorizadoId !== null && !esElegibleParaNuevaAsignacion(m)) {
