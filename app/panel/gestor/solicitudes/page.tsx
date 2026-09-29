@@ -601,6 +601,9 @@ function GestorSolicitudesPageContent() {
   const loadingRanking = cargandoMotorizados || cargandoOrdenes
   const ahoraOperativo = useTickOperativo()
   const [motorizadoSel, setMotorizadoSel] = useState('')
+  // MOTO-RANKING-CANDIDATOS-LISTA-UX-1 — búsqueda LOCAL sobre rankingModal, ya
+  // en memoria: nunca dispara una query ni cambia qué candidatos existen.
+  const [busquedaMotorizado, setBusquedaMotorizado] = useState('')
   const [asignandoId, setAsignandoId] = useState<string | null>(null)
 
   const [cardsAnimating, setCardsAnimating] = useState<string[]>([])
@@ -1104,6 +1107,7 @@ function GestorSolicitudesPageContent() {
     setPrecioFinal(precioInicialAsignacion(s, s.cotizacion?.precioSugerido ?? s.pagoDelivery?.montoSugerido))
     setPrecioEditado(false)
     setMotorizadoSel(s.asignacion?.motorizadoId || '')
+    setBusquedaMotorizado('')
   }
 
   const abrirReasignar = (s: Solicitud) => {
@@ -1113,6 +1117,7 @@ function GestorSolicitudesPageContent() {
     setPrecioFinal(s.confirmacion?.precioFinalCordobas ?? '')
     setPrecioEditado(false)
     setMotorizadoSel(s.asignacion?.motorizadoId || '')
+    setBusquedaMotorizado('')
   }
 
   const cerrarModal = () => {
@@ -1120,6 +1125,7 @@ function GestorSolicitudesPageContent() {
     setOpenId(null)
     setPrecioFinal('')
     setMotorizadoSel('')
+    setBusquedaMotorizado('')
     setModalMode('confirmar')
   }
 
@@ -2475,37 +2481,95 @@ function GestorSolicitudesPageContent() {
                 Motorizado {modalMode === 'confirmar' ? '(opcional)' : ''}
                 {loadingRanking && <span className="ml-1 text-xs text-gray-400 font-normal">(calculando scores…)</span>}
               </label>
-              <select
-                value={motorizadoSel}
-                onChange={(e) => setMotorizadoSel(e.target.value)}
-                disabled={!loadingRanking && rankingModal.length === 0 && modalMode !== 'confirmar'}
-                className="w-full border rounded-lg px-3 py-2"
-              >
-                {modalMode === 'confirmar' && <option value="">-- No asignar todavía --</option>}
-                {(() => {
-                  const scoreMap = new Map(rankingModal.map((r) => [r.id, r.scoreResult.score]))
-                  // MOTO-RANKING-DATOS-REALTIME-1: sin fallback al roster completo. Sin
-                  // candidatos elegibles, la lista queda vacía (ver mensaje debajo del select).
-                  return rankingModal.map((m) => {
-                    const score = scoreMap.get(m.id)
-                    const scoreLabel = score !== undefined ? ` [${score}]` : ''
-                    // MOTO-RANKING-REFERENCIA-UX-1 — misma referencia/distancia que ya
-                    // calculó el ranking (scoreResult.detalles), solo compactada con el
-                    // mismo formateador que usan Drawer y ficha: el <option> nativo solo
-                    // admite texto plano, así que no hay dónde poner una segunda línea.
-                    const referenciaLabel = ` · ${textoReferenciaGeografica(
-                      m.scoreResult.detalles.referenciaGeografica,
-                      m.scoreResult.detalles.distanciaProximoKm,
-                      ahoraOperativo,
-                    )}`
-                    return (
-                      <option key={m.id} value={m.id}>
-                        {esMotorizadoEnLinea(m.estado) ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}{scoreLabel}{referenciaLabel}
-                      </option>
+              {/* MOTO-RANKING-CANDIDATOS-LISTA-UX-1 — el <select> nativo convertía
+                  score + referencia en una sola línea de texto ilegible con 15-20
+                  candidatos. Lista custom scrollable: misma fuente (rankingModal),
+                  mismo motorizadoSel, mismo submit — solo cambia la presentación. */}
+              {rankingModal.length > 0 && (
+                <div className="relative mb-2">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
+                  <input
+                    type="text"
+                    value={busquedaMotorizado}
+                    onChange={(e) => setBusquedaMotorizado(e.target.value)}
+                    placeholder="Buscar motorizado por nombre o teléfono"
+                    className="w-full border rounded-lg pl-8 pr-3 py-1.5 text-sm"
+                  />
+                </div>
+              )}
+              {(() => {
+                // Filtra sobre el mismo rankingModal ya calculado: .filter()
+                // preserva el orden relativo, nunca reordena. Sin búsqueda,
+                // la lista es exactamente rankingModal completo.
+                const q = busquedaMotorizado.trim().toLowerCase()
+                const candidatos = q
+                  ? rankingModal.filter(
+                      (m) => m.nombre.toLowerCase().includes(q) || (m.telefono || '').toLowerCase().includes(q)
                     )
-                  })
-                })()}
-              </select>
+                  : rankingModal
+                return (
+                  <div className="border rounded-lg divide-y max-h-[300px] overflow-y-auto">
+                    {modalMode === 'confirmar' && (
+                      <button
+                        type="button"
+                        onClick={() => setMotorizadoSel('')}
+                        aria-pressed={motorizadoSel === ''}
+                        className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition ${
+                          motorizadoSel === '' ? 'bg-indigo-50' : 'hover:bg-gray-50'
+                        }`}
+                      >
+                        {motorizadoSel === '' ? (
+                          <CheckCircle2 className="h-4 w-4 text-indigo-600 shrink-0" />
+                        ) : (
+                          <span className="h-4 w-4 shrink-0 rounded-full border border-gray-300" />
+                        )}
+                        <span className="italic text-gray-500">-- No asignar todavía --</span>
+                      </button>
+                    )}
+                    {rankingModal.length > 0 && candidatos.length === 0 && (
+                      <p className="px-3 py-4 text-xs text-gray-500 text-center">
+                        No hay motorizados que coincidan con la búsqueda.
+                      </p>
+                    )}
+                    {candidatos.map((m) => {
+                      const seleccionado = motorizadoSel === m.id
+                      const referencia = textoReferenciaGeografica(
+                        m.scoreResult.detalles.referenciaGeografica,
+                        m.scoreResult.detalles.distanciaProximoKm,
+                        ahoraOperativo,
+                      )
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => setMotorizadoSel(m.id)}
+                          aria-pressed={seleccionado}
+                          className={`w-full flex items-start gap-2 px-3 py-2 text-left text-sm transition ${
+                            seleccionado ? 'bg-indigo-50' : 'hover:bg-gray-50'
+                          }`}
+                        >
+                          {seleccionado ? (
+                            <CheckCircle2 className="h-4 w-4 text-indigo-600 shrink-0 mt-0.5" />
+                          ) : (
+                            <span className="h-4 w-4 shrink-0 rounded-full border border-gray-300 mt-0.5" />
+                          )}
+                          <span className="flex-1 min-w-0">
+                            <span className="flex items-center justify-between gap-2">
+                              <span className="min-w-0 truncate font-medium text-gray-900">
+                                {esMotorizadoEnLinea(m.estado) ? '✅ ' : '⛔ '}{m.nombre}{m.telefono ? ` · ${m.telefono}` : ''}
+                              </span>
+                              <span className="shrink-0 text-xs font-black text-indigo-700 bg-indigo-100 border border-indigo-200 rounded-full px-2 py-0.5">
+                                {m.scoreResult.score}
+                              </span>
+                            </span>
+                            <span className="block text-xs text-gray-500 mt-0.5 leading-snug">{referencia}</span>
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )
+              })()}
               {rankingModal.length > 0 && (
                 <div className="text-xs text-gray-400 mt-1">Ordenados por score · [100] = ideal</div>
               )}
