@@ -6,6 +6,7 @@
 import { esMotorizadoEnLinea, tieneCargaOperativa } from './motorizado-presencia'
 import { diaOperativoDe, hoyOperativo } from './dia-operativo'
 import { normalizarFecha } from './timeline-orden'
+import { textoReferenciaGeografica } from './motorizado-referencia-ux'
 
 // ─── Tipos ───────────────────────────────────────────────────────────────────
 
@@ -58,6 +59,13 @@ export interface OrdenActivaRanking {
   zonaEntregaId?: string | null
   macroZonaRetiroId?: string | null
   macroZonaEntregaId?: string | null
+  // MOTO-RANKING-REFERENCIA-UX-1 — código humano (IDENTIDAD-HUMANA-1, ej.
+  // "SH-1058"). useOrdenesActivasCandidatas ya trae el documento completo
+  // (spread de Firestore), así que este campo llega solo al declararlo acá;
+  // no se agrega ningún fetch ni listener nuevo. Puede faltar en órdenes
+  // históricas sin código — la presentación (mostrarCodigo) ya sabe caer al
+  // ID corto sin inventar nada.
+  codigo?: string
 }
 
 export interface NuevaOrdenRanking {
@@ -73,6 +81,32 @@ export interface NuevaOrdenRanking {
   zonaEntregaId?: string | null
   macroZonaRetiroId?: string | null
   macroZonaEntregaId?: string | null
+}
+
+// MOTO-RANKING-REFERENCIA-UX-1 — qué referencia geográfica concreta produjo
+// `proximoPuntoOperativo`/`distanciaProximoKm`. Es la MISMA decisión que ya
+// tomaba getProximoPuntoOperativo (ver getReferenciaGeografica más abajo,
+// de la que getProximoPuntoOperativo ahora es un envoltorio): esto no
+// re-decide nada, solo expone con qué criterio se llegó al punto ya usado
+// por el cálculo de cercanía/compatibilidad. Puramente aditivo — no cambia
+// ningún número del ranking.
+export type TipoReferenciaGeografica =
+  | 'proximo_punto_operativo'
+  | 'ultima_ubicacion_operativa'
+  | 'ubicacion_base'
+  | 'sin_referencia'
+
+export interface ReferenciaGeografica {
+  tipo: TipoReferenciaGeografica
+  coord: { lat: number; lng: number } | null
+  /** Solo con tipo 'proximo_punto_operativo': la orden activa que originó el punto. */
+  ordenId?: string
+  /** Código humano de esa orden (SH-####) si el documento lo tiene. */
+  codigoOrden?: string
+  /** Solo con tipo 'proximo_punto_operativo': si el punto es de retiro o de entrega. */
+  tipoPunto?: 'retiro' | 'entrega'
+  /** Solo con tipo 'ultima_ubicacion_operativa': el timestamp real del dato (nunca inventado). */
+  timestamp?: unknown
 }
 
 export interface ScoreResult {
@@ -92,6 +126,8 @@ export interface ScoreResult {
     mismaMacroZona: boolean | null
     mismaZona: boolean | null
     proximoPuntoOperativo: { lat: number; lng: number } | null
+    /** MOTO-RANKING-REFERENCIA-UX-1 — metadata explicativa, ver arriba. */
+    referenciaGeografica: ReferenciaGeografica
   }
 }
 
@@ -208,11 +244,34 @@ export function ubicacionOperativaFresca(
  *                  mantener el módulo determinista en tests; en producción se
  *                  omite y usa el reloj real.
  */
-export function getProximoPuntoOperativo(
+/**
+ * MOTO-RANKING-REFERENCIA-UX-1 — misma decisión que siempre tomó este
+ * módulo (ver comentarios originales, conservados abajo tal cual), pero
+ * devolviendo también CON QUÉ CRITERIO se llegó al punto: para que la UI
+ * pueda explicarlo sin volver a deducirlo por su cuenta. `getProximoPuntoOperativo`
+ * es ahora un envoltorio de esta función — mismo árbol de decisión, cero
+ * cambio de comportamiento numérico.
+ *
+ * - sin órdenes activas → ultimaUbicacionOperativa SOLO si ubicacionOperativaFresca
+ *   (hoy Managua + de la sesión de presencia vigente); si no, ubicacionBase
+ * - con órdenes activas → punto de la orden activa más avanzada en su ciclo de vida
+ *   (SIN CAMBIOS: la frescura no aplica aquí):
+ *     · asignada | en_camino_retiro  → recoleccion.coord (aún va a buscar)
+ *     · retirado | en_camino_entrega → entrega.coord (ya lo tiene, va a entregar)
+ * - fallback (orden activa sin coord utilizable) → ultimaUbicacionOperativa ?? ubicacionBase ?? null,
+ *   igual que siempre: hay carga real, la frescura no decide acá. Se etiqueta
+ *   según cuál de los dos campos fue el que realmente se usó (sin inventar
+ *   ninguna frescura que el dato no tiene).
+ *
+ * @param ahoraMs  Instante de referencia para la frescura. Inyectado para
+ *                  mantener el módulo determinista en tests; en producción se
+ *                  omite y usa el reloj real.
+ */
+export function getReferenciaGeografica(
   motorizado: MotorizadoConRanking,
   todasLasOrdenes: OrdenActivaRanking[],
   ahoraMs: number = Date.now()
-): { lat: number; lng: number } | null {
+): ReferenciaGeografica {
   // Con o sin trabajo: sus órdenes activas mandan, sea cual sea el `estado` crudo
   // (disponible, o el legacy ocupado).
   const misOrdenes = todasLasOrdenes.filter(
@@ -231,16 +290,51 @@ export function getProximoPuntoOperativo(
       ? (ordenRel.recoleccion?.coord ?? ordenRel.cotizacion?.origenCoord ?? null)
       : (ordenRel.entrega?.coord ?? ordenRel.cotizacion?.destinoCoord ?? null)
 
-    if (coord) return coord
+    if (coord) {
+      return {
+        tipo: 'proximo_punto_operativo',
+        coord,
+        ordenId: ordenRel.id,
+        codigoOrden: ordenRel.codigo,
+        tipoPunto: apuntaRetiro ? 'retiro' : 'entrega',
+      }
+    }
     // Hay carga real pero la orden no trae coord utilizable: mismo fallback de
     // siempre, sin pasar por frescura (no es el caso "sin órdenes activas").
-    return motorizado.ultimaUbicacionOperativa ?? motorizado.ubicacionBase ?? null
+    if (motorizado.ultimaUbicacionOperativa) {
+      return {
+        tipo: 'ultima_ubicacion_operativa',
+        coord: motorizado.ultimaUbicacionOperativa,
+        timestamp: motorizado.ultimaUbicacionOperativa.timestamp,
+      }
+    }
+    if (motorizado.ubicacionBase) {
+      return { tipo: 'ubicacion_base', coord: motorizado.ubicacionBase }
+    }
+    return { tipo: 'sin_referencia', coord: null }
   }
 
   // Sin órdenes activas: la última ubicación operativa solo cuenta si es de HOY
   // y de la sesión de presencia vigente; si no, ubicación base.
-  if (ubicacionOperativaFresca(motorizado, ahoraMs)) return motorizado.ultimaUbicacionOperativa!
-  return motorizado.ubicacionBase ?? null
+  if (ubicacionOperativaFresca(motorizado, ahoraMs)) {
+    return {
+      tipo: 'ultima_ubicacion_operativa',
+      coord: motorizado.ultimaUbicacionOperativa!,
+      timestamp: motorizado.ultimaUbicacionOperativa!.timestamp,
+    }
+  }
+  if (motorizado.ubicacionBase) {
+    return { tipo: 'ubicacion_base', coord: motorizado.ubicacionBase }
+  }
+  return { tipo: 'sin_referencia', coord: null }
+}
+
+export function getProximoPuntoOperativo(
+  motorizado: MotorizadoConRanking,
+  todasLasOrdenes: OrdenActivaRanking[],
+  ahoraMs: number = Date.now()
+): { lat: number; lng: number } | null {
+  return getReferenciaGeografica(motorizado, todasLasOrdenes, ahoraMs).coord
 }
 
 // ─── calcularScore ────────────────────────────────────────────────────────────
@@ -262,7 +356,13 @@ export function calcularScore(
   const scoreCarga = Math.max(0, 1 - cargaActual * 0.25)
 
   // ── 2. Cercanía al próximo punto operativo (30%) ────────────────────────────
-  const proximoPunto = getProximoPuntoOperativo(motorizado, todasLasOrdenes, ahoraMs)
+  // MOTO-RANKING-REFERENCIA-UX-1 — una sola llamada; `proximoPunto` es
+  // exactamente `referenciaGeografica.coord` (mismo valor que antes devolvía
+  // getProximoPuntoOperativo directo), así que ningún número de acá abajo
+  // cambia. La metadata (tipo/orden/timestamp) solo viaja en `detalles` para
+  // que la UI explique de dónde salió este mismo punto.
+  const referenciaGeografica = getReferenciaGeografica(motorizado, todasLasOrdenes, ahoraMs)
+  const proximoPunto = referenciaGeografica.coord
   const coordRetiroNueva =
     nuevaOrden.recoleccion?.coord ?? nuevaOrden.cotizacion?.origenCoord ?? null
 
@@ -371,12 +471,12 @@ export function calcularScore(
       : `${cargaActual} orden${cargaActual > 1 ? 'es' : ''} activa${cargaActual > 1 ? 's' : ''}`
   )
 
-  if (distanciaProximoKm !== null) {
-    const tipo = tieneCargaOperativa(ordenesDelMoto) ? 'estimado' : 'cercano'
-    partes.push(`Punto ${tipo} (${distanciaProximoKm.toFixed(1)} km)`)
-  } else {
-    partes.push('Sin ubicación de referencia')
-  }
+  // MOTO-RANKING-REFERENCIA-UX-1 — antes acá solo se decía "Punto estimado/
+  // cercano (X km)", sin explicar SI ese punto es la próxima orden activa,
+  // una última ubicación operativa (histórica) o la ubicación base. Mismo
+  // dato (referenciaGeografica ya calculada arriba, mismo distanciaProximoKm
+  // que usa el score), solo más explicable — no cambia ningún número.
+  partes.push(textoReferenciaGeografica(referenciaGeografica, distanciaProximoKm, ahoraMs))
 
   if (tieneCargaOperativa(ordenesDelMoto)) {
     partes.push(scoreCompatibilidad >= 0.5 ? 'Ruta compatible' : 'Ruta alejada')
@@ -414,6 +514,7 @@ export function calcularScore(
       mismaMacroZona,
       mismaZona,
       proximoPuntoOperativo: proximoPunto,
+      referenciaGeografica,
     },
   }
 }
