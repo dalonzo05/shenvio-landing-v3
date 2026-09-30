@@ -10,12 +10,9 @@ import {
   getDoc,
   query,
   where,
-  orderBy,
-  limit,
   getCountFromServer,
   getDocs,
   serverTimestamp,
-  Timestamp,
 } from 'firebase/firestore'
 import { onAuthStateChanged } from 'firebase/auth'
 import { httpsCallable } from 'firebase/functions'
@@ -30,6 +27,7 @@ import { X, Bike, Plus, TrendingUp, AlertCircle, MapPin, KeyRound } from 'lucide
 import { vistaAcceso, estadoSinConsultar, type EstadoAcceso } from '@/lib/acceso-motorizado-ui'
 import { esMotorizadoEnLinea } from '@/lib/motorizado-presencia'
 import { estiloTasaAceptacion, formatearTasaAceptacion } from '@/lib/tasa-aceptacion'
+import { leerMetricasAceptacion } from '@/lib/metricas-aceptacion-lectura'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,12 +44,15 @@ type Motorizado = {
   authUid?: string
   createdAt?: any
   tieneBolso?: boolean
-  // Métricas de desempeño (persistidas por motorizado-stats.ts)
+  // Métricas de desempeño — legacy (espejo, MOTO-STATS-ACEPTACION-TRAZA-1),
+  // más metricasAceptacion v2 (fuente canónica actual). Ver
+  // lib/metricas-aceptacion-lectura.ts: v2 gana cuando existe.
   totalAsignaciones?: number
   totalAceptadas?: number
   totalRechazos?: number
   tasaAceptacion?: number
   tiempoPromedioAceptacion?: number
+  metricasAceptacion?: unknown
   ultimaUbicacionOperativa?: { lat: number; lng: number; timestamp?: any }
   scoreDesempeño?: number
   ubicacionBase?: { lat: number; lng: number } | null
@@ -67,9 +68,8 @@ type Stats = {
   total: number
   hoy: number
   semana: number
-  tasaAceptacion: number | null  // 0-100, null si sin datos
+  tasaAceptacion: number | null  // 0-100, null si sin datos (lib/metricas-aceptacion-lectura.ts)
   rechazos: number
-  ultimosRechazos: { id: string; fecha?: Timestamp }[]
   depositosPendientes: number
 }
 
@@ -80,30 +80,29 @@ const estadoConfig = {
   inactivo:   { label: 'Fuera de línea', cls: 'bg-gray-100 text-gray-600 border-gray-200' },
 }
 
-async function fetchStats(motorizadoId: string): Promise<Stats> {
+// MOTO-STATS-ACEPTACION-CONSUMO-1 — aceptadas/rechazadas/tasa ya NO se
+// reconstruyen consultando solicitudes_envio: asignacion.estadoAceptacion
+// solo representa la asignación ACTUAL de una orden, y un rechazo la borra
+// en la misma transacción (asignacion: null) — la condición
+// `estadoAceptacion == 'rechazada'` nunca queda persistida en un documento
+// vivo, así que esa consulta siempre volvía 0 resultados. La métrica sale
+// del propio documento motorizado (ya en memoria, realtime), vía
+// leerMetricasAceptacion() — ver lib/metricas-aceptacion-lectura.ts.
+async function fetchStats(motorizadoId: string, motorizado: Motorizado): Promise<Stats> {
   const col = collection(db, 'solicitudes_envio')
   const hoyStart = new Date(); hoyStart.setHours(0, 0, 0, 0)
   const semanaStart = new Date(); semanaStart.setDate(semanaStart.getDate() - semanaStart.getDay() + (semanaStart.getDay() === 0 ? -6 : 1)); semanaStart.setHours(0, 0, 0, 0)
 
-  const [totalSnap, hoySnap, semanaSnap, aceptadasSnap, rechazadasSnap, depositosSnap] = await Promise.all([
+  const [totalSnap, hoySnap, semanaSnap, depositosSnap] = await Promise.all([
     getCountFromServer(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('estado', '==', 'entregado'))),
     getCountFromServer(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('estado', '==', 'entregado'), where('entregadoAt', '>=', hoyStart))),
     getCountFromServer(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('estado', '==', 'entregado'), where('entregadoAt', '>=', semanaStart))),
-    getCountFromServer(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('asignacion.estadoAceptacion', '==', 'aceptada'))),
-    getDocs(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('asignacion.estadoAceptacion', '==', 'rechazada'), orderBy('updatedAt', 'desc'), limit(3))),
     getDocs(query(col, where('asignacion.motorizadoId', '==', motorizadoId), where('estado', '==', 'entregado'))),
   ])
 
-  const aceptadas = aceptadasSnap.data().count
-  const rechazadas = rechazadasSnap.size
-  const tasaAceptacion = (aceptadas + rechazadas) > 0
-    ? Math.round((aceptadas / (aceptadas + rechazadas)) * 100)
-    : null
-
-  const ultimosRechazos = rechazadasSnap.docs.map((d) => ({
-    id: d.id,
-    fecha: (d.data() as any).updatedAt as Timestamp | undefined,
-  }))
+  const metricas = leerMetricasAceptacion(motorizado)
+  const tasaAceptacion = metricas.tasaPorcentaje
+  const rechazadas = metricas.totalRechazadas
 
   // Depósitos pendientes: órdenes sin confirmar que requieren depósito
   let depositosPendientes = 0
@@ -130,7 +129,6 @@ async function fetchStats(motorizadoId: string): Promise<Stats> {
     semana: semanaSnap.data().count,
     tasaAceptacion,
     rechazos: rechazadas,
-    ultimosRechazos,
     depositosPendientes,
   }
 }
@@ -495,7 +493,7 @@ function MotorizadosPageContent() {
     cargarAcceso(m)
     // Load stats
     setLoadingStats(true)
-    fetchStats(m.id).then((s) => { setStats(s); setLoadingStats(false) }).catch(() => setLoadingStats(false))
+    fetchStats(m.id, m).then((s) => { setStats(s); setLoadingStats(false) }).catch(() => setLoadingStats(false))
   }
 
   function openNew() {
@@ -820,26 +818,6 @@ function MotorizadosPageContent() {
                   <p className="text-[10px] font-semibold text-gray-500 mt-0.5">Dep. pend.</p>
                 </div>
               </div>
-
-              {/* Últimos rechazos */}
-              {!loadingStats && (stats?.ultimosRechazos?.length ?? 0) > 0 && (
-                <div className="bg-orange-50 border border-orange-200 rounded-xl p-3">
-                  <div className="flex items-center gap-1.5 mb-2">
-                    <AlertCircle className="h-3.5 w-3.5 text-orange-500" />
-                    <p className="text-xs font-bold text-orange-700">Últimos rechazos</p>
-                  </div>
-                  <ul className="space-y-1">
-                    {stats!.ultimosRechazos.map((r) => (
-                      <li key={r.id} className="flex items-center justify-between text-xs">
-                        <span className="font-mono text-gray-500">{r.id.slice(0, 8)}</span>
-                        <span className="text-gray-400">
-                          {r.fecha ? (typeof r.fecha.toDate === 'function' ? r.fecha.toDate() : new Date(r.fecha as any)).toLocaleDateString('es-NI', { day: '2-digit', month: 'short' }) : '—'}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
             </section>
           )}
 

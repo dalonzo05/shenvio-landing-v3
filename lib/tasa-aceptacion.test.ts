@@ -70,15 +70,20 @@ test('MSA11 · 0 real conserva el tratamiento de tasa baja; el umbral 70 no camb
   assert.equal(estiloTasaAceptacion(100), 'normal')
 })
 
-test('MSA12 · la fórmula de la ficha no se tocó y el JSX ya no concatena el porcentaje a mano', () => {
+test('MSA12 · el JSX ya no concatena el porcentaje a mano (contrato de presentación intacto)', () => {
   const src = PAGINA()
-  // Fórmula histórica de esta ficha: intacta.
-  assert.ok(src.includes('const tasaAceptacion = (aceptadas + rechazadas) > 0'))
-  assert.ok(src.includes('? Math.round((aceptadas / (aceptadas + rechazadas)) * 100)'))
-  assert.ok(src.includes('    : null'))
-  // Las mismas consultas de siempre.
-  assert.ok(src.includes("where('asignacion.estadoAceptacion', '==', 'aceptada')"))
-  assert.ok(src.includes("where('asignacion.estadoAceptacion', '==', 'rechazada')"))
+  // MOTO-STATS-ACEPTACION-CONSUMO-1 — la fórmula que calculaba esta ficha
+  // consultando solicitudes_envio quedó retirada (era la misma reconstrucción
+  // rota que MOTO-STATS-ACEPTACION-CONSUMO-1 diagnosticó): ahora sale de
+  // leerMetricasAceptacion() sobre el documento del motorizado. Lo que este
+  // test seguía protegiendo — el JSX de presentación, no la fórmula vieja —
+  // sigue intacto y se reafirma acá.
+  assert.ok(!src.includes('const tasaAceptacion = (aceptadas + rechazadas) > 0'), 'la fórmula vieja (reconstrucción rota) ya no debe existir')
+  assert.ok(!src.includes("where('asignacion.estadoAceptacion', '==', 'aceptada')"))
+  assert.ok(!src.includes("where('asignacion.estadoAceptacion', '==', 'rechazada')"))
+  assert.ok(src.includes("import { leerMetricasAceptacion } from '@/lib/metricas-aceptacion-lectura'"))
+  assert.ok(src.includes('const metricas = leerMetricasAceptacion(motorizado)'))
+  assert.ok(src.includes('const tasaAceptacion = metricas.tasaPorcentaje'))
   // Bug original: undefined !== null → `${undefined}%`.
   assert.ok(!/stats\?\.tasaAceptacion\}%/.test(src), 'no se interpola stats?.tasaAceptacion directo')
   assert.ok(!/stats\?\.tasaAceptacion !== null/.test(src), 'no se decide por !== null')

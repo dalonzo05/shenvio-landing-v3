@@ -14,6 +14,8 @@ import { db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { SolicitudDrawer } from '../_components/SolicitudDrawer'
 import { IrAFicha } from '../_components/IrAFicha'
+import { leerMetricasAceptacion, type LecturaMetricasAceptacion } from '@/lib/metricas-aceptacion-lectura'
+import { formatearTasaAceptacion } from '@/lib/tasa-aceptacion'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -167,6 +169,11 @@ function ReportesPageContent() {
   const [prevSolicitudes, setPrevSolicitudes] = useState<Solicitud[]>([])
   const [loading, setLoading] = useState(false)
   const [comercioNames, setComercioNames] = useState<Record<string, string>>({})
+  // MOTO-STATS-ACEPTACION-CONSUMO-1 — aceptación/rechazo históricos del rider
+  // ya no se derivan de solicitudes_envio (ver motorizadoRows más abajo): se
+  // leen del propio documento motorizado/{id}, en UNA lectura bulk (no por
+  // rider), vía leerMetricasAceptacion().
+  const [motorizadosMetricas, setMotorizadosMetricas] = useState<Record<string, LecturaMetricasAceptacion>>({})
 
   // ── Semanas state ────────────────────────────────────────────────────────
   const [semanasSolicitudes, setSemanasSolicitudes] = useState<SolicitudFull[]>([])
@@ -227,6 +234,15 @@ function ReportesPageContent() {
   useEffect(() => {
     fetchSemanasData()
   }, [fetchSemanasData])
+
+  // ── Métricas de aceptación de motorizados — UNA lectura bulk, no por rider ──
+  useEffect(() => {
+    getDocs(collection(db, 'motorizado')).then((snap) => {
+      const map: Record<string, LecturaMetricasAceptacion> = {}
+      snap.docs.forEach((d) => { map[d.id] = leerMetricasAceptacion(d.data() as any) })
+      setMotorizadosMetricas(map)
+    })
+  }, [])
 
   // ── Fetch missing comercio names ─────────────────────────────────────────
   useEffect(() => {
@@ -301,14 +317,21 @@ function ReportesPageContent() {
   }, [solicitudes, comercioNames])
 
   // ── Per-motorizado grouping ──────────────────────────────────────────────
+  // "Asignadas"/"Entregadas"/"Ingresos" son KPIs OPERATIVOS del período (de
+  // las solicitudes del rango elegido) — no se tocan. Rechazadas/Tasa acept.
+  // salen aparte, de motorizadosMetricas (histórico del rider, no del
+  // período): MOTO-STATS-ACEPTACION-CONSUMO-1, ver fixtures del bloque.
+  //
+  // asignacion.estadoAceptacion en la solicitud viva NUNCA vale 'rechazada'
+  // (un rechazo pone asignacion: null en la misma transacción — ver
+  // functions/src/asignacion-respuesta.ts) — por eso ya no se filtra por él.
   const motorizadoRows = useMemo(() => {
-    const map: Record<string, { nombre: string; asignadas: number; entregadas: number; rechazadas: number; ingresos: number }> = {}
+    const map: Record<string, { id: string; nombre: string; asignadas: number; entregadas: number; ingresos: number }> = {}
     for (const s of solicitudes) {
       if (!s.asignacion?.motorizadoId) continue
       const id = s.asignacion.motorizadoId
       const nombre = s.asignacion.motorizadoNombre || id.slice(0, 8)
-      if (!map[id]) map[id] = { nombre, asignadas: 0, entregadas: 0, rechazadas: 0, ingresos: 0 }
-      if (s.asignacion?.estadoAceptacion === 'rechazada') { map[id].rechazadas++; continue }
+      if (!map[id]) map[id] = { id, nombre, asignadas: 0, entregadas: 0, ingresos: 0 }
       map[id].asignadas++
       if (s.estado === 'entregado') {
         map[id].entregadas++
@@ -346,9 +369,13 @@ function ReportesPageContent() {
 
     const motHeaders = ['Motorizado', 'Asignadas', 'Entregadas', 'Rechazadas', 'Tasa acept. %', 'Ingresos C$']
     const motRows = motorizadoRows.map((r) => {
-      const tot = r.asignadas + r.rechazadas
-      const tasa = tot > 0 ? ((r.asignadas / tot) * 100).toFixed(0) : 0
-      return [r.nombre, r.asignadas, r.entregadas, r.rechazadas, tasa, r.ingresos].map(esc).join(',')
+      // Misma fuente que la tabla visible (motorizadosMetricas): nunca un
+      // cálculo aparte. Sin historial, la celda de tasa queda vacía — no se
+      // escribe 0 ni 100, que se leerían como una tasa real.
+      const m = motorizadosMetricas[r.id]
+      const rechazadas = m?.totalRechazadas ?? 0
+      const tasa = m?.tasaPorcentaje ?? ''
+      return [r.nombre, r.asignadas, r.entregadas, rechazadas, tasa, r.ingresos].map(esc).join(',')
     })
 
     const csv = [
@@ -541,10 +568,14 @@ function ReportesPageContent() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {motorizadoRows.map((r) => {
-                const tot = r.asignadas + r.rechazadas
-                const tasaAcept = tot > 0 ? Math.round((r.asignadas / tot) * 100) : null
+                // Misma fuente y mismo valor que el CSV (motorizadosMetricas) —
+                // ver exportCSV(). Rechazadas/tasa son históricas del rider,
+                // no del período de esta tabla.
+                const m = motorizadosMetricas[r.id]
+                const rechazadas = m?.totalRechazadas ?? 0
+                const tasaAcept = m?.tasaPorcentaje ?? null
                 return (
-                  <tr key={r.nombre} className="hover:bg-gray-50 transition-colors">
+                  <tr key={r.id} className="hover:bg-gray-50 transition-colors">
                     <td className={`${tdCls} font-semibold text-gray-900`}>
                       <div className="flex items-center gap-2">
                         <div className="w-7 h-7 rounded-full bg-[#004aad]/10 grid place-items-center flex-shrink-0">
@@ -557,9 +588,9 @@ function ReportesPageContent() {
                     </td>
                     <td className={`${tdCls} text-right`}>{r.asignadas}</td>
                     <td className={`${tdCls} text-right text-green-700 font-semibold`}>{r.entregadas}</td>
-                    <td className={`${tdCls} text-right ${r.rechazadas > 0 ? 'text-orange-600 font-semibold' : 'text-gray-400'}`}>{r.rechazadas}</td>
+                    <td className={`${tdCls} text-right ${rechazadas > 0 ? 'text-orange-600 font-semibold' : 'text-gray-400'}`}>{rechazadas}</td>
                     <td className={`${tdCls} text-right font-semibold ${tasaAcept !== null && tasaAcept < 70 ? 'text-red-500' : 'text-gray-700'}`}>
-                      {tasaAcept !== null ? `${tasaAcept}%` : '—'}
+                      {formatearTasaAceptacion(tasaAcept)}
                     </td>
                     <td className={`${tdCls} text-right font-semibold text-[#004aad]`}>
                       {r.ingresos > 0 ? `C$ ${r.ingresos.toLocaleString('es-NI', { minimumFractionDigits: 0 })}` : '—'}
