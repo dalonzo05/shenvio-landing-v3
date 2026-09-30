@@ -659,12 +659,20 @@ test('MAT-cliente · el panel del motorizado ya no acredita métricas: la única
   assert.ok(fuenteRaiz('app', 'panel', 'motorizado', 'page-DAPC.tsx').includes('registrarAceptacion('));
 });
 
-test('MAT-ranking · el ranking sigue leyendo los campos legacy y sus coeficientes no cambiaron', () => {
+// MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1 migró deliberadamente el
+// componente de aceptación del ranking (ya no `?? 1.0`, que favorecía a
+// riders sin historial; ahora vía resolverAceptacionRanking(), que sí lee
+// metricasAceptacion) — exactamente la frontera que este test fijaba como
+// "todavía no". Los coeficientes de peso y el resto de la fórmula (carga,
+// cercanía, compatibilidad, bolso) siguen intactos, y eso se reafirma acá;
+// la cobertura de la fórmula de aceptación nueva vive en
+// lib/motorizado-ranking.test.ts / lib/motorizado-ranking-aceptacion.test.ts.
+test('MAT-ranking · el ranking migró la aceptación a metricasAceptacion; el resto de la fórmula no cambió', () => {
   const r = fuenteRaiz('lib', 'motorizado-ranking.ts');
-  assert.ok(r.includes('const scoreAceptacion = motorizado.tasaAceptacion ?? 1.0'));
+  assert.ok(!r.includes('motorizado.tasaAceptacion ?? 1.0'));
   for (const c of ['PESO_CARGA      = 0.40', 'PESO_CERCANIA   = 0.30', 'PESO_COMPAT     = 0.20', 'PESO_ACEPTACION = 0.10']) assert.ok(r.includes(c), c);
   assert.ok(r.includes('Math.max(0, 1 - cargaActual * 0.25)'));
-  assert.ok(!r.includes('metricasAceptacion'), 'el ranking todavía no migra a la fuente canónica');
+  assert.ok(r.includes('metricasAceptacion'), 'ahora SÍ debe migrar a la fuente canónica (vía resolverAceptacionRanking)');
 });
 
 // ─── MOTO-STATS-ACEPTACION-TRAZA-1 · compatibilidad de rollout ────────────────
@@ -810,11 +818,15 @@ test('ROL8 · las Rules siguen impidiendo fabricar métricas: el motorizado ya n
   assert.ok(bloque.includes('!request.resource.data.diff(resource.data).affectedKeys().hasAny(camposDeMetricasServidor())'));
 });
 
-test('ROL9 · el ranking sigue sin diff: mismos coeficientes y sigue leyendo el legacy', () => {
+// Ver nota en MAT-ranking arriba: el ranking migró deliberadamente en
+// MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1. `protocolo` sigue sin tener
+// ninguna relación con el ranking (eso no cambió: es exclusivo del payload
+// de responderAsignacion).
+test('ROL9 · el ranking migró los coeficientes de aceptación a metricasAceptacion; protocolo sigue sin relación con el ranking', () => {
   const r = fuenteRaiz('lib', 'motorizado-ranking.ts');
-  assert.ok(r.includes('const scoreAceptacion = motorizado.tasaAceptacion ?? 1.0'));
+  assert.ok(!r.includes('motorizado.tasaAceptacion ?? 1.0'));
   for (const c of ['PESO_CARGA      = 0.40', 'PESO_CERCANIA   = 0.30', 'PESO_COMPAT     = 0.20', 'PESO_ACEPTACION = 0.10']) assert.ok(r.includes(c), c);
-  assert.ok(!r.includes('metricasAceptacion') && !r.includes('protocolo'));
+  assert.ok(r.includes('metricasAceptacion') && !r.includes('protocolo'));
 });
 
 test('ROL10 · el cliente anterior no entra en falso error: sus helpers nunca lanzan y se llaman sin await; y las Functions nuevas aceptan su payload', () => {

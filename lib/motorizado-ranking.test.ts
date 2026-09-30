@@ -155,12 +155,18 @@ test('RX11 · scoreTotal no cambia por agregar metadata UX (fixture determinista
     id: 'ordA', estado: 'asignada', asignacion: { motorizadoId: 'dickson' },
     recoleccion: { coord: { lat: 12.2, lng: -86.1 } }, codigo: 'SH-0011',
   }
-  const r = calcularScore(moto('dickson', { tasaAceptacion: 0.9 }), [orden], NUEVA, [orden], AHORA)
+  // MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1 — totalAsignaciones agregado:
+  // sin él, `tasaAceptacion` sola ya no es legacy válida (leerLegacy exige
+  // totalAsignaciones > 0, igual que exige el propio writer real —
+  // espejoLegacy() siempre escribe ambos juntos), y este fixture caería a
+  // 'sin_historial' (0.5) en vez de reflejar el 0.9 que pretende fijar.
+  const r = calcularScore(moto('dickson', { tasaAceptacion: 0.9, totalAsignaciones: 20, totalAceptadas: 18 }), [orden], NUEVA, [orden], AHORA)
   // Valor exacto de esta fixture determinista con el código actual (fijado
   // una vez calculado, no recalculado en el test): cargaActual=1 →
   // scoreCarga=0.75; haversine(12.2,-86.1 → 12.13,-86.25) ≈ 18.067 km →
   // scoreCercania≈0.0966; con carga, misma distancia/15 → negativo → clamp
-  // scoreCompatibilidad=0; scoreAceptacion=0.9. Si agregar
+  // scoreCompatibilidad=0; scoreAceptacion=0.9 (legacy válida, sin v2 →
+  // resolverAceptacionRanking() devuelve la tasa legacy tal cual). Si agregar
   // `referenciaGeografica` a `detalles` alguna vez mueve este número, esta
   // aserción debe fallar (cubre M6: "cambiar score/orden al agregar
   // metadata").
@@ -217,4 +223,109 @@ test('RX16 · Base de Datos no importa el ranking ni gana controles de asignaci�
   assert.ok(!src.includes('motorizado-referencia-ux'))
   assert.ok(!src.includes('rankearMotorizados'))
   assert.ok(!src.includes('Asignar sugerido'))
+})
+
+// ═══ MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1 ═══════════════════════════════
+// RA9-RA16, RP1 y la protección de source-contract del punto 35. Los casos
+// puros del helper (RA1-RA8, RT1-RT6) viven en
+// lib/motorizado-ranking-aceptacion.test.ts — acá solo lo que depende de la
+// INTEGRACIÓN con calcularScore()/rankearMotorizados().
+
+// ─── RA9/RA16 · sin query/listener nuevo, funciones puras ──────────────────
+
+test('RA9/RA16 · motorizado-ranking.ts y motorizado-ranking-aceptacion.ts no importan Firestore (0 query/listener nuevo)', () => {
+  for (const archivo of ['motorizado-ranking.ts', 'motorizado-ranking-aceptacion.ts']) {
+    const src = fuente('lib', archivo)
+    assert.ok(!/from ['"]firebase\/firestore['"]/.test(src), `${archivo} no debe importar firebase/firestore`)
+    assert.ok(!/onSnapshot|getDoc|getDocs|collection\(/.test(src), `${archivo} no debe leer Firestore directamente`)
+  }
+})
+
+// ─── RA10 · el hook realtime que alimenta el ranking no cambió ─────────────
+
+test('RA10 · useMotorizadosCandidatos.ts sigue con un único onSnapshot (0 diff funcional esperado)', () => {
+  const src = fuente('app', 'panel', 'gestor', '_hooks', 'useMotorizadosCandidatos.ts')
+  assert.equal((src.match(/onSnapshot\(/g) ?? []).length, 1)
+  // metricasAceptacion ya llega en el spread completo del documento — sin cambios acá.
+  assert.ok(src.includes('...(d.data() as Record<string, unknown>)'))
+})
+
+// ─── RA11 · redondeo/clamp preservados, sin techo superior nuevo ───────────
+
+test('RA11 · scoreTotal sigue usando Math.round + Math.max(0, ...), sin Math.min(100, ...) nuevo', () => {
+  const src = fuente('lib', 'motorizado-ranking.ts')
+  const bloque = src.slice(src.indexOf('// ── 7. Score total'), src.indexOf('// ── 8. Explicación'))
+  assert.ok(bloque.includes('Math.round('))
+  assert.ok(bloque.includes('Math.max(0,'))
+  assert.ok(!bloque.includes('Math.min('), 'sigue sin techo superior — deuda MOTO-RANKING-SCORE-TECHO-1 aparte')
+})
+
+// ─── RA12 · el orden solo cambia cuando la nueva aceptación lo justifica ───
+
+test('RA12 · dos candidatos idénticos salvo aceptación: el orden refleja exactamente esa diferencia', () => {
+  const m = (id: string, extra: Partial<MotorizadoConRanking>) => moto(id, extra)
+  const sinHistorial = m('nuevo', {})
+  const con100 = m('veterano', { totalAsignaciones: 10, totalAceptadas: 10, tasaAceptacion: 1 })
+  const r = rankearMotorizados([sinHistorial, con100], [], NUEVA, AHORA)
+  // veterano (100%) debe superar a nuevo (50% neutral) — única diferencia entre ambos.
+  assert.deepEqual(r.map((x) => x.id), ['veterano', 'nuevo'])
+  assert.ok(r[0].scoreResult.score > r[1].scoreResult.score)
+})
+
+// ─── RA13 · nuevo vs rider 50%: mismo componente de aceptación ─────────────
+
+test('RA13 · un rider sin historial y uno con 50% real comparten exactamente el mismo scoreAceptacion', () => {
+  const nuevo = calcularScore(moto('nuevo'), [], NUEVA, [], AHORA)
+  const con50 = calcularScore(moto('con50', { totalAsignaciones: 4, totalAceptadas: 2, tasaAceptacion: 0.5 }), [], NUEVA, [], AHORA)
+  assert.equal(nuevo.detalles.scoreAceptacion, 0.5)
+  assert.equal(con50.detalles.scoreAceptacion, 0.5)
+  assert.equal(nuevo.score, con50.score, 'con todo lo demás igual, el score total también debe coincidir')
+})
+
+// ─── RA14 · nuevo vs rider 100%: exactamente 5 puntos abajo ────────────────
+
+test('RA14 · un rider sin historial queda exactamente 5 puntos por debajo de uno con 100% real (resto idéntico)', () => {
+  const nuevo = calcularScore(moto('nuevo'), [], NUEVA, [], AHORA)
+  const con100 = calcularScore(moto('con100', { totalAsignaciones: 10, totalAceptadas: 10, tasaAceptacion: 1 }), [], NUEVA, [], AHORA)
+  assert.equal(nuevo.detalles.scoreAceptacion, 0.5)
+  assert.equal(con100.detalles.scoreAceptacion, 1)
+  assert.equal(con100.score - nuevo.score, 5, `diferencia esperada 5 pts (0.5 de rango * 10% de peso * 100), fue ${con100.score - nuevo.score}`)
+})
+
+// ─── RA15 · v2 parcial no reemplaza abruptamente legacy (integración) ──────
+
+test('RA15 · un rider con legacy lifetime alto y v2 parcial reciente no cae abruptamente a la tasa v2', () => {
+  const legacyAlto = calcularScore(
+    moto('mixto', {
+      totalAsignaciones: 100, totalAceptadas: 90, tasaAceptacion: 0.9,
+      metricasAceptacion: { version: 2, totalDecisiones: 2, totalAceptadas: 1, totalRechazadas: 1, tasaAceptacion: 0.5 },
+    }),
+    [], NUEVA, [], AHORA,
+  )
+  // Ni el 90% legacy puro ni el 50% v2 puro: algo entre medio (0.82 según RA6).
+  assert.ok(legacyAlto.detalles.scoreAceptacion > 0.5 && legacyAlto.detalles.scoreAceptacion < 0.9)
+  assert.ok(Math.abs(legacyAlto.detalles.scoreAceptacion - 0.82) < 1e-9)
+})
+
+// ─── RP1 · no doble penalización por rechazos ──────────────────────────────
+
+test('RP1 · misma tasa efectiva (80%), distinto totalRechazos absoluto (0 vs 25) → MISMO score total', () => {
+  const base = { totalAsignaciones: 10, totalAceptadas: 8, tasaAceptacion: 0.8 }
+  const conCeroRechazos = calcularScore(moto('a', { ...base }), [], NUEVA, [], AHORA)
+  const con25Rechazos = calcularScore(moto('b', { ...base, totalRechazos: 25 }), [], NUEVA, [], AHORA)
+  assert.equal(conCeroRechazos.score, con25Rechazos.score, 'totalRechazos ya no debe restar del scoreTotal')
+  // penalizacionRechazos se sigue calculando (transparencia/debug) pero no participa del score.
+  assert.equal(conCeroRechazos.detalles.penalizacionRechazos, 0)
+  assert.equal(con25Rechazos.detalles.penalizacionRechazos, 10)
+})
+
+// ─── Source-contract (punto 35) · el fallback viejo y la resta vieja no vuelven ─
+
+test('source-contract · motorizado-ranking.ts ya no contiene el fallback ?? 1.0 ni resta penalizacionRechazos del scoreTotal', () => {
+  const src = fuente('lib', 'motorizado-ranking.ts')
+  assert.ok(!src.includes('motorizado.tasaAceptacion ?? 1.0'), 'el fallback favorable viejo no debe volver')
+  assert.ok(src.includes("import { resolverAceptacionRanking } from './motorizado-ranking-aceptacion'"))
+  const bloqueScoreTotal = src.slice(src.indexOf('// ── 7. Score total'), src.indexOf('// ── 8. Explicación'))
+  const lineaFormula = bloqueScoreTotal.slice(bloqueScoreTotal.indexOf('Math.round('))
+  assert.ok(!lineaFormula.includes('penalizacionRechazos'), 'la expresión real del scoreTotal no debe restar penalizacionRechazos (el comentario arriba SÍ puede mencionarlo)')
 })

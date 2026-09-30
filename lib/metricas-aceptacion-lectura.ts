@@ -3,9 +3,12 @@
 // Gestor que hoy la reconstruían mal.
 //
 // SOLO LEE. No escribe Firestore, no decide qué mostrar en pantalla (eso
-// sigue siendo lib/tasa-aceptacion.ts) y no decide el score de ranking (eso
-// es MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1, deliberadamente aparte: el
-// ranking sigue leyendo motorizado.tasaAceptacion ?? 1.0 sin cambios).
+// sigue siendo lib/tasa-aceptacion.ts) y no decide el score de ranking — eso
+// vive en lib/motorizado-ranking-aceptacion.ts (MOTO-RANKING-ACEPTACION-
+// SIN-HISTORIAL-1), que reutiliza leerV2()/leerLegacy() de este archivo
+// (exportadas más abajo) para su propia política de transición gradual, sin
+// tocar el contrato público leerMetricasAceptacion() que consumen
+// Motorizados/Reportes.
 //
 // Dos fuentes conviven en el documento motorizado/{id}:
 //
@@ -58,7 +61,7 @@ const finitoNoNegativo = (v: unknown): v is number =>
 const tasaValida = (v: unknown): v is number =>
   typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1
 
-interface V2Valida {
+export interface V2Valida {
   totalDecisiones: number
   totalAceptadas: number
   totalRechazadas: number
@@ -72,8 +75,14 @@ interface V2Valida {
  * con 0 decisiones la proyección ni se escribe, así que un totalDecisiones
  * de 0 acá es una forma que no debería existir: se trata como no utilizable,
  * nunca como "0% real" fabricado desde una forma vacía.
+ *
+ * Exportada (MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1): el ranking necesita
+ * saber si v2 Y legacy son válidas SIMULTÁNEAMENTE (para la transición
+ * gradual), algo que leerMetricasAceptacion() no expone porque su contrato
+ * público es "una sola fuente ganadora". Misma validación, cero duplicación,
+ * cero cambio de comportamiento para quien ya usa leerMetricasAceptacion().
  */
-function leerV2(v: unknown): V2Valida | null {
+export function leerV2(v: unknown): V2Valida | null {
   if (typeof v !== 'object' || v === null) return null
   const o = v as Record<string, unknown>
   if (o.version !== 2) return null
@@ -89,7 +98,7 @@ function leerV2(v: unknown): V2Valida | null {
   }
 }
 
-interface LegacyValida {
+export interface LegacyValida {
   totalAsignaciones: number
   totalAceptadas: number
   totalRechazos: number
@@ -108,8 +117,11 @@ interface LegacyValida {
  * cubierto (solo aceptaciones → totalRechazos ausente). Ambos se leen como 0,
  * nunca como dato faltante que invalide todo el fallback — el 0% real de un
  * rider sin ninguna aceptación no puede colapsar a "sin historial".
+ *
+ * Exportada — ver comentario de leerV2() arriba: el ranking necesita leer
+ * legacy incluso cuando v2 también es válida (transición gradual).
  */
-function leerLegacy(entrada: EntradaMetricasAceptacion): LegacyValida | null {
+export function leerLegacy(entrada: EntradaMetricasAceptacion): LegacyValida | null {
   const { totalAsignaciones, totalAceptadas, totalRechazos, tasaAceptacion } = entrada
   if (!finitoNoNegativo(totalAsignaciones) || totalAsignaciones <= 0) return null
   const aceptadas = totalAceptadas === undefined ? 0 : finitoNoNegativo(totalAceptadas) ? totalAceptadas : null

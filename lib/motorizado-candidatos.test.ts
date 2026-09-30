@@ -188,13 +188,27 @@ test('arquitectura · el listado principal conserva su propio realtime de órden
 
 // ─── Rules / ranking / Functions: 0 cambio semántico (grep directo) ────────────
 
-test('0 cambio semántico · pesos, carga, cercanía, compatibilidad, bolso, rechazos, aceptación y ubicación fresca intactos', () => {
+test('0 cambio semántico · pesos, carga, cercanía, compatibilidad y bolso intactos', () => {
   const r = fuente('lib', 'motorizado-ranking.ts')
   for (const linea of [
     'PESO_CARGA      = 0.40', 'PESO_CERCANIA   = 0.30', 'PESO_COMPAT     = 0.20', 'PESO_ACEPTACION = 0.10',
     'Math.max(0, 1 - cargaActual * 0.25)', 'DIST_MAX_CERCANIA = 20', 'DIST_MAX_COMPAT = 15',
-    'PENALIZACION_BOLSO = 30', 'const scoreAceptacion = motorizado.tasaAceptacion ?? 1.0',
+    'PENALIZACION_BOLSO = 30',
   ]) assert.ok(r.includes(linea), linea)
   // La firma cambia solo por el parámetro opcional ahoraMs (ya existía desde MOTO-RANKING-UBICACION-FRESCA-1).
   assert.ok(r.includes('ahoraMs: number = Date.now()'))
+})
+
+// MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1 — el componente de aceptación
+// (antes `motorizado.tasaAceptacion ?? 1.0`, favorecía a riders sin
+// historial) y la resta de penalizacionRechazos en scoreTotal (duplicaba la
+// misma señal con sesgo de volumen) SÍ cambiaron, deliberadamente, en ese
+// bloque — cobertura completa en lib/motorizado-ranking.test.ts (RA1-RA16,
+// source-contract) y lib/motorizado-ranking-aceptacion.test.ts (RT1-RT6).
+// Esta suite ya no los pinnea como "intactos"; separado de la anterior para
+// que el nombre del test no mienta sobre lo que realmente protege.
+test('0 cambio semántico · aceptación migró a través del helper dedicado (no releyó legacy inline)', () => {
+  const r = fuente('lib', 'motorizado-ranking.ts')
+  assert.ok(!r.includes('motorizado.tasaAceptacion ?? 1.0'))
+  assert.ok(r.includes("from './motorizado-ranking-aceptacion'"))
 })

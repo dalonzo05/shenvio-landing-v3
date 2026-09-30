@@ -7,6 +7,7 @@ import { esMotorizadoEnLinea, tieneCargaOperativa } from './motorizado-presencia
 import { diaOperativoDe, hoyOperativo } from './dia-operativo'
 import { normalizarFecha } from './timeline-orden'
 import { textoReferenciaGeografica } from './motorizado-referencia-ux'
+import { resolverAceptacionRanking } from './motorizado-ranking-aceptacion'
 
 // ─── Tipos ───────────────────────────────────────────────────────────────────
 
@@ -30,10 +31,15 @@ export interface MotorizadoConRanking {
   // que tocan otros escritores (ubicación operativa, edición del gestor, el
   // espejo legacy de responderAsignacion).
   presenciaUpdatedAt?: unknown
-  tasaAceptacion?: number         // 0-1, asumir 1.0 si ausente
-  totalRechazos?: number          // acumulado histórico de rechazos
-  totalAsignaciones?: number      // acumulado histórico de asignaciones procesadas
-  totalAceptadas?: number         // acumulado histórico de aceptaciones
+  // MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1 — legacy (top-level) + v2
+  // (metricasAceptacion). Ninguno de los dos se lee directo acá: ver
+  // resolverAceptacionRanking() en motorizado-ranking-aceptacion.ts, que
+  // aplica la transición gradual v2/legacy y el neutral sin historial.
+  tasaAceptacion?: number         // 0-1 — legacy top-level
+  totalRechazos?: number          // acumulado histórico de rechazos — legacy top-level, YA NO penaliza el score (ver scoreTotal)
+  totalAsignaciones?: number      // acumulado histórico de asignaciones procesadas — legacy top-level
+  totalAceptadas?: number         // acumulado histórico de aceptaciones — legacy top-level
+  metricasAceptacion?: unknown    // proyección canónica v2 (version/totalDecisiones/totalAceptadas/totalRechazadas/tasaAceptacion)
   tiempoPromedioAceptacion?: number // segundos promedio desde asignación a aceptación
   tieneBolso?: boolean            // asumir false si ausente
   zonaBase?: string | null        // zona pequeña de base del motorizado
@@ -394,7 +400,12 @@ export function calcularScore(
   }
 
   // ── 4. Tasa de aceptación histórica (10%) ───────────────────────────────────
-  const scoreAceptacion = motorizado.tasaAceptacion ?? 1.0
+  // MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1 — ya no `?? 1.0` (favorecía a
+  // riders sin historial exactamente igual que a un veterano 100% real).
+  // resolverAceptacionRanking() interpola v2/legacy con transición gradual
+  // (0 decisiones v2 → 100% de peso a las 10) y usa 0.5 neutral sin ninguna
+  // fuente — ver lib/motorizado-ranking-aceptacion.ts.
+  const scoreAceptacion = resolverAceptacionRanking(motorizado).scoreAceptacion
 
   // ── 5. Score base 0-100 ─────────────────────────────────────────────────────
   const scoreFinal =
@@ -408,7 +419,12 @@ export function calcularScore(
   const requiereBolso = nuevaOrden.requiereBolso ?? false
   const penalizacionBolso = requiereBolso && !motorizado.tieneBolso ? PENALIZACION_BOLSO : 0
 
-  // -2 pts por cada 5 rechazos acumulados, máximo -10 pts
+  // MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1 — ya NO resta de scoreTotal (ver
+  // más abajo): duplicaba la misma señal que scoreAceptacion, con sesgo de
+  // volumen (un rechazo pesa igual en un rider de 100 decisiones que en uno
+  // de 1000). Se sigue calculando y exponiendo en `detalles` por
+  // transparencia/debug — totalRechazos sigue existiendo en Firestore, esto
+  // no lo toca, solo deja de restarlo del score.
   const penalizacionRechazos = motorizado.totalRechazos
     ? Math.min(PENALIZACION_RECHAZOS_MAX, Math.floor(motorizado.totalRechazos / 5) * PENALIZACION_RECHAZOS_POR_5)
     : 0
@@ -456,8 +472,10 @@ export function calcularScore(
   // Motorizados sin órdenes activas: no aplica bonificación zonal (son igualmente flexibles)
 
   // ── 7. Score total ──────────────────────────────────────────────────────────
+  // penalizacionRechazos NO participa (ver comentario donde se calcula):
+  // scoreAceptacion ya refleja los mismos rechazos, sin sesgo de volumen.
   const scoreTotal = Math.round(
-    Math.max(0, scoreFinal - penalizacionBolso - penalizacionRechazos + bonificacionZonaTotal)
+    Math.max(0, scoreFinal - penalizacionBolso + bonificacionZonaTotal)
   )
 
   // ── 8. Explicación textual ──────────────────────────────────────────────────

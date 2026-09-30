@@ -96,13 +96,20 @@ test('ACM17b · Motorizados no agrega queries nuevas por rider para aceptación 
   assert.equal(llamadas, 4, 'fetchStats debe hacer 4 lecturas Firestore (total/hoy/semana/depósitos), ya no 6')
 })
 
-// ── ACM18 · el ranking no cambia en este bloque ─────────────────────────────
+// ── ACM18 · el ranking no cambió EN ESTE BLOQUE (2H) ────────────────────────
+// MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1 (2I) migró deliberadamente el
+// componente de aceptación del ranking — exactamente la frontera que este
+// test fijaba como "todavía no". Ya no se puede afirmar `?? 1.0` (2I lo
+// retiró a propósito: favorecía a riders sin historial). La cobertura real
+// de la fórmula nueva vive en lib/motorizado-ranking.test.ts (RA1-RA16,
+// source-contract) y lib/motorizado-ranking-aceptacion.test.ts (RT1-RT6) —
+// acá solo se reafirma que el ranking usa el helper dedicado, no que haya
+// vuelto a leer campos legacy inline sin pasar por él.
 
-test('ACM18 · lib/motorizado-ranking.ts sigue sin tocar: mismo fallback legacy, mismo campo', () => {
+test('ACM18 · lib/motorizado-ranking.ts migró a través de resolverAceptacionRanking(), no releyendo legacy inline', () => {
   const src = fuente(...RANKING)
-  assert.ok(src.includes('const scoreAceptacion = motorizado.tasaAceptacion ?? 1.0'))
-  assert.ok(src.includes('motorizado.totalRechazos'))
-  assert.ok(!src.includes('metricasAceptacion'), 'el ranking no debe empezar a leer metricasAceptacion en este bloque — eso es MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1')
+  assert.ok(!src.includes('motorizado.tasaAceptacion ?? 1.0'), 'el fallback favorable de 2H-anterior no debe haber vuelto')
+  assert.ok(src.includes("from './motorizado-ranking-aceptacion'"), 'debe migrar a través del helper dedicado, no releer campos legacy sueltos')
 })
 
 // ── CT1-CT10 · corrección post-preintegración (fallback legacy + universos) ─
