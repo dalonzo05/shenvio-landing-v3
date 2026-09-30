@@ -12,6 +12,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { leerMetricasAceptacion } from './metricas-aceptacion-lectura'
+import { formatearTasaAceptacion } from './tasa-aceptacion'
 
 function fuente(...ruta: string[]): string {
   return readFileSync(join(__dirname, '..', ...ruta), 'utf8').replace(/\r/g, '')
@@ -101,4 +103,82 @@ test('ACM18 · lib/motorizado-ranking.ts sigue sin tocar: mismo fallback legacy,
   assert.ok(src.includes('const scoreAceptacion = motorizado.tasaAceptacion ?? 1.0'))
   assert.ok(src.includes('motorizado.totalRechazos'))
   assert.ok(!src.includes('metricasAceptacion'), 'el ranking no debe empezar a leer metricasAceptacion en este bloque — eso es MOTO-RANKING-ACEPTACION-SIN-HISTORIAL-1')
+})
+
+// ── CT1-CT10 · corrección post-preintegración (fallback legacy + universos) ─
+// Bug encontrado en la preintegración: un rider cuya única historia legacy
+// era un rechazo (totalAceptadas ausente) caía a 'sin_historial' en vez de
+// 'legacy' 0% — corregido en lib/metricas-aceptacion-lectura.ts (LG1-LG7).
+// Acá se fija el extremo a extremo: el mismo documento, pasado por el mismo
+// pipeline (leerMetricasAceptacion → formatearTasaAceptacion) que usan ambas
+// superficies, produce "0%" y no "—".
+
+const RIDER_SOLO_RECHAZOS = { totalAsignaciones: 1, totalRechazos: 1, tasaAceptacion: 0 }
+
+test('CT1 · Motorizados: rider legacy solo-rechazos muestra "0%", no "—"', () => {
+  const metricas = leerMetricasAceptacion(RIDER_SOLO_RECHAZOS)
+  assert.equal(formatearTasaAceptacion(metricas.tasaPorcentaje), '0%')
+})
+
+test('CT2 · Reportes: mismo pipeline, mismo resultado "0%"', () => {
+  // Reportes y Motorizados comparten el mismo helper y el mismo formateador
+  // (ACM14/ACM16b) — el pipeline es literalmente el mismo código, se prueba
+  // una vez acá para el caso específico que bugueaba.
+  const metricas = leerMetricasAceptacion(RIDER_SOLO_RECHAZOS)
+  assert.equal(metricas.fuente, 'legacy')
+  assert.equal(formatearTasaAceptacion(metricas.tasaPorcentaje), '0%')
+})
+
+function bloqueTheadPorMotorizado(src: string): string {
+  const inicio = src.indexOf('<th className={thCls}>Motorizado</th>')
+  assert.ok(inicio !== -1, 'no se encontró el <thead> de la tabla "Por motorizado"')
+  const fin = src.indexOf('</tr>', inicio)
+  return src.slice(inicio, fin)
+}
+
+test('CT3 · el <th> de la tabla (no solo el CSV) dice "Rechazos históricos"', () => {
+  const bloque = bloqueTheadPorMotorizado(fuente(...REPORTES))
+  assert.ok(bloque.includes('Rechazos históricos'))
+})
+
+test('CT4 · el <th> de la tabla (no solo el CSV) dice "Tasa aceptación histórica"', () => {
+  const bloque = bloqueTheadPorMotorizado(fuente(...REPORTES))
+  assert.ok(bloque.includes('Tasa aceptación histórica'))
+})
+
+test('CT5 · existe una nota visible (no oculta) que explica los dos universos temporales', () => {
+  const src = fuente(...REPORTES)
+  const inicio = src.indexOf('Por motorizado')
+  const bloque = src.slice(inicio, inicio + 1200)
+  assert.ok(bloque.includes('período seleccionado'))
+  assert.ok(bloque.includes('históricos'))
+  // Visible en el DOM, no un atributo title="" que solo aparece en hover.
+  assert.ok(!/title="[^"]*históric/i.test(bloque), 'la nota debe ser texto visible, no un tooltip oculto')
+})
+
+test('CT6 · el CSV explicita "histórico"/"histórica" en sus encabezados', () => {
+  const src = fuente(...REPORTES)
+  assert.ok(src.includes("'Rechazos históricos'"))
+  assert.ok(src.includes("'Tasa aceptación histórica %'"))
+})
+
+test('CT7 · Asignadas sigue siendo del período (agrupado desde `solicitudes`, sin tocar)', () => {
+  const src = fuente(...REPORTES)
+  assert.ok(src.includes('map[id].asignadas++'))
+  assert.ok(src.includes('for (const s of solicitudes)'))
+})
+
+test('CT8 · Entregadas sigue siendo del período', () => {
+  const src = fuente(...REPORTES)
+  assert.ok(src.includes("if (s.estado === 'entregado') {\n        map[id].entregadas++"))
+})
+
+test('CT9 · Ingresos sigue siendo del período', () => {
+  const src = fuente(...REPORTES)
+  assert.ok(src.includes('map[id].ingresos += s.confirmacion?.precioFinalCordobas || 0'))
+})
+
+test('CT10 · tabla y CSV siguen indexando motorizadosMetricas por el mismo r.id (ACM15, reafirmado tras el fix de headers)', () => {
+  const src = fuente(...REPORTES)
+  assert.equal(src.split('motorizadosMetricas[r.id]').length - 1, 2)
 })

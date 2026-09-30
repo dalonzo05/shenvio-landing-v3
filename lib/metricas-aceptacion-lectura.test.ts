@@ -80,6 +80,73 @@ test('ACM7 · version distinta de 2 no se trata como v2 autoritativa (cae a lega
   assert.equal(sinLegacy.fuente, 'sin_historial')
 })
 
+// ── LG1-LG7 · fallback legacy — totalAceptadas/totalRechazos ausentes ──────
+// espejoLegacy() (functions/src/asignacion-respuesta.ts) escribe cada
+// contador SOLO en su propia rama: aceptar() nunca incluye totalRechazos en
+// el patch, rechazar() nunca incluye totalAceptadas. Un rider cuya ÚNICA
+// historia sea un rechazo es legítimo y real, y antes de este fix caía
+// incorrectamente a 'sin_historial' en vez de 'legacy' con 0%.
+
+test('LG1 · 1 asignación, 1 rechazo, totalAceptadas ausente, tasa 0 → legacy 0%', () => {
+  const r = leerMetricasAceptacion({ totalAsignaciones: 1, totalRechazos: 1, tasaAceptacion: 0 })
+  assert.deepEqual(r, {
+    fuente: 'legacy',
+    totalDecisiones: 1,
+    totalAceptadas: 0,
+    totalRechazadas: 1,
+    tasaAceptacion: 0,
+    tasaPorcentaje: 0,
+  })
+})
+
+test('LG2 · 2 asignaciones, 2 rechazos, totalAceptadas ausente → 0%', () => {
+  const r = leerMetricasAceptacion({ totalAsignaciones: 2, totalRechazos: 2, tasaAceptacion: 0 })
+  assert.equal(r.fuente, 'legacy')
+  assert.equal(r.totalAceptadas, 0)
+  assert.equal(r.totalRechazadas, 2)
+  assert.equal(r.tasaPorcentaje, 0)
+})
+
+test('LG3 · 2 asignaciones, 2 aceptaciones, totalRechazos ausente → 100%', () => {
+  const r = leerMetricasAceptacion({ totalAsignaciones: 2, totalAceptadas: 2, tasaAceptacion: 1 })
+  assert.equal(r.fuente, 'legacy')
+  assert.equal(r.totalAceptadas, 2)
+  assert.equal(r.totalRechazadas, 0)
+  assert.equal(r.tasaPorcentaje, 100)
+})
+
+test('LG4 · aceptadas y rechazadas presentes → cálculo esperado (regresión de ACM6)', () => {
+  const r = leerMetricasAceptacion({ totalAsignaciones: 4, totalAceptadas: 3, totalRechazos: 1, tasaAceptacion: 0.75 })
+  assert.equal(r.fuente, 'legacy')
+  assert.equal(r.totalAceptadas, 3)
+  assert.equal(r.totalRechazadas, 1)
+  assert.equal(r.tasaPorcentaje, 75)
+})
+
+test('LG5 · v2 válida sigue ganando aunque exista legacy solo-rechazos', () => {
+  const entrada: EntradaMetricasAceptacion = {
+    metricasAceptacion: { version: 2, totalDecisiones: 3, totalAceptadas: 2, totalRechazadas: 1, tasaAceptacion: 2 / 3 },
+    totalAsignaciones: 1, totalRechazos: 1, tasaAceptacion: 0,
+  }
+  const r = leerMetricasAceptacion(entrada)
+  assert.equal(r.fuente, 'v2')
+  assert.equal(r.tasaPorcentaje, 67)
+})
+
+test('LG6 · sin campos de historial reales (ni v2 ni legacy) → sin_historial', () => {
+  assert.equal(leerMetricasAceptacion({}).fuente, 'sin_historial')
+  assert.equal(leerMetricasAceptacion({ totalAsignaciones: 0 }).fuente, 'sin_historial')
+  // tasa inválida no fabrica historial aunque totalAsignaciones sea válido.
+  assert.equal(leerMetricasAceptacion({ totalAsignaciones: 2, totalRechazos: 2, tasaAceptacion: NaN }).fuente, 'sin_historial')
+})
+
+test('LG7 · 0% legacy no se confunde con "—" (tasaPorcentaje/tasaAceptacion nunca null cuando fuente es legacy)', () => {
+  const r = leerMetricasAceptacion({ totalAsignaciones: 1, totalRechazos: 1, tasaAceptacion: 0 })
+  assert.notEqual(r.tasaPorcentaje, null)
+  assert.notEqual(r.tasaAceptacion, null)
+  assert.equal(r.tasaPorcentaje, 0)
+})
+
 // ── ACM8 · datos inválidos degradan seguro ──────────────────────────────────
 
 test('ACM8 · datos inválidos degradan a legacy o sin_historial, nunca rompen ni inventan', () => {

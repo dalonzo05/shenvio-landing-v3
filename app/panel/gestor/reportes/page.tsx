@@ -367,7 +367,7 @@ function ReportesPageContent() {
     const comHeaders = ['Comercio', 'Órdenes', 'Entregadas', 'Tasa %', 'Ingresos C$']
     const comRows = comercioRows.map((r) => [r.nombre, r.ordenes, r.entregadas, r.ordenes > 0 ? ((r.entregadas / r.ordenes) * 100).toFixed(0) : 0, r.ingresos].map(esc).join(','))
 
-    const motHeaders = ['Motorizado', 'Asignadas', 'Entregadas', 'Rechazadas', 'Tasa acept. %', 'Ingresos C$']
+    const motHeaders = ['Motorizado', 'Asignadas', 'Entregadas', 'Rechazos históricos', 'Tasa aceptación histórica %', 'Ingresos C$']
     const motRows = motorizadoRows.map((r) => {
       // Misma fuente que la tabla visible (motorizadosMetricas): nunca un
       // cálculo aparte. Sin historial, la celda de tasa queda vacía — no se
@@ -549,6 +549,14 @@ function ReportesPageContent() {
       <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
         <div className="px-4 py-3 border-b border-gray-100">
           <h2 className="text-sm font-black text-gray-800">Por motorizado</h2>
+          {/* MOTO-STATS-ACEPTACION-CONSUMO-1 — Asignadas/Entregadas/Ingresos son
+              del período elegido arriba; Rechazos/Tasa son la métrica canónica
+              del rider (lifetime), no se pueden acotar por fecha sin eventos
+              históricos (deuda futura: ACEPTACION-POR-PERIODO-EVENTOS-1 /
+              REGISTRO-VIAJES-EVENTOS-1). Se dice acá en vez de dejarlo implícito. */}
+          <p className="text-[11px] text-gray-400 mt-0.5">
+            Asignadas, entregadas e ingresos corresponden al período seleccionado. Rechazos y tasa de aceptación son históricos (todo el tiempo del rider).
+          </p>
         </div>
         {loading ? (
           <div className="py-10 text-center text-sm text-gray-400">Cargando…</div>
@@ -561,8 +569,8 @@ function ReportesPageContent() {
                 <th className={thCls}>Motorizado</th>
                 <th className={`${thCls} text-right`}>Asignadas</th>
                 <th className={`${thCls} text-right`}>Entregadas</th>
-                <th className={`${thCls} text-right`}>Rechazadas</th>
-                <th className={`${thCls} text-right`}>Tasa acept.</th>
+                <th className={`${thCls} text-right`}>Rechazos históricos</th>
+                <th className={`${thCls} text-right`}>Tasa aceptación histórica</th>
                 <th className={`${thCls} text-right`}>Ingresos</th>
               </tr>
             </thead>

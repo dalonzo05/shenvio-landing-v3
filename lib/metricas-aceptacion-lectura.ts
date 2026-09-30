@@ -19,8 +19,10 @@
 //     tasaAceptacion / totalAsignaciones / totalAceptadas / totalRechazos —
 //     top-level, mismos nombres de campo que antes calculaba el cliente
 //     (ver lib/motorizado-stats.ts). totalRechazos puede estar AUSENTE si el
-//     rider nunca rechazó (espejoLegacy solo lo escribe en la rama de
-//     rechazo) — ausente se lee como 0, no como dato inválido.
+//     rider nunca rechazó, y totalAceptadas puede estar AUSENTE si nunca
+//     aceptó (espejoLegacy solo escribe cada contador en su propia rama) —
+//     cualquiera de los dos ausente se lee como 0, nunca como dato inválido
+//     que invalide todo el fallback.
 //
 // v2 gana siempre que sea válida. Legacy es fallback de compatibilidad para
 // documentos que todavía no tienen v2. Sin ninguna de las dos, "sin
@@ -96,18 +98,26 @@ interface LegacyValida {
 
 /**
  * Legacy es utilizable solo si totalAsignaciones > 0 (hay historial real) y
- * los campos presentes son coherentes. totalRechazos ausente es válido —
- * espejoLegacy() solo lo escribe en la rama de rechazo — y se lee como 0,
- * nunca como dato faltante que invalide todo el fallback.
+ * los campos presentes son coherentes.
+ *
+ * espejoLegacy() escribe cada contador SOLO en su propia rama: aceptar()
+ * nunca incluye totalRechazos en el patch, rechazar() nunca incluye
+ * totalAceptadas — cada uno queda AUSENTE del documento hasta la primera vez
+ * que esa rama corre. Un rider cuya única historia sea rechazo(s) es
+ * perfectamente legítimo y tiene totalAceptadas ausente, simétrico al caso ya
+ * cubierto (solo aceptaciones → totalRechazos ausente). Ambos se leen como 0,
+ * nunca como dato faltante que invalide todo el fallback — el 0% real de un
+ * rider sin ninguna aceptación no puede colapsar a "sin historial".
  */
 function leerLegacy(entrada: EntradaMetricasAceptacion): LegacyValida | null {
   const { totalAsignaciones, totalAceptadas, totalRechazos, tasaAceptacion } = entrada
   if (!finitoNoNegativo(totalAsignaciones) || totalAsignaciones <= 0) return null
-  if (!finitoNoNegativo(totalAceptadas)) return null
+  const aceptadas = totalAceptadas === undefined ? 0 : finitoNoNegativo(totalAceptadas) ? totalAceptadas : null
+  if (aceptadas === null) return null
   const rechazos = totalRechazos === undefined ? 0 : finitoNoNegativo(totalRechazos) ? totalRechazos : null
   if (rechazos === null) return null
   if (!tasaValida(tasaAceptacion)) return null
-  return { totalAsignaciones, totalAceptadas, totalRechazos: rechazos, tasaAceptacion }
+  return { totalAsignaciones, totalAceptadas: aceptadas, totalRechazos: rechazos, tasaAceptacion }
 }
 
 /**
