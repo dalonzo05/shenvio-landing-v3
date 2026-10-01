@@ -5,7 +5,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { formatearAntiguedad, textoReferenciaGeografica } from './motorizado-referencia-ux'
+import { formatearAntiguedad, textoReferenciaGeografica, getReferenciaZonaTexto } from './motorizado-referencia-ux'
 import type { ReferenciaGeografica } from './motorizado-ranking'
 
 const AHORA = new Date('2026-09-28T18:00:00.000Z').getTime()
@@ -112,4 +112,50 @@ test('formatearAntiguedad · timestamp ilegible → null, sin inventar nada', ()
 
 test('formatearAntiguedad · timestamp en el futuro (reloj desincronizado) → null, no se inventa una antigüedad negativa', () => {
   assert.equal(formatearAntiguedad(new Date(AHORA + 60000), AHORA), null)
+})
+
+// ─── getReferenciaZonaTexto · MOTO-RANKING-REFERENCIA-ZONA-UX-1 ────────────
+
+test('RZ9 · zona + macrozona → "Zona · Macrozona"', () => {
+  const ref: ReferenciaGeografica = {
+    tipo: 'proximo_punto_operativo', coord: { lat: 12.2, lng: -86.1 },
+    zonaNombre: 'Mall Las Américas', macroZonaNombre: 'Managua Este',
+  }
+  assert.equal(getReferenciaZonaTexto(ref), 'Mall Las Américas · Managua Este')
+})
+
+test('RZ7 · solo zona → solo zona', () => {
+  const ref: ReferenciaGeografica = {
+    tipo: 'ubicacion_base', coord: { lat: 12.1, lng: -86.25 },
+    zonaNombre: 'Ciudad Jardín', macroZonaNombre: null,
+  }
+  assert.equal(getReferenciaZonaTexto(ref), 'Ciudad Jardín')
+})
+
+test('RZ8 · solo macrozona → solo macrozona', () => {
+  const ref: ReferenciaGeografica = {
+    tipo: 'ubicacion_base', coord: { lat: 12.1, lng: -86.25 },
+    zonaNombre: null, macroZonaNombre: 'Managua Centro',
+  }
+  assert.equal(getReferenciaZonaTexto(ref), 'Managua Centro')
+})
+
+test('RZ6 · sin zona ni macrozona → null, nunca "Zona desconocida" / "Sin zona"', () => {
+  const ref: ReferenciaGeografica = { tipo: 'ultima_ubicacion_operativa', coord: { lat: 12.15, lng: -86.2 } }
+  assert.equal(getReferenciaZonaTexto(ref), null)
+})
+
+test('RZ6b · cadenas vacías/espacios se tratan como ausentes, no se renderizan', () => {
+  const ref: ReferenciaGeografica = {
+    tipo: 'ubicacion_base', coord: { lat: 12.1, lng: -86.25 },
+    zonaNombre: '', macroZonaNombre: '   ',
+  }
+  assert.equal(getReferenciaZonaTexto(ref), null)
+})
+
+test('RZ5 · última ubicación operativa sin metadata autoritativa → null (no inventa tercera línea)', () => {
+  const ref: ReferenciaGeografica = {
+    tipo: 'ultima_ubicacion_operativa', coord: { lat: 12.15, lng: -86.2 }, timestamp: new Date(AHORA),
+  }
+  assert.equal(getReferenciaZonaTexto(ref), null)
 })

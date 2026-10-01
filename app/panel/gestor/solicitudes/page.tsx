@@ -20,7 +20,7 @@ import {
   type NuevaOrdenRanking,
   type MotorizadoRankeado,
 } from '@/lib/motorizado-ranking'
-import { textoReferenciaGeografica } from '@/lib/motorizado-referencia-ux'
+import { textoReferenciaGeografica, getReferenciaZonaTexto } from '@/lib/motorizado-referencia-ux'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import {
@@ -2538,6 +2538,7 @@ function GestorSolicitudesPageContent() {
                         m.scoreResult.detalles.distanciaProximoKm,
                         ahoraOperativo,
                       )
+                      const zonaTexto = getReferenciaZonaTexto(m.scoreResult.detalles.referenciaGeografica)
                       return (
                         <button
                           key={m.id}
@@ -2563,6 +2564,9 @@ function GestorSolicitudesPageContent() {
                               </span>
                             </span>
                             <span className="block text-xs text-gray-500 mt-0.5 leading-snug">{referencia}</span>
+                            {zonaTexto && (
+                              <span className="block text-xs text-gray-400 mt-0.5 leading-snug truncate">{zonaTexto}</span>
+                            )}
                           </span>
                         </button>
                       )

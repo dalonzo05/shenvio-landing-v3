@@ -44,6 +44,12 @@ export interface MotorizadoConRanking {
   tieneBolso?: boolean            // asumir false si ausente
   zonaBase?: string | null        // zona pequeña de base del motorizado
   macroZonaBase?: string | null   // macrozona de base del motorizado
+  // MOTO-RANKING-REFERENCIA-ZONA-UX-1 — campos reales del documento (ver
+  // app/panel/gestor/motorizados/page.tsx), distintos de zonaBase/macroZonaBase
+  // arriba: esos no coinciden con lo que el escritor realmente persiste. Estos
+  // sí son los que la ficha del Gestor lee/edita de verdad.
+  zonaBaseNombre?: string | null       // zona pequeña de base, nombre humano real
+  macroZonaBaseNombre?: string | null  // macrozona de base, nombre humano real
   zonaOperativaActual?: string | null       // zona pequeña operativa actual (para uso futuro)
   macroZonaOperativaActual?: string | null  // macrozona operativa actual (para uso futuro)
   scoreDesempeño?: number         // reservado para uso futuro
@@ -65,6 +71,15 @@ export interface OrdenActivaRanking {
   zonaEntregaId?: string | null
   macroZonaRetiroId?: string | null
   macroZonaEntregaId?: string | null
+  // MOTO-RANKING-REFERENCIA-ZONA-UX-1 — nombres humanos de la misma
+  // clasificación (clasificarOrdenCompleto los escribe junto a los *Id arriba,
+  // ver lib/zonas.ts y app/panel/gestor/ingresar-orden/page.tsx). Mismo patrón
+  // que `codigo` abajo: ya llegan en el spread completo de Firestore, declarar
+  // el campo no agrega ningún fetch.
+  zonaRetiroNombre?: string | null
+  zonaEntregaNombre?: string | null
+  macroZonaRetiroNombre?: string | null
+  macroZonaEntregaNombre?: string | null
   // MOTO-RANKING-REFERENCIA-UX-1 — código humano (IDENTIDAD-HUMANA-1, ej.
   // "SH-1058"). useOrdenesActivasCandidatas ya trae el documento completo
   // (spread de Firestore), así que este campo llega solo al declararlo acá;
@@ -113,6 +128,13 @@ export interface ReferenciaGeografica {
   tipoPunto?: 'retiro' | 'entrega'
   /** Solo con tipo 'ultima_ubicacion_operativa': el timestamp real del dato (nunca inventado). */
   timestamp?: unknown
+  // MOTO-RANKING-REFERENCIA-ZONA-UX-1 — metadata PRESENCIAL para que el
+  // Gestor vea el contexto territorial del punto ya elegido. Puramente
+  // presentacional: nunca participan de score, distancia, selección del
+  // punto ni orden — ver getReferenciaGeografica() para de dónde salen.
+  // Ausentes cuando no hay dato autoritativo (nunca inferidos/inventados).
+  zonaNombre?: string | null
+  macroZonaNombre?: string | null
 }
 
 export interface ScoreResult {
@@ -273,6 +295,13 @@ export function ubicacionOperativaFresca(
  *                  mantener el módulo determinista en tests; en producción se
  *                  omite y usa el reloj real.
  */
+// MOTO-RANKING-REFERENCIA-ZONA-UX-1 — "dato autoritativo" para zona/
+// macrozona significa: string real, no vacío tras trim. Nunca se infiere
+// desde otro campo; si no cumple esto, se trata como ausente.
+function nombreZonaValido(v: string | null | undefined): string | null {
+  return typeof v === 'string' && v.trim() !== '' ? v : null
+}
+
 export function getReferenciaGeografica(
   motorizado: MotorizadoConRanking,
   todasLasOrdenes: OrdenActivaRanking[],
@@ -303,6 +332,10 @@ export function getReferenciaGeografica(
         ordenId: ordenRel.id,
         codigoOrden: ordenRel.codigo,
         tipoPunto: apuntaRetiro ? 'retiro' : 'entrega',
+        // Del MISMO punto (retiro o entrega) que ya decidió `coord` arriba —
+        // nunca del extremo contrario de la orden.
+        zonaNombre: nombreZonaValido(apuntaRetiro ? ordenRel.zonaRetiroNombre : ordenRel.zonaEntregaNombre),
+        macroZonaNombre: nombreZonaValido(apuntaRetiro ? ordenRel.macroZonaRetiroNombre : ordenRel.macroZonaEntregaNombre),
       }
     }
     // Hay carga real pero la orden no trae coord utilizable: mismo fallback de
@@ -315,7 +348,12 @@ export function getReferenciaGeografica(
       }
     }
     if (motorizado.ubicacionBase) {
-      return { tipo: 'ubicacion_base', coord: motorizado.ubicacionBase }
+      return {
+        tipo: 'ubicacion_base',
+        coord: motorizado.ubicacionBase,
+        zonaNombre: nombreZonaValido(motorizado.zonaBaseNombre),
+        macroZonaNombre: nombreZonaValido(motorizado.macroZonaBaseNombre),
+      }
     }
     return { tipo: 'sin_referencia', coord: null }
   }
@@ -327,10 +365,19 @@ export function getReferenciaGeografica(
       tipo: 'ultima_ubicacion_operativa',
       coord: motorizado.ultimaUbicacionOperativa!,
       timestamp: motorizado.ultimaUbicacionOperativa!.timestamp,
+      // MOTO-RANKING-REFERENCIA-ZONA-UX-1 — sin dato autoritativo hoy (ver
+      // diagnóstico): zonaOperativaActual/macroZonaOperativaActual no tienen
+      // writer real. zonaNombre/macroZonaNombre quedan ausentes a propósito,
+      // nunca inventados ni resueltos por coordenadas.
     }
   }
   if (motorizado.ubicacionBase) {
-    return { tipo: 'ubicacion_base', coord: motorizado.ubicacionBase }
+    return {
+      tipo: 'ubicacion_base',
+      coord: motorizado.ubicacionBase,
+      zonaNombre: nombreZonaValido(motorizado.zonaBaseNombre),
+      macroZonaNombre: nombreZonaValido(motorizado.macroZonaBaseNombre),
+    }
   }
   return { tipo: 'sin_referencia', coord: null }
 }

@@ -329,3 +329,154 @@ test('source-contract · motorizado-ranking.ts ya no contiene el fallback ?? 1.0
   const lineaFormula = bloqueScoreTotal.slice(bloqueScoreTotal.indexOf('Math.round('))
   assert.ok(!lineaFormula.includes('penalizacionRechazos'), 'la expresión real del scoreTotal no debe restar penalizacionRechazos (el comentario arriba SÍ puede mencionarlo)')
 })
+
+// ═══ MOTO-RANKING-REFERENCIA-ZONA-UX-1 ══════════════════════════════════════
+// getReferenciaGeografica propaga zona/macrozona del MISMO punto que ya
+// decidía coord/tipoPunto/codigoOrden — puramente presentacional, 0 cambio
+// numérico. El helper de formato (getReferenciaZonaTexto) y sus fallbacks
+// viven en lib/motorizado-referencia-ux.test.ts (RZ5-RZ9); acá solo lo que
+// depende de la INTEGRACIÓN con getReferenciaGeografica/calcularScore.
+
+// ─── RZ1-RZ4 · próximo punto usa el zona/macrozona del punto REAL ──────────
+
+test('RZ1 · próximo punto apuntando a Retiro usa zonaRetiroNombre', () => {
+  const orden: OrdenActivaRanking = {
+    id: 'ordA', estado: 'asignada', asignacion: { motorizadoId: 'm1' },
+    recoleccion: { coord: { lat: 12.2, lng: -86.1 } },
+    zonaRetiroNombre: 'Mall Las Américas', zonaEntregaNombre: 'Linda Vista',
+  }
+  const ref = getReferenciaGeografica(moto('m1'), [orden], AHORA)
+  assert.equal(ref.tipoPunto, 'retiro')
+  assert.equal(ref.zonaNombre, 'Mall Las Américas')
+})
+
+test('RZ2 · próximo punto apuntando a Entrega usa zonaEntregaNombre', () => {
+  const orden: OrdenActivaRanking = {
+    id: 'ordB', estado: 'en_camino_entrega', asignacion: { motorizadoId: 'm2' },
+    entrega: { coord: { lat: 12.3, lng: -86.2 } },
+    zonaRetiroNombre: 'Mall Las Américas', zonaEntregaNombre: 'Linda Vista',
+  }
+  const ref = getReferenciaGeografica(moto('m2'), [orden], AHORA)
+  assert.equal(ref.tipoPunto, 'entrega')
+  assert.equal(ref.zonaNombre, 'Linda Vista')
+})
+
+test('RZ3 · Retiro usa macroZonaRetiroNombre', () => {
+  const orden: OrdenActivaRanking = {
+    id: 'ordA', estado: 'asignada', asignacion: { motorizadoId: 'm1' },
+    recoleccion: { coord: { lat: 12.2, lng: -86.1 } },
+    macroZonaRetiroNombre: 'Managua Este', macroZonaEntregaNombre: 'Managua Oeste',
+  }
+  const ref = getReferenciaGeografica(moto('m1'), [orden], AHORA)
+  assert.equal(ref.macroZonaNombre, 'Managua Este')
+})
+
+test('RZ4 · Entrega usa macroZonaEntregaNombre', () => {
+  const orden: OrdenActivaRanking = {
+    id: 'ordB', estado: 'retirado', asignacion: { motorizadoId: 'm2' },
+    entrega: { coord: { lat: 12.3, lng: -86.2 } },
+    macroZonaRetiroNombre: 'Managua Este', macroZonaEntregaNombre: 'Managua Oeste',
+  }
+  const ref = getReferenciaGeografica(moto('m2'), [orden], AHORA)
+  assert.equal(ref.macroZonaNombre, 'Managua Oeste')
+})
+
+// ─── Test cruzado Retiro/Entrega (punto 31 del bloque) ─────────────────────
+
+test('RZ-cruzado · Retiro NO usa zona/macrozona de Entrega, y viceversa', () => {
+  const fixture = {
+    zonaRetiroNombre: 'Zona Retiro X', zonaEntregaNombre: 'Zona Entrega Y',
+    macroZonaRetiroNombre: 'Macro Retiro X', macroZonaEntregaNombre: 'Macro Entrega Y',
+  }
+  const retiro: OrdenActivaRanking = {
+    id: 'ordR', estado: 'asignada', asignacion: { motorizadoId: 'm1' },
+    recoleccion: { coord: { lat: 12.2, lng: -86.1 } }, ...fixture,
+  }
+  const entrega: OrdenActivaRanking = {
+    id: 'ordE', estado: 'en_camino_entrega', asignacion: { motorizadoId: 'm2' },
+    entrega: { coord: { lat: 12.3, lng: -86.2 } }, ...fixture,
+  }
+  const refRetiro = getReferenciaGeografica(moto('m1'), [retiro], AHORA)
+  const refEntrega = getReferenciaGeografica(moto('m2'), [entrega], AHORA)
+  assert.equal(refRetiro.zonaNombre, 'Zona Retiro X')
+  assert.notEqual(refRetiro.zonaNombre, 'Zona Entrega Y')
+  assert.equal(refRetiro.macroZonaNombre, 'Macro Retiro X')
+  assert.equal(refEntrega.zonaNombre, 'Zona Entrega Y')
+  assert.notEqual(refEntrega.zonaNombre, 'Zona Retiro X')
+  assert.equal(refEntrega.macroZonaNombre, 'Macro Entrega Y')
+})
+
+// ─── RZ10-RZ11 · ubicación base usa los campos reales (no zonaBase/macroZonaBase) ─
+
+test('RZ10 · ubicación base usa zonaBaseNombre (campo real), no zonaBase', () => {
+  const m = moto('m1', {
+    ubicacionBase: { lat: 12.1, lng: -86.25 },
+    zonaBaseNombre: 'Ciudad Jardín',
+    zonaBase: 'OTRO VALOR QUE NO DEBE USARSE',
+  })
+  const ref = getReferenciaGeografica(m, [], AHORA)
+  assert.equal(ref.tipo, 'ubicacion_base')
+  assert.equal(ref.zonaNombre, 'Ciudad Jardín')
+})
+
+test('RZ11 · ubicación base usa macroZonaBaseNombre (campo real), no macroZonaBase', () => {
+  const m = moto('m1', {
+    ubicacionBase: { lat: 12.1, lng: -86.25 },
+    macroZonaBaseNombre: 'Managua Centro',
+    macroZonaBase: 'OTRO VALOR QUE NO DEBE USARSE',
+  })
+  const ref = getReferenciaGeografica(m, [], AHORA)
+  assert.equal(ref.macroZonaNombre, 'Managua Centro')
+})
+
+// ─── RZ5 · última ubicación operativa nunca inventa zona/macrozona ─────────
+
+test('RZ5 · última ubicación operativa fresca → zonaNombre/macroZonaNombre quedan ausentes', () => {
+  const HOY_12H = { toDate: () => new Date('2026-09-28T18:00:00.000Z') }
+  const m = moto('m1', {
+    ultimaUbicacionOperativa: { lat: 12.15, lng: -86.2, timestamp: HOY_12H },
+    presenciaUpdatedAt: { toDate: () => new Date('2026-09-28T06:00:00.000Z') },
+  })
+  const ref = getReferenciaGeografica(m, [], AHORA)
+  assert.equal(ref.tipo, 'ultima_ubicacion_operativa')
+  assert.equal(ref.zonaNombre, undefined)
+  assert.equal(ref.macroZonaNombre, undefined)
+})
+
+// ─── RZ12-RZ13 · invariantes de score y orden ───────────────────────────────
+
+test('RZ12 · scoreTotal es idéntico con y sin metadata geográfica nueva', () => {
+  const orden: OrdenActivaRanking = {
+    id: 'ordA', estado: 'asignada', asignacion: { motorizadoId: 'm1' },
+    recoleccion: { coord: { lat: 12.13, lng: -86.25 } },
+  }
+  const ordenConZona: OrdenActivaRanking = {
+    ...orden, zonaRetiroNombre: 'Zona X', macroZonaRetiroNombre: 'Macro Y',
+  }
+  const sinMeta = calcularScore(moto('m1'), [orden], NUEVA, [orden], AHORA)
+  const conMeta = calcularScore(moto('m1'), [ordenConZona], NUEVA, [ordenConZona], AHORA)
+  assert.equal(sinMeta.score, conMeta.score)
+})
+
+test('RZ13 · el orden de candidatos no cambia al agregar metadata de zona', () => {
+  const sinMeta = rankearMotorizados(
+    [moto('a', { tieneBolso: true }), moto('b', { tieneBolso: true })],
+    [], NUEVA,
+  ).map((m) => m.id)
+  const conMeta = rankearMotorizados(
+    [
+      moto('a', { tieneBolso: true, zonaBaseNombre: 'Zona A' }),
+      moto('b', { tieneBolso: true, zonaBaseNombre: 'Zona B' }),
+    ],
+    [], NUEVA,
+  ).map((m) => m.id)
+  assert.deepEqual(sinMeta, conMeta)
+})
+
+// ─── RZ14-RZ15 · source-contract: 0 queries, 0 listeners nuevos ────────────
+
+test('RZ14/RZ15 · getReferenciaGeografica sigue sin fetch/onSnapshot/getDoc/getZonasActivas/point-in-polygon', () => {
+  const src = fuente('lib', 'motorizado-ranking.ts')
+  const cuerpo = src.slice(src.indexOf('export function getReferenciaGeografica'), src.indexOf('export function getProximoPuntoOperativo'))
+  assert.ok(!/onSnapshot|getDoc|getDocs|fetch\(|getZonasActivas|clasificarPuntoEnZona|clasificarOrdenCompleto|pointInPolygon/.test(cuerpo))
+})

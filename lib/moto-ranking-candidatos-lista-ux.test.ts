@@ -72,7 +72,8 @@ test('LU4 · el score visible es m.scoreResult.score, no un valor derivado', () 
 
 test('LU5 · la referencia geográfica sale de textoReferenciaGeografica() sobre scoreResult.detalles', () => {
   const src = fuente(...LISTADO)
-  assert.ok(src.includes("import { textoReferenciaGeografica } from '@/lib/motorizado-referencia-ux'"))
+  // MOTO-RANKING-REFERENCIA-ZONA-UX-1 agregó getReferenciaZonaTexto al mismo import.
+  assert.ok(src.includes("import { textoReferenciaGeografica, getReferenciaZonaTexto } from '@/lib/motorizado-referencia-ux'"))
   const bloque = bloqueLista(src)
   assert.ok(bloque.includes('textoReferenciaGeografica('))
   assert.ok(bloque.includes('m.scoreResult.detalles.referenciaGeografica'))
@@ -198,4 +199,45 @@ test('precio · el campo "Precio final (C$)" no fue tocado por este bloque', () 
   const src = fuente(...LISTADO)
   assert.ok(src.includes('Precio final (C$)'))
   assert.ok(src.includes('step={10}'))
+})
+
+// ═══ MOTO-RANKING-REFERENCIA-ZONA-UX-1 ══════════════════════════════════════
+// Tercera línea opcional (zona/macrozona) en la misma fila de candidato.
+// Puramente presentacional sobre el mismo scoreResult.detalles.referenciaGeografica
+// ya usado por LU5 — no reconstruye metadata mirando solicitudes por su cuenta.
+
+test('RZ16 · getReferenciaZonaTexto se calcula sobre la misma referenciaGeografica que usa la línea 2', () => {
+  const src = fuente(...LISTADO)
+  assert.ok(src.includes("import { textoReferenciaGeografica, getReferenciaZonaTexto } from '@/lib/motorizado-referencia-ux'"))
+  const bloque = bloqueLista(src)
+  assert.ok(bloque.includes('const zonaTexto = getReferenciaZonaTexto(m.scoreResult.detalles.referenciaGeografica)'))
+})
+
+test('RZ17 · la tercera línea es condicional: solo se renderiza si zonaTexto no es null', () => {
+  const bloque = bloqueLista(fuente(...LISTADO))
+  assert.ok(bloque.includes('{zonaTexto && ('), 'debe ser condicional, nunca mostrar una línea vacía/"Sin zona"')
+  assert.ok(!bloque.includes('Sin zona'))
+  assert.ok(!bloque.includes('Zona desconocida'))
+})
+
+test('RZ18 · la tercera línea usa clases mínimas (texto discreto, truncate) sin overflow horizontal nuevo', () => {
+  const bloque = bloqueLista(fuente(...LISTADO))
+  const inicio = bloque.indexOf('{zonaTexto && (')
+  const fragmento = bloque.slice(inicio, inicio + 200)
+  assert.ok(fragmento.includes('text-xs'))
+  assert.ok(fragmento.includes('truncate'))
+  assert.ok(!fragmento.includes('whitespace-nowrap'), 'no debe forzar una sola línea que provoque scroll horizontal')
+})
+
+test('RZ-selección · motorizadoSel/setMotorizadoSel y la búsqueda nombre/teléfono no cambiaron al agregar la 3ª línea', () => {
+  const bloque = bloqueLista(fuente(...LISTADO))
+  assert.ok(bloque.includes('const seleccionado = motorizadoSel === m.id'))
+  assert.ok(bloque.includes('onClick={() => setMotorizadoSel(m.id)}'))
+})
+
+test('RZ-no-query · el bloque de la lista sigue sin abrir queries/listeners al agregar la 3ª línea', () => {
+  const bloque = bloqueLista(fuente(...LISTADO))
+  for (const prohibido of ['onSnapshot(', 'getDocs(', 'getDoc(', 'query(', 'fetch(', 'getZonasActivas(', 'clasificarPuntoEnZona(', 'clasificarOrdenCompleto(']) {
+    assert.ok(!bloque.includes(prohibido), `no debe llamar ${prohibido} en el bloque de la lista`)
+  }
 })

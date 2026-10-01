@@ -67,3 +67,20 @@ export function textoReferenciaGeografica(
       return 'Sin ubicación disponible · referencia neutral'
   }
 }
+
+/**
+ * MOTO-RANKING-REFERENCIA-ZONA-UX-1 — tercera línea opcional con el contexto
+ * territorial (zona/macrozona) del mismo punto que ya describe
+ * textoReferenciaGeografica(). Nunca inventa: si `referencia` no trae
+ * ninguno de los dos campos (dato no autoritativo, ej. última ubicación
+ * operativa hoy), retorna null y el llamador simplemente omite la línea —
+ * nunca "Zona desconocida" ni "Sin zona".
+ */
+export function getReferenciaZonaTexto(referencia: ReferenciaGeografica): string | null {
+  const zona = typeof referencia.zonaNombre === 'string' && referencia.zonaNombre.trim() !== '' ? referencia.zonaNombre : null
+  const macroZona = typeof referencia.macroZonaNombre === 'string' && referencia.macroZonaNombre.trim() !== '' ? referencia.macroZonaNombre : null
+  if (zona && macroZona) return `${zona} · ${macroZona}`
+  if (zona) return zona
+  if (macroZona) return macroZona
+  return null
+}
