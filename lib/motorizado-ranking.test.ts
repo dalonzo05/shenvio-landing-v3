@@ -458,19 +458,41 @@ test('RZ12 · scoreTotal es idéntico con y sin metadata geográfica nueva', () 
   assert.equal(sinMeta.score, conMeta.score)
 })
 
-test('RZ13 · el orden de candidatos no cambia al agregar metadata de zona', () => {
-  const sinMeta = rankearMotorizados(
-    [moto('a', { tieneBolso: true }), moto('b', { tieneBolso: true })],
-    [], NUEVA,
-  ).map((m) => m.id)
-  const conMeta = rankearMotorizados(
-    [
-      moto('a', { tieneBolso: true, zonaBaseNombre: 'Zona A' }),
-      moto('b', { tieneBolso: true, zonaBaseNombre: 'Zona B' }),
-    ],
-    [], NUEVA,
-  ).map((m) => m.id)
-  assert.deepEqual(sinMeta, conMeta)
+// MOTO-RANKING-REFERENCIA-ZONA-UX-1 — corrección post-preintegración: la
+// versión anterior de RZ13 usaba moto('a')/moto('b') SIN ubicacionBase, así
+// que getReferenciaGeografica() resolvía 'sin_referencia' para ambos y
+// zonaNombre quedaba undefined en los dos — un tie-break espurio por zona
+// nunca tenía valores distintos sobre los que actuar, así que el test
+// pasaba aunque el invariante NO estuviera protegido (mutation M7 de la
+// preintegración independiente no lo hizo caer). Este fixture fuerza
+// 'ubicacion_base' real en ambos candidatos, con zonaBaseNombre DISTINTOS
+// elegidos a propósito en orden alfabético INVERSO al de entrada (a: "Zona
+// Z", b: "Zona A") — si un tie-break ascendente por zona se agregara, b
+// pasaría antes que a, lo que el assert final detecta.
+test('RZ13 · el orden de candidatos no cambia al agregar metadata de zona (tie real con ubicacion_base)', () => {
+  const UBICACION = { lat: 12.1, lng: -86.25 }
+  const candidatoA = moto('a', { ubicacionBase: UBICACION, zonaBaseNombre: 'Zona Z' })
+  const candidatoB = moto('b', { ubicacionBase: UBICACION, zonaBaseNombre: 'Zona A' })
+
+  // Confirma que el escenario realmente activa las condiciones necesarias
+  // (sin esto, el test podría volver a ser un falso positivo silencioso).
+  const refA = getReferenciaGeografica(candidatoA, [], AHORA)
+  const refB = getReferenciaGeografica(candidatoB, [], AHORA)
+  assert.equal(refA.tipo, 'ubicacion_base')
+  assert.equal(refB.tipo, 'ubicacion_base')
+  assert.equal(refA.zonaNombre, 'Zona Z')
+  assert.equal(refB.zonaNombre, 'Zona A')
+  assert.notEqual(refA.zonaNombre, refB.zonaNombre)
+
+  const resultado = rankearMotorizados([candidatoA, candidatoB], [], NUEVA, AHORA)
+  assert.equal(
+    resultado[0].scoreResult.score, resultado[1].scoreResult.score,
+    'mismo ubicacionBase + sin carga/orden activa + sin historial de aceptación → scoreTotal debe empatar (si no, el test no prueba el invariante de orden)',
+  )
+  assert.deepEqual(
+    resultado.map((m) => m.id), ['a', 'b'],
+    'con score empatado, el orden de entrada debe preservarse — la metadata de zona NO debe convertirse en tie-break',
+  )
 })
 
 // ─── RZ14-RZ15 · source-contract: 0 queries, 0 listeners nuevos ────────────
