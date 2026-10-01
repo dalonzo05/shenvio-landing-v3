@@ -1311,6 +1311,17 @@ function GestorSolicitudesPageContent() {
         destinoCoord: solicitud.cotizacion?.destinoCoord ?? null,
       },
       requiereBolso: solicitud.requiereBolso ?? false,
+      // MOTO-RANKING-SUPERFICIES-CONSISTENCIA-1 — sin estos 4 campos,
+      // bonificacionZonaTotal en lib/motorizado-ranking.ts siempre caía en
+      // "datos insuficientes → sin efecto" para este modal, aunque
+      // SolicitudDrawer.tsx y solicitudes/[id]/page.tsx (misma solicitud,
+      // mismo rankearMotorizados()) sí los propagan y sí calculan el bonus
+      // territorial real. Mismo campo `solicitud`, ya disponible en este
+      // useMemo — 0 fetch nuevo.
+      zonaRetiroId: solicitud.zonaRetiroId ?? null,
+      zonaEntregaId: solicitud.zonaEntregaId ?? null,
+      macroZonaRetiroId: solicitud.macroZonaRetiroId ?? null,
+      macroZonaEntregaId: solicitud.macroZonaEntregaId ?? null,
     }
     return rankearMotorizados(motorizados, ordenesActivas, nuevaOrden, ahoraOperativo)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- diaOperativoRanking, ver rankingTabla

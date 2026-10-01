@@ -502,3 +502,111 @@ test('RZ14/RZ15 · getReferenciaGeografica sigue sin fetch/onSnapshot/getDoc/get
   const cuerpo = src.slice(src.indexOf('export function getReferenciaGeografica'), src.indexOf('export function getProximoPuntoOperativo'))
   assert.ok(!/onSnapshot|getDoc|getDocs|fetch\(|getZonasActivas|clasificarPuntoEnZona|clasificarOrdenCompleto|pointInPolygon/.test(cuerpo))
 })
+
+// ═══ MOTO-RANKING-SUPERFICIES-CONSISTENCIA-1 ════════════════════════════════
+// Bug confirmado en diagnóstico: app/panel/gestor/solicitudes/page.tsx
+// construía su `nuevaOrden` SIN zonaRetiroId/zonaEntregaId/macroZonaRetiroId/
+// macroZonaEntregaId, así que bonificacionZonaTotal (lib/motorizado-ranking.ts)
+// siempre caía en "datos insuficientes → sin efecto" para ese modal, mientras
+// SolicitudDrawer.tsx y solicitudes/[id]/page.tsx sí los propagaban y sí
+// aplicaban el bonus/penalización territorial real — mismo motor
+// (rankearMotorizados), inputs distintos. Estos tests prueban, contra el
+// motor REAL, que cuando ambas superficies alimentan los mismos 4 campos
+// (que es lo que el fix de page.tsx ahora hace), obtienen el MISMO
+// bonificacionZonaTotal — no son grep, son comportamiento real.
+
+test('SC6 · John-like: carga activa + misma macrozona y zona de entrega → bonificacionZonaTotal = +12 (8+4)', () => {
+  const ordenActiva: OrdenActivaRanking = {
+    id: 'ordJohn', estado: 'asignada', asignacion: { motorizadoId: 'john' },
+    recoleccion: { coord: { lat: 12.2, lng: -86.1 } },
+    macroZonaEntregaId: 'MZ-ESTE', zonaEntregaId: 'Z-MALL',
+  }
+  const nuevaOrdenJohn: NuevaOrdenRanking = {
+    ...NUEVA,
+    macroZonaEntregaId: 'MZ-ESTE', zonaEntregaId: 'Z-MALL',
+  }
+  const r = calcularScore(moto('john'), [ordenActiva], nuevaOrdenJohn, [ordenActiva], AHORA)
+  assert.equal(r.detalles.mismaMacroZona, true)
+  assert.equal(r.detalles.mismaZona, true)
+  assert.equal(r.detalles.bonificacionZonaTotal, 12)
+})
+
+test('SC7 · Dickson-like: carga activa + macrozona de entrega distinta → bonificacionZonaTotal = -5', () => {
+  const ordenActiva: OrdenActivaRanking = {
+    id: 'ordDickson', estado: 'en_camino_entrega', asignacion: { motorizadoId: 'dickson' },
+    entrega: { coord: { lat: 12.3, lng: -86.2 } },
+    macroZonaEntregaId: 'MZ-ESTE',
+  }
+  const nuevaOrdenDickson: NuevaOrdenRanking = {
+    ...NUEVA,
+    macroZonaEntregaId: 'MZ-OESTE',
+  }
+  const r = calcularScore(moto('dickson'), [ordenActiva], nuevaOrdenDickson, [ordenActiva], AHORA)
+  assert.equal(r.detalles.mismaMacroZona, false)
+  assert.equal(r.detalles.bonificacionZonaTotal, -5)
+})
+
+test('SC8 · rider sin órdenes activas → bonificacionZonaTotal = 0 aunque existan campos territoriales (Luigi/José no cambian)', () => {
+  const nuevaOrdenConZona: NuevaOrdenRanking = {
+    ...NUEVA,
+    macroZonaEntregaId: 'MZ-ESTE', zonaEntregaId: 'Z-MALL',
+  }
+  const r = calcularScore(moto('luigi'), [], nuevaOrdenConZona, [], AHORA)
+  assert.equal(r.detalles.mismaMacroZona, null)
+  assert.equal(r.detalles.bonificacionZonaTotal, 0)
+})
+
+// ─── Consistencia entre adaptadores (SC1-SC5): el modal compacto debe
+// propagar los mismos 4 campos territoriales que SolicitudDrawer.tsx y
+// solicitudes/[id]/page.tsx ya propagaban — fuente real, no una convención
+// nueva. Source-contract: es el único punto testeable para un useMemo
+// dentro de un componente .tsx sin runner de React/DOM en este repo (mismo
+// patrón que RX15/RX16/LU2/LU5).
+
+function bloqueRankingModal(src: string): string {
+  const inicio = src.indexOf('const rankingModal = useMemo<MotorizadoRankeado[]>(() => {')
+  assert.ok(inicio !== -1, 'no se encontró el useMemo de rankingModal en page.tsx')
+  const fin = src.indexOf('}, [openId, motorizados, ordenesActivas, allItems, diaOperativoRanking])')
+  assert.ok(fin !== -1, 'no se encontró el cierre del useMemo de rankingModal')
+  return src.slice(inicio, fin)
+}
+
+test('SC1-SC5 · page.tsx propaga los 4 campos territoriales al nuevaOrden de rankingModal (mismos nombres que SolicitudDrawer.tsx/[id]/page.tsx)', () => {
+  const srcModal = fuente('app', 'panel', 'gestor', 'solicitudes', 'page.tsx')
+  const bloque = bloqueRankingModal(srcModal)
+  assert.ok(bloque.includes('zonaRetiroId: solicitud.zonaRetiroId ?? null'), 'SC2: zonaRetiroId')
+  assert.ok(bloque.includes('zonaEntregaId: solicitud.zonaEntregaId ?? null'), 'SC3: zonaEntregaId')
+  assert.ok(bloque.includes('macroZonaRetiroId: solicitud.macroZonaRetiroId ?? null'), 'SC4: macroZonaRetiroId')
+  assert.ok(bloque.includes('macroZonaEntregaId: solicitud.macroZonaEntregaId ?? null'), 'SC5: macroZonaEntregaId')
+
+  const srcDrawer = fuente('app', 'panel', 'gestor', '_components', 'SolicitudDrawer.tsx')
+  for (const campo of ['zonaRetiroId', 'zonaEntregaId', 'macroZonaRetiroId', 'macroZonaEntregaId']) {
+    assert.ok(srcDrawer.includes(`${campo}: solicitud.${campo} ?? null`), `SolicitudDrawer.tsx debe seguir propagando ${campo} (SC1: misma convención)`)
+  }
+})
+
+test('SC9 · referencia geográfica/distancia de rankingModal sigue sin cambios (misma fuente textoReferenciaGeografica, mismo distanciaProximoKm)', () => {
+  const bloqueLista = fuente('app', 'panel', 'gestor', 'solicitudes', 'page.tsx')
+  assert.ok(bloqueLista.includes('textoReferenciaGeografica('))
+  assert.ok(bloqueLista.includes('m.scoreResult.detalles.referenciaGeografica'))
+  assert.ok(bloqueLista.includes('m.scoreResult.detalles.distanciaProximoKm'))
+})
+
+test('SC13 · motor único: rankingModal sigue llamando rankearMotorizados() de lib/motorizado-ranking, 0 fórmula local/duplicada', () => {
+  const srcModal = fuente('app', 'panel', 'gestor', 'solicitudes', 'page.tsx')
+  const bloque = bloqueRankingModal(srcModal)
+  assert.ok(bloque.includes('return rankearMotorizados(motorizados, ordenesActivas, nuevaOrden, ahoraOperativo)'))
+  assert.ok(!bloque.includes('scoreCarga'), 'no debe reimplementar componentes del score localmente')
+  assert.ok(!bloque.includes('scoreCercania'))
+  assert.ok(!bloque.includes('scoreCompatibilidad'))
+  assert.ok(!bloque.includes('BONUS_MISMA_MACROZONA') && !bloque.includes('PENALIZACION_DESVIO_MACROZONA'), 'el cálculo de bonus sigue viviendo exclusivamente en lib/motorizado-ranking.ts')
+})
+
+test('SC14 · fórmula/pesos/sort productivos de lib/motorizado-ranking.ts no cambiaron por este fix', () => {
+  const src = fuente('lib', 'motorizado-ranking.ts')
+  for (const c of ['PESO_CARGA      = 0.40', 'PESO_CERCANIA   = 0.30', 'PESO_COMPAT     = 0.20', 'PESO_ACEPTACION = 0.10', 'BONUS_MISMA_MACROZONA         = 8', 'BONUS_MISMA_ZONA              = 4', 'PENALIZACION_DESVIO_MACROZONA = 5']) {
+    assert.ok(src.includes(c), c)
+  }
+  assert.ok(src.includes('.sort((a, b) => b.scoreResult.score - a.scoreResult.score)'), 'sort productivo sin tie-break nuevo')
+  assert.ok(!src.includes('Math.min(100'), 'score >100 sigue fuera de scope (MOTO-RANKING-SCORE-TECHO-1)')
+})
