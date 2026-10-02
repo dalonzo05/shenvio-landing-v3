@@ -610,3 +610,155 @@ test('SC14 · fórmula/pesos/sort productivos de lib/motorizado-ranking.ts no ca
   assert.ok(src.includes('.sort((a, b) => b.scoreResult.score - a.scoreResult.score)'), 'sort productivo sin tie-break nuevo')
   assert.ok(!src.includes('Math.min(100'), 'score >100 sigue fuera de scope (MOTO-RANKING-SCORE-TECHO-1)')
 })
+
+// ─── SC10 · prueba conductual directa: mismos inputs → mismo orden entre
+// Superficie A (page.tsx) y Superficie B (SolicitudDrawer.tsx) ─────────────
+// Hallazgo de la preintegración independiente: SC1-SC5 (campos propagados
+// idénticos) + SC13 (mismo motor) + SC14 (misma fórmula) solo PRUEBAN por
+// inferencia transitiva que el orden coincide — nunca se ejecuta el
+// invariante real que falló en producción, y nunca leen qué campos
+// territoriales el código REAL incluye. Este test construye DOS objetos
+// NuevaOrdenRanking INDEPENDIENTES (nunca nuevaOrdenB = nuevaOrdenA) a
+// partir de la MISMA solicitud fixture, derivando cuáles de los 4 campos
+// territoriales incluir leyendo EN VIVO el bloque real de cada adaptador
+// (igual que SC1-SC5) — así que si alguno de los dos archivos reintrodujera
+// la omisión original, nuevaOrdenA/B dejarían de coincidir y el resultado
+// de rankearMotorizados() REAL (ejecutado dos veces) divergiría de verdad.
+
+function bloqueRankingCalculado(src: string): string {
+  const inicio = src.indexOf('const rankingCalculado = useMemo<MotorizadoRankeado[]>(() => {')
+  assert.ok(inicio !== -1, 'no se encontró el useMemo de rankingCalculado en SolicitudDrawer.tsx')
+  const fin = src.indexOf('}, [solicitud, motorizados, ordenesActivas, comercioRequiereBolso, diaOperativoParaRecomputo(ahoraOperativo)])')
+  assert.ok(fin !== -1, 'no se encontró el cierre del useMemo de rankingCalculado')
+  return src.slice(inicio, fin)
+}
+
+const CAMPOS_TERRITORIALES = ['zonaRetiroId', 'zonaEntregaId', 'macroZonaRetiroId', 'macroZonaEntregaId'] as const
+
+/** Qué campos territoriales declara realmente un bloque fuente, leyendo el literal exacto `campo: solicitud.campo ?? null`. */
+function camposDeclarados(bloque: string): Set<string> {
+  const declarados = new Set<string>()
+  for (const campo of CAMPOS_TERRITORIALES) {
+    if (bloque.includes(`${campo}: solicitud.${campo} ?? null`)) declarados.add(campo)
+  }
+  return declarados
+}
+
+test('SC10 · misma solicitud + mismos candidatos + mismo contexto territorial → Superficie A y Superficie B producen el MISMO orden', () => {
+  // Fixture de una sola "solicitud" (análoga al documento real que ambos
+  // adaptadores leen) — sensible: con 3 riders cuyos scores base quedan
+  // deliberadamente cerca, de modo que SOLO la bonificación/penalización
+  // territorial decide quién queda primero.
+  const solicitudFixture = {
+    recoleccion: { coord: { lat: 12.1, lng: -86.25 } },
+    entrega: { coord: { lat: 12.3, lng: -86.1 } },
+    cotizacion: { origenCoord: null as { lat: number; lng: number } | null, destinoCoord: null as { lat: number; lng: number } | null },
+    requiereBolso: false,
+    zonaRetiroId: 'Z-RETIRO-X',
+    zonaEntregaId: 'Z-ENTREGA-X',
+    macroZonaRetiroId: 'MZ-RETIRO-X',
+    macroZonaEntregaId: 'MZ-ENTREGA-X',
+  }
+
+  // Qué campos territoriales declara HOY, en vivo, cada adaptador real.
+  const srcModal = fuente('app', 'panel', 'gestor', 'solicitudes', 'page.tsx')
+  const srcDrawer = fuente('app', 'panel', 'gestor', '_components', 'SolicitudDrawer.tsx')
+  const declaradosA = camposDeclarados(bloqueRankingModal(srcModal))
+  const declaradosB = camposDeclarados(bloqueRankingCalculado(srcDrawer))
+
+  function construirNuevaOrden(declarados: Set<string>): NuevaOrdenRanking {
+    const base: NuevaOrdenRanking = {
+      recoleccion: { coord: solicitudFixture.recoleccion.coord ?? null },
+      entrega: { coord: solicitudFixture.entrega.coord ?? null },
+      cotizacion: {
+        origenCoord: solicitudFixture.cotizacion.origenCoord ?? null,
+        destinoCoord: solicitudFixture.cotizacion.destinoCoord ?? null,
+      },
+      requiereBolso: solicitudFixture.requiereBolso ?? false,
+    }
+    const conTerritorio = base as NuevaOrdenRanking & Record<typeof CAMPOS_TERRITORIALES[number], string | null>
+    for (const campo of CAMPOS_TERRITORIALES) {
+      if (declarados.has(campo)) conTerritorio[campo] = solicitudFixture[campo] ?? null
+    }
+    return base
+  }
+
+  // nuevaOrdenA — adaptación de app/panel/gestor/solicitudes/page.tsx, derivada
+  // de lo que ESE archivo realmente declara hoy (objeto independiente).
+  const nuevaOrdenA = construirNuevaOrden(declaradosA)
+  // nuevaOrdenB — adaptación de SolicitudDrawer.tsx, derivada de lo que ESE
+  // archivo realmente declara hoy. Objeto INDEPENDIENTE (no nuevaOrdenB =
+  // nuevaOrdenA): cada uno se construye desde su propia lectura de fuente.
+  const nuevaOrdenB = construirNuevaOrden(declaradosB)
+
+  // Precondición D: hoy, ambos adaptadores reales declaran los mismos 4
+  // campos territoriales (si esto no se cumple, el resto del test no
+  // prueba nada — sería comparar dos fixtures ya divergentes a propósito).
+  assert.deepEqual([...declaradosA].sort(), [...CAMPOS_TERRITORIALES].sort(), 'page.tsx debe declarar los 4 campos territoriales hoy')
+  assert.deepEqual([...declaradosB].sort(), [...CAMPOS_TERRITORIALES].sort(), 'SolicitudDrawer.tsx debe declarar los 4 campos territoriales hoy')
+  for (const campo of CAMPOS_TERRITORIALES) {
+    assert.equal(nuevaOrdenA[campo], nuevaOrdenB[campo], `nuevaOrdenA y nuevaOrdenB deben coincidir en ${campo}`)
+  }
+
+  // Órdenes activas: compatible y incompatible SÍ tienen carga (para que el
+  // bonus/penalización territorial aplique); neutral no tiene ninguna.
+  const ordenCompatible: OrdenActivaRanking = {
+    id: 'ord-compatible', estado: 'asignada', asignacion: { motorizadoId: 'compatible' },
+    recoleccion: { coord: solicitudFixture.recoleccion.coord },
+    macroZonaEntregaId: 'MZ-ENTREGA-X', zonaEntregaId: 'Z-ENTREGA-X', // misma macro+zona que la nueva orden
+  }
+  const ordenIncompatible: OrdenActivaRanking = {
+    id: 'ord-incompatible', estado: 'asignada', asignacion: { motorizadoId: 'incompatible' },
+    recoleccion: { coord: solicitudFixture.recoleccion.coord },
+    macroZonaEntregaId: 'MZ-OTRA-ZONA', // macrozona distinta → penalización
+  }
+  const ordenesActivas: OrdenActivaRanking[] = [ordenCompatible, ordenIncompatible]
+
+  const motorizados: MotorizadoConRanking[] = [
+    moto('compatible'),  // carga activa, territorialmente compatible → +12
+    moto('neutral'),     // sin carga activa → bonificacionZonaTotal = 0 por contrato
+    moto('incompatible'), // carga activa, macrozona distinta → -5
+  ]
+
+  function ejecutar(nuevaOrden: NuevaOrdenRanking) {
+    return rankearMotorizados(motorizados, ordenesActivas, nuevaOrden, AHORA)
+  }
+
+  const resultadoA = ejecutar(nuevaOrdenA)
+  const resultadoB = ejecutar(nuevaOrdenB)
+
+  const porId = (r: ReturnType<typeof ejecutar>) => new Map(r.map((m) => [m.id, m.scoreResult]))
+  const srA = porId(resultadoA)
+  const srB = porId(resultadoB)
+
+  // Precondiciones A/B: el fixture realmente activa bonus/penalización —
+  // confirmado en AMBAS superficies, no solo en A.
+  for (const [sr, etiqueta] of [[srA, 'A'], [srB, 'B']] as const) {
+    assert.equal(sr.get('compatible')!.detalles.bonificacionZonaTotal, 12, `precondición A (superficie ${etiqueta}): rider compatible debe recibir +12`)
+    assert.equal(sr.get('incompatible')!.detalles.bonificacionZonaTotal, -5, `precondición B (superficie ${etiqueta}): rider incompatible debe recibir -5`)
+    assert.equal(sr.get('neutral')!.detalles.bonificacionZonaTotal, 0, `rider sin carga (superficie ${etiqueta}): bonificacionZonaTotal = 0 por contrato`)
+  }
+
+  // Precondición C: el fixture es sensible — SIN el bonus territorial
+  // (simulando la omisión original del bug), el orden sería distinto.
+  const nuevaOrdenSinTerritorio: NuevaOrdenRanking = {
+    recoleccion: nuevaOrdenA.recoleccion,
+    entrega: nuevaOrdenA.entrega,
+    cotizacion: nuevaOrdenA.cotizacion,
+    requiereBolso: nuevaOrdenA.requiereBolso,
+    // 0 campos territoriales — exactamente la omisión original del bug.
+  }
+  const resultadoSinTerritorio = ejecutar(nuevaOrdenSinTerritorio).map((m) => m.id)
+  const ordenEsperado = resultadoA.map((m) => m.id)
+  assert.notDeepEqual(
+    resultadoSinTerritorio, ordenEsperado,
+    'precondición C: el fixture debe ser sensible — sin la metadata territorial el orden cambiaría (si no, esta prueba no demuestra nada)',
+  )
+
+  // La comparación real: A y B, con los MISMOS inputs territoriales,
+  // producen el MISMO orden.
+  const ordenA = resultadoA.map((m) => m.id)
+  const ordenB = resultadoB.map((m) => m.id)
+  assert.deepEqual(ordenA, ordenB, 'Superficie A y Superficie B deben producir el mismo orden con el mismo contexto territorial')
+  assert.deepEqual(ordenA, ['compatible', 'neutral', 'incompatible'], 'orden esperado: el bonus/penalización territorial decide el orden final')
+})
