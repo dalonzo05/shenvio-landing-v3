@@ -50,6 +50,9 @@ import {
 const UID_COMERCIO = 'uid_comercio'
 const UID_GESTOR = 'uid_gestor'
 const UID_MOTO = 'uid_moto'
+// MOTO-ASIGNACION-RULES-CIERRE-1 — un segundo motorizado REAL (activo, rol
+// motorizado) para probar ownership cruzado y reasignación sin mocks ambiguos.
+const UID_MOTO_B = 'uid_moto_b'
 const UID_DIGITADOR = 'uid_digitador'
 const UID_ADMIN = 'uid_admin'
 const COMERCIO_ID = 'com1'
@@ -71,6 +74,7 @@ before(async () => {
     await setDoc(doc(db, 'usuarios', UID_GESTOR), { activo: true, rol: 'gestor' })
     await setDoc(doc(db, 'usuarios', UID_ADMIN), { activo: true, rol: 'admin' })
     await setDoc(doc(db, 'usuarios', UID_MOTO), { activo: true, rol: 'motorizado' })
+    await setDoc(doc(db, 'usuarios', UID_MOTO_B), { activo: true, rol: 'motorizado' })
     await setDoc(doc(db, 'usuarios', UID_DIGITADOR), { activo: true, rol: 'digitador' })
     await setDoc(doc(db, 'comercios', COMERCIO_ID), { name: 'Mariposita', authUid: UID_COMERCIO })
   })
@@ -87,12 +91,13 @@ beforeEach(async () => {
     await setDoc(doc(db, 'usuarios', UID_GESTOR), { activo: true, rol: 'gestor' })
     await setDoc(doc(db, 'usuarios', UID_ADMIN), { activo: true, rol: 'admin' })
     await setDoc(doc(db, 'usuarios', UID_MOTO), { activo: true, rol: 'motorizado' })
+    await setDoc(doc(db, 'usuarios', UID_MOTO_B), { activo: true, rol: 'motorizado' })
     await setDoc(doc(db, 'usuarios', UID_DIGITADOR), { activo: true, rol: 'digitador' })
     await setDoc(doc(db, 'comercios', COMERCIO_ID), { name: 'Mariposita', authUid: UID_COMERCIO })
   })
 })
 
-const como = (uid: string) => env.authenticatedContext(uid).firestore()
+const como =(uid: string) => env.authenticatedContext(uid).firestore()
 
 /** Orden mínima que las reglas aceptan como creación legítima de comercio. */
 function ordenBase(extra: Record<string, unknown> = {}) {
@@ -2312,15 +2317,20 @@ test('VR14 · la autoridad server no pasa por Rules: Admin SDK persiste entregad
   })
 })
 
-test('VR15 · gestor y admin conservan lo administrativo y lo financiero', async () => {
-  // Confirmar y asignar: intactos.
+test('VR15 · gestor y admin conservan lo administrativo y lo financiero (la asignación ya no se fabrica desde cliente)', async () => {
+  // Confirmar: intacto.
   const id = await ordenConCodigo('vr15', { estado: 'pendiente_confirmacion' })
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
     estado: 'confirmada',
     confirmacion: { precioFinalCordobas: 90, confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp() },
     updatedAt: serverTimestamp(),
   }))
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
+  // MOTO-ASIGNACION-RULES-CIERRE-1 (R2): este caso pineaba como ALLOW que el
+  // gestor escribiera la asignación a mano. Ese contrato cambió a propósito:
+  // asignar es de la callable asignarMotorizado, no del cliente. La cobertura
+  // completa de R2 (gestor y admin; crear, cambiar, fabricar 'aceptada', y lo
+  // que sí se conserva) vive en las pruebas AR-R2 más abajo.
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
     estado: 'asignada',
     asignacion: { motorizadoAuthUid: UID_MOTO, motorizadoNombre: 'John Pork', estadoAceptacion: 'pendiente' },
     updatedAt: serverTimestamp(),
@@ -2691,4 +2701,294 @@ test('MAT12 · lo que el motorizado sí conserva sigue permitido: presencia y ub
   await assertSucceeds(updateDoc(propio, { ultimaUbicacionOperativa: { lat: 12.1, lng: -86.2 }, updatedAt: serverTimestamp() }))
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'motorizado', id), { telefono: '70000000' }))
   await assertSucceeds(updateDoc(doc(como(UID_ADMIN), 'motorizado', id), { nombre: 'Luigi A.' }))
+})
+
+// ─── AR · MOTO-ASIGNACION-RULES-CIERRE-1 ─────────────────────────────────────
+//
+// Frontera de autorización de la asignación y la respuesta del motorizado.
+// Aceptar y rechazar NO se escriben por Rules: son de la callable
+// responderAsignacion (Admin SDK). Lo que las Rules deben garantizar es que
+// ninguna ruta directa equivalente exista: ni para un motorizado ajeno, ni para
+// uno que todavía no aceptó, ni para fabricar la asignación desde un cliente de
+// gestor o admin (R2). Antes de este bloque ese contrato solo estaba probado
+// del lado de las Functions.
+
+/** Orden con los campos sensibles reales del schema, asignada a quien se indique. */
+async function ordenAsignadaA(
+  id: string,
+  estado: string,
+  asignacion: Record<string, unknown> | null,
+  extra: Record<string, unknown> = {},
+) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', id), {
+      ...ordenBase({
+        estado,
+        asignacion,
+        confirmacion: { precioFinalCordobas: 90, confirmadoPorUid: UID_GESTOR },
+        cotizacion: { origenCoord: { lat: 12.1, lng: -86.2 }, destinoCoord: { lat: 12.2, lng: -86.3 } },
+        recoleccion: { coord: { lat: 12.1, lng: -86.2 }, direccion: 'Retiro X' },
+        entrega: { coord: { lat: 12.2, lng: -86.3 }, direccion: 'Entrega Y' },
+        pagoDelivery: { tipo: 'contado', quienPaga: 'recoleccion', montoSugerido: 90 },
+        recargoZona: { aplica: false, monto: 0 },
+        ...extra,
+      }),
+      codigo: 'SH-1001',
+      secuencia: 1001,
+    })
+  })
+  return id
+}
+
+const asignacionDe = (uid: string, estadoAceptacion?: unknown) => ({
+  motorizadoId: `m_${uid}`,
+  motorizadoAuthUid: uid,
+  motorizadoNombre: 'Rider',
+  ...(estadoAceptacion === undefined ? {} : { estadoAceptacion }),
+})
+
+/** La señal legítima del motorizado: salir a retirar. */
+const senalEnCaminoRetiro = () => ({
+  estado: 'en_camino_retiro',
+  updatedAt: serverTimestamp(),
+  'historial.en_camino_retiroAt': serverTimestamp(),
+})
+const senalEnCaminoEntrega = () => ({
+  estado: 'en_camino_entrega',
+  updatedAt: serverTimestamp(),
+  'historial.en_camino_entregaAt': serverTimestamp(),
+})
+const refOrden = (uid: string, id: string) => doc(como(uid), 'solicitudes_envio', id)
+
+// ── Ownership cruzado ────────────────────────────────────────────────────────
+
+test('AR1 · el motorizado A no puede modificar ni leer una solicitud asignada al motorizado B ⇒ DENY', async () => {
+  const id = await ordenAsignadaA('ar1', 'asignada', asignacionDe(UID_MOTO_B, 'aceptada'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { evidencias: { retiro: 'https://example.test/a.jpg' }, updatedAt: serverTimestamp() }))
+  await assertFails(getDoc(refOrden(UID_MOTO, id)))
+  // Control: el dueño real sí puede, así que lo de arriba se negó por la propiedad y no por otra cosa.
+  await assertSucceeds(updateDoc(refOrden(UID_MOTO_B, id), senalEnCaminoRetiro()))
+})
+
+test('AR2 · el motorizado A no ejecuta transiciones operativas ni la ruta directa equivalente a rechazar sobre la orden de B ⇒ DENY', async () => {
+  const enViaje = await ordenAsignadaA('ar2a', 'retirado', asignacionDe(UID_MOTO_B, 'aceptada'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, enViaje), senalEnCaminoEntrega()))
+  const asignada = await ordenAsignadaA('ar2b', 'asignada', asignacionDe(UID_MOTO_B, 'pendiente'))
+  // Rechazar es de la callable; escribirlo directo (estado + asignacion null) no es una vía.
+  await assertFails(updateDoc(refOrden(UID_MOTO, asignada), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() }))
+  // Control: B sí avanza en lo suyo.
+  await assertSucceeds(updateDoc(refOrden(UID_MOTO_B, enViaje), senalEnCaminoEntrega()))
+})
+
+// ── R1 · no se sale a retirar sin haber aceptado ─────────────────────────────
+
+test('AR3a · asignada + aceptada → en_camino_retiro ⇒ ALLOW', async () => {
+  const id = await ordenAsignadaA('ar3a', 'asignada', asignacionDe(UID_MOTO, 'aceptada'))
+  await assertSucceeds(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+})
+
+test('AR3b · asignada + pendiente → en_camino_retiro ⇒ DENY (no se salta la aceptación)', async () => {
+  const id = await ordenAsignadaA('ar3b', 'asignada', asignacionDe(UID_MOTO, 'pendiente'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+})
+
+test('AR3c · asignada + rechazada → en_camino_retiro ⇒ DENY', async () => {
+  const id = await ordenAsignadaA('ar3c', 'asignada', asignacionDe(UID_MOTO, 'rechazada'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+})
+
+test('AR3d · asignada + expirada → en_camino_retiro ⇒ DENY', async () => {
+  const id = await ordenAsignadaA('ar3d', 'asignada', asignacionDe(UID_MOTO, 'expirada'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+})
+
+test('AR3e · asignación LEGACY sin estadoAceptacion → en_camino_retiro ⇒ ALLOW (no se rompen las órdenes históricas)', async () => {
+  const id = await ordenAsignadaA('ar3e', 'asignada', asignacionDe(UID_MOTO))
+  await assertSucceeds(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+})
+
+test('AR3f · estadoAceptacion presente pero null o de un valor desconocido ⇒ DENY (el default solo cubre la AUSENCIA del campo)', async () => {
+  const nula = await ordenAsignadaA('ar3f1', 'asignada', asignacionDe(UID_MOTO, null))
+  await assertFails(updateDoc(refOrden(UID_MOTO, nula), senalEnCaminoRetiro()))
+  const rara = await ordenAsignadaA('ar3f2', 'asignada', asignacionDe(UID_MOTO, 'quizas'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, rara), senalEnCaminoRetiro()))
+})
+
+test('AR-estados · la señal en_camino_retiro no sale de cancelada, confirmada, retirado ni entregado ⇒ DENY', async () => {
+  for (const estado of ['cancelada', 'confirmada', 'retirado', 'entregado']) {
+    const id = await ordenAsignadaA(`ares_${estado}`, estado, asignacionDe(UID_MOTO, 'aceptada'))
+    await assertFails(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+  }
+})
+
+// ── Campos sensibles: el motorizado no los toca ──────────────────────────────
+
+test('AR9 · el motorizado no puede cambiar el precio, ni solo ni junto a su señal ⇒ DENY', async () => {
+  const id = await ordenAsignadaA('ar9', 'asignada', asignacionDe(UID_MOTO, 'aceptada'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { 'confirmacion.precioFinalCordobas': 1, updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { confirmacion: { precioFinalCordobas: 1, confirmadoPorUid: UID_MOTO }, updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { 'pagoDelivery.montoSugerido': 1, updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { recargoZona: { aplica: true, monto: 500 }, updatedAt: serverTimestamp() }))
+  // Control: la señal limpia sobre el mismo documento sí pasa.
+  await assertSucceeds(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+})
+
+test('AR10 · tampoco por la ruta directa equivalente a rechazar/operar: precio junto a estado y asignacion null ⇒ DENY', async () => {
+  const id = await ordenAsignadaA('ar10', 'asignada', asignacionDe(UID_MOTO, 'pendiente'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), {
+    estado: 'confirmada',
+    asignacion: null,
+    'confirmacion.precioFinalCordobas': 1,
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('AR11 · el motorizado no puede cambiar direcciones, coords ni la cotización ⇒ DENY', async () => {
+  const id = await ordenAsignadaA('ar11', 'asignada', asignacionDe(UID_MOTO, 'aceptada'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { 'recoleccion.coord': { lat: 0, lng: 0 }, updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { entrega: { coord: { lat: 0, lng: 0 }, direccion: 'Otra' }, updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { cotizacion: { origenCoord: null, destinoCoord: null }, updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+})
+
+test('AR12 · el motorizado no puede cambiar el cliente ni el comercio de la orden ⇒ DENY', async () => {
+  const id = await ordenAsignadaA('ar12', 'asignada', asignacionDe(UID_MOTO, 'aceptada'))
+  for (const campo of [
+    { userId: 'otro' },
+    { comercioId: 'otro' },
+    { comercioUid: 'otro' },
+    { ownerSnapshot: { uid: 'otro', companyName: 'Otro' } },
+  ]) {
+    await assertFails(updateDoc(refOrden(UID_MOTO, id), { ...campo, updatedAt: serverTimestamp() }))
+  }
+  await assertSucceeds(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+})
+
+test('AR13 · el motorizado no puede autoasignarse ni fabricar su propia aceptación ⇒ DENY', async () => {
+  // Orden sin asignar: no es "su" orden, así que no hay rama que lo deje escribirla.
+  const libre = await ordenAsignadaA('ar13a', 'confirmada', null)
+  await assertFails(updateDoc(refOrden(UID_MOTO, libre), { estado: 'asignada', asignacion: asignacionDe(UID_MOTO, 'aceptada'), updatedAt: serverTimestamp() }))
+  // Orden asignada a otro: tampoco puede tomarla.
+  const ajena = await ordenAsignadaA('ar13b', 'asignada', asignacionDe(UID_MOTO_B, 'pendiente'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, ajena), { asignacion: asignacionDe(UID_MOTO, 'aceptada'), updatedAt: serverTimestamp() }))
+  // Su propia orden, todavía pendiente: no puede marcarla aceptada a mano (eso es de la callable).
+  const propia = await ordenAsignadaA('ar13c', 'asignada', asignacionDe(UID_MOTO, 'pendiente'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, propia), { 'asignacion.estadoAceptacion': 'aceptada', updatedAt: serverTimestamp() }))
+})
+
+test('AR14 · el motorizado asignado no puede reasignar la orden a otro rider ni cambiar su propio vínculo ⇒ DENY', async () => {
+  const id = await ordenAsignadaA('ar14', 'asignada', asignacionDe(UID_MOTO, 'aceptada'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { asignacion: asignacionDe(UID_MOTO_B, 'pendiente'), updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { 'asignacion.motorizadoAuthUid': UID_MOTO_B, updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { asignacion: null, estado: 'confirmada', updatedAt: serverTimestamp() }))
+})
+
+// ── Reasignación: el rider anterior pierde la orden, el nuevo la gana ────────
+
+test('AR19 · tras reasignar de A a B, A pierde lectura y no puede actualizar ni salir a retirar ⇒ DENY', async () => {
+  const id = await ordenAsignadaA('ar19', 'asignada', asignacionDe(UID_MOTO, 'aceptada'))
+  await assertSucceeds(getDoc(refOrden(UID_MOTO, id)))
+  // La reasignación la hace la callable (Admin SDK): se simula con las reglas apagadas.
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'solicitudes_envio', id), { asignacion: asignacionDe(UID_MOTO_B, 'pendiente') })
+  })
+  await assertFails(getDoc(refOrden(UID_MOTO, id)))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+  await assertFails(updateDoc(refOrden(UID_MOTO, id), { evidencias: { retiro: 'https://example.test/a.jpg' }, updatedAt: serverTimestamp() }))
+  // Un rechazo (asignacion null) también la saca de su alcance.
+  const rechazada = await ordenAsignadaA('ar19b', 'asignada', asignacionDe(UID_MOTO, 'pendiente'))
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'solicitudes_envio', rechazada), { estado: 'confirmada', asignacion: null })
+  })
+  await assertFails(getDoc(refOrden(UID_MOTO, rechazada)))
+})
+
+test('AR20 · el rider nuevo, con la asignación vigente y aceptada, sí ejecuta la transición; pendiente todavía no ⇒ ALLOW / DENY', async () => {
+  const id = await ordenAsignadaA('ar20', 'asignada', asignacionDe(UID_MOTO, 'aceptada'))
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'solicitudes_envio', id), { asignacion: asignacionDe(UID_MOTO_B, 'pendiente') })
+  })
+  await assertSucceeds(getDoc(refOrden(UID_MOTO_B, id)))
+  await assertFails(updateDoc(refOrden(UID_MOTO_B, id), senalEnCaminoRetiro()))
+  // Acepta (la callable lo escribe con Admin SDK): ahora sí.
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'solicitudes_envio', id), { 'asignacion.estadoAceptacion': 'aceptada' })
+  })
+  await assertSucceeds(updateDoc(refOrden(UID_MOTO_B, id), senalEnCaminoRetiro()))
+})
+
+// ── Campos extra junto a una transición válida ───────────────────────────────
+
+test('AR22 · una transición válida con un campo prohibido colado en el mismo update ⇒ DENY (no solo codigo/secuencia)', async () => {
+  const id = await ordenAsignadaA('ar22', 'asignada', asignacionDe(UID_MOTO, 'aceptada'))
+  const prohibidos: Array<Record<string, unknown>> = [
+    { confirmacion: { precioFinalCordobas: 1, confirmadoPorUid: UID_MOTO } },
+    { cotizacion: { origenCoord: null, destinoCoord: null } },
+    { asignacion: asignacionDe(UID_MOTO_B, 'pendiente') },
+    // Un cambio REAL dentro de la asignación (escribir 'aceptada' sobre un documento que ya
+    // la tiene no cambia nada y no cuenta): fabricar la aceptación se prueba abajo, sobre pendiente.
+    { 'asignacion.motorizadoNombre': 'Otro nombre' },
+    { userId: 'otro' },
+  ]
+  for (const extra of prohibidos) {
+    await assertFails(updateDoc(refOrden(UID_MOTO, id), { ...senalEnCaminoRetiro(), ...extra }))
+  }
+  // Y el caso que más importa: con la asignación PENDIENTE, salir a retirar y fabricar la aceptación en el mismo update.
+  const pendiente = await ordenAsignadaA('ar22b', 'asignada', asignacionDe(UID_MOTO, 'pendiente'))
+  await assertFails(updateDoc(refOrden(UID_MOTO, pendiente), { ...senalEnCaminoRetiro(), 'asignacion.estadoAceptacion': 'aceptada' }))
+  await assertFails(updateDoc(refOrden(UID_MOTO, pendiente), { ...senalEnCaminoRetiro(), asignacion: asignacionDe(UID_MOTO, 'aceptada') }))
+  // Control: la señal sola sí pasa sobre el documento ya aceptado.
+  await assertSucceeds(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+})
+
+// ── R2 · la asignación no se fabrica desde un cliente de gestor ni de admin ──
+
+const STAFF = [['gestor', UID_GESTOR], ['admin', UID_ADMIN]] as const
+
+test('AR-R2a · gestor y admin no pueden crear una asignación no nula directamente (null → mapa) ⇒ DENY', async () => {
+  for (const [rol, uid] of STAFF) {
+    const id = await ordenAsignadaA(`arr2a_${rol}`, 'confirmada', null)
+    await assertFails(updateDoc(refOrden(uid, id), { estado: 'asignada', asignacion: asignacionDe(UID_MOTO, 'pendiente'), updatedAt: serverTimestamp() }))
+    // Ni siquiera dejando el estado quieto.
+    await assertFails(updateDoc(refOrden(uid, id), { asignacion: asignacionDe(UID_MOTO, 'pendiente'), updatedAt: serverTimestamp() }))
+  }
+})
+
+test('AR-R2b · gestor y admin no pueden cambiar una asignación existente (A → B) ⇒ DENY', async () => {
+  for (const [rol, uid] of STAFF) {
+    const id = await ordenAsignadaA(`arr2b_${rol}`, 'asignada', asignacionDe(UID_MOTO, 'pendiente'))
+    await assertFails(updateDoc(refOrden(uid, id), { asignacion: asignacionDe(UID_MOTO_B, 'pendiente'), updatedAt: serverTimestamp() }))
+    await assertFails(updateDoc(refOrden(uid, id), { 'asignacion.motorizadoAuthUid': UID_MOTO_B, updatedAt: serverTimestamp() }))
+  }
+})
+
+test('AR-R2c · gestor y admin no pueden fabricar la aceptación tocando asignacion.estadoAceptacion ⇒ DENY', async () => {
+  for (const [rol, uid] of STAFF) {
+    const id = await ordenAsignadaA(`arr2c_${rol}`, 'asignada', asignacionDe(UID_MOTO, 'pendiente'))
+    await assertFails(updateDoc(refOrden(uid, id), { 'asignacion.estadoAceptacion': 'aceptada', updatedAt: serverTimestamp() }))
+    await assertFails(updateDoc(refOrden(uid, id), { 'asignacion.aceptadoAt': serverTimestamp(), updatedAt: serverTimestamp() }))
+  }
+})
+
+test('AR-R2d · lo que el producto sí hace desde cliente se conserva: dejar la asignación igual, omitirla o limpiarla ⇒ ALLOW', async () => {
+  for (const [rol, uid] of STAFF) {
+    const asignada = await ordenAsignadaA(`arr2d_${rol}`, 'asignada', asignacionDe(UID_MOTO, 'aceptada'))
+    // Update administrativo que no menciona la asignación.
+    await assertSucceeds(updateDoc(refOrden(uid, asignada), { detalle: 'nota del gestor', updatedAt: serverTimestamp() }))
+    // Reescribir la MISMA asignación no es fabricar nada.
+    await assertSucceeds(updateDoc(refOrden(uid, asignada), { asignacion: asignacionDe(UID_MOTO, 'aceptada'), updatedAt: serverTimestamp() }))
+    // Limpiarla: rebotar a confirmada ("No asignar todavía") o cancelar.
+    await assertSucceeds(updateDoc(refOrden(uid, asignada), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() }))
+    const aCancelar = await ordenAsignadaA(`arr2d_c_${rol}`, 'asignada', asignacionDe(UID_MOTO, 'pendiente'))
+    await assertSucceeds(updateDoc(refOrden(uid, aCancelar), { estado: 'cancelada', asignacion: null, canceladaAt: serverTimestamp(), updatedAt: serverTimestamp() }))
+  }
+})
+
+// ── No regresión: multiasignación sin tope ───────────────────────────────────
+
+test('AR-multi · un motorizado con varias órdenes asignadas y aceptadas avanza cada una: las Rules no ponen tope de carga ⇒ ALLOW', async () => {
+  const ids: string[] = []
+  for (const n of [1, 2, 3, 4, 5]) ids.push(await ordenAsignadaA(`armulti${n}`, 'asignada', asignacionDe(UID_MOTO, 'aceptada')))
+  for (const id of ids) await assertSucceeds(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
 })

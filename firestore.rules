@@ -790,12 +790,39 @@ service cloud.firestore {
           || esReactivacionValida();
       }
 
+      // ── MOTO-ASIGNACION-RULES-CIERRE-1 · R2: la asignación no se fabrica
+      // desde el cliente ────────────────────────────────────────────────────────
+      //
+      // Asignar o reasignar es de la callable asignarMotorizado (Admin SDK, en
+      // transacción): ahí viven la elegibilidad del motorizado, la concurrencia
+      // por updatedAt y el contrato de que toda asignación nace 'pendiente'.
+      // Con esta Rule, un cliente de gestor o admin ya no puede esquivarlas
+      // escribiendo la asignación a mano —ni crearla (null → mapa), ni
+      // cambiarla (mapa A → mapa B), ni fabricar 'aceptada' tocando
+      // asignacion.estadoAceptacion, que además nunca dejaría el evento ni las
+      // métricas de la decisión.
+      //
+      // Lo que el producto SÍ hace desde cliente se conserva: dejar la
+      // asignación como está, o limpiarla (null) al cancelar, rebotar a
+      // confirmada o rechazar. Se verificó que todo writer cliente vivo
+      // escribe `asignacion: null` y ninguno un mapa. No hay excepción para
+      // admin: su autoridad sigue siendo la del servidor (Admin SDK), que no
+      // pasa por estas Rules.
+      //
+      // Va primero entre las condiciones propias de esta rama: es barata (dos
+      // lecturas) y evita evaluar las pesadas cuando ya deniega.
+      function asignacionNoSeFabricaDesdeCliente() {
+        return request.resource.data.get('asignacion', null) == null
+          || request.resource.data.get('asignacion', null) == resource.data.get('asignacion', null);
+      }
+
       // Gestor/admin: acceso completo salvo reabrir una orden cerrada por
       // una vía que no sea la reactivación explícita.
       // IDENTIDAD-HUMANA-1: noTocaCodigo() solo hace falta en esta rama. Las
       // de motorizado y comercio ya traen su propia allowlist de raiz
       // (hasOnly), que deja fuera codigo y secuencia por construccion.
       allow update: if isAdminOrGestor()
+        && asignacionNoSeFabricaDesdeCliente()
         && transicionDesdeCerradoValida()
         && destinoOperativoProhibido()
         && noTocaCodigo()
@@ -1090,10 +1117,30 @@ service cloud.firestore {
       //
       // Los updates del motorizado que NO mueven estado (evidencias, boucher,
       // marcador semanal) siguen pasando por conservaEstado().
+      //
+      // ── MOTO-ASIGNACION-RULES-CIERRE-1 · R1: no se sale a retirar sin haber
+      // aceptado ──────────────────────────────────────────────────────────────
+      //
+      // asignada → en_camino_retiro exige asignacion.estadoAceptacion ==
+      // 'aceptada'. Antes solo se miraban estado y propiedad, así que un
+      // motorizado con la asignación todavía 'pendiente' podía saltarse la
+      // aceptación escribiendo la señal directo: sin evento aceptacion_motorizado,
+      // sin métricas y sin respetar la decisión explícita que
+      // responderAsignacion (única puerta de aceptar/rechazar) existe para
+      // registrar. Que la UI solo ofrezca "en camino" tras aceptar es un guard de
+      // pantalla, no una autorización.
+      //
+      // Una asignación LEGACY (anterior a estadoAceptacion) no trae el campo: el
+      // default 'aceptada' la deja pasar, para no romper órdenes históricas
+      // en curso. Cualquier valor presente que no sea 'aceptada' —'pendiente',
+      // 'rechazada', 'expirada', null— deniega. isAssignedMotorizado() ya
+      // garantizó que `asignacion` es un mapa antes de llegar acá, así que el
+      // .get() no puede fallar por tipo.
       function transicionClienteMotorizadoValida() {
         return conservaEstado()
           || (resource.data.get('estado', '') == 'asignada'
-              && request.resource.data.get('estado', '') == 'en_camino_retiro')
+              && request.resource.data.get('estado', '') == 'en_camino_retiro'
+              && resource.data.asignacion.get('estadoAceptacion', 'aceptada') == 'aceptada')
           || (resource.data.get('estado', '') == 'retirado'
               && request.resource.data.get('estado', '') == 'en_camino_entrega');
       }
