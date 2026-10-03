@@ -11,6 +11,7 @@ import {
   getDoc,
   setDoc,
   writeBatch,
+  deleteField,
   serverTimestamp,
   Timestamp,
 } from 'firebase/firestore'
@@ -28,6 +29,12 @@ import {
 } from '@/lib/revision-depositos-gestor'
 import { compressImage, uploadDepositoBoucher, uploadVersionBoucherDeposito } from '@/fb/storage'
 import { registrarMovimiento, convertirDepositoEnDeuda } from '@/lib/financial-writes'
+import {
+  esGastoElegibleParaDeposito,
+  marcarGastosConsumidos,
+  liberarGastosDeDeposito,
+  anularLiberaGastos,
+} from '@/lib/deposito-motorizado-envio'
 import { getDepositoEstado, cuentas } from '@/lib/financial-types'
 import { calcularDeposito } from '@/lib/calculo-deposito'
 import {
@@ -507,7 +514,7 @@ function DepositosPageContent() {
     return onSnapshot(q, (snap) => {
       const list = snap.docs
         .map((d) => ({ id: d.id, ...(d.data() as any) }))
-        .filter((g: any) => !g.liquidacionId)
+        .filter((g: any) => esGastoElegibleParaDeposito(g))
         .map((g: any) => ({ id: g.id, motorizadoId: g.motorizadoId as string, monto: g.monto as number }))
       setGastosAprobados(list)
     })
@@ -952,7 +959,12 @@ function DepositosPageContent() {
       const montoBruto = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
       const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motDocId)
       const gastosDescontados = gastosDeMotorizado.reduce((s, g) => s + g.monto, 0)
-      montoTotal = Math.max(0, montoBruto - gastosDescontados)
+      // FIN-2 — si el depósito ya nació (reintento tras un fallo posterior) sus
+      // gastos ya están consumidos por él: no se recalcula el monto con los gastos
+      // que quedan libres, se conserva el snapshot que el depósito ya guardó.
+      const previo = existente.exists() ? existente.data() : null
+      const reanuda = previo?.estado === 'pendiente_boucher'
+      montoTotal = reanuda ? (previo?.montoTotal ?? 0) : Math.max(0, montoBruto - gastosDescontados)
 
       // 1) Documento primero, sin boucher — path determinístico ligado a
       //    este depositoId, punto de reintento si el paso 2 falla. Antes de
@@ -971,22 +983,29 @@ function DepositosPageContent() {
       // No hay semantica de reemplazo que preservar: el payload reescribe
       // todos sus propios campos, y lo unico que sobrevive al merge —el
       // boucher de un intento anterior— lo pisa el paso 3 igualmente.
-      await setDoc(depositoRef, {
-        creadoAt: serverTimestamp(),
-        tipo: 'recaudacion_motorizado_storkhub',
-        estado: 'pendiente_boucher',
-        destinatario: 'storkhub',
-        destinatarioId: 'storkhub',
-        destinatarioNombre: 'Storkhub',
-        cuentasDestino: [],
-        motorizadoUid: motAuthUid,
-        motorizadoNombre: motNombre,
-        solicitudIds: ordenes.map((o) => o.id),
-        montoTotal,
-        montoBruto,
-        gastosDescontados,
-        gastosIds: gastosDeMotorizado.map((g) => g.id),
-      }, { merge: true })
+      // FIN-2 — el depósito y la marca de consumo de sus gastos: UN solo commit.
+      // Un reintento (reanuda) no vuelve a crearlo: ya existe con sus gastos.
+      if (!reanuda) {
+        const bCrear = writeBatch(db)
+        bCrear.set(depositoRef, {
+          creadoAt: serverTimestamp(),
+          tipo: 'recaudacion_motorizado_storkhub',
+          estado: 'pendiente_boucher',
+          destinatario: 'storkhub',
+          destinatarioId: 'storkhub',
+          destinatarioNombre: 'Storkhub',
+          cuentasDestino: [],
+          motorizadoUid: motAuthUid,
+          motorizadoNombre: motNombre,
+          solicitudIds: ordenes.map((o) => o.id),
+          montoTotal,
+          montoBruto,
+          gastosDescontados,
+          gastosIds: gastosDeMotorizado.map((g) => g.id),
+        }, { merge: true })
+        marcarGastosConsumidos(bCrear, (gid) => doc(db, 'gastos_motorizado', gid), gastosDeMotorizado.map((g) => g.id), depositoId)
+        await bCrear.commit()
+      }
 
       // 2) Comprimir y subir boucher al MISMO depositoId — si cualquiera de
       //    los dos falla, el doc queda en 'pendiente_boucher' y un
@@ -1164,7 +1183,9 @@ function DepositosPageContent() {
       const gastosDeMotorizado = gastosAprobados.filter((g) => g.motorizadoId === motDocId)
       const gastosDescontados = gastosDeMotorizado.reduce((s, g) => s + g.monto, 0)
       const montoTotal = Math.max(0, montoBruto - gastosDescontados)
-      await setDoc(depositoRef, {
+      // FIN-2 — el depósito y la marca de consumo de sus gastos: UN solo commit.
+      const bCrear = writeBatch(db)
+      bCrear.set(depositoRef, {
         creadoAt: serverTimestamp(),
         tipo: 'recaudacion_motorizado_storkhub',
         estado: 'pendiente_boucher',
@@ -1182,6 +1203,8 @@ function DepositosPageContent() {
         digitadoPorUid: uid,
         digitadoAt: serverTimestamp(),
       })
+      marcarGastosConsumidos(bCrear, (gid) => doc(db, 'gastos_motorizado', gid), gastosDeMotorizado.map((g) => g.id), depositoId)
+      await bCrear.commit()
     }
 
     // 2) Subir boucher — el documento ya existe y ya declara digitadoPorUid.
@@ -1462,7 +1485,10 @@ function DepositosPageContent() {
       // 1. Crear ordenes_deposito (convertirDepositoEnDeuda lo requiere existente)
       const depositoRef = doc(collection(db, 'ordenes_deposito'))
       const depositoId = depositoRef.id
-      await setDoc(depositoRef, {
+      // FIN-2 — el depósito y la marca de consumo de sus gastos: UN solo commit.
+      const gastosIdsConsumo = gastosAprobados.filter((g) => g.motorizadoId === motDocId).map((g) => g.id)
+      const bCrear = writeBatch(db)
+      bCrear.set(depositoRef, {
         creadoAt: serverTimestamp(),
         tipo: 'recaudacion_motorizado_storkhub',
         estado: 'pendiente_boucher',
@@ -1475,8 +1501,10 @@ function DepositosPageContent() {
         montoTotal: monto,
         montoBruto: gm.storkhub.totalBruto,
         gastosDescontados: gm.storkhub.gastosDeducibles,
-        gastosIds: gastosAprobados.filter((g) => g.motorizadoId === motDocId).map((g) => g.id),
+        gastosIds: gastosIdsConsumo,
       })
+      marcarGastosConsumidos(bCrear, (gid) => doc(db, 'gastos_motorizado', gid), gastosIdsConsumo, depositoId)
+      await bCrear.commit()
 
       // 2. Convertir en deuda
       await convertirDepositoEnDeuda({
@@ -1668,6 +1696,14 @@ function DepositosPageContent() {
     setErrorAccion(null)
     try {
       await anularMovimientosDeDeposito(dep.id, 'Depósito anulado por administrador')
+      // FIN-2 — si la anulación libera las órdenes, libera también los gastos que
+      // este depósito había consumido (solo los que siguen marcados por él).
+      const gastosLeidos = anularLiberaGastos(dep.estado)
+        ? await Promise.all((dep.gastosIds ?? []).map(async (gid) => {
+            const snap = await getDoc(doc(db, 'gastos_motorizado', gid))
+            return snap.exists() ? { id: gid, ...(snap.data() as { consumidoEnDepositoId?: string | null }) } : null
+          }))
+        : []
       const eventoId = doc(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id
       const b = writeBatch(db)
       b.set(
@@ -1682,6 +1718,7 @@ function DepositosPageContent() {
       if (eliminarLiberaOrdenes(dep.estado)) {
         const destino = dep.destinatario === 'storkhub' ? 'storkhub' : 'comercio'
         ;(dep.solicitudIds ?? []).forEach((sid) => b.update(doc(db, 'solicitudes_envio', sid), camposLiberacionDeposito(destino)))
+        liberarGastosDeDeposito(b, (gid) => doc(db, 'gastos_motorizado', gid), gastosLeidos, dep.id, deleteField())
       }
       await b.commit()
       setAnulandoId(null)

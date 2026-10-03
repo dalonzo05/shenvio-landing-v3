@@ -2386,7 +2386,81 @@ service cloud.firestore {
         || (isMotorizadoRole()
             && get(/databases/$(database)/documents/motorizado/$(resource.data.motorizadoId)).data.authUid == request.auth.uid)
         || isDigitador();
-      allow create, update: if isAdminOrGestor();
+
+      // ── FIN-2 · un gasto se descuenta una sola vez ───────────────────────────
+      //
+      // `consumidoEnDepositoId` es la relación auditable gasto → depósito que lo
+      // consumió. Se escribe en el MISMO commit que crea el depósito con ese
+      // gasto en `gastosIds`, y esta regla es la guardia autoritativa de la
+      // concurrencia: el gasto tiene que seguir sin consumir AL COMMIT. Dos
+      // depósitos que compiten por el mismo gasto no pueden ganar los dos, sea
+      // cual sea lo que cada pestaña tenga cargado en memoria.
+      //
+      //   · consumir: sin marca → depósito que lo lista en `gastosIds` (visto
+      //     con getAfter: el depósito del propio batch), de StorkHub, vivo, y
+      //     del MISMO motorizado que el gasto. Lo puede escribir quien crea el
+      //     depósito (gestor/admin, el motorizado dueño o el digitador que lo
+      //     digita); nadie marca "consumido" a mano en un gasto ajeno.
+      //   · liberar: solo staff, solo si la marca apunta a un depósito que ESE
+      //     batch anula y que no estaba convertido en deuda. Nunca limpia una
+      //     marca que apunte a otro documento.
+      //
+      // Lo demás (crear, anular un gasto…) sigue como estaba y no puede tocar
+      // la marca. Cerrar el resto de la escritura de gastos a servidor es FIN-1.
+      function tocaMarcaDeConsumo() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasAny(['consumidoEnDepositoId']);
+      }
+
+      function rutaDeposito(depId) {
+        return /databases/$(database)/documents/ordenes_deposito/$(depId);
+      }
+
+      function depositoConsumeEsteGasto(dep) {
+        return dep.get('tipo', '') == 'recaudacion_motorizado_storkhub'
+          && !(dep.get('estado', '') in ['anulado', 'rechazado'])
+          && dep.get('gastosIds', []) is list
+          && id in dep.get('gastosIds', [])
+          && resource.data.get('motorizadoId', '') is string
+          && resource.data.get('motorizadoId', '') != ''
+          && get(/databases/$(database)/documents/motorizado/$(resource.data.get('motorizadoId', ''))).data.get('authUid', '')
+               == dep.get('motorizadoUid', '');
+      }
+
+      function actorCreaEseDeposito(dep) {
+        return isAdminOrGestor()
+          || (isMotorizadoRole() && dep.get('motorizadoUid', '') == request.auth.uid)
+          || (isDigitador() && dep.get('digitadoPorUid', null) == request.auth.uid);
+      }
+
+      function consumoDeGastoValido() {
+        let depId = request.resource.data.get('consumidoEnDepositoId', null);
+        return depId is string
+          && depId.size() > 0
+          && resource.data.get('consumidoEnDepositoId', null) == null
+          && resource.data.get('estado', '') == 'aprobado'
+          && request.resource.data.get('estado', '') == 'aprobado'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['consumidoEnDepositoId'])
+          && existsAfter(rutaDeposito(depId))
+          && depositoConsumeEsteGasto(getAfter(rutaDeposito(depId)).data)
+          && actorCreaEseDeposito(getAfter(rutaDeposito(depId)).data);
+      }
+
+      function liberacionDeGastoValida() {
+        let depId = resource.data.get('consumidoEnDepositoId', null);
+        return isAdminOrGestor()
+          && depId is string
+          && depId.size() > 0
+          && !('consumidoEnDepositoId' in request.resource.data.keys())
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['consumidoEnDepositoId'])
+          && existsAfter(rutaDeposito(depId))
+          && getAfter(rutaDeposito(depId)).data.get('estado', '') == 'anulado'
+          && get(rutaDeposito(depId)).data.get('estado', '') != 'convertido_en_deuda';
+      }
+
+      allow create: if isAdminOrGestor()
+        && !('consumidoEnDepositoId' in request.resource.data.keys());
+      allow update: if isAdminOrGestor() && !tocaMarcaDeConsumo();
+      allow update: if consumoDeGastoValido() || liberacionDeGastoValida();
       allow delete: if false;
     }
 

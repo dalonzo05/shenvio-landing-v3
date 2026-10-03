@@ -33,6 +33,7 @@ import {
   camposEventoDepositoDevuelto,
   camposEventoDepositoRehecho,
 } from '../lib/deposito-eventos'
+import { liberarGastosDeDeposito, marcarGastosConsumidos } from '../lib/deposito-motorizado-envio'
 import {
   camposReemplazoBoucher,
   planReemplazoBoucher,
@@ -3118,4 +3119,227 @@ test('CR-cliente · el cliente individual conserva su creación normal y no pued
 test('CR-digitador · el digitador no crea solicitudes, con o sin asignacion ⇒ DENY (contrato actual preservado)', async () => {
   await assertFails(nacer(UID_DIGITADOR, 'cr_dig_ok', ordenBase()))
   await assertFails(nacer(UID_DIGITADOR, 'cr_dig_asig', ordenBase({ asignacion: ASIGNACION_FABRICADA })))
+})
+
+// ─── FG-R · FIN-2 · un gasto se descuenta una sola vez ───────────────────────
+//
+// GASTO-APROBADO-DESCUENTO-REPETIDO-1. La relación gasto → depósito que lo
+// consumió (`consumidoEnDepositoId`) se escribe en el MISMO batch que crea el
+// depósito, y firestore.rules es la guardia autoritativa: el gasto tiene que
+// seguir sin consumir AL COMMIT. Estos casos usan los mismos helpers que los
+// writers reales (marcarGastosConsumidos / liberarGastosDeDeposito).
+//
+// Lo que NO cierra FIN-2 (queda para FIN-1): el resto de la escritura de
+// gastos por gestor/admin sigue siendo de cliente.
+
+async function sembrarGastosFin2(extraGastos: Record<string, Record<string, unknown>> = {}) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    await setDoc(doc(db, 'motorizado', 'mot1'), { authUid: UID_MOTO, nombre: 'M1' })
+    await setDoc(doc(db, 'motorizado', 'mot2'), { authUid: UID_MOTO_B, nombre: 'M2' })
+    for (const id of ['g1', 'g2', 'g3']) {
+      await setDoc(doc(db, 'gastos_motorizado', id), { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, tipo: 'peaje_terminal' })
+    }
+    await setDoc(doc(db, 'gastos_motorizado', 'gOtro'), { motorizadoId: 'mot2', estado: 'aprobado', monto: 10, tipo: 'peaje_terminal' })
+    await setDoc(doc(db, 'gastos_motorizado', 'gAnulado'), { motorizadoId: 'mot1', estado: 'anulado', monto: 10, tipo: 'peaje_terminal' })
+    for (const [id, d] of Object.entries(extraGastos)) await setDoc(doc(db, 'gastos_motorizado', id), d)
+  })
+}
+
+async function sembrarDepositoFin2(id: string, estado: string, gastosIds: string[], extra: Record<string, unknown> = {}) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'ordenes_deposito', id), depositoBase({ estado, gastosIds, ...extra }))
+  })
+}
+
+async function leerGastoFin2(id: string): Promise<Record<string, unknown> | undefined> {
+  let data: Record<string, unknown> | undefined
+  await env.withSecurityRulesDisabled(async (ctx) => { data = (await getDoc(doc(ctx.firestore(), 'gastos_motorizado', id))).data() })
+  return data
+}
+
+async function leerDepositoFin2(id: string): Promise<Record<string, unknown> | undefined> {
+  let data: Record<string, unknown> | undefined
+  await env.withSecurityRulesDisabled(async (ctx) => { data = (await getDoc(doc(ctx.firestore(), 'ordenes_deposito', id))).data() })
+  return data
+}
+
+/** El commit que crea un depósito con sus gastos: lo que hacen los 4 writers reales. */
+function batchCrearDepositoConGastos(uid: string, depId: string, gastosIds: string[], extraDeposito: Record<string, unknown> = {}) {
+  const db = como(uid)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', depId), depositoBase({
+    gastosIds, gastosDescontados: gastosIds.length * 10, montoBruto: 100 + gastosIds.length * 10, montoTotal: 100, ...extraDeposito,
+  }))
+  marcarGastosConsumidos(b, (id) => doc(db, 'gastos_motorizado', id), gastosIds, depId)
+  return b
+}
+
+/** La anulación auditada de un depósito (admin + evento) y, opcionalmente, la liberación de gastos. */
+function batchAnularDepositoFin2(uid: string, depId: string, liberar: string[]) {
+  const db = como(uid)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', depId), camposAnularDeposito(uid, serverTimestamp(), 'Depósito mal armado', 'evAnulFin2'), { merge: true })
+  b.set(doc(db, 'ordenes_deposito', depId, 'eventos', 'evAnulFin2'),
+    camposEventoDepositoAnulado({ uid, rol: 'admin' }, serverTimestamp(), 'Depósito mal armado'))
+  liberarGastosDeDeposito(b, (id) => doc(db, 'gastos_motorizado', id),
+    liberar.map((id) => ({ id, consumidoEnDepositoId: depId })), depId, deleteField())
+  return { db, b }
+}
+
+test('FG-R1 · FLUJO MOTORIZADO: crea su depósito y marca sus gastos en un batch ⇒ ALLOW, con la relación gasto → depósito escrita', async () => {
+  await sembrarGastosFin2()
+  await assertSucceeds(batchCrearDepositoConGastos(UID_MOTO, 'D1', ['g1', 'g2']).commit())
+  assert.equal((await leerGastoFin2('g1'))?.consumidoEnDepositoId, 'D1')
+  assert.equal((await leerGastoFin2('g2'))?.consumidoEnDepositoId, 'D1')
+  assert.equal((await leerGastoFin2('g3'))?.consumidoEnDepositoId, undefined, 'el gasto que no entró queda libre')
+  assert.deepEqual((await leerDepositoFin2('D1'))?.gastosIds, ['g1', 'g2'])
+})
+
+test('FG-R2 · FG3/FG9 DOS PESTAÑAS: ambas ven g1 libre, D1 gana y D2 NO consume el mismo gasto ⇒ DENY, sin escrituras parciales', async () => {
+  await sembrarGastosFin2()
+  // Tab A y tab B arman su commit con g1 todavía libre en memoria.
+  const tabA = batchCrearDepositoConGastos(UID_MOTO, 'D1', ['g1'])
+  const tabB = batchCrearDepositoConGastos(UID_MOTO, 'D2', ['g1', 'g2'])
+  await assertSucceeds(tabA.commit())
+  await assertFails(tabB.commit())
+  assert.equal(await leerDepositoFin2('D2'), undefined, 'D2 no se creó: el batch es todo o nada')
+  assert.equal((await leerGastoFin2('g1'))?.consumidoEnDepositoId, 'D1', 'g1 sigue siendo de D1')
+  assert.equal((await leerGastoFin2('g2'))?.consumidoEnDepositoId, undefined, 'g2 tampoco quedó marcado a medias')
+})
+
+test('FG-R3 · FLUJO GESTOR: el gestor crea un depósito con gastos ⇒ ALLOW; otro depósito (gestor o motorizado) con el mismo gasto ⇒ DENY', async () => {
+  await sembrarGastosFin2()
+  await assertSucceeds(batchCrearDepositoConGastos(UID_GESTOR, 'D3', ['g3']).commit())
+  assert.equal((await leerGastoFin2('g3'))?.consumidoEnDepositoId, 'D3')
+  await assertFails(batchCrearDepositoConGastos(UID_GESTOR, 'D4', ['g3']).commit())
+  await assertFails(batchCrearDepositoConGastos(UID_MOTO, 'D5', ['g3']).commit())
+  assert.equal(await leerDepositoFin2('D4'), undefined)
+  assert.equal(await leerDepositoFin2('D5'), undefined)
+})
+
+test('FG-R4 · FLUJO DIGITADOR: el digitador crea el depósito que digita con sus gastos ⇒ ALLOW; el mismo gasto en otro ⇒ DENY', async () => {
+  await sembrarGastosFin2()
+  const dig = { digitadoPorUid: UID_DIGITADOR, digitadoAt: serverTimestamp() }
+  await assertSucceeds(batchCrearDepositoConGastos(UID_DIGITADOR, 'D6', ['g1'], dig).commit())
+  assert.equal((await leerGastoFin2('g1'))?.consumidoEnDepositoId, 'D6')
+  await assertFails(batchCrearDepositoConGastos(UID_DIGITADOR, 'D7', ['g1'], { ...dig, digitadoAt: serverTimestamp() }).commit())
+})
+
+test('FG-R5 · nadie marca un gasto "consumido" a mano: sin depósito, ajeno, no listado, de otro motorizado o anulado ⇒ DENY', async () => {
+  await sembrarGastosFin2()
+  const m = como(UID_MOTO)
+  // sin depósito
+  await assertFails(updateDoc(doc(m, 'gastos_motorizado', 'g1'), { consumidoEnDepositoId: 'DX' }))
+  // depósito propio que NO lista el gasto
+  await sembrarDepositoFin2('DVacio', 'pendiente_boucher', [])
+  await assertFails(updateDoc(doc(m, 'gastos_motorizado', 'g1'), { consumidoEnDepositoId: 'DVacio' }))
+  // gasto de OTRO motorizado dentro de mi depósito
+  await assertFails(batchCrearDepositoConGastos(UID_MOTO, 'DAjeno', ['gOtro']).commit())
+  // depósito de otro motorizado
+  await assertFails(batchCrearDepositoConGastos(UID_MOTO_B, 'DDeB', ['g1'], { motorizadoUid: UID_MOTO }).commit())
+  // gasto anulado
+  await assertFails(batchCrearDepositoConGastos(UID_MOTO, 'DAnulado', ['gAnulado']).commit())
+  // además de la marca, tocar otro campo del gasto
+  const db = como(UID_MOTO)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', 'DExtra'), depositoBase({ gastosIds: ['g1'] }))
+  b.update(doc(db, 'gastos_motorizado', 'g1'), { consumidoEnDepositoId: 'DExtra', monto: 1 })
+  await assertFails(b.commit())
+  assert.equal((await leerGastoFin2('g1'))?.consumidoEnDepositoId, undefined)
+  // y liberar una marca ajena
+  await sembrarGastosFin2({ gMarcado: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, consumidoEnDepositoId: 'DVacio' } })
+  await assertFails(updateDoc(doc(m, 'gastos_motorizado', 'gMarcado'), { consumidoEnDepositoId: deleteField() }))
+})
+
+test('FG-R6 · FG4/FG5/FG17: devuelto, en_revision (rehacer) y confirmado CONSERVAN el gasto: ni se libera ni lo toma otro depósito ⇒ DENY', async () => {
+  for (const estado of ['en_revision', 'devuelto', 'confirmado']) {
+    await env.clearFirestore()
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore()
+      await setDoc(doc(db, 'usuarios', UID_GESTOR), { activo: true, rol: 'gestor' })
+      await setDoc(doc(db, 'usuarios', UID_ADMIN), { activo: true, rol: 'admin' })
+      await setDoc(doc(db, 'usuarios', UID_MOTO), { activo: true, rol: 'motorizado' })
+    })
+    await sembrarGastosFin2({ gUsado: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, consumidoEnDepositoId: 'DV' } })
+    await sembrarDepositoFin2('DV', estado, ['gUsado'])
+    // liberar sin que el depósito esté anulado
+    await assertFails(updateDoc(doc(como(UID_ADMIN), 'gastos_motorizado', 'gUsado'), { consumidoEnDepositoId: deleteField() }), )
+    // otro depósito que quiere el mismo gasto
+    await assertFails(batchCrearDepositoConGastos(UID_MOTO, 'DNuevo', ['gUsado']).commit())
+    assert.equal((await leerGastoFin2('gUsado'))?.consumidoEnDepositoId, 'DV', estado)
+  }
+})
+
+test('FG-R7 · FG6: anular un depósito CONVERTIDO EN DEUDA no libera el gasto (el batch con liberación ⇒ DENY; sin ella, la anulación sigue ⇒ ALLOW)', async () => {
+  await sembrarGastosFin2({ gUsado: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, consumidoEnDepositoId: 'DC' } })
+  await sembrarDepositoFin2('DC', 'convertido_en_deuda', ['gUsado'])
+  await assertFails(batchAnularDepositoFin2(UID_ADMIN, 'DC', ['gUsado']).b.commit())
+  assert.equal((await leerDepositoFin2('DC'))?.estado, 'convertido_en_deuda', 'el batch es todo o nada')
+  await assertSucceeds(batchAnularDepositoFin2(UID_ADMIN, 'DC', []).b.commit())
+  assert.equal((await leerGastoFin2('gUsado'))?.consumidoEnDepositoId, 'DC', 'el efecto económico ya ocurrió: el gasto sigue consumido')
+})
+
+test('FG-R8 · FG7: anular un depósito que libera sus órdenes libera sus gastos en el MISMO batch; después otro depósito sí puede usarlos', async () => {
+  await sembrarGastosFin2({ gUsado: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, consumidoEnDepositoId: 'DA' } })
+  await sembrarDepositoFin2('DA', 'en_revision', ['gUsado'])
+  await assertSucceeds(batchAnularDepositoFin2(UID_ADMIN, 'DA', ['gUsado']).b.commit())
+  assert.equal((await leerDepositoFin2('DA'))?.estado, 'anulado')
+  assert.equal((await leerGastoFin2('gUsado'))?.consumidoEnDepositoId, undefined, 'liberado')
+  await assertSucceeds(batchCrearDepositoConGastos(UID_MOTO, 'DB', ['gUsado']).commit())
+  assert.equal((await leerGastoFin2('gUsado'))?.consumidoEnDepositoId, 'DB')
+})
+
+test('FG-R9 · FG11/FG12: al anular D1 NO se limpia una marca que ya apunta a otro depósito vivo ⇒ DENY, y D1 no se anula', async () => {
+  await sembrarGastosFin2({
+    gDeD1: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, consumidoEnDepositoId: 'D1' },
+    gDeD2: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, consumidoEnDepositoId: 'D2' },
+  })
+  await sembrarDepositoFin2('D1', 'en_revision', ['gDeD1'])
+  await sembrarDepositoFin2('D2', 'en_revision', ['gDeD2'])
+  // El batch intenta liberar también el gasto de D2 mientras anula D1 (sin el filtro del helper).
+  const { db, b } = batchAnularDepositoFin2(UID_ADMIN, 'D1', ['gDeD1'])
+  b.update(doc(db, 'gastos_motorizado', 'gDeD2'), { consumidoEnDepositoId: deleteField() })
+  await assertFails(b.commit())
+  assert.equal((await leerDepositoFin2('D1'))?.estado, 'en_revision')
+  assert.equal((await leerGastoFin2('gDeD2'))?.consumidoEnDepositoId, 'D2')
+  // El camino correcto, con el filtro, libera solo el de D1.
+  await assertSucceeds(batchAnularDepositoFin2(UID_ADMIN, 'D1', ['gDeD1', 'gDeD2'].filter((id) => id === 'gDeD1')).b.commit())
+  assert.equal((await leerGastoFin2('gDeD1'))?.consumidoEnDepositoId, undefined)
+  assert.equal((await leerGastoFin2('gDeD2'))?.consumidoEnDepositoId, 'D2')
+})
+
+test('FG-R10 · FG8 LEGACY: un gasto sin marcador, aunque figure en gastosIds de un depósito viejo, sigue consumible hasta el backfill (FIN-GASTOS-CONSUMO-BACKFILL-1)', async () => {
+  await sembrarGastosFin2()
+  await sembrarDepositoFin2('DViejo', 'confirmado', ['g3'])
+  await assertSucceeds(batchCrearDepositoConGastos(UID_MOTO, 'DNuevo', ['g3']).commit())
+  assert.equal((await leerGastoFin2('g3'))?.consumidoEnDepositoId, 'DNuevo')
+})
+
+test('FG-R11 · FG10: crear D2 no cambia el snapshot histórico de D1 (gastosIds, gastosDescontados, montoBruto, montoTotal)', async () => {
+  await sembrarGastosFin2()
+  await assertSucceeds(batchCrearDepositoConGastos(UID_MOTO, 'D1', ['g1']).commit())
+  const antes = JSON.stringify(await leerDepositoFin2('D1'))
+  await assertSucceeds(batchCrearDepositoConGastos(UID_MOTO, 'D2', ['g2', 'g3']).commit())
+  assert.equal(JSON.stringify(await leerDepositoFin2('D1')), antes)
+  assert.deepEqual((await leerDepositoFin2('D2'))?.gastosIds, ['g2', 'g3'])
+})
+
+test('FG-R12 · lo demás de gastos_motorizado no cambia: el gestor crea y anula gastos ⇒ ALLOW; pero no crea uno ya consumido ni marca a mano ⇒ DENY', async () => {
+  await sembrarGastosFin2()
+  const g = como(UID_GESTOR)
+  await assertSucceeds(setDoc(doc(g, 'gastos_motorizado', 'gNuevo'), { motorizadoId: 'mot1', estado: 'aprobado', monto: 5, tipo: 'peaje_terminal' }))
+  await assertSucceeds(updateDoc(doc(g, 'gastos_motorizado', 'g1'), { estado: 'anulado', updatedAt: serverTimestamp() }))
+  await assertFails(setDoc(doc(g, 'gastos_motorizado', 'gPreconsumido'), { motorizadoId: 'mot1', estado: 'aprobado', monto: 5, consumidoEnDepositoId: 'DX' }))
+  await assertFails(updateDoc(doc(g, 'gastos_motorizado', 'g2'), { consumidoEnDepositoId: 'DX' }))
+  await assertFails(deleteDoc(doc(g, 'gastos_motorizado', 'g2')))
+})
+
+test('FG-R13 · un depósito con muchos gastos cabe en un solo batch (12 gastos) ⇒ ALLOW: la guardia no revienta el límite de accesos de las reglas', async () => {
+  const muchos: Record<string, Record<string, unknown>> = {}
+  const ids: string[] = []
+  for (let i = 0; i < 12; i++) { ids.push(`gm${i}`); muchos[`gm${i}`] = { motorizadoId: 'mot1', estado: 'aprobado', monto: 10 } }
+  await sembrarGastosFin2(muchos)
+  await assertSucceeds(batchCrearDepositoConGastos(UID_MOTO, 'DMuchos', ids).commit())
+  for (const id of ids) assert.equal((await leerGastoFin2(id))?.consumidoEnDepositoId, 'DMuchos')
 })

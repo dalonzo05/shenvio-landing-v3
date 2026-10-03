@@ -134,3 +134,112 @@ export function envioReutilizable(
 export function pasosPendientesEnvio(envio: EnvioDepositoEnCurso | null | undefined): Array<'crear' | 'subir' | 'enviar'> {
   return envio?.creado ? ['subir', 'enviar'] : ['crear', 'subir', 'enviar']
 }
+
+// ─── FIN-2 — un gasto se descuenta una sola vez ───────────────────────────────
+//
+// Un depósito a StorkHub resta del bruto los gastos aprobados del motorizado
+// (`gastosIds` / `gastosDescontados`). Hasta FIN-2 nada marcaba el gasto como
+// usado, así que el mismo gasto se volvía a restar en cada depósito siguiente.
+//
+// Marcador: `consumidoEnDepositoId` en el gasto = el depósito que lo consumió.
+// NO se reutiliza `liquidacionId`: en un gasto significa "aplicado en una
+// liquidación semanal" (comentario de origen, financial-types), lo lee solo el
+// filtro de elegibilidad y ningún writer vivo lo escribe. Guardar ahí un
+// depositoId cambiaría su contrato.
+//
+// Ciclo de vida (misma vida que las órdenes del depósito, deposito-transiciones):
+//   · nace con el depósito, en el MISMO commit que fija `gastosIds`;
+//   · devuelto / en_revision / rehacer / confirmado / convertido_en_deuda:
+//     el depósito sigue vivo o ya produjo efecto económico → se conserva;
+//   · anulado, y solo si libera sus órdenes (eliminarLiberaOrdenes): la
+//     obligación vuelve a pendiente, así que el gasto también → se libera,
+//     y solo si la marca sigue apuntando a ESE depósito.
+//
+// Un gasto histórico sin marcador es elegible (compatible hacia atrás): el
+// backfill desde `ordenes_deposito.gastosIds` es FIN-GASTOS-CONSUMO-BACKFILL-1.
+//
+// PURO: sin Firestore.
+
+export const CAMPO_GASTO_CONSUMIDO = 'consumidoEnDepositoId'
+
+export interface GastoParaDeposito {
+  estado?: string | null
+  liquidacionId?: string | null
+  consumidoEnDepositoId?: string | null
+}
+
+/** ¿Este gasto puede descontarse en un depósito nuevo? */
+export function esGastoElegibleParaDeposito(g: GastoParaDeposito | null | undefined): boolean {
+  if (!g) return false
+  if (g.estado !== 'aprobado') return false
+  if (g.liquidacionId) return false
+  if (typeof g.consumidoEnDepositoId === 'string' && g.consumidoEnDepositoId.length > 0) return false
+  return true
+}
+
+/** Campos que marcan el gasto como consumido por ESTE depósito. */
+export function camposConsumoGasto(depositoId: string): Record<string, string> {
+  if (!depositoId) throw new Error('camposConsumoGasto: falta el depositoId')
+  return { [CAMPO_GASTO_CONSUMIDO]: depositoId }
+}
+
+/**
+ * Gastos que se pueden liberar al anular `depositoId`: solo los que siguen
+ * marcados por ESE depósito. Un gasto que ya apunta a otro documento (o que
+ * nunca se marcó, histórico) no se toca.
+ */
+export function gastosALiberarAlAnular<T extends { id: string; consumidoEnDepositoId?: string | null }>(
+  gastos: Array<T | null | undefined>,
+  depositoId: string,
+): string[] {
+  return gastos
+    .filter((g): g is T => !!g && g.consumidoEnDepositoId === depositoId)
+    .map((g) => g.id)
+}
+
+/** ¿Anular este depósito libera sus gastos? Misma regla que libera sus órdenes. */
+export function anularLiberaGastos(estadoDelDeposito: string | null | undefined): boolean {
+  return estadoDelDeposito !== 'convertido_en_deuda'
+}
+
+/** Lo mínimo que se le pide a un batch de Firestore: así el helper es puro. */
+export interface BatchActualiza<R> {
+  update(ref: R, data: Record<string, unknown>): unknown
+}
+
+/**
+ * Marca, en el batch que CREA el depósito, cada gasto de `gastosIds` como
+ * consumido por ese depósito. Va en el mismo commit que fija `gastosIds`: no
+ * existe "depósito con gastos y gasto libre" ni "gasto consumido y depósito sin
+ * crear". La guardia contra dos depósitos concurrentes es de firestore.rules.
+ * @returns cuántos gastos marcó
+ */
+export function marcarGastosConsumidos<R>(
+  batch: BatchActualiza<R>,
+  refGasto: (gastoId: string) => R,
+  gastosIds: readonly string[] | null | undefined,
+  depositoId: string,
+): number {
+  const ids = [...new Set((gastosIds ?? []).filter((id) => typeof id === 'string' && id.length > 0))]
+  const campos = camposConsumoGasto(depositoId)
+  ids.forEach((id) => batch.update(refGasto(id), campos))
+  return ids.length
+}
+
+/**
+ * Libera, en el batch que ANULA el depósito, solo los gastos que siguen
+ * marcados por ese depósito. `limpiar` es el centinela de borrado del SDK
+ * (deleteField()), que llega de afuera para que esto siga siendo puro.
+ * @returns cuántos gastos liberó
+ */
+export function liberarGastosDeDeposito<R>(
+  batch: BatchActualiza<R>,
+  refGasto: (gastoId: string) => R,
+  gastosLeidos: Array<{ id: string; consumidoEnDepositoId?: string | null } | null | undefined>,
+  depositoId: string,
+  limpiar: unknown,
+): number {
+  const ids = gastosALiberarAlAnular(gastosLeidos, depositoId)
+  ids.forEach((id) => batch.update(refGasto(id), { [CAMPO_GASTO_CONSUMIDO]: limpiar }))
+  return ids.length
+}

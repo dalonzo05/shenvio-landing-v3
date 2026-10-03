@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import {
   collection, onSnapshot, query, where,
-  doc, getDoc, setDoc, updateDoc, serverTimestamp, Timestamp, writeBatch,
+  doc, getDoc, updateDoc, serverTimestamp, Timestamp, writeBatch,
   runTransaction, increment, arrayUnion, limit,
 } from 'firebase/firestore';
 import { auth, db, functions } from '@/fb/config';
@@ -39,7 +39,9 @@ import {
   camposEnvioBoucherMotorizado,
   campoPunteroDepositoMotorizado,
   envioReutilizable,
+  esGastoElegibleParaDeposito,
   firmaEnvioDeposito,
+  marcarGastosConsumidos,
   pasosPendientesEnvio,
   type DatosDepositoMotorizado,
   type EnvioDepositoEnCurso,
@@ -491,7 +493,7 @@ export default function PanelMotorizadoPage() {
 
   // Gastos aprobados no liquidados (para deducir del depósito pendiente a Storkhub)
   const [gastosNoLiquidados, setGastosNoLiquidados] = useState<Array<{
-    id: string; monto: number; tipo: string; liquidacionId?: string;
+    id: string; monto: number; tipo: string; liquidacionId?: string; consumidoEnDepositoId?: string | null;
   }>>([]);
 
   useEffect(() => { const id = setInterval(() => setTick(Date.now()), 1000); return () => clearInterval(id); }, []);
@@ -587,7 +589,7 @@ export default function PanelMotorizadoPage() {
     const unsub = onSnapshot(q, (s) => {
       const list = s.docs
         .map((d) => ({ id: d.id, ...(d.data() as any) }))
-        .filter((g: any) => !g.liquidacionId); // excluir los ya descontados en liquidación
+        .filter((g: any) => esGastoElegibleParaDeposito(g)); // FIN-2: ni liquidados ni ya consumidos por otro depósito
       setGastosNoLiquidados(list as any);
     });
     return () => unsub();
@@ -1063,7 +1065,12 @@ export default function PanelMotorizadoPage() {
     enviosEnCurso.current[key] = envio;
     const depositoRef = doc(db, 'ordenes_deposito', envio.depositoId);
     if (pasosPendientesEnvio(envio).includes('crear')) {
-      await setDoc(depositoRef, camposCreacionDepositoMotorizado(datos, serverTimestamp()));
+      // FIN-2 — el depósito y la marca de consumo de sus gastos: UN solo commit.
+      // Si otro depósito ya consumió alguno, firestore.rules deniega todo el batch.
+      const bCrear = writeBatch(db);
+      bCrear.set(depositoRef, camposCreacionDepositoMotorizado(datos, serverTimestamp()));
+      marcarGastosConsumidos(bCrear, (gid) => doc(db, 'gastos_motorizado', gid), datos.gastosIds, envio.depositoId);
+      await bCrear.commit();
       envio.creado = true;
     }
     const subida = await uploadDepositoBoucher(datos.motorizadoUid, envio.depositoId, blob);
