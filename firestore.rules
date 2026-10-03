@@ -653,7 +653,35 @@ service cloud.firestore {
           && get(/databases/$(database)/documents/usuarios/$(request.resource.data.userId)).data.get('rol', '') == 'cliente';
       }
 
+      // ── MOTO-ASIGNACION-RULES-CREATE-1: una solicitud no nace asignada ────────
+      //
+      // R2 (más abajo, en el update de gestor/admin) impide fabricar la
+      // asignación sobre una orden existente; esto cierra la misma puerta por
+      // la ruta de CREATE. Hasta ahora gestor, admin y comercio podían crear una
+      // orden ya 'asignada' con un mapa `asignacion` —incluso con
+      // estadoAceptacion 'aceptada'—, esquivando la callable asignarMotorizado
+      // (elegibilidad, concurrencia) y la aceptación explícita que
+      // responderAsignacion registra.
+      //
+      // Contrato de nacimiento desde el cliente:
+      //   · `asignacion` ausente o null. No se mira el interior del mapa: un
+      //     mapa no nulo, sea cual sea, deniega.
+      //   · `estado` presente y uno de los dos con los que nacen los writers
+      //     vivos (comercio/solicitar y gestor/ingresar-orden). Un estado
+      //     avanzado ('asignada', 'en_camino_*', 'retirado', 'entregado'…) o
+      //     cerrado no es un nacimiento: es el mismo salto de la máquina de
+      //     estados que las Rules de update ya vedan al cliente.
+      //
+      // El Admin SDK no evalúa estas Rules: la callable y las Functions siguen
+      // pudiendo crear y asignar. Solo aplica a create: no toca documentos
+      // existentes ni sus asignaciones históricas.
+      function nacimientoSinAsignacion() {
+        return request.resource.data.get('asignacion', null) == null
+          && request.resource.data.get('estado', '') in ['pendiente_confirmacion', 'programada'];
+      }
+
       allow create: if isActiveUser()
+        && nacimientoSinAsignacion()
         && (
           ordenDeComercio()
             // Un comercio solo puede crear órdenes a su propio nombre: el

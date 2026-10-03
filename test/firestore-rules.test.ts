@@ -53,6 +53,9 @@ const UID_MOTO = 'uid_moto'
 // MOTO-ASIGNACION-RULES-CIERRE-1 — un segundo motorizado REAL (activo, rol
 // motorizado) para probar ownership cruzado y reasignación sin mocks ambiguos.
 const UID_MOTO_B = 'uid_moto_b'
+// MOTO-ASIGNACION-RULES-CREATE-1 — un cliente individual real (rol 'cliente'),
+// para probar la rama personal del create sin inventar un actor ambiguo.
+const UID_CLIENTE = 'uid_cliente'
 const UID_DIGITADOR = 'uid_digitador'
 const UID_ADMIN = 'uid_admin'
 const COMERCIO_ID = 'com1'
@@ -75,6 +78,7 @@ before(async () => {
     await setDoc(doc(db, 'usuarios', UID_ADMIN), { activo: true, rol: 'admin' })
     await setDoc(doc(db, 'usuarios', UID_MOTO), { activo: true, rol: 'motorizado' })
     await setDoc(doc(db, 'usuarios', UID_MOTO_B), { activo: true, rol: 'motorizado' })
+    await setDoc(doc(db, 'usuarios', UID_CLIENTE), { activo: true, rol: 'cliente' })
     await setDoc(doc(db, 'usuarios', UID_DIGITADOR), { activo: true, rol: 'digitador' })
     await setDoc(doc(db, 'comercios', COMERCIO_ID), { name: 'Mariposita', authUid: UID_COMERCIO })
   })
@@ -92,6 +96,7 @@ beforeEach(async () => {
     await setDoc(doc(db, 'usuarios', UID_ADMIN), { activo: true, rol: 'admin' })
     await setDoc(doc(db, 'usuarios', UID_MOTO), { activo: true, rol: 'motorizado' })
     await setDoc(doc(db, 'usuarios', UID_MOTO_B), { activo: true, rol: 'motorizado' })
+    await setDoc(doc(db, 'usuarios', UID_CLIENTE), { activo: true, rol: 'cliente' })
     await setDoc(doc(db, 'usuarios', UID_DIGITADOR), { activo: true, rol: 'digitador' })
     await setDoc(doc(db, 'comercios', COMERCIO_ID), { name: 'Mariposita', authUid: UID_COMERCIO })
   })
@@ -2991,4 +2996,126 @@ test('AR-multi · un motorizado con varias órdenes asignadas y aceptadas avanza
   const ids: string[] = []
   for (const n of [1, 2, 3, 4, 5]) ids.push(await ordenAsignadaA(`armulti${n}`, 'asignada', asignacionDe(UID_MOTO, 'aceptada')))
   for (const id of ids) await assertSucceeds(updateDoc(refOrden(UID_MOTO, id), senalEnCaminoRetiro()))
+})
+
+// ─── CR · MOTO-ASIGNACION-RULES-CREATE-1 ─────────────────────────────────────
+//
+// Cierra por la ruta de CREATE lo que R2 ya cierra por la de UPDATE: una
+// solicitud creada desde el cliente no puede nacer asignada. Antes de este
+// bloque gestor, admin y comercio podían crear una orden con estado 'asignada'
+// y un mapa `asignacion` (incluso con estadoAceptacion 'aceptada'), saltándose
+// la callable asignarMotorizado (elegibilidad, concurrencia) y la aceptación
+// explícita. Los dos writers vivos (comercio/solicitar y gestor/ingresar-orden)
+// nacen siempre en 'pendiente_confirmacion' o 'programada' y sin `asignacion`.
+//
+// Server authority (CR10, documentado y no probado acá a propósito): el Admin
+// SDK no evalúa estas Rules, así que la callable y cualquier Function pueden
+// seguir creando o asignando; probarlo dentro de un test de Rules solo
+// demostraría que las Rules están apagadas.
+
+const ESTADOS_DE_NACIMIENTO = ['pendiente_confirmacion', 'programada'] as const
+
+const ASIGNACION_FABRICADA = {
+  motorizadoId: 'm1',
+  motorizadoAuthUid: UID_MOTO,
+  motorizadoNombre: 'John Pork',
+  estadoAceptacion: 'aceptada',
+}
+
+const nacer = (uid: string, id: string, payload: Record<string, unknown>) =>
+  setDoc(doc(como(uid), 'solicitudes_envio', id), payload)
+
+const CREADORES = [['comercio', UID_COMERCIO], ['gestor', UID_GESTOR], ['admin', UID_ADMIN]] as const
+
+test('CR1 · gestor crea una solicitud normal, en cualquiera de sus dos estados de nacimiento ⇒ ALLOW', async () => {
+  for (const estado of ESTADOS_DE_NACIMIENTO) {
+    await assertSucceeds(nacer(UID_GESTOR, `cr1_${estado}`, ordenBase({ estado })))
+  }
+})
+
+test('CR2 · gestor intenta crear con un mapa asignacion ⇒ DENY (y la misma orden sin asignacion sí pasa)', async () => {
+  await assertFails(nacer(UID_GESTOR, 'cr2a', ordenBase({ asignacion: ASIGNACION_FABRICADA })))
+  await assertFails(nacer(UID_GESTOR, 'cr2b', ordenBase({ asignacion: { motorizadoAuthUid: UID_MOTO } })))
+  await assertSucceeds(nacer(UID_GESTOR, 'cr2c', ordenBase()))
+})
+
+test('CR3 · admin intenta crear con un mapa asignacion ⇒ DENY (y la misma orden sin asignacion sí pasa)', async () => {
+  await assertFails(nacer(UID_ADMIN, 'cr3a', ordenBase({ asignacion: ASIGNACION_FABRICADA })))
+  await assertFails(nacer(UID_ADMIN, 'cr3b', ordenBase({ asignacion: { motorizadoAuthUid: UID_MOTO } })))
+  await assertSucceeds(nacer(UID_ADMIN, 'cr3c', ordenBase()))
+})
+
+test('CR4 · comercio crea una solicitud normal, en cualquiera de sus dos estados de nacimiento ⇒ ALLOW', async () => {
+  for (const estado of ESTADOS_DE_NACIMIENTO) {
+    await assertSucceeds(nacer(UID_COMERCIO, `cr4_${estado}`, ordenBase({ estado })))
+  }
+})
+
+test('CR5 · comercio intenta crear su propia solicitud con un mapa asignacion ⇒ DENY', async () => {
+  await assertFails(nacer(UID_COMERCIO, 'cr5a', ordenBase({ asignacion: ASIGNACION_FABRICADA })))
+  // El caso completo del hallazgo: ya asignada Y con la aceptación fabricada.
+  await assertFails(nacer(UID_COMERCIO, 'cr5b', ordenBase({ estado: 'asignada', asignacion: ASIGNACION_FABRICADA })))
+  await assertSucceeds(nacer(UID_COMERCIO, 'cr5c', ordenBase()))
+})
+
+test('CR6 · nadie crea una solicitud ya avanzada: estado asignada o cualquier estado operativo ⇒ DENY', async () => {
+  for (const [, uid] of CREADORES) {
+    await assertFails(nacer(uid, `cr6_asignada_${uid}`, ordenBase({ estado: 'asignada' })))
+  }
+  // Mismo hueco, otros estados del viaje: una orden no puede nacer ya en curso ni ya cerrada.
+  for (const estado of ['confirmada', 'en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado', 'cancelada', 'rechazada']) {
+    await assertFails(nacer(UID_GESTOR, `cr6_${estado}`, ordenBase({ estado })))
+  }
+})
+
+test('CR6b · una solicitud creada sin estado ⇒ DENY (el estado de nacimiento tiene que venir y ser uno de los dos reales)', async () => {
+  const { estado: _quitado, ...sinEstado } = ordenBase()
+  void _quitado
+  for (const [, uid] of CREADORES) {
+    await assertFails(nacer(uid, `cr6b_${uid}`, sinEstado))
+  }
+})
+
+test('CR7 · crear con asignacion explícitamente null ⇒ ALLOW', async () => {
+  for (const [rol, uid] of CREADORES) {
+    await assertSucceeds(nacer(uid, `cr7_${rol}`, ordenBase({ asignacion: null })))
+  }
+})
+
+test('CR8 · crear con la clave asignacion ausente ⇒ ALLOW', async () => {
+  for (const [rol, uid] of CREADORES) {
+    const payload = ordenBase()
+    assert.equal('asignacion' in payload, false)
+    await assertSucceeds(nacer(uid, `cr8_${rol}`, payload))
+  }
+})
+
+test('CR9 · crear con estadoAceptacion embebido en una asignacion, o con asignacion de cualquier forma no nula ⇒ DENY', async () => {
+  for (const estadoAceptacion of ['aceptada', 'pendiente', 'rechazada', 'expirada']) {
+    await assertFails(nacer(UID_GESTOR, `cr9_${estadoAceptacion}`, ordenBase({ asignacion: { estadoAceptacion } })))
+  }
+  // No importa el interior: ni un mapa vacío ni un valor que no sea mapa.
+  await assertFails(nacer(UID_GESTOR, 'cr9_vacio', ordenBase({ asignacion: {} })))
+  await assertFails(nacer(UID_GESTOR, 'cr9_string', ordenBase({ asignacion: 'm1' })))
+  await assertFails(nacer(UID_COMERCIO, 'cr9_com', ordenBase({ asignacion: { estadoAceptacion: 'aceptada' } })))
+})
+
+test('CR-cliente · el cliente individual conserva su creación normal y no puede nacer asignado ⇒ ALLOW / DENY', async () => {
+  const personal = (extra: Record<string, unknown> = {}) => ({
+    userId: UID_CLIENTE,
+    comercioUid: UID_CLIENTE,
+    ownerSnapshot: { uid: UID_CLIENTE, nombre: 'Cliente' },
+    estado: 'pendiente_confirmacion',
+    tipoCliente: 'contado',
+    createdAt: serverTimestamp(),
+    ...extra,
+  })
+  await assertFails(nacer(UID_CLIENTE, 'cr_cli_asig', personal({ asignacion: ASIGNACION_FABRICADA })))
+  await assertFails(nacer(UID_CLIENTE, 'cr_cli_estado', personal({ estado: 'asignada' })))
+  await assertSucceeds(nacer(UID_CLIENTE, 'cr_cli_ok', personal()))
+})
+
+test('CR-digitador · el digitador no crea solicitudes, con o sin asignacion ⇒ DENY (contrato actual preservado)', async () => {
+  await assertFails(nacer(UID_DIGITADOR, 'cr_dig_ok', ordenBase()))
+  await assertFails(nacer(UID_DIGITADOR, 'cr_dig_asig', ordenBase({ asignacion: ASIGNACION_FABRICADA })))
 })
