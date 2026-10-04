@@ -40,11 +40,13 @@ import {
   pathVersionBoucher,
 } from '../lib/deposito-boucher-version'
 import {
+  agregarAnulacionDeMovimientosAlBatch,
   camposAnularDeposito,
   camposConfirmarDeposito,
   camposPedirCorreccion,
   camposRehacerDeposito,
 } from '../lib/deposito-correccion'
+import { camposLiberacionDeposito, camposReaperturaRevision } from '../lib/deposito-transiciones'
 
 // Identidades del arnés. El rol de comercio es 'Comercio' con mayúscula: así
 // está en las reglas y así se escribe en `usuarios`.
@@ -3342,4 +3344,205 @@ test('FG-R13 · un depósito con muchos gastos cabe en un solo batch (12 gastos)
   await sembrarGastosFin2(muchos)
   await assertSucceeds(batchCrearDepositoConGastos(UID_MOTO, 'DMuchos', ids).commit())
   for (const id of ids) assert.equal((await leerGastoFin2(id))?.consumidoEnDepositoId, 'DMuchos')
+})
+
+// ─── F5 · FIN-5 · rehacer y anular: el ledger cambia en el MISMO commit ──────
+//
+// REHACER-ANULA-ANTES-DEL-BATCH. Antes, el ledger se anulaba con un commit
+// propio y recién después se armaba el batch del depósito. Estos casos arman el
+// batch igual que los writers reales (movimientos leídos + anulación dentro del
+// batch principal) y fuerzan que el batch principal sea DENEGADO por una
+// condición legítima de las Rules: rehacer y anular son solo de admin.
+//
+// Lo que NO cierra FIN-5 (queda para FIN-1/FIN-3): el ledger sigue siendo
+// escribible por gestor/admin, y el estado del depósito se lee en el cliente.
+
+const MOV_BASE = { depositoId: 'depD', tipo: 'deposito_efectivo_storkhub', monto: 40 }
+
+async function sembrarFin5(movs: Record<string, Record<string, unknown>>, opts: { gastos?: string[]; estado?: string } = {}) {
+  await sembrarDigitacion({
+    depEstado: opts.estado ?? 'confirmado',
+    registro: { deposito: { storkhubDepositoId: 'depD', confirmadoStorkhub: true, confirmadoStorkhubAt: new Date() } },
+  })
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    for (const [id, m] of Object.entries(movs)) await setDoc(doc(db, 'movimientos_financieros', id), { ...MOV_BASE, ...m })
+    if (opts.gastos?.length) {
+      await setDoc(doc(db, 'motorizado', 'mot1'), { authUid: UID_MOTO, nombre: 'M1' })
+      await setDoc(doc(db, 'ordenes_deposito', 'depD'), { gastosIds: opts.gastos }, { merge: true })
+      for (const g of opts.gastos) {
+        await setDoc(doc(db, 'gastos_motorizado', g), { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, tipo: 'peaje_terminal', consumidoEnDepositoId: 'depD' })
+      }
+    }
+  })
+}
+
+async function leerDoc(coleccion: string, id: string): Promise<Record<string, unknown> | undefined> {
+  let data: Record<string, unknown> | undefined
+  await env.withSecurityRulesDisabled(async (ctx) => { data = (await getDoc(doc(ctx.firestore(), coleccion, id))).data() })
+  return data
+}
+
+/** El puntero de la orden al depósito, tipado: lo que Rehacer reabre y Anular libera. */
+async function punteroDeOrdenD(): Promise<{ confirmadoStorkhub?: boolean; storkhubDepositoId?: string | null }> {
+  const o = await leerDoc('solicitudes_envio', ORDEN_D)
+  const registro = o?.registro as { deposito?: { confirmadoStorkhub?: boolean; storkhubDepositoId?: string | null } } | undefined
+  return registro?.deposito ?? {}
+}
+
+async function eventosDeD(): Promise<number> {
+  let n = 0
+  await env.withSecurityRulesDisabled(async (ctx) => { n = (await getDocs(collection(ctx.firestore(), 'ordenes_deposito', 'depD', 'eventos'))).size })
+  return n
+}
+
+/** Lo que hace el writer real: lee los movimientos del depósito y los entrega para el batch. */
+async function leerMovsDeD(db: ReturnType<typeof como>) {
+  const snap = await getDocs(query(collection(db, 'movimientos_financieros'), where('depositoId', '==', 'depD')))
+  return snap.docs.map((d) => ({ ref: d.ref, estado: (d.data() as { estado?: unknown }).estado }))
+}
+
+async function batchRehacerFin5(uid: string, opts: { sinEvento?: boolean } = {}) {
+  const db = como(uid)
+  const rol = uid === UID_ADMIN ? 'admin' : 'gestor'
+  const movs = await leerMovsDeD(db)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', 'depD'), camposRehacerDeposito(uid, serverTimestamp(), 'motivo suficiente', 'evF5'), { merge: true })
+  if (!opts.sinEvento) b.set(doc(db, 'ordenes_deposito', 'depD', 'eventos', 'evF5'), camposEventoDepositoRehecho({ uid, rol }, serverTimestamp(), 'motivo suficiente'))
+  b.update(doc(db, 'solicitudes_envio', ORDEN_D), camposReaperturaRevision('storkhub', 'depD'))
+  agregarAnulacionDeMovimientosAlBatch(b, movs, uid, 'Depósito revertido a revisión por gestor', serverTimestamp())
+  return b
+}
+
+async function batchAnularFin5(uid: string, opts: { gastos?: string[]; sinEvento?: boolean } = {}) {
+  const db = como(uid)
+  const rol = uid === UID_ADMIN ? 'admin' : 'gestor'
+  const movs = await leerMovsDeD(db)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', 'depD'), camposAnularDeposito(uid, serverTimestamp(), 'motivo suficiente', 'evF5'), { merge: true })
+  if (!opts.sinEvento) b.set(doc(db, 'ordenes_deposito', 'depD', 'eventos', 'evF5'), camposEventoDepositoAnulado({ uid, rol }, serverTimestamp(), 'motivo suficiente'))
+  b.update(doc(db, 'solicitudes_envio', ORDEN_D), camposLiberacionDeposito('storkhub'))
+  liberarGastosDeDeposito(b, (id) => doc(db, 'gastos_motorizado', id), (opts.gastos ?? []).map((id) => ({ id, consumidoEnDepositoId: 'depD' })), 'depD', deleteField())
+  agregarAnulacionDeMovimientosAlBatch(b, movs, uid, 'Depósito anulado por administrador', serverTimestamp())
+  return b
+}
+
+test('F5-FR1 · REHACER válido: depósito, evento, orden y ledger cambian en UN commit ⇒ ALLOW', async () => {
+  await sembrarFin5({ M1: { estado: 'activo' } })
+  await assertSucceeds((await batchRehacerFin5(UID_ADMIN)).commit())
+  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'en_revision')
+  assert.equal(await eventosDeD(), 1)
+  assert.equal((await punteroDeOrdenD()).confirmadoStorkhub, false)
+  const m1 = await leerDoc('movimientos_financieros', 'M1')
+  assert.equal(m1?.estado, 'anulado')
+  assert.equal(m1?.anuladoPorUid, UID_ADMIN)
+})
+
+test('F5-FR2 · REHACER denegado (gestor no puede): NINGÚN movimiento queda anulado, ni evento, ni orden ⇒ DENY', async () => {
+  await sembrarFin5({ M1: { estado: 'activo' }, M2: { estado: 'activo' } })
+  await assertFails((await batchRehacerFin5(UID_GESTOR)).commit())
+  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'confirmado')
+  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'activo')
+  assert.equal((await leerDoc('movimientos_financieros', 'M2'))?.estado, 'activo')
+  assert.equal(await eventosDeD(), 0)
+  assert.equal((await punteroDeOrdenD()).confirmadoStorkhub, true)
+})
+
+test('F5-FA1 · ANULAR válido: depósito anulado, evento, orden liberada y ledger anulado en UN commit ⇒ ALLOW', async () => {
+  await sembrarFin5({ M1: { estado: 'activo' } })
+  await assertSucceeds((await batchAnularFin5(UID_ADMIN)).commit())
+  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'anulado')
+  assert.equal(await eventosDeD(), 1)
+  assert.equal((await punteroDeOrdenD()).storkhubDepositoId, null)
+  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'anulado')
+})
+
+test('F5-FA2 · ANULAR denegado (gestor no puede): el ledger sigue activo, el depósito en su estado, la orden sin liberar ⇒ DENY', async () => {
+  await sembrarFin5({ M1: { estado: 'activo' } })
+  await assertFails((await batchAnularFin5(UID_GESTOR)).commit())
+  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'confirmado')
+  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'activo')
+  assert.equal(await eventosDeD(), 0)
+  assert.equal((await punteroDeOrdenD()).storkhubDepositoId, 'depD')
+})
+
+test('F5-FA2b · sin su evento de auditoría el batch entero cae: el ledger NO queda anulado (evento y ledger van juntos) ⇒ DENY', async () => {
+  await sembrarFin5({ M1: { estado: 'activo' } })
+  await assertFails((await batchAnularFin5(UID_ADMIN, { sinEvento: true })).commit())
+  await assertFails((await batchRehacerFin5(UID_ADMIN, { sinEvento: true })).commit())
+  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'activo')
+  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'confirmado')
+})
+
+test('F5-FA3 · VARIOS movimientos: anula M1 y M2 y NO reescribe M3, que ya estaba anulado', async () => {
+  const previo = { estado: 'anulado', anuladoPorUid: 'uidOriginal', motivoAnulacion: 'motivo original' }
+  for (const accion of ['rehacer', 'anular'] as const) {
+    await env.clearFirestore()
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore()
+      await setDoc(doc(db, 'usuarios', UID_GESTOR), { activo: true, rol: 'gestor' })
+      await setDoc(doc(db, 'usuarios', UID_ADMIN), { activo: true, rol: 'admin' })
+    })
+    await sembrarFin5({ M1: { estado: 'activo' }, M2: { estado: 'activo' }, M3: previo })
+    await assertSucceeds((await (accion === 'rehacer' ? batchRehacerFin5(UID_ADMIN) : batchAnularFin5(UID_ADMIN))).commit())
+    assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'anulado', accion)
+    assert.equal((await leerDoc('movimientos_financieros', 'M2'))?.estado, 'anulado', accion)
+    const m3 = await leerDoc('movimientos_financieros', 'M3')
+    assert.equal(m3?.anuladoPorUid, 'uidOriginal', accion + ': M3 conserva quién lo anuló')
+    assert.equal(m3?.motivoAnulacion, 'motivo original', accion)
+  }
+})
+
+test('F5-FA4 · SIN movimientos: rehacer y anular siguen funcionando', async () => {
+  await sembrarFin5({})
+  await assertSucceeds((await batchRehacerFin5(UID_ADMIN)).commit())
+  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'en_revision')
+  await env.clearFirestore()
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    await setDoc(doc(db, 'usuarios', UID_ADMIN), { activo: true, rol: 'admin' })
+  })
+  await sembrarFin5({})
+  await assertSucceeds((await batchAnularFin5(UID_ADMIN)).commit())
+  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'anulado')
+})
+
+test('F5-FIN2 · REGRESIÓN FIN-2: anular libera órdenes Y gastos Y anula el ledger en el mismo commit; si cae, no cambia nada', async () => {
+  await sembrarFin5({ M1: { estado: 'activo' } }, { gastos: ['g1', 'g2'] })
+  // Cae (gestor): ni el gasto se libera, ni el ledger se anula.
+  await assertFails((await batchAnularFin5(UID_GESTOR, { gastos: ['g1', 'g2'] })).commit())
+  assert.equal((await leerDoc('gastos_motorizado', 'g1'))?.consumidoEnDepositoId, 'depD')
+  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'activo')
+  // Pasa (admin): todo junto.
+  await assertSucceeds((await batchAnularFin5(UID_ADMIN, { gastos: ['g1', 'g2'] })).commit())
+  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'anulado')
+  assert.equal((await leerDoc('gastos_motorizado', 'g1'))?.consumidoEnDepositoId, undefined)
+  assert.equal((await leerDoc('gastos_motorizado', 'g2'))?.consumidoEnDepositoId, undefined)
+  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'anulado')
+  assert.equal((await punteroDeOrdenD()).storkhubDepositoId, null)
+})
+
+test('F5-IDEM · una segunda anulación sobre un depósito ya anulado no pasa y no reescribe el ledger ⇒ DENY', async () => {
+  await sembrarFin5({ M1: { estado: 'activo' } })
+  await assertSucceeds((await batchAnularFin5(UID_ADMIN)).commit())
+  const antes = await leerDoc('movimientos_financieros', 'M1')
+  await assertFails((await batchAnularFin5(UID_ADMIN)).commit())
+  assert.deepEqual(await leerDoc('movimientos_financieros', 'M1'), antes)
+  assert.equal(await eventosDeD(), 1, 'no se creó un segundo evento')
+})
+
+test('F5-REPRO · REPRODUCCIÓN del bug anterior: con un commit de ledger SEPARADO y el batch principal denegado, queda confirmado + ledger anulado', async () => {
+  await sembrarFin5({ M1: { estado: 'activo' } })
+  // El patrón viejo: el ledger se anula y se commitea solo...
+  const db = como(UID_GESTOR)
+  const viejo = writeBatch(db)
+  agregarAnulacionDeMovimientosAlBatch(viejo, await leerMovsDeD(db), UID_GESTOR, 'Depósito revertido a revisión por gestor', serverTimestamp())
+  await assertSucceeds(viejo.commit())
+  // ...y después el batch principal es denegado.
+  const principal = writeBatch(db)
+  principal.set(doc(db, 'ordenes_deposito', 'depD'), camposRehacerDeposito(UID_GESTOR, serverTimestamp(), 'motivo suficiente', 'evF5'), { merge: true })
+  principal.set(doc(db, 'ordenes_deposito', 'depD', 'eventos', 'evF5'), camposEventoDepositoRehecho({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp(), 'motivo suficiente'))
+  await assertFails(principal.commit())
+  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'confirmado')
+  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'anulado', 'el estado inconsistente que FIN-5 elimina del writer')
 })

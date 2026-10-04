@@ -265,3 +265,60 @@ export function accionesDeposito(
     anular: ab && admin && dep?.estado !== 'anulado',
   }
 }
+
+// ─── FIN-5 · anular los movimientos del ledger EN EL MISMO batch ──────────────
+//
+// REHACER-ANULA-ANTES-DEL-BATCH. Rehacer y Anular un depósito confirmado
+// anulaban primero sus movimientos del ledger con un commit PROPIO y recién
+// después armaban el batch que cambia el depósito, escribe el evento y libera
+// órdenes y gastos. Si el segundo commit fallaba (Rules, red, estado que ya
+// cambió), el depósito seguía confirmado con su ledger anulado.
+//
+// Estos helpers separan LEER de ESCRIBIR: el writer lee los movimientos antes de
+// armar el batch y los anula dentro de él. Nada aquí hace commit: el commit es
+// del writer principal, y todo ocurre o no ocurre.
+//
+// Semántica idéntica a la anterior: un movimiento está activo si su estado NO es
+// 'anulado', y los que ya estaban anulados no se reescriben (conservan quién y
+// cuándo los anuló). Siguen siendo escrituras de cliente sobre el ledger: cerrar
+// esa autoridad es FIN-1, no esto.
+
+export const ESTADO_MOVIMIENTO_ANULADO = 'anulado'
+
+/** Un movimiento está activo mientras no esté anulado (ausente o cualquier otro estado). */
+export function esMovimientoActivo(estado: unknown): boolean {
+  return estado !== ESTADO_MOVIMIENTO_ANULADO
+}
+
+/** Lo que se escribe en un movimiento al anularlo, con su trazabilidad. */
+export function camposAnulacionMovimiento<T>(uid: string, motivo: string, ahora: T) {
+  return {
+    estado: ESTADO_MOVIMIENTO_ANULADO,
+    anuladoAt: ahora,
+    anuladoPorUid: uid,
+    motivoAnulacion: motivo,
+  }
+}
+
+export interface BatchActualizaMovimientos<R> {
+  update(ref: R, data: Record<string, unknown>): unknown
+}
+
+/**
+ * Agrega al batch la anulación de cada movimiento ACTIVO. No hace commit.
+ * @returns cuántos movimientos anuló
+ */
+export function agregarAnulacionDeMovimientosAlBatch<R>(
+  batch: BatchActualizaMovimientos<R>,
+  movimientos: ReadonlyArray<{ ref: R; estado?: unknown } | null | undefined>,
+  uid: string,
+  motivo: string,
+  ahora: unknown,
+): number {
+  const activos = movimientos.filter(
+    (m): m is { ref: R; estado?: unknown } => !!m && esMovimientoActivo(m.estado),
+  )
+  const campos = camposAnulacionMovimiento(uid, motivo, ahora)
+  activos.forEach((m) => batch.update(m.ref, campos))
+  return activos.length
+}

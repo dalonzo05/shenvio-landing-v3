@@ -7,6 +7,8 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   BOTON_PEDIR_CORRECCION,
   ESTADO_DEVUELTO,
@@ -14,6 +16,9 @@ import {
   ETIQUETA_DEVUELTO,
   TEXTO_ESPERANDO_CORRECCION,
   accionesDeposito,
+  agregarAnulacionDeMovimientosAlBatch,
+  camposAnulacionMovimiento,
+  esMovimientoActivo,
   camposAnularDeposito,
   camposConfirmarDeposito,
   camposPedirCorreccion,
@@ -173,4 +178,81 @@ test('CO15 · un anulado es terminal: ya no ofrece nada', () => {
 
 test('CO16 · el tipo C no ofrece ninguna acción de Depósitos, ni al admin', () => {
   assert.deepEqual(accionesDeposito(C, 'admin'), { pedirCorreccion: false, rehacer: false, anular: false })
+})
+
+// ─── FIN-5 · anular el ledger en el MISMO batch ──────────────────────────────
+
+class BatchFalso {
+  actualizaciones: Array<{ ref: string; data: Record<string, unknown> }> = []
+  commits = 0
+  update(ref: string, data: Record<string, unknown>) { this.actualizaciones.push({ ref, data }) }
+  commit() { this.commits++ }
+}
+
+test('F5-U1 · activo es todo lo que no esté anulado: ausente, vacío u otro estado cuentan', () => {
+  assert.equal(esMovimientoActivo('anulado'), false)
+  assert.equal(esMovimientoActivo(undefined), true)
+  assert.equal(esMovimientoActivo(''), true)
+  assert.equal(esMovimientoActivo('activo'), true)
+})
+
+test('F5-U2 · la anulación lleva estado, quién, cuándo y por qué — y nada más', () => {
+  assert.deepEqual(camposAnulacionMovimiento('uidA', 'motivo', AHORA), {
+    estado: 'anulado', anuladoAt: AHORA, anuladoPorUid: 'uidA', motivoAnulacion: 'motivo',
+  })
+})
+
+test('F5-U3 · varios movimientos: anula los activos y NO reescribe los ya anulados; no hace commit', () => {
+  const b = new BatchFalso()
+  const n = agregarAnulacionDeMovimientosAlBatch(b, [
+    { ref: 'M1', estado: 'activo' },
+    { ref: 'M2', estado: undefined },
+    { ref: 'M3', estado: 'anulado' },
+  ], 'uidA', 'motivo', AHORA)
+  assert.equal(n, 2)
+  assert.deepEqual(b.actualizaciones.map((a) => a.ref), ['M1', 'M2'])
+  assert.equal(b.commits, 0, 'el commit es del writer principal')
+})
+
+test('F5-U4 · sin movimientos (o con nulos) no escribe nada y no falla', () => {
+  const b = new BatchFalso()
+  assert.equal(agregarAnulacionDeMovimientosAlBatch(b, [], 'uidA', 'm', AHORA), 0)
+  assert.equal(agregarAnulacionDeMovimientosAlBatch(b, [null, undefined], 'uidA', 'm', AHORA), 0)
+  assert.equal(b.actualizaciones.length, 0)
+})
+
+// Contrato de código: lo que impide volver al patrón "commit del ledger → batch
+// principal". La atomicidad real la demuestra el emulador (F5 en test/).
+function fuenteDepositosGestor(): string {
+  return readFileSync(join(__dirname, '..', 'app', 'panel', 'gestor', 'depositos', 'page.tsx'), 'utf8').replace(/\r/g, '')
+}
+function cuerpoDe(src: string, nombre: string): string {
+  const ini = src.indexOf('async function ' + nombre + '(')
+  assert.ok(ini >= 0, 'existe ' + nombre)
+  const sig = src.indexOf('\n  async function ', ini + 10)
+  const sig2 = src.indexOf('\n  // ── ', ini + 10)
+  const fin = [sig, sig2].filter((x) => x > 0).sort((a, b) => a - b)[0] ?? src.length
+  return src.slice(ini, fin)
+}
+
+test('F5-S1 · el writer ya no tiene un helper que commitea el ledger por su cuenta', () => {
+  const src = fuenteDepositosGestor()
+  assert.ok(!src.includes('anularMovimientosDeDeposito'), 'desapareció el helper con commit propio')
+  assert.ok(src.includes('leerMovimientosDeDeposito'), 'queda solo la lectura')
+  const lectura = cuerpoDe(src, 'leerMovimientosDeDeposito')
+  assert.ok(!lectura.includes('.commit('), 'leer no escribe')
+  assert.ok(!lectura.includes('writeBatch'), 'leer no arma batches')
+})
+
+test('F5-S2 · rehacer y anular: UN solo commit, y la anulación del ledger va ANTES de él, en el mismo batch', () => {
+  const src = fuenteDepositosGestor()
+  for (const nombre of ['rehacerDeposito', 'anularDeposito']) {
+    const c = cuerpoDe(src, nombre)
+    assert.equal((c.match(/\.commit\(\)/g) ?? []).length, 1, nombre + ' hace un solo commit')
+    assert.equal((c.match(/writeBatch\(db\)/g) ?? []).length, 1, nombre + ' arma un solo batch')
+    const iAnula = c.indexOf('agregarAnulacionDeMovimientosAlBatch(b,')
+    const iCommit = c.indexOf('await b.commit()')
+    assert.ok(iAnula > 0 && iAnula < iCommit, nombre + ' anula el ledger dentro del batch, antes del commit')
+    assert.ok(c.indexOf('leerMovimientosDeDeposito') < c.indexOf('writeBatch(db)'), nombre + ' lee antes de armar el batch')
+  }
 })

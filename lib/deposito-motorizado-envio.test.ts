@@ -214,7 +214,7 @@ test('FG-S2 · Gestor: la lista de gastos descontables usa la elegibilidad compa
 
 test('FG-S3 · Gestor: anular un depósito libera sus gastos en el MISMO batch que libera sus órdenes', () => {
   const src = fuenteFin2(...DEPOSITOS_GESTOR)
-  const m = src.match(/if \(eliminarLiberaOrdenes\(dep\.estado\)\) \{[\s\S]*?liberarGastosDeDeposito\(b,[\s\S]*?deleteField\(\)\)[\s\S]*?\}\s*await b\.commit\(\)/)
+  const m = src.match(/if \(eliminarLiberaOrdenes\(dep\.estado\)\) \{[\s\S]*?liberarGastosDeDeposito\(b,[\s\S]*?deleteField\(\)\)[\s\S]*?\}\s*(?:agregarAnulacionDeMovimientosAlBatch\(b,[^\n]*\)\s*)?await b\.commit\(\)/)
   assert.ok(m, 'la liberación de gastos va dentro del if de liberación de órdenes y antes del commit')
   assert.ok(src.includes('anularLiberaGastos(dep.estado)'), 'solo se leen/liberan gastos cuando la anulación libera órdenes')
 })

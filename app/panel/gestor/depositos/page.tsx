@@ -101,6 +101,7 @@ import {
   correccionSolicitada,
   puedeConfirmarDeposito,
   puedePedirCorreccion,
+  agregarAnulacionDeMovimientosAlBatch,
 } from '@/lib/deposito-correccion'
 import {
   camposEnlaceDigitacion,
@@ -1613,27 +1614,19 @@ function DepositosPageContent() {
     }
   }
 
-  // ── Anular movimientos financieros activos de un depósito ────────────────
-  // Usado antes de rehacer o eliminar un depósito confirmado para evitar
-  // que el ledger cuente el mismo depósito dos veces.
+  // ── Movimientos financieros de un depósito (SOLO LECTURA) ─────────────────
+  // Rehacer y anular un depósito confirmado deben anular sus movimientos del
+  // ledger para que no cuente el mismo depósito dos veces. FIN-5: esa anulación
+  // ya NO tiene commit propio — se lee aquí y se agrega al batch principal con
+  // agregarAnulacionDeMovimientosAlBatch, así que el depósito, su evento, las
+  // órdenes, los gastos y el ledger cambian juntos o no cambian.
   // No borra nada — solo marca estado: 'anulado' con trazabilidad.
 
-  async function anularMovimientosDeDeposito(depositoId: string, motivo: string) {
+  async function leerMovimientosDeDeposito(depositoId: string) {
     const snap = await getDocs(
       query(collection(db, 'movimientos_financieros'), where('depositoId', '==', depositoId))
     )
-    const activos = snap.docs.filter((d) => (d.data() as any).estado !== 'anulado')
-    if (activos.length === 0) return
-    const b = writeBatch(db)
-    activos.forEach((d) => {
-      b.update(d.ref, {
-        estado: 'anulado',
-        anuladoAt: serverTimestamp(),
-        anuladoPorUid: auth.currentUser?.uid ?? '',
-        motivoAnulacion: motivo,
-      })
-    })
-    await b.commit()
+    return snap.docs.map((d) => ({ ref: d.ref, estado: (d.data() as { estado?: unknown }).estado }))
   }
 
   // ── Rehacer depósito: vuelve a "Por revisar" para que el motorizado reenvíe ──
@@ -1647,8 +1640,9 @@ function DepositosPageContent() {
     if (!uid || !userRol) return
     setErrorAccion(null)
     try {
-      // 1. Anular movimientos del ledger — el depósito no está más confirmado
-      await anularMovimientosDeDeposito(dep.id, 'Depósito revertido a revisión por gestor')
+      // 1. Leer los movimientos del ledger — el depósito no está más confirmado.
+      //    Se anulan en el MISMO batch de abajo (FIN-5): sin commit propio.
+      const movimientos = await leerMovimientosDeDeposito(dep.id)
       // 2. Resetear estado operativo.
       //
       // DEPOSITOS-UX-TRAZABILIDAD-1 — en el mismo batch, las órdenes dejan de
@@ -1669,6 +1663,7 @@ function DepositosPageContent() {
         camposEventoDepositoRehecho({ uid, rol: userRol }, serverTimestamp(), motivo),
       )
       ;(dep.solicitudIds ?? []).forEach((sid) => b.update(doc(db, 'solicitudes_envio', sid), camposReaperturaRevision(destino, dep.id)))
+      agregarAnulacionDeMovimientosAlBatch(b, movimientos, uid, 'Depósito revertido a revisión por gestor', serverTimestamp())
       await b.commit()
       setRehaciendoId(null)
       setMotivoRehacer('')
@@ -1695,7 +1690,8 @@ function DepositosPageContent() {
     if (!uid || !userRol) return
     setErrorAccion(null)
     try {
-      await anularMovimientosDeDeposito(dep.id, 'Depósito anulado por administrador')
+      // FIN-5 — se leen aquí y se anulan en el MISMO batch que anula el depósito.
+      const movimientos = await leerMovimientosDeDeposito(dep.id)
       // FIN-2 — si la anulación libera las órdenes, libera también los gastos que
       // este depósito había consumido (solo los que siguen marcados por él).
       const gastosLeidos = anularLiberaGastos(dep.estado)
@@ -1720,6 +1716,7 @@ function DepositosPageContent() {
         ;(dep.solicitudIds ?? []).forEach((sid) => b.update(doc(db, 'solicitudes_envio', sid), camposLiberacionDeposito(destino)))
         liberarGastosDeDeposito(b, (gid) => doc(db, 'gastos_motorizado', gid), gastosLeidos, dep.id, deleteField())
       }
+      agregarAnulacionDeMovimientosAlBatch(b, movimientos, uid, 'Depósito anulado por administrador', serverTimestamp())
       await b.commit()
       setAnulandoId(null)
       setMotivoAnulacion('')
