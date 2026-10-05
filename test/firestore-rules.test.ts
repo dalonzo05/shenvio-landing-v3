@@ -46,7 +46,7 @@ import {
   camposPedirCorreccion,
   camposRehacerDeposito,
 } from '../lib/deposito-correccion'
-import { camposLiberacionDeposito, camposReaperturaRevision } from '../lib/deposito-transiciones'
+import { camposEnlaceDigitacion, camposLiberacionDeposito, camposReaperturaRevision } from '../lib/deposito-transiciones'
 
 // Identidades del arnés. El rol de comercio es 'Comercio' con mayúscula: así
 // está en las reglas y así se escribe en `usuarios`.
@@ -3545,4 +3545,40 @@ test('F5-REPRO · REPRODUCCIÓN del bug anterior: con un commit de ledger SEPARA
   await assertFails(principal.commit())
   assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'confirmado')
   assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'anulado', 'el estado inconsistente que FIN-5 elimina del writer')
+})
+
+// ─── F3 · FIN-3 · el gestor MATERIALIZA el depósito; la confirmación es de la callable ──
+//
+// confirmarStorkhub/confirmarComercio ya no confirman: dejan el depósito en
+// 'en_revision' con su boucher y el puntero en sus órdenes (mismo batch) y llaman a
+// confirmarDeposito. Si FIN-1 cierra las Rules del depósito, ESTE camino tiene que
+// seguir permitido: estos casos lo fijan. No son un cierre de autoridad.
+
+async function sembrarMaterializacion(destino: 'storkhub' | 'comercio') {
+  await sembrarDigitacion({ destinatario: destino, solicitudIds: [ORDEN_D, 'ordD2'] })
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordD2'), { ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0002', secuencia: 2 })
+  })
+}
+
+function batchMaterializar(uid: string, destino: 'storkhub' | 'comercio') {
+  const db = como(uid)
+  const b = writeBatch(db)
+  b.update(doc(db, 'ordenes_deposito', 'depD'), { boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x', uploadedAt: serverTimestamp(), motorizadoUid: UID_MOTO }, estado: 'en_revision' })
+  for (const id of [ORDEN_D, 'ordD2']) b.update(doc(db, 'solicitudes_envio', id), camposEnlaceDigitacion(destino, 'depD'))
+  return b
+}
+
+test('F3-R1 · gestor: depósito StorkHub pendiente_boucher → en_revision con boucher y puntero en sus órdenes, en UN batch ⇒ ALLOW', async () => {
+  await sembrarMaterializacion('storkhub')
+  await assertSucceeds(batchMaterializar(UID_GESTOR, 'storkhub').commit())
+  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'en_revision', 'queda en revisión, NO confirmado')
+  assert.equal((await punteroDeOrdenD()).storkhubDepositoId, 'depD')
+  assert.equal((await punteroDeOrdenD()).confirmadoStorkhub, undefined, 'las órdenes NO quedan confirmadas: eso lo hace la callable')
+})
+
+test('F3-R2 · gestor: depósito de comercio pendiente_boucher → en_revision con boucher y puntero ⇒ ALLOW', async () => {
+  await sembrarMaterializacion('comercio')
+  await assertSucceeds(batchMaterializar(UID_GESTOR, 'comercio').commit())
+  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'en_revision')
 })

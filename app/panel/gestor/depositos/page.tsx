@@ -28,14 +28,21 @@ import {
   DETALLE_ESPERANDO_COMPROBANTE,
 } from '@/lib/revision-depositos-gestor'
 import { compressImage, uploadDepositoBoucher, uploadVersionBoucherDeposito } from '@/fb/storage'
-import { registrarMovimiento, convertirDepositoEnDeuda } from '@/lib/financial-writes'
+import { convertirDepositoEnDeuda } from '@/lib/financial-writes'
+import { confirmarDepositoServidor } from '@/lib/confirmar-deposito-cliente'
+import {
+  ErrorConfirmacionDeposito,
+  exigirConfirmado,
+  presentarErrorConfirmacion,
+  presentarResultadoConfirmacion,
+} from '@/lib/confirmacion-deposito-ux'
 import {
   esGastoElegibleParaDeposito,
   marcarGastosConsumidos,
   liberarGastosDeDeposito,
   anularLiberaGastos,
 } from '@/lib/deposito-motorizado-envio'
-import { getDepositoEstado, cuentas } from '@/lib/financial-types'
+import { getDepositoEstado } from '@/lib/financial-types'
 import { calcularDeposito } from '@/lib/calculo-deposito'
 import {
   Wallet,
@@ -82,7 +89,6 @@ import {
   MOTIVO_EVENTO_MAX,
   SUBCOLECCION_EVENTOS_DEPOSITO,
   camposEventoDepositoAnulado,
-  camposEventoDepositoConfirmado,
   camposEventoDepositoDevuelto,
   camposEventoDepositoRehecho,
   filasEventosDeposito,
@@ -95,7 +101,6 @@ import {
   ETIQUETA_DEVUELTO,
   TEXTO_ESPERANDO_CORRECCION,
   camposAnularDeposito,
-  camposConfirmarDeposito,
   camposPedirCorreccion,
   camposRehacerDeposito,
   correccionSolicitada,
@@ -406,6 +411,8 @@ function DepositosPageContent() {
   const [motivoAnulacion, setMotivoAnulacion] = useState<string>('')
   const [motivoReemplazoBoucher, setMotivoReemplazoBoucher] = useState<string>('')
   const [errorAccion, setErrorAccion] = useState<string | null>(null)
+  // FIN-3 — avisos que no son error (p. ej. "ya estaba confirmado").
+  const [avisoAccion, setAvisoAccion] = useState<string | null>(null)
   // Eventos de auditoría, SOLO de los depósitos ya expandidos: cargarlos en el
   // listado sería una query por fila (N+1) sobre una pantalla que hoy cuesta
   // cero reads extra.
@@ -932,17 +939,57 @@ function DepositosPageContent() {
 
   // ── Confirmar depósito ─────────────────────────────────────────────────────
   //
-  // STORAGE ORPHANS BLOQUE 1: depositoId ahora lo genera y persiste el
-  // llamador (DepositoGrupo) una sola vez por sesión de confirmación, para
-  // que un reintento reutilice el MISMO id/path en vez de generar uno
-  // nuevo cada vez. El doc nace en 'pendiente_boucher' (mismo estado que ya
-  // usa Digitador — nada nuevo) y solo pasa a 'confirmado' junto con el
-  // campo boucher, en la misma escritura. Guard de idempotencia: si un
-  // intento previo con este MISMO depositoId ya dejó el depósito
-  // 'confirmado' con boucher (falló algo DESPUÉS, p.ej. el batch de
-  // órdenes), no se repite el upload ni la escritura del doc — se salta
-  // directo a los side effects, que reutilizar es seguro porque nunca
-  // llegan a ejecutarse dos veces (ver nota en registrarMovimiento).
+  // FIN-3 — CONFIRMAR YA NO ES UNA SECUENCIA DE COMMITS DE CLIENTE.
+  //
+  // Antes: batch (depósito 'confirmado' + evento) → batch (órdenes) →
+  // registrarMovimiento (que nunca lanza). Un fallo a mitad dejaba un depósito
+  // confirmado sin ledger, dos pestañas escribían dos movimientos y el monto era
+  // el que traía el documento.
+  //
+  // Ahora el gestor solo MATERIALIZA el depósito —nace en 'pendiente_boucher', se
+  // sube el comprobante y pasa a 'en_revision' con el puntero en sus órdenes— y la
+  // confirmación financiera (estado, evento, órdenes y ledger) la hace UNA
+  // callable en UNA transacción (functions/src/confirmacion-deposito.ts), que
+  // además demuestra el monto contra las órdenes y los gastos. Si la callable
+  // falla, el depósito queda en 'en_revision': seguro, visible en "Por revisar" y
+  // reintentable con el mismo depositoId, porque la callable es idempotente.
+  //
+  // STORAGE ORPHANS BLOQUE 1: depositoId lo genera y persiste el llamador
+  // (DepositoGrupo) una sola vez por sesión de confirmación, para que un
+  // reintento reutilice el MISMO id/path en vez de generar uno nuevo. El doc nace
+  // en 'pendiente_boucher' (mismo estado que usa Digitador) y solo pasa a
+  // 'en_revision' junto con el campo boucher. Si un intento previo ya dejó el
+  // depósito en 'en_revision' (o 'confirmado') con boucher, no se repite el upload
+  // ni la escritura del documento: se salta directo a la callable.
+
+  /** El depósito pasa a revisión con su comprobante y sus órdenes quedan apuntándole: un solo batch. */
+  async function enviarARevision(
+    depositoRef: ReturnType<typeof doc>,
+    boucherData: Record<string, unknown>,
+    ordenes: Solicitud[],
+    destino: 'storkhub' | 'comercio',
+    depositoId: string,
+  ) {
+    const b = writeBatch(db)
+    b.update(depositoRef, { boucher: boucherData, estado: 'en_revision' })
+    ordenes.forEach((o) => b.update(doc(db, 'solicitudes_envio', o.id), camposEnlaceDigitacion(destino, depositoId)))
+    await b.commit()
+  }
+
+  /**
+   * La ÚNICA confirmación financiera del producto: la callable. Lanza
+   * ErrorConfirmacionDeposito (con su mensaje de pantalla) si el depósito no
+   * quedó confirmado. Nunca reintenta por su cuenta.
+   */
+  async function confirmarEnServidor(depositoId: string) {
+    let presentada
+    try {
+      presentada = presentarResultadoConfirmacion(await confirmarDepositoServidor(depositoId))
+    } catch (e) {
+      presentada = presentarErrorConfirmacion(e)
+    }
+    return exigirConfirmado(presentada)
+  }
 
   async function confirmarStorkhub(ordenes: Solicitud[], motId: string, motNombre: string, boucherFile: File, depositoId: string) {
     // Resolver el doc ID canónico del motorizado (motId puede ser authUid en docs antiguos)
@@ -951,10 +998,11 @@ function DepositosPageContent() {
 
     const depositoRef = doc(db, 'ordenes_deposito', depositoId)
     const existente = await getDoc(depositoRef)
-    const yaConfirmado = existente.exists() && existente.data()?.estado === 'confirmado' && !!existente.data()?.boucher
+    const yaMaterializado = existente.exists()
+      && ['en_revision', 'confirmado'].includes(existente.data()?.estado)
+      && !!existente.data()?.boucher
 
-    let montoTotal: number
-    if (!yaConfirmado) {
+    if (!yaMaterializado) {
       // El boucher vive bajo el UID del MOTORIZADO dueño del depósito, no bajo el
       // del gestor que lo sube: el namespace identifica al titular del depósito.
       const montoBruto = ordenes.reduce((s, o) => s + calcDeposito(o).totalAStorkhub, 0)
@@ -965,25 +1013,13 @@ function DepositosPageContent() {
       // que quedan libres, se conserva el snapshot que el depósito ya guardó.
       const previo = existente.exists() ? existente.data() : null
       const reanuda = previo?.estado === 'pendiente_boucher'
-      montoTotal = reanuda ? (previo?.montoTotal ?? 0) : Math.max(0, montoBruto - gastosDescontados)
+      const montoTotal = reanuda ? (previo?.montoTotal ?? 0) : Math.max(0, montoBruto - gastosDescontados)
 
-      // 1) Documento primero, sin boucher — path determinístico ligado a
-      //    este depositoId, punto de reintento si el paso 2 falla. Antes de
-      //    esta escritura, compressImage() puede fallar sin dejar rastro
-      //    (nada se escribió todavía) — no hace falta que corra antes.
-      // IDENTIDAD-HUMANA-1 — { merge: true } es prerequisito de los codigos.
-      //
-      // El guard de arriba es `yaConfirmado` = existe && estado 'confirmado'
-      // && tiene boucher. Un reintento tras fallar el upload deja el doc en
-      // 'pendiente_boucher' SIN boucher, asi que `yaConfirmado` es false y
-      // este setDoc se vuelve a ejecutar sobre un documento que ya existe.
-      // Sin merge, ese reintento borraria el `codigo` y la `secuencia` que el
-      // trigger ya asigno, y el documento quedaria sin identidad operativa
-      // para siempre: el trigger solo dispara en la creacion.
-      //
-      // No hay semantica de reemplazo que preservar: el payload reescribe
-      // todos sus propios campos, y lo unico que sobrevive al merge —el
-      // boucher de un intento anterior— lo pisa el paso 3 igualmente.
+      // 1) Documento primero, sin boucher — path determinístico ligado a este
+      //    depositoId, punto de reintento si el paso 2 falla.
+      // IDENTIDAD-HUMANA-1 — { merge: true } es prerequisito de los codigos: un
+      // reintento reejecuta esta escritura sobre un documento que ya existe, y sin
+      // merge borraría el codigo y la secuencia que el trigger ya asignó.
       // FIN-2 — el depósito y la marca de consumo de sus gastos: UN solo commit.
       // Un reintento (reanuda) no vuelve a crearlo: ya existe con sus gastos.
       if (!reanuda) {
@@ -1008,58 +1044,32 @@ function DepositosPageContent() {
         await bCrear.commit()
       }
 
-      // 2) Comprimir y subir boucher al MISMO depositoId — si cualquiera de
-      //    los dos falla, el doc queda en 'pendiente_boucher' y un
-      //    reintento reutiliza este mismo path.
+      // 2) Comprimir y subir boucher al MISMO depositoId — si cualquiera de los
+      //    dos falla, el doc queda en 'pendiente_boucher' y un reintento
+      //    reutiliza este mismo path.
       const blob = await compressImage(boucherFile)
       const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
       const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
 
-      // 3) Boucher y transición a 'confirmado' en la MISMA escritura.
-      // DEPOSITOS-UX-TRAZABILIDAD-1 — este flujo deja el depósito confirmado
-      // por el gestor, pero no decía quién ni cuándo. Solo hacia adelante.
-      //
-      // DEPOSITO-AUDITORIA-1 — de updateDoc a un batch de dos escrituras, para
-      // que el evento DEPOSITO_CONFIRMADO entre junto con la confirmación. Los
-      // pasos 1 y 2 no se reordenan: son los que sostienen la garantía de
-      // Storage (el documento existe antes de que se suba el objeto).
-      await escribirConfirmacionConEvento(depositoRef, { boucher: boucherData })
-    } else {
-      montoTotal = existente.data()?.montoTotal ?? 0
+      // 3) Boucher + 'en_revision' + puntero en las órdenes (mismo batch).
+      await enviarARevision(depositoRef, boucherData, ordenes, 'storkhub', depositoId)
     }
 
-    const b = writeBatch(db)
-    ordenes.forEach((o) =>
-      b.update(doc(db, 'solicitudes_envio', o.id), {
-        'registro.deposito.confirmadoStorkhub': true,
-        'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
-        'registro.deposito.storkhubDepositoId': depositoId,
-      })
-    )
-    await b.commit()
-    await registrarMovimiento('deposito_efectivo_storkhub', montoTotal,
-      auth.currentUser?.uid ?? '',
-      `Gestor confirmó depósito Storkhub · ${motNombre}`,
-      { depositoId, motorizadoId: motDocId },
-      {
-        cuentas: { origen: cuentas.efectivoEnPoder(motDocId), destino: cuentas.banco },
-        propietario: 'storkhub',
-      }
-    )
+    // 4) La confirmación financiera: la callable, no este cliente.
+    await confirmarEnServidor(depositoId)
   }
 
   async function confirmarComercio(ordenes: Solicitud[], comercioUid: string, comercioNombre: string, motId: string, motNombre: string, boucherFile: File, depositoId: string) {
-    // Resolver el doc ID canónico del motorizado
     const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
-    const motDocId = await resolverMotorizadoDocId(motAuthUid)
 
     const depositoRef = doc(db, 'ordenes_deposito', depositoId)
     const existente = await getDoc(depositoRef)
-    const yaConfirmado = existente.exists() && existente.data()?.estado === 'confirmado' && !!existente.data()?.boucher
+    const yaMaterializado = existente.exists()
+      && ['en_revision', 'confirmado'].includes(existente.data()?.estado)
+      && !!existente.data()?.boucher
 
-    let montoTotal: number
-    if (!yaConfirmado) {
-      montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAlComercio, 0)
+    if (!yaMaterializado) {
+      const montoTotal = ordenes.reduce((s, o) => s + calcDeposito(o).totalAlComercio, 0)
 
       await setDoc(depositoRef, {
         creadoAt: serverTimestamp(),
@@ -1083,32 +1093,10 @@ function DepositosPageContent() {
       const { url, pathStorage } = await uploadDepositoBoucher(motAuthUid, depositoId, blob)
       const boucherData = { url, pathStorage, uploadedAt: serverTimestamp(), motorizadoUid: motAuthUid }
 
-      // DEPOSITOS-UX-TRAZABILIDAD-1 — este flujo deja el depósito confirmado
-      // por el gestor, pero no decía quién ni cuándo. Solo hacia adelante.
-      // DEPOSITO-AUDITORIA-1 — con su evento, en el mismo batch (ver arriba).
-      await escribirConfirmacionConEvento(depositoRef, { boucher: boucherData })
-    } else {
-      montoTotal = existente.data()?.montoTotal ?? 0
+      await enviarARevision(depositoRef, boucherData, ordenes, 'comercio', depositoId)
     }
 
-    const b = writeBatch(db)
-    ordenes.forEach((o) =>
-      b.update(doc(db, 'solicitudes_envio', o.id), {
-        'registro.deposito.confirmadoComercio': true,
-        'registro.deposito.confirmadoComercioAt': serverTimestamp(),
-        'registro.deposito.comercioDepositoId': depositoId,
-      })
-    )
-    await b.commit()
-    await registrarMovimiento('deposito_efectivo_comercio', montoTotal,
-      auth.currentUser?.uid ?? '',
-      `Gestor confirmó depósito comercio ${comercioNombre} · ${motNombre}`,
-      { depositoId, motorizadoId: motDocId, comercioId: comercioUid },
-      {
-        cuentas: { origen: cuentas.efectivoEnPoder(motDocId), destino: cuentas.saldoComercio(comercioUid) },
-        propietario: `comercio:${comercioUid}`,
-      }
-    )
+    await confirmarEnServidor(depositoId)
   }
 
   // ── Digitar depósito (DIGITADOR V1) ────────────────────────────────────────
@@ -1119,8 +1107,8 @@ function DepositosPageContent() {
   // de las órdenes solo se escribe el PUNTERO al depósito (DEPOSITOS-UX-
   // TRAZABILIDAD-1): la confirmación, los flags y los movimientos ocurren
   // solo si confirmarDepositoExistente lo aprueba después.
-  // confirmarStorkhub/confirmarComercio (arriba) quedan intactos: son la vía
-  // de un solo paso que sigue usando el gestor.
+  // confirmarStorkhub/confirmarComercio (arriba) son la vía de un solo paso del
+  // gestor; desde FIN-3 también terminan en la callable confirmarDeposito.
 
   // AUDITORÍA FINAL (ownership real del boucher): el documento Firestore se
   // crea PRIMERO (sin boucher) y recién después se sube el archivo — al
@@ -1279,93 +1267,22 @@ function DepositosPageContent() {
     await b.commit()
   }
 
-  /**
-   * DEPOSITO-AUDITORIA-1 — confirmación + evento en una sola escritura atómica.
-   *
-   * Los dos flujos en los que el gestor registra Y confirma de una
-   * (confirmarStorkhub / confirmarComercio) usaban un updateDoc suelto. Un
-   * batch de dos operaciones es el cambio mínimo que impide que el evento
-   * quede sin su confirmación, o al revés.
-   */
-  async function escribirConfirmacionConEvento(
-    depositoRef: ReturnType<typeof doc>,
-    camposExtra: Record<string, unknown>,
-  ) {
-    const uid = auth.currentUser?.uid ?? ''
-    if (!uid || !userRol) throw new Error('No pudimos verificar tu sesión. Volvé a entrar.')
-    const eventoId = doc(collection(db, depositoRef.path, SUBCOLECCION_EVENTOS_DEPOSITO)).id
-    const b = writeBatch(db)
-    b.set(
-      depositoRef,
-      { ...camposExtra, ...camposConfirmarDeposito(uid, serverTimestamp(), eventoId) },
-      { merge: true },
-    )
-    b.set(
-      doc(db, depositoRef.path, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
-      camposEventoDepositoConfirmado({ uid, rol: userRol }, serverTimestamp()),
-    )
-    await b.commit()
-  }
-
   // ── Confirmar depósito existente (creado por motorizado o digitador) ──────
-
+  //
+  // FIN-3 — la MISMA autoridad que confirmarStorkhub/confirmarComercio: la callable
+  // confirmarDeposito. Esta función ya no escribe estado, evento, órdenes ni
+  // ledger: pide la confirmación y presenta el resultado. setConfirmandoId queda
+  // como protección de UX contra el doble clic; la seguridad está en el servidor.
   async function confirmarDepositoExistente(dep: DepositoOrderDoc) {
     setConfirmandoId(dep.id)
+    setErrorAccion(null)
+    setAvisoAccion(null)
     try {
-      // dep.motorizadoUid es el authUid; resolvemos el doc ID para las cuentas del ledger
-      const motDocId = await resolverMotorizadoDocId(dep.motorizadoUid)
-      const uid = auth.currentUser?.uid ?? ''
-
-      const { doc: docRef } = await import('firebase/firestore')
-      const ref = docRef(db, 'ordenes_deposito', dep.id)
-      if (!userRol) throw new Error('No pudimos verificar tu sesión. Volvé a entrar.')
-      const b = writeBatch(db)
-      // HARDENING — el evento viaja en el MISMO batch que el cambio de estado
-      // y firestore.rules lo EXIGE: o quedan los dos, o no queda ninguno. Un
-      // depósito confirmado sin su evento sería un agujero en la historia
-      // justo en el momento en el que el dinero se da por recibido.
-      //
-      // Trazabilidad DIGITADOR V1 (sección 11): si dep.digitadoPorUid ya
-      // existe, queda junto a confirmadoPorUid — actores distintos. Si el
-      // depósito lo subió el motorizado, esto solo agrega quién confirmó.
-      const eventoId = docRef(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id
-      b.set(
-        docRef(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
-        camposEventoDepositoConfirmado({ uid, rol: userRol }, serverTimestamp()),
-      )
-      b.set(ref, camposConfirmarDeposito(uid, serverTimestamp(), eventoId), { merge: true })
-      const fieldKey = dep.destinatario === 'storkhub'
-        ? 'registro.deposito.confirmadoStorkhub'
-        : 'registro.deposito.confirmadoComercio'
-      const atKey = dep.destinatario === 'storkhub'
-        ? 'registro.deposito.confirmadoStorkhubAt'
-        : 'registro.deposito.confirmadoComercioAt'
-      const idKey = dep.destinatario === 'storkhub'
-        ? 'registro.deposito.storkhubDepositoId'
-        : 'registro.deposito.comercioDepositoId'
-      dep.solicitudIds.forEach((sid) => {
-        b.update(docRef(db, 'solicitudes_envio', sid), {
-          [fieldKey]: true,
-          [atKey]: serverTimestamp(),
-          [idKey]: dep.id,
-        })
-      })
-      await b.commit()
-      const _esStorkhub = dep.destinatario === 'storkhub'
-      await registrarMovimiento(
-        _esStorkhub ? 'deposito_efectivo_storkhub' : 'deposito_efectivo_comercio',
-        dep.montoTotal,
-        auth.currentUser?.uid ?? '',
-        `Depósito confirmado · ${dep.destinatarioNombre} · ${dep.motorizadoNombre}`,
-        { depositoId: dep.id, motorizadoId: motDocId },
-        {
-          cuentas: {
-            origen: cuentas.efectivoEnPoder(motDocId),
-            destino: _esStorkhub ? cuentas.banco : cuentas.saldoComercio(dep.destinatarioId ?? dep.destinatarioNombre),
-          },
-          propietario: _esStorkhub ? 'storkhub' : `comercio:${dep.destinatarioId ?? dep.destinatarioNombre}`,
-        }
-      )
+      const presentada = presentarResultadoConfirmacion(await confirmarDepositoServidor(dep.id))
+      if (presentada.categoria === 'ya_procesada') setAvisoAccion(presentada.mensaje)
+    } catch (e) {
+      // Sin reintento automático: el resultado puede ser desconocido.
+      setErrorAccion(presentarErrorConfirmacion(e).mensaje)
     } finally {
       setConfirmandoId(null)
     }
@@ -1748,6 +1665,12 @@ function DepositosPageContent() {
         <div className="flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
           <p className="text-xs font-semibold text-red-700">{errorAccion}</p>
           <button onClick={() => setErrorAccion(null)} className="text-xs font-semibold text-red-400 hover:text-red-600">✕</button>
+        </div>
+      )}
+      {avisoAccion && (
+        <div className="flex items-start justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
+          <p className="text-xs font-semibold text-blue-700">{avisoAccion}</p>
+          <button onClick={() => setAvisoAccion(null)} className="text-xs font-semibold text-blue-400 hover:text-blue-600">✕</button>
         </div>
       )}
 
@@ -2860,8 +2783,9 @@ function DepositoGrupo({
         setModalOpen(false)
         setBoucherFile(null)
       }, 2000)
-    } catch {
-      setErr('Error al subir el boucher. Intentá de nuevo.')
+    } catch (e) {
+      // FIN-3 — un rechazo de la callable se explica tal cual; solo el resto es "boucher".
+      setErr(e instanceof ErrorConfirmacionDeposito ? e.message : 'Error al subir el boucher. Intentá de nuevo.')
     } finally {
       setUploading(false)
     }
