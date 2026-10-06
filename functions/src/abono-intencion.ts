@@ -118,7 +118,8 @@ export function validarPeticionPreparar(data: unknown): PeticionPreparar {
   }
   const saldoId = saldoIdValido(d.saldoId);
   const out: PeticionPreparar = { saldoId, ...validarCamposAbono(d, saldoId) };
-  if (d.reconoceOperacionId !== undefined) {
+  // null (así llega `undefined` desde el SDK de Firebase) == ausente: no reconoce ninguna operación.
+  if (d.reconoceOperacionId !== undefined && d.reconoceOperacionId !== null) {
     if (typeof d.reconoceOperacionId !== 'string' || !RE_OPERACION_ID.test(d.reconoceOperacionId)) {
       throw new HttpsError('invalid-argument', 'reconoceOperacionId inválido.');
     }

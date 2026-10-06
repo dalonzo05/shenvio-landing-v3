@@ -18,7 +18,7 @@ import {
   prepararAbonoDirectoCore, obtenerIntencionAbonoCore, descartarIntencionAbonoCore, validarPeticionPreparar,
   idPuntero, type DepsIntencion,
 } from '../src/abono-intencion';
-import { registrarAbonoDirectoCore, type DepsAbono } from '../src/abono-directo';
+import { registrarAbonoDirectoCore, validarPeticionAbono, type DepsAbono } from '../src/abono-directo';
 
 type Doc = Record<string, unknown>;
 const TS = (n: number) => ({ __ts: n });
@@ -489,4 +489,86 @@ test('F4C-AT2 · las intenciones solo las escriben las Functions (Admin SDK, den
   for (const x of ['delete', 'TTL', 'ttl', 'expira', 'caduca', 'FieldValue.delete']) assert.ok(!nucleo.includes(x) && !callable.includes(x), `ninguna ruta borra o caduca intenciones (${x})`);
   const rules = norm(['..', '..', '..', 'firestore.rules']);
   assert.ok(!rules.includes('intenciones_abono_directo') && !rules.includes('punteros_abono_directo'), 'sin reglas de cliente: el cliente no las lee ni las escribe');
+});
+
+// ── Fix post-E2E: opcionales que el SDK de Firebase entrega como null ─────────
+// @firebase/functions serializa `undefined` como `null`: el primer abono real llegó con
+// `reconoceOperacionId: null` y el parser lo rechazó como inválido. Para los campos REALMENTE opcionales
+// (reconoceOperacionId, nota, comprobanteUrl, comprobantePath) null == ausente; los obligatorios siguen
+// estrictos y un tipo equivocado distinto de null sigue siendo inválido.
+test('F4C-NULL1 · REPRODUCCIÓN E2E: saldo 80, primer abono C$10 por ajuste_manual con reconoceOperacionId:null (como lo entrega el SDK) ⇒ se prepara, se aplica: 80→70, abonado_parcial', async () => {
+  const w = mundo(); sembrar(w, { saldo: { montoOriginal: 80, saldoPendiente: 80 } });
+  const peticion = { saldoId: 's1', monto: 10, metodoAbono: 'ajuste_manual', nota: 'E2E FIN-4C abono directo autoritativo', reconoceOperacionId: null };
+  const p = await prepararAbonoDirectoCore(w.depsInt, 'a1', peticion);
+  assert.equal(p.resultado, 'preparada');
+  const r = await registrarAbonoDirectoCore(w.depsAbo, 'a1', { saldoId: 's1', monto: 10, operacionId: p.intencion.operacionId, metodoAbono: 'ajuste_manual', nota: 'E2E FIN-4C abono directo autoritativo' });
+  assert.equal(r.resultado, 'aplicado');
+  assert.equal(w.saldo().saldoPendiente, 70);
+  assert.equal(w.saldo().estado, 'abonado_parcial');
+  assert.equal((w.saldo().abonos as Doc[]).length, 1);
+  assert.equal(w.movimientos().length, 1);
+  assert.equal(w.intenciones()[0].estado, 'aplicada');
+  assert.equal(w.intenciones()[0].actorRol, 'admin');
+});
+
+test('F4C-NULL2 · (SDK-2) null en un opcional REAL equivale a ausente: la petición normalizada es idéntica a la que lo omite', () => {
+  const sin = validarPeticionPreparar({ ...base, metodoAbono: 'ajuste_manual' });
+  for (const campo of ['reconoceOperacionId', 'nota', 'comprobanteUrl', 'comprobantePath']) {
+    const con = validarPeticionPreparar({ ...base, metodoAbono: 'ajuste_manual', [campo]: null });
+    assert.deepEqual(con, sin, `${campo}: null ≡ ausente`);
+  }
+  const todos = validarPeticionPreparar({ ...base, nota: null, comprobanteUrl: null, comprobantePath: null, reconoceOperacionId: null });
+  assert.equal(Object.prototype.hasOwnProperty.call(todos, 'reconoceOperacionId'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(todos, 'comprobanteUrl'), false);
+  const reg = validarPeticionAbono({ ...base, operacionId: 'op_valida_de_16_chars', comprobanteUrl: null, comprobantePath: null, nota: null });
+  assert.equal(Object.prototype.hasOwnProperty.call(reg, 'comprobanteUrl'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(reg, 'comprobantePath'), false);
+});
+
+test('F4C-NULL3 · (SDK-3) un tipo equivocado distinto de null SIGUE siendo inválido en cada opcional', () => {
+  const invalido = (extra: Record<string, unknown>) => assert.throws(() => validarPeticionPreparar({ ...base, ...extra }), codigo('invalid-argument'), JSON.stringify(extra));
+  for (const v of [123, {}, [], true, '', 'corto', 'con espacios no validos 1234']) invalido({ reconoceOperacionId: v });
+  for (const v of [123, {}, [], true, 'http://x/y.jpg', '']) invalido({ comprobanteUrl: v });
+  for (const v of [123, {}, [], true, 'otro/lugar.jpg', 'saldos/s2/abono_0.jpg', 'saldos/s1/../x']) invalido({ comprobantePath: v });
+  for (const v of [123, {}, [], true]) invalido({ nota: v });
+  for (const v of [123, {}, [], true, '']) assert.throws(() => validarPeticionAbono({ ...base, operacionId: 'op_valida_de_16_chars', comprobanteUrl: v }), codigo('invalid-argument'));
+});
+
+test('F4C-NULL4 · null NO relaja los OBLIGATORIOS: saldoId, monto, metodoAbono (y operacionId al registrar) nulos ⇒ invalid-argument; los campos extra siguen rechazados', () => {
+  for (const campo of ['saldoId', 'monto', 'metodoAbono']) {
+    assert.throws(() => validarPeticionPreparar({ ...base, [campo]: null }), codigo('invalid-argument'), `preparar ${campo}`);
+    assert.throws(() => validarPeticionAbono({ ...base, operacionId: 'op_valida_de_16_chars', [campo]: null }), codigo('invalid-argument'), `registrar ${campo}`);
+  }
+  assert.throws(() => validarPeticionAbono({ ...base, operacionId: null }), codigo('invalid-argument'));
+  assert.throws(() => validarPeticionAbono({ ...base }), codigo('invalid-argument'), 'operacionId ausente');
+  assert.throws(() => validarPeticionPreparar({ ...base, extra: null }), codigo('invalid-argument'), 'campo extra aunque sea null');
+  assert.throws(() => validarPeticionPreparar({ ...base, operacionId: null }), codigo('invalid-argument'), 'preparar no acepta operacionId');
+});
+
+test('F4C-NULL5 · reconoceOperacionId:null NO rompe la protección de la intención: tras A aplicada no nace B; con el reconocimiento explícito de A sí', async () => {
+  const w = mundo(); sembrar(w);
+  const a = await preparar(w);
+  await registrar(w, 'g1', a.intencion.operacionId);
+  const sinReconocer = await preparar(w, 'g1', { reconoceOperacionId: null });
+  assert.equal(sinReconocer.resultado, 'ya_aplicada');
+  assert.equal(sinReconocer.intencion.operacionId, a.intencion.operacionId);
+  assert.equal(w.intenciones().length, 1, 'no se creó B en silencio');
+  const b = await preparar(w, 'g1', { reconoceOperacionId: a.intencion.operacionId });
+  assert.notEqual(b.intencion.operacionId, a.intencion.operacionId);
+  assert.equal(w.intenciones().length, 2);
+  assert.equal((await preparar(w, 'g1', { reconoceOperacionId: null })).resultado, 'recuperada');
+  assert.equal(w.intenciones().length, 2);
+});
+
+test('F4C-NULL6 · (SDK-5) el comprobante: null se comporta EXACTAMENTE como ausente, por método. Hoy la exigencia de comprobante para transferencia vive en la pantalla (METODOS_REQUIEREN_COMPROBANTE), no en el servidor', async () => {
+  for (const metodoAbono of ['ajuste_manual', 'transferencia', 'descuento_liquidacion']) {
+    const w1 = mundo(); sembrar(w1); const w2 = mundo(); sembrar(w2);
+    const ausente = await prepararAbonoDirectoCore(w1.depsInt, 'g1', { saldoId: 's1', monto: 10, metodoAbono });
+    const nulo = await prepararAbonoDirectoCore(w2.depsInt, 'g1', { saldoId: 's1', monto: 10, metodoAbono, comprobanteUrl: null, comprobantePath: null });
+    assert.equal(nulo.resultado, ausente.resultado, metodoAbono);
+    const a = await registrarAbonoDirectoCore(w1.depsAbo, 'g1', { saldoId: 's1', monto: 10, operacionId: ausente.intencion.operacionId, metodoAbono });
+    const n = await registrarAbonoDirectoCore(w2.depsAbo, 'g1', { saldoId: 's1', monto: 10, operacionId: nulo.intencion.operacionId, metodoAbono, comprobanteUrl: null, comprobantePath: null });
+    assert.equal(n.resultado, a.resultado, metodoAbono);
+    assert.deepEqual(Object.keys((w2.saldo().abonos as Doc[])[0]).sort(), Object.keys((w1.saldo().abonos as Doc[])[0]).sort(), 'el abono guardado tiene la misma forma: sin comprobante');
+  }
 });

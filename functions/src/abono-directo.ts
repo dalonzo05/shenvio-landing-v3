@@ -160,13 +160,15 @@ export function validarCamposAbono(d: Record<string, unknown>, saldoId: string):
     nota = d.nota.trim();
   }
   const out: CamposAbono = { monto: d.monto, metodoAbono: d.metodoAbono, nota };
-  if (d.comprobanteUrl !== undefined) {
+  // El SDK de Firebase entrega `undefined` como `null`: en un opcional REAL, null equivale a ausente.
+  // Un tipo equivocado distinto de null sigue siendo inválido; los obligatorios no pasan por aquí.
+  if (d.comprobanteUrl !== undefined && d.comprobanteUrl !== null) {
     if (typeof d.comprobanteUrl !== 'string' || !d.comprobanteUrl.startsWith('https://') || d.comprobanteUrl.length > MAX_URL) {
       throw new HttpsError('invalid-argument', 'comprobanteUrl inválido.');
     }
     out.comprobanteUrl = d.comprobanteUrl;
   }
-  if (d.comprobantePath !== undefined) {
+  if (d.comprobantePath !== undefined && d.comprobantePath !== null) {
     // El comprobante de un abono vive en saldos/<saldoId>/…: no se acepta una ruta de otro lado.
     if (typeof d.comprobantePath !== 'string' || !d.comprobantePath.startsWith(`saldos/${saldoId}/`) || d.comprobantePath.includes('..') || d.comprobantePath.length > MAX_PATH) {
       throw new HttpsError('invalid-argument', 'comprobantePath inválido.');

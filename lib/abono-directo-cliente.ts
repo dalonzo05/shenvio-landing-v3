@@ -2,6 +2,7 @@ import { httpsCallable } from 'firebase/functions'
 import { functions } from '@/fb/config'
 import type { IntencionAbono, RespuestaPreparar, ResultadoAbonoServidor } from './abono-directo-ux'
 import type { MetodoAbono } from './financial-types'
+import { payloadPreparar, payloadRegistrar } from './abono-directo-payload'
 
 // FIN-4C — los ÚNICOS caminos del producto para registrar un abono directo.
 //
@@ -33,7 +34,7 @@ export interface PeticionAbonoCliente {
 }
 
 export async function prepararAbonoDirectoServidor(p: PeticionPrepararCliente): Promise<RespuestaPreparar> {
-  const r = await httpsCallable<PeticionPrepararCliente, RespuestaPreparar>(functions, 'prepararAbonoDirecto')(p)
+  const r = await httpsCallable<Record<string, unknown>, RespuestaPreparar>(functions, 'prepararAbonoDirecto')(payloadPreparar(p))
   return r.data
 }
 
@@ -48,6 +49,6 @@ export async function descartarAbonoDirectoServidor(operacionId: string): Promis
 }
 
 export async function registrarAbonoDirectoServidor(p: PeticionAbonoCliente): Promise<ResultadoAbonoServidor> {
-  const r = await httpsCallable<PeticionAbonoCliente, ResultadoAbonoServidor>(functions, 'registrarAbonoDirecto')(p)
+  const r = await httpsCallable<Record<string, unknown>, ResultadoAbonoServidor>(functions, 'registrarAbonoDirecto')(payloadRegistrar(p))
   return r.data
 }
