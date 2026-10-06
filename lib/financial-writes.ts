@@ -12,7 +12,6 @@ import {
   updateDoc,
   where,
   writeBatch,
-  arrayUnion,
   Timestamp,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
@@ -23,7 +22,6 @@ import type {
   GastoMotorizado,
   TipoSaldo,
   SaldoCargoMotorizado,
-  AbonoSaldo,
   MetodoAbono,
   OrigenSaldo,
   PropietarioEfectivo,
@@ -277,75 +275,13 @@ export async function crearSaldoCargo(params: {
   return ref.id
 }
 
-/**
- * Registra un abono (pago parcial o total) a un saldo a cargo.
- * Usa runTransaction para que la actualización del saldo y la creación del
- * movimiento sean atómicas: si una falla, ninguna se aplica.
- */
-export async function registrarAbonoSaldo(params: {
-  saldoId: string
-  montoAbono: number
-  metodoAbono: MetodoAbono
-  nota?: string
-  operadorId: string
-  motorizadoId: string
-  motorizadoNombre: string
-  comprobanteUrl?: string
-  comprobantePath?: string
-}): Promise<void> {
-  const {
-    saldoId, montoAbono, metodoAbono, nota, operadorId,
-    motorizadoId, motorizadoNombre, comprobanteUrl, comprobantePath,
-  } = params
-
-  const cuentaDestino: string =
-    metodoAbono === 'transferencia'          ? cuentas.banco :
-    /* descuento_liquidacion | ajuste_manual */ cuentas.recuperacionDeuda
-
-  const saldoRef = doc(db, 'saldos_cargo_motorizado', saldoId)
-  const movRef   = doc(collection(db, 'movimientos_financieros'))
-
-  await runTransaction(db, async (tx) => {
-    const snap = await tx.get(saldoRef)
-    if (!snap.exists()) throw new Error(`Saldo ${saldoId} no encontrado`)
-
-    const pendienteActual = snap.data().saldoPendiente as number
-    const nuevoSaldo  = Math.max(0, pendienteActual - montoAbono)
-    const nuevoEstado = nuevoSaldo <= 0 ? 'pagado' : 'abonado_parcial'
-
-    const abono: AbonoSaldo = {
-      monto: montoAbono,
-      fecha: Timestamp.now(), // serverTimestamp() no puede usarse dentro de arrayUnion()
-      metodoAbono,
-      nota: nota ?? '',
-      creadoPorUid: operadorId,
-      ...(comprobanteUrl ? { comprobanteUrl } : {}),
-      ...(comprobantePath ? { comprobantePath } : {}),
-    }
-
-    tx.update(saldoRef, {
-      saldoPendiente: nuevoSaldo,
-      estado: nuevoEstado,
-      abonos: arrayUnion(abono),
-      updatedAt: serverTimestamp(),
-    })
-
-    const movimiento: Omit<MovimientoFinanciero, 'id'> = {
-      tipo: 'abono_deuda_motorizado',
-      monto: montoAbono,
-      at: serverTimestamp(),
-      creadoPorUid: operadorId,
-      creadoPorRol: 'gestor',
-      descripcion: `Abono deuda (${metodoAbono}) · ${motorizadoNombre}`,
-      estado: 'activo',
-      cuentaOrigen:  cuentas.deudaMotorizado(motorizadoId),
-      cuentaDestino,
-      motorizadoId,
-      saldoId,
-    }
-    tx.set(movRef, movimiento)
-  })
-}
+// FIN-4C — registrarAbonoSaldo YA NO VIVE AQUÍ. El abono directo del gestor/admin (saldo +
+// historial de abonos + ledger) lo hace la Cloud Function registrarAbonoDirecto en una sola
+// transacción, con el monto validado contra el saldo real, el estado protegido, el actor y la
+// cuenta derivados en el servidor y un operacionId idempotente: functions/src/abono-directo.ts.
+// El cliente la invoca con lib/abono-directo-cliente.ts y no escribe nada de eso por su cuenta.
+// El abono por liquidación (crearLiquidacion) y la propuesta de abono (digitador) tienen sus
+// propios caminos y no pasan por aquí.
 
 /**
  * Anula un saldo a cargo del motorizado.

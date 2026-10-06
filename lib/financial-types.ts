@@ -182,7 +182,7 @@ export interface MovimientoFinanciero {
   monto: number
   at: unknown // siempre serverTimestamp() — nunca Date ni Timestamp.fromDate()
   creadoPorUid: string  // UID de quien disparó la escritura
-  creadoPorRol: 'gestor' | 'motorizado' | 'sistema'
+  creadoPorRol: 'admin' | 'gestor' | 'motorizado' | 'sistema'
   descripcion: string
   estado: 'activo' | 'anulado'
   anuladoPorMovimientoId?: string // si fue revertido por otro movimiento
@@ -213,6 +213,7 @@ export interface MovimientoFinanciero {
   cargoId?: string        // ref a cargos_delivery (Fase 1A)
   pagoComercioId?: string // ref a pagos_comercio (Fase 1A)
   aplicacionId?: string   // ref a aplicaciones_pago (Fase 1A)
+  operacionId?: string    // FIN-4C: identidad de la intención de abono directo (idempotencia)
 
   // ── Datos extra sin schema fijo ─────────────────────────────────────────────
   metadata?: Record<string, unknown>
@@ -338,6 +339,14 @@ export interface AbonoSaldo {
   // quien registró la propuesta; propuestaId enlaza al documento origen.
   digitadoPorUid?: string
   propuestaId?: string
+
+  // ── Trazabilidad del abono directo (FIN-4C) ─────────────────────────────
+  // Presentes solo cuando el abono lo aplicó registrarAbonoDirecto (Cloud Function).
+  // operacionId identifica la INTENCIÓN (idempotencia); movimientoId enlaza la entrada
+  // con su movimiento del ledger (abono ↔ movimiento 1:1); creadoPorRol es el rol REAL.
+  operacionId?: string
+  movimientoId?: string
+  creadoPorRol?: 'admin' | 'gestor'
 }
 
 // ─── Propuestas de abono de saldo (colección propuestas_abono_saldo) ──────────

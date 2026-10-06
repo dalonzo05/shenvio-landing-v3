@@ -66,7 +66,7 @@ export interface MovimientoFinanciero {
   monto: number
   at: unknown
   creadoPorUid: string
-  creadoPorRol: 'gestor' | 'motorizado' | 'sistema'
+  creadoPorRol: 'admin' | 'gestor' | 'motorizado' | 'sistema'
   descripcion: string
   estado: 'activo' | 'anulado'
   anuladoPorMovimientoId?: string
@@ -91,6 +91,7 @@ export interface MovimientoFinanciero {
   cargoId?: string
   pagoComercioId?: string
   aplicacionId?: string
+  operacionId?: string // FIN-4C: identidad de la intención de abono directo (idempotencia)
 
   metadata?: Record<string, unknown>
 }

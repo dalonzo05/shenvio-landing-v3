@@ -14,10 +14,18 @@ import { httpsCallable } from 'firebase/functions'
 import { auth, db, functions } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
-  registrarAbonoSaldo, anularSaldoCargo, revertirConversionEnDeuda, condonarDeudaMotorizado,
+  anularSaldoCargo, revertirConversionEnDeuda, condonarDeudaMotorizado,
   crearPropuestaAbono, corregirPropuestaAbono,
   crearPropuestaAbonoPendienteComprobante, completarComprobantePropuesta,
 } from '@/lib/financial-writes'
+import { registrarAbonoDirectoServidor, type PeticionAbonoCliente } from '@/lib/abono-directo-cliente'
+import {
+  ErrorAbonoDirecto,
+  exigirAbonado,
+  presentarErrorAbono,
+  presentarResultadoAbono,
+} from '@/lib/abono-directo-ux'
+import { conservarOperacion, obtenerOperacion, type OperacionAbono } from '@/lib/abono-operacion'
 import {
   LABELS_TIPO_SALDO,
   type SaldoCargoMotorizado,
@@ -147,6 +155,8 @@ function SaldosPageContent() {
   // operación siga recuperable. Se resetea junto con el resto del form en
   // resetAbono().
   const pendingPropuestaIdRef = useRef<string | null>(null)
+  // FIN-4C — la operación (identidad de la intención) del abono directo en curso.
+  const operacionAbonoRef = useRef<OperacionAbono | null>(null)
 
   // ── DIGITADOR V1 — doble control de abonos (D3) ───────────────────────────
   const [userRol, setUserRol] = useState<string | null>(null)
@@ -237,6 +247,8 @@ function SaldosPageContent() {
   }
 
   function resetAbono() {
+    // Cancelar o éxito: la intención termina. Un resultado incierto NO pasa por aquí.
+    operacionAbonoRef.current = null
     setAbonoId(null)
     setPropuestaCorrigiendoId(null)
     setMontoAbono('')
@@ -250,6 +262,20 @@ function SaldosPageContent() {
   }
 
   // ── Abonar ─────────────────────────────────────────────────────────────────
+
+  /**
+   * FIN-4C — el ÚNICO abono directo del producto: la callable. Lanza ErrorAbonoDirecto (con su
+   * mensaje de pantalla) si el abono no quedó aplicado. Nunca reintenta por su cuenta.
+   */
+  async function abonarEnServidor(p: PeticionAbonoCliente) {
+    let presentada
+    try {
+      presentada = presentarResultadoAbono(await registrarAbonoDirectoServidor(p))
+    } catch (e) {
+      presentada = presentarErrorAbono(e)
+    }
+    return exigirAbonado(presentada)
+  }
 
   async function handleAbono(saldo: Saldo) {
     setErrAbono(null)
@@ -280,21 +306,29 @@ function SaldosPageContent() {
         comprobantePath = pathStorage
       }
 
-      await registrarAbonoSaldo({
+      // La identidad de la INTENCIÓN: nueva para un abono nuevo, la MISMA mientras el resultado
+      // sea incierto (un reintento tras un error temporal reusa este operacionId).
+      const operacion = obtenerOperacion(operacionAbonoRef.current, saldo.id)
+      operacionAbonoRef.current = operacion
+      await abonarEnServidor({
         saldoId: saldo.id,
-        montoAbono: monto,
+        monto,
+        operacionId: operacion.operacionId,
         metodoAbono,
         nota: notaAbono,
-        operadorId: auth.currentUser?.uid ?? '',
-        motorizadoId: saldo.motorizadoId,
-        motorizadoNombre: saldo.motorizadoNombre,
-        comprobanteUrl,
-        comprobantePath,
+        ...(comprobanteUrl ? { comprobanteUrl } : {}),
+        ...(comprobantePath ? { comprobantePath } : {}),
       })
       resetAbono()
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error('Error registrando abono:', e)
-      setErrAbono(e?.message || 'Error al registrar abono')
+      if (e instanceof ErrorAbonoDirecto) {
+        // Un resultado definitivo cierra la operación; uno incierto la conserva para reintentar.
+        if (!conservarOperacion(e.categoria)) operacionAbonoRef.current = null
+        setErrAbono(e.message)
+      } else {
+        setErrAbono(e instanceof Error ? e.message : 'Error al registrar abono')
+      }
     } finally {
       setSavingAbono(false)
     }

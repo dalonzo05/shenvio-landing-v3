@@ -15,6 +15,7 @@ export { crearAccesoMotorizado, repararAccesoMotorizado, diagnosticarAccesoMotor
 export { actualizarPresenciaMotorizado } from './presencia-motorizado-callable';
 export { confirmarDeposito } from './confirmacion-deposito-callable';
 export { convertirDepositoEnDeuda } from './conversion-deposito-deuda-callable';
+export { registrarAbonoDirecto } from './abono-directo-callable';
 
 /**
  * Daily report (DRY-RUN / LOG-ONLY): lists orders delivered more than 45
