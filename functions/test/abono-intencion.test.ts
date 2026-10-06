@@ -112,7 +112,7 @@ function sembrar(w: Mundo, opts: { saldo?: Doc; id?: string } = {}) {
   }
 }
 
-const base = { saldoId: 's1', monto: 40, metodoAbono: 'transferencia' };
+const base = { saldoId: 's1', monto: 40, metodoAbono: 'ajuste_manual' };
 const preparar = (w: Mundo, uid: string | null = 'g1', extra: Record<string, unknown> = {}) =>
   prepararAbonoDirectoCore(w.depsInt, uid ?? undefined, { ...base, ...extra });
 const registrar = (w: Mundo, uid: string | null, op: string, extra: Record<string, unknown> = {}) =>
@@ -128,7 +128,7 @@ test('F4C-I1 · una intención NUEVA: la crea el servidor (id, actor y rol del s
   assert.equal(r.resultado, 'preparada');
   const op = r.intencion.operacionId;
   assert.match(op, /^[A-Za-z0-9_-]{16,64}$/, 'cumple el formato que valida registrarAbonoDirecto');
-  assert.deepEqual({ ...r.intencion }, { operacionId: op, saldoId: 's1', monto: 40, metodoAbono: 'transferencia', estado: 'preparada' });
+  assert.deepEqual({ ...r.intencion }, { operacionId: op, saldoId: 's1', monto: 40, metodoAbono: 'ajuste_manual', estado: 'preparada' });
   const doc = w.get(`intenciones_abono_directo/${op}`)!;
   assert.equal(doc.actorUid, 'a1', 'el actor sale de request.auth');
   assert.equal(doc.actorRol, 'admin', 'el rol sale de usuarios/{uid}');
@@ -205,7 +205,7 @@ test('F4C-I6 · una preparada con OTROS parámetros no se reemplaza en silencio:
   assert.equal(b.resultado, 'operacion_pendiente_existente');
   assert.equal(b.intencion.operacionId, a.intencion.operacionId);
   assert.equal(b.intencion.monto, 40, 'la existente queda intacta');
-  const c = await preparar(w, 'g1', { metodoAbono: 'ajuste_manual' });
+  const c = await preparar(w, 'g1', { metodoAbono: 'descuento_liquidacion' });
   assert.equal(c.resultado, 'operacion_pendiente_existente');
   assert.equal(w.intenciones().length, 1);
   // la resolución es EXPLÍCITA
@@ -245,7 +245,7 @@ test('F4C-I8 · otro saldo no reutiliza la intención: cada saldo tiene la suya;
   const antes = w.snapshot();
   await assert.rejects(registrar(w, 'g1', a.intencion.operacionId, { saldoId: 's2' }), codigo('failed-precondition', 'conflicto_idempotencia'));
   await assert.rejects(registrar(w, 'g1', a.intencion.operacionId, { monto: 41 }), codigo('failed-precondition', 'conflicto_idempotencia'));
-  await assert.rejects(registrar(w, 'g1', a.intencion.operacionId, { metodoAbono: 'ajuste_manual' }), codigo('failed-precondition', 'conflicto_idempotencia'));
+  await assert.rejects(registrar(w, 'g1', a.intencion.operacionId, { metodoAbono: 'descuento_liquidacion' }), codigo('failed-precondition', 'conflicto_idempotencia'));
   assert.equal(w.snapshot(), antes);
 });
 
@@ -560,15 +560,89 @@ test('F4C-NULL5 · reconoceOperacionId:null NO rompe la protección de la intenc
   assert.equal(w.intenciones().length, 2);
 });
 
-test('F4C-NULL6 · (SDK-5) el comprobante: null se comporta EXACTAMENTE como ausente, por método. Hoy la exigencia de comprobante para transferencia vive en la pantalla (METODOS_REQUIEREN_COMPROBANTE), no en el servidor', async () => {
-  for (const metodoAbono of ['ajuste_manual', 'transferencia', 'descuento_liquidacion']) {
-    const w1 = mundo(); sembrar(w1); const w2 = mundo(); sembrar(w2);
-    const ausente = await prepararAbonoDirectoCore(w1.depsInt, 'g1', { saldoId: 's1', monto: 10, metodoAbono });
-    const nulo = await prepararAbonoDirectoCore(w2.depsInt, 'g1', { saldoId: 's1', monto: 10, metodoAbono, comprobanteUrl: null, comprobantePath: null });
-    assert.equal(nulo.resultado, ausente.resultado, metodoAbono);
-    const a = await registrarAbonoDirectoCore(w1.depsAbo, 'g1', { saldoId: 's1', monto: 10, operacionId: ausente.intencion.operacionId, metodoAbono });
-    const n = await registrarAbonoDirectoCore(w2.depsAbo, 'g1', { saldoId: 's1', monto: 10, operacionId: nulo.intencion.operacionId, metodoAbono, comprobanteUrl: null, comprobantePath: null });
-    assert.equal(n.resultado, a.resultado, metodoAbono);
-    assert.deepEqual(Object.keys((w2.saldo().abonos as Doc[])[0]).sort(), Object.keys((w1.saldo().abonos as Doc[])[0]).sort(), 'el abono guardado tiene la misma forma: sin comprobante');
+// ── Comprobante de la transferencia: regla de negocio SERVER-SIDE ─────────────
+// La pantalla exige comprobante solo para `transferencia` (METODOS_REQUIEREN_COMPROBANTE) y manda AMBOS campos
+// (comprobanteUrl y comprobantePath, que produce uploadComprobante). El servidor ahora lo hace autoritativo en
+// registrarAbonoDirecto: preparar corre ANTES de subir la imagen, así que no puede exigirlo; la intención queda
+// preparada (no se cierra) y se aplica cuando llega con su comprobante.
+const COMPROBANTE = { comprobanteUrl: 'https://ex.test/c.jpg', comprobantePath: 'saldos/s1/abono_0.jpg' };
+
+test('F4C-TR1 · transferencia SIN comprobante ⇒ rechazo de negocio (failed-precondition/comprobante_requerido): 0 saldo, 0 abono, 0 ledger; la intención sigue preparada', async () => {
+  const w = mundo(); sembrar(w);
+  const p = await preparar(w, 'g1', { metodoAbono: 'transferencia' });
+  assert.equal(p.resultado, 'preparada', 'preparar no puede exigirlo: la pantalla sube la imagen DESPUÉS');
+  const antes = w.snapshot();
+  await assert.rejects(registrar(w, 'g1', p.intencion.operacionId, { metodoAbono: 'transferencia' }), codigo('failed-precondition', 'comprobante_requerido'));
+  assert.equal(w.snapshot(), antes, 'ni una escritura');
+  assert.equal(w.saldo().saldoPendiente, 100);
+  assert.equal((w.saldo().abonos as Doc[]).length, 0);
+  assert.equal(w.movimientos().length, 0);
+  assert.equal(w.intenciones()[0].estado, 'preparada');
+  // el mismo operacionId se aplica después, con su comprobante
+  assert.equal((await registrar(w, 'g1', p.intencion.operacionId, { metodoAbono: 'transferencia', ...COMPROBANTE })).resultado, 'aplicado');
+  assert.equal(w.saldo().saldoPendiente, 60);
+});
+
+test('F4C-TR2 · transferencia CON comprobante válido (url + path) ⇒ permitida y el abono guarda el comprobante', async () => {
+  const w = mundo(); sembrar(w);
+  const p = await preparar(w, 'g1', { metodoAbono: 'transferencia' });
+  assert.equal((await registrar(w, 'g1', p.intencion.operacionId, { metodoAbono: 'transferencia', ...COMPROBANTE })).resultado, 'aplicado');
+  const abono = (w.saldo().abonos as Doc[])[0];
+  assert.equal(abono.comprobanteUrl, COMPROBANTE.comprobanteUrl);
+  assert.equal(abono.comprobantePath, COMPROBANTE.comprobantePath);
+});
+
+test('F4C-TR3 · transferencia con comprobante null (como lo manda el SDK) o a medias ⇒ rechazo de NEGOCIO, no invalid-argument del parser', async () => {
+  for (const comp of [{ comprobanteUrl: null, comprobantePath: null }, { comprobanteUrl: null }, { comprobanteUrl: COMPROBANTE.comprobanteUrl }, { comprobantePath: COMPROBANTE.comprobantePath }, { comprobanteUrl: COMPROBANTE.comprobanteUrl, comprobantePath: null }]) {
+    const w = mundo(); sembrar(w);
+    const p = await preparar(w, 'g1', { metodoAbono: 'transferencia' });
+    const antes = w.snapshot();
+    await assert.rejects(registrar(w, 'g1', p.intencion.operacionId, { metodoAbono: 'transferencia', ...comp }), codigo('failed-precondition', 'comprobante_requerido'), JSON.stringify(comp));
+    assert.equal(w.snapshot(), antes);
   }
+});
+
+test('F4C-TR4 · ajuste_manual sin comprobante (ausente o null) ⇒ permitido: la regla NO es global', async () => {
+  for (const comp of [{}, { comprobanteUrl: null, comprobantePath: null }]) {
+    const w = mundo(); sembrar(w);
+    const p = await preparar(w, 'g1', { metodoAbono: 'ajuste_manual' });
+    assert.equal((await registrar(w, 'g1', p.intencion.operacionId, { metodoAbono: 'ajuste_manual', ...comp })).resultado, 'aplicado');
+    const abono = (w.saldo().abonos as Doc[])[0];
+    assert.equal('comprobanteUrl' in abono, false);
+    assert.equal('comprobantePath' in abono, false);
+  }
+});
+
+test('F4C-TR5 · descuento_liquidacion sin comprobante ⇒ se preserva el contrato actual (permitido)', async () => {
+  const w = mundo(); sembrar(w);
+  const p = await preparar(w, 'g1', { metodoAbono: 'descuento_liquidacion' });
+  assert.equal((await registrar(w, 'g1', p.intencion.operacionId, { metodoAbono: 'descuento_liquidacion' })).resultado, 'aplicado');
+  assert.equal(w.movimientos().length, 1);
+});
+
+test('F4C-TR6 · comprobantePath de OTRO saldo sigue rechazado (invalid-argument), también en transferencia', async () => {
+  const w = mundo(); sembrar(w);
+  const p = await preparar(w, 'g1', { metodoAbono: 'transferencia' });
+  const antes = w.snapshot();
+  await assert.rejects(registrar(w, 'g1', p.intencion.operacionId, { metodoAbono: 'transferencia', comprobanteUrl: COMPROBANTE.comprobanteUrl, comprobantePath: 'saldos/s2/abono_0.jpg' }), codigo('invalid-argument'));
+  assert.equal(w.snapshot(), antes);
+});
+
+test('F4C-TR7 · URL o path inválidos siguen rechazados (invalid-argument) en transferencia; el parser corre antes que la regla de negocio', async () => {
+  const w = mundo(); sembrar(w);
+  const p = await preparar(w, 'g1', { metodoAbono: 'transferencia' });
+  for (const comp of [{ comprobanteUrl: 'http://ex.test/c.jpg', comprobantePath: COMPROBANTE.comprobantePath }, { comprobanteUrl: 5, comprobantePath: COMPROBANTE.comprobantePath }, { comprobanteUrl: COMPROBANTE.comprobanteUrl, comprobantePath: 'otro/lugar.jpg' },
+    { comprobanteUrl: COMPROBANTE.comprobanteUrl, comprobantePath: 'saldos/s1/../x.jpg' }, { comprobanteUrl: COMPROBANTE.comprobanteUrl, comprobantePath: 7 }]) {
+    await assert.rejects(registrar(w, 'g1', p.intencion.operacionId, { metodoAbono: 'transferencia', ...comp }), codigo('invalid-argument'), JSON.stringify(comp));
+  }
+  assert.equal(w.movimientos().length, 0);
+});
+
+test('F4C-TR8 · el idempotente ya_aplicado de una transferencia no pide el comprobante otra vez; la regla corre solo para una operación que aún se va a aplicar', async () => {
+  const w = mundo(); sembrar(w);
+  const p = await preparar(w, 'g1', { metodoAbono: 'transferencia' });
+  await registrar(w, 'g1', p.intencion.operacionId, { metodoAbono: 'transferencia', ...COMPROBANTE });
+  assert.equal((await registrar(w, 'g1', p.intencion.operacionId, { metodoAbono: 'transferencia', ...COMPROBANTE })).resultado, 'ya_aplicado');
+  assert.equal(w.saldo().saldoPendiente, 60);
+  assert.equal(w.movimientos().length, 1);
 });

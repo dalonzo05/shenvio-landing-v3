@@ -60,6 +60,11 @@ import { cuentas } from './financial-types';
 
 export const ESTADOS_ABONABLES: readonly string[] = ['pendiente', 'abonado_parcial'];
 export const METODOS_ABONO: readonly string[] = ['transferencia', 'descuento_liquidacion', 'ajuste_manual'];
+/**
+ * Los métodos que exigen comprobante: los mismos que la pantalla (METODOS_REQUIEREN_COMPROBANTE en
+ * app/panel/gestor/saldos/page.tsx). La pantalla sube la imagen y manda AMBOS: comprobanteUrl y comprobantePath.
+ */
+export const METODOS_REQUIEREN_COMPROBANTE: readonly string[] = ['transferencia'];
 export const TIPO_MOVIMIENTO_ABONO = 'abono_deuda_motorizado';
 export const RE_OPERACION_ID = /^[A-Za-z0-9_-]{16,64}$/;
 export const RE_SALDO_ID = /^[A-Za-z0-9_-]{1,200}$/;
@@ -77,6 +82,7 @@ export type MotivoRechazoAbono =
   | 'intencion_inexistente'
   | 'intencion_ajena'
   | 'intencion_cerrada'
+  | 'comprobante_requerido'
   | 'operacion_pendiente_existente';
 
 export interface CamposAbono {
@@ -301,6 +307,14 @@ export async function registrarAbonoDirectoCore(
     }
     if (intencion.estado !== 'preparada') {
       throw rechazo('intencion_cerrada', 'Esta operación ya se cerró sin aplicarse. Preparala de nuevo.', { estadoIntencion: String(intencion.estado ?? '') });
+    }
+
+    // ── Comprobante de la transferencia (regla de negocio; null y ausente son lo mismo) ──
+    // Se lanza SIN cerrar la intención: no es un rechazo definitivo de la operación sino un dato que falta;
+    // la intención sigue preparada y se aplica cuando llegue con su comprobante. La transacción se revierte:
+    // 0 saldo, 0 abono, 0 movimiento.
+    if (METODOS_REQUIEREN_COMPROBANTE.includes(req.metodoAbono) && (!req.comprobanteUrl || !req.comprobantePath)) {
+      throw rechazo('comprobante_requerido', 'La transferencia requiere el comprobante: subí la imagen y volvé a registrar el abono.', { metodoAbono: req.metodoAbono });
     }
 
     // ── Validación contra el saldo REAL releído ───────────────────────────────

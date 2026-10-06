@@ -104,7 +104,7 @@ function sembrar(w: Mundo, opts: { saldo?: Doc; id?: string } = {}) {
 // siembra, a nombre de quien llama primero, igual que lo haría la preparación. Con `sinIntencion` no se siembra.
 const abonar = (w: Mundo, uid: string | null = 'g1', data: Record<string, unknown> | unknown = {}, sinIntencion = false) => {
   const d = typeof data === 'object' && data !== null && !Array.isArray(data)
-    ? { saldoId: 's1', monto: 40, operacionId: OP(1), metodoAbono: 'transferencia', ...(data as Record<string, unknown>) }
+    ? { saldoId: 's1', monto: 40, operacionId: OP(1), metodoAbono: 'ajuste_manual', ...(data as Record<string, unknown>) }
     : data;
   const x = d as Record<string, unknown>;
   if (!sinIntencion && uid && typeof d === 'object' && d !== null && typeof x.operacionId === 'string' && typeof x.saldoId === 'string'
@@ -266,7 +266,7 @@ test('F4C-FC16 · el motorizado y la cuenta salen del SALDO; ningún campo del c
     await assert.rejects(abonar(w, 'g1', extra), codigo('invalid-argument'), JSON.stringify(extra));
   }
   assert.equal(w.escrituras, 0);
-  await abonar(w, 'g1', { metodoAbono: 'transferencia' });
+  await abonar(w, 'g1', { operacionId: OP(2), metodoAbono: 'transferencia', comprobanteUrl: 'https://ex.test/c.jpg', comprobantePath: 'saldos/s1/abono_0.jpg' });
   const m = w.movimientos()[0];
   assert.equal(m.motorizadoId, 'motA');
   assert.equal(m.cuentaOrigen, 'deuda_motorizado:motA');
@@ -342,7 +342,7 @@ test('F4C-FC19 · mismo operacionId con OTRO monto o método ⇒ conflicto_idemp
   await abonar(w, 'g1', { monto: 50 });
   const antes = w.snapshot();
   await assert.rejects(abonar(w, 'g1', { monto: 70 }), codigo('failed-precondition', 'conflicto_idempotencia'));
-  await assert.rejects(abonar(w, 'g1', { monto: 50, metodoAbono: 'ajuste_manual' }), codigo('failed-precondition', 'conflicto_idempotencia'));
+  await assert.rejects(abonar(w, 'g1', { monto: 50, metodoAbono: 'descuento_liquidacion' }), codigo('failed-precondition', 'conflicto_idempotencia'));
   assert.equal(w.snapshot(), antes);
 });
 
