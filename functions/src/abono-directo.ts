@@ -24,25 +24,26 @@
 //   - El cliente manda la INTENCIÓN: saldoId, monto, operacionId y la metadata del
 //     producto (método, nota, comprobante). El monto es una intención legítima, NO una
 //     autoridad: se valida contra el saldo RELEÍDO dentro de la transacción.
-//   - Saldo (pendiente, estado, abonos[]) y movimiento del ledger se escriben juntos, o
-//     no se escribe nada.
+//   - Saldo (pendiente, estado, abonos[]), movimiento del ledger e INTENCIÓN se escriben
+//     juntos, o no se escribe nada.
 //
-// ─── Idempotencia (por qué `operacionId`) ────────────────────────────────────
+// ─── Idempotencia: la intención vive en el SERVIDOR ──────────────────────────
 //
 // Dos abonos legítimos pueden tener EXACTAMENTE el mismo monto sobre el mismo saldo
 // (C$30 y C$30). Deduplicar por saldo, por monto, por saldo+monto o por actor los
-// fusionaría o rechazaría. La identidad tiene que ser la de la INTENCIÓN: el cliente
-// genera un `operacionId` al iniciar el submit, lo conserva mientras el resultado sea
-// incierto y estrena uno nuevo para el siguiente abono.
+// fusionaría o rechazaría. La identidad es la de la INTENCIÓN, y NO la fabrica el
+// cliente: la crea prepararAbonoDirecto (functions/src/abono-intencion.ts) en
+// intenciones_abono_directo/{operacionId} y la recupera desde cualquier pantalla,
+// pestaña o dispositivo del mismo usuario. Una recarga que perdió la respuesta de un
+// commit exitoso no puede entonces inventar OTRA operación: recupera la misma, ya aplicada.
 //
 //   movimiento   id determinista `abono_<operacionId>`, creado con create()
 //   abonos[]     la entrada lleva `operacionId` y `movimientoId` (abono ↔ movimiento 1:1)
+//   intención    preparada → aplicada (en la MISMA transacción que el saldo y el ledger)
+//                           → rechazada (cuando el servidor demuestra que NO se aplicó)
 //
-// La guarda es el estado releído DENTRO de la transacción (no la UI): si la operación ya
-// está aplicada y es COHERENTE ⇒ 'ya_aplicado' sin escribir nada; si el mismo operacionId
-// llega con otro saldo, otro monto u otro método ⇒ 'conflicto_idempotencia'; si falta
-// una de las dos piezas (abono sin movimiento, movimiento sin abono) ⇒
-// 'abono_inconsistente', sin reparar en silencio.
+// registrarAbonoDirecto exige una intención válida: que exista, sea del actor, del saldo y
+// coincida en monto y método. Una operacionId arbitraria se rechaza.
 //
 // La guarda de idempotencia va ANTES de validar estado y monto: el reintento de un
 // abono que ya dejó el saldo 'pagado' no puede ser rechazado por "saldo no abonable".
@@ -61,8 +62,8 @@ export const ESTADOS_ABONABLES: readonly string[] = ['pendiente', 'abonado_parci
 export const METODOS_ABONO: readonly string[] = ['transferencia', 'descuento_liquidacion', 'ajuste_manual'];
 export const TIPO_MOVIMIENTO_ABONO = 'abono_deuda_motorizado';
 export const RE_OPERACION_ID = /^[A-Za-z0-9_-]{16,64}$/;
+export const RE_SALDO_ID = /^[A-Za-z0-9_-]{1,200}$/;
 const CLAVES_PETICION = ['saldoId', 'monto', 'operacionId', 'metodoAbono', 'nota', 'comprobanteUrl', 'comprobantePath'];
-const MAX_ID = 200;
 const MAX_NOTA = 500;
 const MAX_URL = 2048;
 const MAX_PATH = 300;
@@ -72,16 +73,23 @@ export type MotivoRechazoAbono =
   | 'saldo_no_abonable'
   | 'monto_excede_saldo'
   | 'conflicto_idempotencia'
-  | 'abono_inconsistente';
+  | 'abono_inconsistente'
+  | 'intencion_inexistente'
+  | 'intencion_ajena'
+  | 'intencion_cerrada'
+  | 'operacion_pendiente_existente';
 
-export interface PeticionAbono {
-  saldoId: string;
+export interface CamposAbono {
   monto: number;
-  operacionId: string;
   metodoAbono: string;
   nota: string;
   comprobanteUrl?: string;
   comprobantePath?: string;
+}
+
+export interface PeticionAbono extends CamposAbono {
+  saldoId: string;
+  operacionId: string;
 }
 
 export type ResultadoAbono = {
@@ -103,8 +111,10 @@ export interface TxAbono {
   getUsuario(uid: string): Promise<DocumentData | null>;
   getSaldo(id: string): Promise<DocumentData | null>;
   getMovimiento(id: string): Promise<DocumentData | null>;
+  getIntencion(id: string): Promise<DocumentData | null>;
   updateSaldo(id: string, campos: DocumentData): void;
   crearMovimiento(id: string, campos: DocumentData): void;
+  updateIntencion(id: string, campos: DocumentData): void;
 }
 
 export interface DepsAbono {
@@ -115,25 +125,55 @@ export interface DepsAbono {
   ahora(): unknown;
 }
 
-function rechazo(motivo: MotivoRechazoAbono, mensaje: string, extra: Record<string, unknown> = {}): HttpsError {
+export function rechazo(motivo: MotivoRechazoAbono, mensaje: string, extra: Record<string, unknown> = {}): HttpsError {
   return new HttpsError('failed-precondition', mensaje, { motivo, ...extra });
 }
 
-function esNumeroFinito(v: unknown): v is number {
+export function esNumeroFinito(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
 }
 
-function idValido(v: unknown): v is string {
-  return typeof v === 'string' && v.trim().length > 0 && v.length <= MAX_ID;
+export function idValido(v: unknown): v is string {
+  return typeof v === 'string' && v.trim().length > 0 && v.length <= 200;
 }
 
 /** Centavos enteros: el dinero se compara sin errores de coma flotante. */
-function centavos(n: number): number {
+export function centavos(n: number): number {
   return Math.round(n * 100);
 }
 
 function tieneAcuerdoDeCentavos(n: number): boolean {
   return Math.abs(n * 100 - Math.round(n * 100)) < 1e-6;
+}
+
+/** Los campos de la INTENCIÓN de abono (monto, método, nota y comprobante). Comunes a preparar y registrar. */
+export function validarCamposAbono(d: Record<string, unknown>, saldoId: string): CamposAbono {
+  if (!esNumeroFinito(d.monto) || d.monto <= 0 || d.monto > MAX_MONTO || !tieneAcuerdoDeCentavos(d.monto)) {
+    throw new HttpsError('invalid-argument', 'El monto debe ser un número mayor que 0, con a lo sumo 2 decimales.');
+  }
+  if (typeof d.metodoAbono !== 'string' || !METODOS_ABONO.includes(d.metodoAbono)) {
+    throw new HttpsError('invalid-argument', 'metodoAbono inválido.');
+  }
+  let nota = '';
+  if (d.nota !== undefined && d.nota !== null) {
+    if (typeof d.nota !== 'string' || d.nota.length > MAX_NOTA) throw new HttpsError('invalid-argument', `La nota no puede superar ${MAX_NOTA} caracteres.`);
+    nota = d.nota.trim();
+  }
+  const out: CamposAbono = { monto: d.monto, metodoAbono: d.metodoAbono, nota };
+  if (d.comprobanteUrl !== undefined) {
+    if (typeof d.comprobanteUrl !== 'string' || !d.comprobanteUrl.startsWith('https://') || d.comprobanteUrl.length > MAX_URL) {
+      throw new HttpsError('invalid-argument', 'comprobanteUrl inválido.');
+    }
+    out.comprobanteUrl = d.comprobanteUrl;
+  }
+  if (d.comprobantePath !== undefined) {
+    // El comprobante de un abono vive en saldos/<saldoId>/…: no se acepta una ruta de otro lado.
+    if (typeof d.comprobantePath !== 'string' || !d.comprobantePath.startsWith(`saldos/${saldoId}/`) || d.comprobantePath.includes('..') || d.comprobantePath.length > MAX_PATH) {
+      throw new HttpsError('invalid-argument', 'comprobantePath inválido.');
+    }
+    out.comprobantePath = d.comprobantePath;
+  }
+  return out;
 }
 
 /**
@@ -153,36 +193,11 @@ export function validarPeticionAbono(data: unknown): PeticionAbono {
   if (typeof d.operacionId !== 'string' || !RE_OPERACION_ID.test(d.operacionId)) {
     throw new HttpsError('invalid-argument', 'operacionId inválido: de 16 a 64 caracteres (letras, números, guion o guion bajo).');
   }
-  if (!esNumeroFinito(d.monto) || d.monto <= 0 || d.monto > MAX_MONTO || !tieneAcuerdoDeCentavos(d.monto)) {
-    throw new HttpsError('invalid-argument', 'El monto debe ser un número mayor que 0, con a lo sumo 2 decimales.');
-  }
-  if (typeof d.metodoAbono !== 'string' || !METODOS_ABONO.includes(d.metodoAbono)) {
-    throw new HttpsError('invalid-argument', 'metodoAbono inválido.');
-  }
-  let nota = '';
-  if (d.nota !== undefined && d.nota !== null) {
-    if (typeof d.nota !== 'string' || d.nota.length > MAX_NOTA) throw new HttpsError('invalid-argument', `La nota no puede superar ${MAX_NOTA} caracteres.`);
-    nota = d.nota.trim();
-  }
-  const out: PeticionAbono = { saldoId, monto: d.monto, operacionId: d.operacionId, metodoAbono: d.metodoAbono, nota };
-  if (d.comprobanteUrl !== undefined) {
-    if (typeof d.comprobanteUrl !== 'string' || !d.comprobanteUrl.startsWith('https://') || d.comprobanteUrl.length > MAX_URL) {
-      throw new HttpsError('invalid-argument', 'comprobanteUrl inválido.');
-    }
-    out.comprobanteUrl = d.comprobanteUrl;
-  }
-  if (d.comprobantePath !== undefined) {
-    // El comprobante de un abono vive en saldos/<saldoId>/…: no se acepta una ruta de otro lado.
-    if (typeof d.comprobantePath !== 'string' || !d.comprobantePath.startsWith(`saldos/${saldoId}/`) || d.comprobantePath.includes('..') || d.comprobantePath.length > MAX_PATH) {
-      throw new HttpsError('invalid-argument', 'comprobantePath inválido.');
-    }
-    out.comprobantePath = d.comprobantePath;
-  }
-  return out;
+  return { saldoId, operacionId: d.operacionId, ...validarCamposAbono(d, saldoId) };
 }
 
 /** Mismo criterio que isAdminOrGestor() en firestore.rules: usuario ACTIVO con rol admin o gestor. */
-function exigirGestorOAdmin(usuario: DocumentData | null): 'admin' | 'gestor' {
+export function exigirGestorOAdmin(usuario: DocumentData | null): 'admin' | 'gestor' {
   const rol = usuario?.rol;
   if (!usuario || usuario.activo !== true || (rol !== 'admin' && rol !== 'gestor')) {
     throw new HttpsError('permission-denied', 'Solo un gestor o admin activo puede registrar un abono.');
@@ -200,6 +215,7 @@ function resolverOperacionExistente(
   abono: DocumentData | undefined,
   mov: DocumentData | null,
   movimientoId: string,
+  intencion: DocumentData,
 ): ResultadoAbono {
   if (!abono && mov) {
     // El mismo operacionId ya se usó en OTRO saldo: no es un reintento, es un conflicto.
@@ -221,9 +237,11 @@ function resolverOperacionExistente(
     && m.estado === 'activo'
     && m.saldoId === req.saldoId
     && esNumeroFinito(a.monto) && esNumeroFinito(m.monto) && centavos(m.monto) === centavos(a.monto)
-    && (a.movimientoId === undefined || a.movimientoId === movimientoId);
+    && (a.movimientoId === undefined || a.movimientoId === movimientoId)
+    && intencion.estado === 'aplicada'
+    && intencion.movimientoId === movimientoId;
   if (!coherente) {
-    throw rechazo('abono_inconsistente', 'El abono y su movimiento de esta operación no coinciden. Hay que revisarlo; no se corrige solo.');
+    throw rechazo('abono_inconsistente', 'El abono, su movimiento y su intención no coinciden. Hay que revisarlo; no se corrige solo.');
   }
   return {
     ok: true as const,
@@ -248,25 +266,49 @@ export async function registrarAbonoDirectoCore(
   const req = validarPeticionAbono(data);
   const movimientoId = `abono_${req.operacionId}`;
 
-  return deps.transaction(async (tx) => {
+  // Un rechazo DEFINITIVO tiene que PERSISTIR el cierre de la intención: lanzar dentro de la
+  // transacción revertiría esa escritura. Se devuelve y se lanza fuera, ya confirmada.
+  const r = await deps.transaction<ResultadoAbono | { rechazado: HttpsError }>(async (tx) => {
     // ── LECTURAS (todas antes de cualquier escritura) ─────────────────────────
     const rol = exigirGestorOAdmin(await tx.getUsuario(uid));
+
+    // La operación tiene que corresponder a una INTENCIÓN válida de este actor.
+    const intencion = await tx.getIntencion(req.operacionId);
+    if (!intencion) throw rechazo('intencion_inexistente', 'La operación no existe: hay que prepararla primero.');
+    if (intencion.actorUid !== uid) throw rechazo('intencion_ajena', 'Esta operación pertenece a otro usuario.');
+    if (intencion.saldoId !== req.saldoId || !esNumeroFinito(intencion.monto) || centavos(intencion.monto) !== centavos(req.monto) || intencion.metodoAbono !== req.metodoAbono) {
+      throw rechazo('conflicto_idempotencia', 'Esta operación se preparó con otro saldo, monto o método. No se registró nada.');
+    }
 
     const saldo = await tx.getSaldo(req.saldoId);
     if (!saldo) throw new HttpsError('not-found', 'El saldo no existe.');
     const mov = await tx.getMovimiento(movimientoId);
     const abonos: DocumentData[] = Array.isArray(saldo.abonos) ? saldo.abonos : [];
     const abonoExistente = abonos.find((a) => a && a.operacionId === req.operacionId);
+    const hayHuella = !!(abonoExistente || mov);
 
     // Guarda de idempotencia: ANTES de validar estado y monto (ver cabecera).
-    if (abonoExistente || mov) {
-      return resolverOperacionExistente(req, saldo, abonoExistente, mov, movimientoId);
+    if (intencion.estado === 'aplicada' && !hayHuella) {
+      throw rechazo('abono_inconsistente', 'La intención figura aplicada pero no hay abono ni movimiento. Hay que revisarlo; no se corrige solo.');
+    }
+    if (intencion.estado === 'preparada' && hayHuella) {
+      throw rechazo('abono_inconsistente', 'Hay un abono o un movimiento de esta operación pero la intención sigue preparada. Hay que revisarlo; no se corrige solo.');
+    }
+    if (hayHuella) {
+      return resolverOperacionExistente(req, saldo, abonoExistente, mov, movimientoId, intencion);
+    }
+    if (intencion.estado !== 'preparada') {
+      throw rechazo('intencion_cerrada', 'Esta operación ya se cerró sin aplicarse. Preparala de nuevo.', { estadoIntencion: String(intencion.estado ?? '') });
     }
 
     // ── Validación contra el saldo REAL releído ───────────────────────────────
     const estadoAnterior = String(saldo.estado ?? '');
+    const cerrarSinAplicar = (e: HttpsError, motivo: string) => {
+      tx.updateIntencion(req.operacionId, { estado: 'rechazada', motivoRechazo: motivo, updatedAt: deps.serverTimestamp() });
+      return { rechazado: e };
+    };
     if (!ESTADOS_ABONABLES.includes(estadoAnterior)) {
-      throw rechazo('saldo_no_abonable', `No se puede abonar un saldo en estado "${estadoAnterior || 'desconocido'}".`, { estado: estadoAnterior });
+      return cerrarSinAplicar(rechazo('saldo_no_abonable', `No se puede abonar un saldo en estado "${estadoAnterior || 'desconocido'}".`, { estado: estadoAnterior }), 'saldo_no_abonable');
     }
     // Sin identidad suficiente para el ledger no se inventa nada.
     if (typeof saldo.motorizadoId !== 'string' || saldo.motorizadoId.length === 0 || !esNumeroFinito(saldo.saldoPendiente) || saldo.saldoPendiente < 0) {
@@ -275,10 +317,10 @@ export async function registrarAbonoDirectoCore(
     const pendienteC = centavos(saldo.saldoPendiente);
     const montoC = centavos(req.monto);
     if (pendienteC <= 0) {
-      throw rechazo('saldo_no_abonable', 'El saldo no tiene monto pendiente.', { estado: estadoAnterior });
+      return cerrarSinAplicar(rechazo('saldo_no_abonable', 'El saldo no tiene monto pendiente.', { estado: estadoAnterior }), 'saldo_no_abonable');
     }
     if (montoC > pendienteC) {
-      throw rechazo('monto_excede_saldo', `El monto (${req.monto}) supera el saldo pendiente actual (${saldo.saldoPendiente}).`, { saldoPendiente: saldo.saldoPendiente });
+      return cerrarSinAplicar(rechazo('monto_excede_saldo', `El monto (${req.monto}) supera el saldo pendiente actual (${saldo.saldoPendiente}).`, { saldoPendiente: saldo.saldoPendiente }), 'monto_excede_saldo');
     }
 
     // ── ESCRITURAS (todas dentro de esta transacción) ─────────────────────────
@@ -322,6 +364,14 @@ export async function registrarAbonoDirectoCore(
       operacionId: req.operacionId,
     });
 
+    // La intención se cierra en la MISMA transacción: nunca "aplicado pero preparada".
+    tx.updateIntencion(req.operacionId, {
+      estado: 'aplicada',
+      movimientoId,
+      aplicadaAt: ahora,
+      updatedAt: ahora,
+    });
+
     return {
       ok: true as const,
       resultado: 'aplicado' as const,
@@ -335,4 +385,7 @@ export async function registrarAbonoDirectoCore(
       saldoPendiente: nuevoPendiente,
     };
   });
+
+  if ('rechazado' in r) throw r.rechazado;
+  return r;
 }

@@ -1,11 +1,12 @@
-// FIN-4C — presentación del resultado de registrarAbonoDirecto, ciclo de vida del operacionId
-// y CONTRATOS de la pantalla de Saldos.
+// FIN-4C — presentación del resultado del abono directo, decisiones de la INTENCIÓN (que vive en el
+// servidor) y CONTRATOS de la pantalla de Saldos.
 //
-// La atomicidad, la idempotencia, el sobre-abono y la concurrencia los prueba
-// functions/test/abono-directo.test.ts. Aquí se prueba lo que le toca al cliente: (1) que no
-// confunda los diez resultados, (2) que el operacionId se conserve mientras el resultado sea
-// incierto y cambie para una intención nueva, y (3) que ninguna superficie del producto siga
-// escribiendo el abono directo por su cuenta.
+// La atomicidad, la idempotencia, el sobre-abono, la concurrencia y el comportamiento de la intención
+// (recuperar tras recargar, otra pestaña, nuevo abono explícito) los prueban functions/test/abono-directo.test.ts
+// y functions/test/abono-intencion.test.ts contra el núcleo real. Aquí se prueba lo que le toca al cliente:
+// (1) que no confunda los resultados, (2) que decida solo a partir de lo que dice el servidor —no de su
+// memoria— y (3) que ninguna superficie del producto fabrique la identidad de la operación ni escriba el
+// abono por su cuenta.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -13,19 +14,24 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   ErrorAbonoDirecto,
+  MSG_APLICADA_RECUPERADA,
   MSG_APLICADO,
   MSG_CONFLICTO,
+  MSG_INTENCION_NO_DISPONIBLE,
   MSG_MONTO_EXCEDE,
   MSG_NO_ABONABLE,
+  MSG_PENDIENTE_EXISTENTE,
   MSG_PERMISO,
   MSG_SALDO_INEXISTENTE,
   MSG_TEMPORAL,
   MSG_YA_APLICADO,
+  decidirTrasPreparar,
   exigirAbonado,
   presentarErrorAbono,
   presentarResultadoAbono,
+  vistaIntencionAlAbrir,
+  type IntencionAbono,
 } from './abono-directo-ux'
-import { conservarOperacion, generarOperacionId, obtenerOperacion } from './abono-operacion'
 
 const err = (code: string, motivo?: string, message = 'msg del servidor') => ({ code, message, details: motivo ? { motivo } : undefined })
 
@@ -37,11 +43,14 @@ test('F4C-U1 · aplicado y ya_aplicado NO se confunden: el segundo dice que no s
   assert.match(MSG_YA_APLICADO, /nada nuevo/)
 })
 
-test('F4C-U2 · cada rechazo del servidor tiene su categoría y su mensaje (monto, estado, saldo, conflicto, permiso)', () => {
+test('F4C-U2 · cada rechazo del servidor tiene su categoría y su mensaje (monto, estado, saldo, conflicto, intención, permiso)', () => {
   assert.deepEqual(presentarErrorAbono(err('functions/failed-precondition', 'monto_excede_saldo')), { categoria: 'monto_excede', mensaje: MSG_MONTO_EXCEDE, aplicado: false })
   assert.deepEqual(presentarErrorAbono(err('failed-precondition', 'saldo_no_abonable')), { categoria: 'no_abonable', mensaje: MSG_NO_ABONABLE, aplicado: false })
   assert.deepEqual(presentarErrorAbono(err('functions/failed-precondition', 'conflicto_idempotencia')), { categoria: 'conflicto', mensaje: MSG_CONFLICTO, aplicado: false })
   assert.deepEqual(presentarErrorAbono(err('functions/not-found')), { categoria: 'saldo_inexistente', mensaje: MSG_SALDO_INEXISTENTE, aplicado: false })
+  for (const motivo of ['intencion_inexistente', 'intencion_ajena', 'intencion_cerrada']) {
+    assert.deepEqual(presentarErrorAbono(err('functions/failed-precondition', motivo)), { categoria: 'intencion', mensaje: MSG_INTENCION_NO_DISPONIBLE, aplicado: false }, motivo)
+  }
   for (const code of ['permission-denied', 'functions/permission-denied', 'unauthenticated', 'functions/unauthenticated']) {
     assert.deepEqual(presentarErrorAbono(err(code)), { categoria: 'permiso', mensaje: MSG_PERMISO, aplicado: false }, code)
   }
@@ -57,11 +66,12 @@ test('F4C-U3 · monto/petición inválida e integridad se distinguen y traen la 
   assert.equal(b.aplicado, false)
 })
 
-test('F4C-U4 · resultado incierto: red, timeout o error interno ⇒ NO se sabe si se aplicó, y reintentar es seguro', () => {
+test('F4C-U4 · resultado incierto: red, timeout o error interno ⇒ NO se sabe si se aplicó; se verificará la operación existente y reintentar es seguro', () => {
   for (const e of [err('functions/unavailable'), err('functions/deadline-exceeded'), err('functions/internal'), err('functions/unknown'), new Error('Failed to fetch'), null, undefined, 'x']) {
     assert.deepEqual(presentarErrorAbono(e), { categoria: 'temporal', mensaje: MSG_TEMPORAL, aplicado: false })
   }
   assert.match(MSG_TEMPORAL, /No sabemos si el abono llegó a registrarse/)
+  assert.match(MSG_TEMPORAL, /Verificaremos la operación existente/)
   assert.match(MSG_TEMPORAL, /reintentar es seguro/)
 })
 
@@ -73,47 +83,81 @@ test('F4C-U5 · nunca se muestra éxito si la callable falló: exigirAbonado lan
   }
 })
 
-// ── operacionId: ciclo de vida ───────────────────────────────────────────────
+// ── la intención: la pantalla decide con lo que dice el SERVIDOR ─────────────
 
-const FORMATO_SERVIDOR = /^[A-Za-z0-9_-]{16,64}$/
+const intencion = (extra: Partial<IntencionAbono> = {}): IntencionAbono => ({ operacionId: 'srv_op_A_0000000001', saldoId: 's1', monto: 40, metodoAbono: 'transferencia', estado: 'preparada', ...extra })
 
-test('F4C-O1 · el operacionId generado cumple el formato que valida el servidor y no se repite', () => {
-  const ids = new Set<string>()
-  for (let i = 0; i < 500; i++) {
-    const id = generarOperacionId()
-    assert.match(id, FORMATO_SERVIDOR)
-    ids.add(id)
+test('F4C-UI1 · abrir un saldo SIN intención no inventa nada: la vista es "ninguna" y la operación se pide al servidor al registrar', () => {
+  assert.deepEqual(vistaIntencionAlAbrir(null, {}, 's1'), { tipo: 'ninguna' })
+  const prep = decidirTrasPreparar({ resultado: 'preparada', intencion: intencion() })
+  assert.deepEqual(prep, { accion: 'continuar', operacionId: 'srv_op_A_0000000001', recuperada: false }, 'el id sale de la respuesta del servidor')
+})
+
+test('F4C-UI2 · REMOUNT: una preparada se recupera con la misma operación, sin importar la memoria local (vacía o con otras operaciones)', () => {
+  const I = intencion()
+  const memorias: Array<Record<string, string>> = [{}, { s1: 'otra_operacion_xxxxxxx' }, { s2: 'srv_op_A_0000000001' }]
+  for (const memoria of memorias) {
+    assert.deepEqual(vistaIntencionAlAbrir(I, memoria, 's1'), { tipo: 'pendiente', intencion: I })
   }
-  assert.equal(ids.size, 500)
+  assert.deepEqual(decidirTrasPreparar({ resultado: 'recuperada', intencion: I }), { accion: 'continuar', operacionId: I.operacionId, recuperada: true })
 })
 
-test('F4C-O2 · un REINTENTO (mismo saldo, operación abierta) reusa el MISMO operacionId; no genera uno nuevo', () => {
-  let n = 0
-  const nuevo = () => `op_generado_${++n}_xxxxxxxxxx`
-  const intento1 = obtenerOperacion(null, 's1', nuevo)
-  const intento2 = obtenerOperacion(intento1, 's1', nuevo) // timeout → reintento
-  const intento3 = obtenerOperacion(intento2, 's1', nuevo)
-  assert.equal(intento2.operacionId, intento1.operacionId)
-  assert.equal(intento3.operacionId, intento1.operacionId)
-  assert.equal(n, 1, 'solo se generó UN id para la misma intención')
+test('F4C-UI3 · RECARGA simulada: la memoria se pierde por completo y la vista sale IGUAL del servidor ⇒ misma operación, ninguna B', () => {
+  const I = intencion({ estado: 'aplicada', movimientoId: 'abono_srv_op_A_0000000001' })
+  const antesDeRecargar = vistaIntencionAlAbrir(I, { s1: I.operacionId }, 's1')   // el usuario ya la había reconocido
+  const trasRecargar = vistaIntencionAlAbrir(I, {}, 's1')                        // la memoria desapareció
+  assert.deepEqual(antesDeRecargar, { tipo: 'ninguna' })
+  assert.deepEqual(trasRecargar, { tipo: 'aplicada_sin_reconocer', intencion: I }, 'tras recargar se MUESTRA la aplicada; no se asume un abono nuevo')
 })
 
-test('F4C-O3 · un abono NUEVO (operación cerrada) estrena operacionId aunque el monto sea el mismo; otro saldo también', () => {
-  let n = 0
-  const nuevo = () => `op_generado_${++n}_xxxxxxxxxx`
-  const a = obtenerOperacion(null, 's1', nuevo)
-  const b = obtenerOperacion(null, 's1', nuevo) // la anterior se cerró con un resultado definitivo
-  const c = obtenerOperacion(a, 's2', nuevo)    // otro saldo
-  assert.notEqual(a.operacionId, b.operacionId)
-  assert.notEqual(a.operacionId, c.operacionId)
-  assert.equal(c.saldoId, 's2')
+test('F4C-UI4 · una intención ya APLICADA se muestra como recuperada: preparar no deja continuar con otra operación', () => {
+  const I = intencion({ estado: 'aplicada', movimientoId: 'abono_srv_op_A_0000000001' })
+  const d = decidirTrasPreparar({ resultado: 'ya_aplicada', intencion: I })
+  assert.deepEqual(d, { accion: 'mostrar_aplicada', intencion: I, mensaje: MSG_APLICADA_RECUPERADA })
+  assert.match(MSG_APLICADA_RECUPERADA, /No se creó otro/)
+  const p = decidirTrasPreparar({ resultado: 'operacion_pendiente_existente', intencion: intencion({ monto: 99 }) })
+  assert.equal(p.accion, 'resolver_pendiente')
+  assert.match(MSG_PENDIENTE_EXISTENTE, /descartalo/)
 })
 
-test('F4C-O4 · solo un resultado INCIERTO conserva la operación; todo resultado definitivo la cierra', () => {
-  assert.equal(conservarOperacion('temporal'), true)
-  for (const c of ['exito', 'ya_aplicado', 'monto_invalido', 'monto_excede', 'no_abonable', 'saldo_inexistente', 'conflicto', 'integridad', 'permiso']) {
-    assert.equal(conservarOperacion(c), false, c)
-  }
+test('F4C-UI5 · resultado INCIERTO: la operación persiste en el servidor; la pantalla no la cierra ni inventa otra (el siguiente intento la recupera)', () => {
+  assert.equal(presentarErrorAbono(err('functions/unavailable')).categoria, 'temporal')
+  const src = sinComentarios(PAGINA())
+  const c = sinComentarios(cuerpoDe(PAGINA(), 'handleAbono'))
+  const iCatch = c.indexOf('} catch (e: unknown)')
+  assert.ok(iCatch > 0)
+  const enCatch = c.slice(iCatch)
+  assert.ok(!enCatch.includes('resetAbono()') && !enCatch.includes('reconocidasRef') && !enCatch.includes('descartarAbonoDirectoServidor'), 'el catch no cierra ni reconoce ni descarta')
+  assert.ok(!/randomUUID|Math\.random|Date\.now|generarOperacionId/.test(src), 'la pantalla no fabrica identidad')
+})
+
+test('F4C-UI6 · CANCELAR/cerrar el modal solo afecta la pantalla: no llama al servidor; descartar es una acción explícita y única', () => {
+  const src = sinComentarios(PAGINA())
+  const i = src.indexOf('function resetAbono()')
+  assert.ok(i > 0)
+  const reset = src.slice(i, src.indexOf('\n  }', i))
+  assert.ok(!/Servidor\(|descartar|httpsCallable|await /.test(reset), 'resetAbono no toca el servidor')
+  assert.equal((src.match(/descartarAbonoDirectoServidor\(/g) ?? []).length, 1, 'un solo llamador de descartar')
+  assert.ok(sinComentarios(cuerpoDe(PAGINA(), 'handleDescartarIntencion')).includes('descartarAbonoDirectoServidor(intencionAbono.operacionId)'))
+})
+
+test('F4C-UI7 · el NUEVO abono es explícito: «Registrar otro abono» reconoce la aplicada y handleAbono manda ese reconocimiento', () => {
+  const I = intencion({ estado: 'aplicada' })
+  assert.deepEqual(vistaIntencionAlAbrir(I, { s1: I.operacionId }, 's1'), { tipo: 'ninguna' }, 'reconocida: ya no estorba')
+  const otro = sinComentarios(PAGINA())
+  const h = sinComentarios(cuerpoDe(PAGINA(), 'handleAbono'))
+  assert.ok(h.includes('reconoceOperacionId: reconocidasRef.current[saldo.id]'))
+  const ini = otro.indexOf('function handleRegistrarOtroAbono()')
+  assert.ok(ini > 0 && otro.slice(ini, ini + 300).includes('reconocidasRef.current[intencionAbono.saldoId] = intencionAbono.operacionId'))
+})
+
+test('F4C-UI8 · el nuevo abono del MISMO monto es legítimo: la operación nueva trae otro id y la pantalla no compara montos para impedirlo', () => {
+  const A = intencion()
+  const B = decidirTrasPreparar({ resultado: 'preparada', intencion: intencion({ operacionId: 'srv_op_B_0000000002' }) })
+  assert.equal(B.accion, 'continuar')
+  if (B.accion === 'continuar') assert.notEqual(B.operacionId, A.operacionId)
+  const h = sinComentarios(cuerpoDe(PAGINA(), 'handleAbono'))
+  assert.ok(!/intencionAbono\.monto|\.monto ===|\.monto !==/.test(h), 'handleAbono no deduplica por monto')
 })
 
 // ── contratos de la pantalla ─────────────────────────────────────────────────
@@ -121,57 +165,55 @@ test('F4C-O4 · solo un resultado INCIERTO conserva la operación; todo resultad
 const RAIZ = join(__dirname, '..')
 const leer = (...ruta: string[]) => readFileSync(join(RAIZ, ...ruta), 'utf8').replace(/\r/g, '')
 const PAGINA = () => leer('app', 'panel', 'gestor', 'saldos', 'page.tsx')
-const sinComentarios = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+function sinComentarios(s: string): string { return s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '') }
 
 function cuerpoDe(src: string, nombre: string): string {
-  const ini = src.indexOf(`async function ${nombre}(`)
+  const ini = src.indexOf(`async function ${nombre}(`) >= 0 ? src.indexOf(`async function ${nombre}(`) : src.indexOf(`function ${nombre}(`)
   assert.ok(ini >= 0, `existe ${nombre}`)
   const candidatos = [src.indexOf('\n  async function ', ini + 10), src.indexOf('\n  // ── ', ini + 10), src.indexOf('\n  function ', ini + 10), src.indexOf('\n  /**\n', ini + 10)].filter((x) => x > 0)
   return src.slice(ini, Math.min(...candidatos))
 }
 
-const PROHIBIDO_EN_ABONO = ['runTransaction', 'writeBatch', 'updateDoc', 'setDoc', 'addDoc', 'arrayUnion', 'movimientos_financieros', 'saldos_cargo_motorizado', 'registrarMovimiento', 'registrarAbonoSaldo', 'creadoPorRol', 'auth.currentUser']
+const PROHIBIDO_EN_ABONO = ['runTransaction', 'writeBatch', 'updateDoc', 'setDoc', 'addDoc', 'arrayUnion', 'movimientos_financieros', 'saldos_cargo_motorizado', 'intenciones_abono_directo', 'registrarMovimiento', 'registrarAbonoSaldo', 'creadoPorRol', 'auth.currentUser']
 
-test('F4C-C1 · el abono directo llama a la callable y no escribe nada financiero desde la pantalla', () => {
+test('F4C-C1 · el abono directo llama a las callables y no escribe nada financiero desde la pantalla', () => {
   const src = PAGINA()
   const c = sinComentarios(cuerpoDe(src, 'handleAbono'))
-  assert.ok(c.includes('await abonarEnServidor({'), 'invoca la callable')
+  assert.ok(c.includes('await prepararEnServidor({') && c.includes('await abonarEnServidor({'), 'prepara y registra en el servidor')
   for (const t of PROHIBIDO_EN_ABONO) assert.ok(!c.includes(t), `handleAbono no contiene ${t}`)
   const e = sinComentarios(cuerpoDe(src, 'abonarEnServidor'))
   assert.ok(e.includes('registrarAbonoDirectoServidor(p)'))
   assert.ok(e.includes('exigirAbonado('), 'un fallo lanza; no se muestra éxito')
   assert.ok(!/for \(|while \(|setTimeout|retry/i.test(e), 'sin reintentos automáticos')
   assert.equal((src.match(/registrarAbonoDirectoServidor\(/g) ?? []).length, 1, 'un solo punto de invocación')
+  assert.equal((src.match(/prepararAbonoDirectoServidor\(/g) ?? []).length, 1, 'preparar se invoca desde un solo punto: prepararEnServidor')
 })
 
-test('F4C-C2 · el operacionId nace de obtenerOperacion y se guarda ANTES de llamar: un reintento incierto lo reusa', () => {
-  const src = PAGINA()
-  const c = sinComentarios(cuerpoDe(src, 'handleAbono'))
-  const iObtener = c.indexOf('obtenerOperacion(operacionAbonoRef.current, saldo.id)')
-  const iGuarda = c.indexOf('operacionAbonoRef.current = operacion')
-  const iLlama = c.indexOf('await abonarEnServidor(')
-  assert.ok(iObtener > 0 && iGuarda > iObtener && iLlama > iGuarda, 'obtener → guardar en la ref → llamar')
-  assert.ok(c.includes('operacionId: operacion.operacionId'))
-  assert.ok(!c.includes('generarOperacionId') && !/Date\.now|Math\.random|randomUUID/.test(c), 'handleAbono no inventa ids por su cuenta')
-  assert.ok(c.includes('if (!conservarOperacion(e.categoria)) operacionAbonoRef.current = null'), 'solo lo incierto conserva la operación')
-})
-
-test('F4C-C3 · éxito y cancelar cierran la operación (resetAbono); un error incierto NO pasa por resetAbono', () => {
-  const src = sinComentarios(PAGINA())
-  const ini = src.indexOf('function resetAbono()')
-  assert.ok(ini > 0)
-  assert.ok(src.slice(ini, ini + 200).includes('operacionAbonoRef.current = null'))
+test('F4C-C2 · el orden es PREPARAR → comprobante → REGISTRAR, y el operacionId que se registra es el que devolvió el servidor', () => {
   const c = sinComentarios(cuerpoDe(PAGINA(), 'handleAbono'))
-  const iCatch = c.indexOf('} catch (e: unknown)')
-  assert.ok(iCatch > 0)
-  assert.ok(!c.slice(iCatch).includes('resetAbono()'), 'el catch no cierra la operación incierta')
+  const iPrep = c.indexOf('await prepararEnServidor(')
+  const iDecide = c.indexOf('decidirTrasPreparar(preparada)')
+  const iSube = c.indexOf('uploadComprobante(')
+  const iReg = c.indexOf('await abonarEnServidor(')
+  assert.ok(iPrep > 0 && iDecide > iPrep && iSube > iDecide && iReg > iSube, 'preparar → decidir → subir comprobante → registrar')
+  assert.ok(c.includes('operacionId: decision.operacionId'))
+  assert.ok(c.includes("decision.accion !== 'continuar'"), 'si la operación ya está aplicada o hay otra pendiente, NO se registra')
 })
 
-test('F4C-C4 · el wrapper de la callable manda la INTENCIÓN: nada de saldo pendiente, estado, motorizado, actor ni rol', () => {
+test('F4C-C3 · al abrir el formulario se RECONCILIA con el servidor (obtenerIntencionAbono); la memoria local no es la autoridad', () => {
+  const src = sinComentarios(PAGINA())
+  assert.ok(src.includes('obtenerIntencionAbonoServidor(abonoId)'))
+  assert.ok(src.includes('vistaIntencionAlAbrir(r.intencion, reconocidasRef.current, abonoId)'))
+  assert.ok(!/operacionAbonoRef|obtenerOperacion|conservarOperacion/.test(src), 'ya no hay una operación guardada solo en memoria')
+  assert.ok(!/sessionStorage|localStorage|indexedDB/.test(src), 'tampoco en el almacenamiento del navegador: la autoridad es el servidor')
+})
+
+test('F4C-C4 · los wrappers mandan la INTENCIÓN: nada de saldo pendiente, estado, motorizado, actor ni rol; el cliente no manda un operacionId inventado al preparar', () => {
   const w = sinComentarios(leer('lib', 'abono-directo-cliente.ts'))
-  assert.ok(w.includes("'registrarAbonoDirecto'"))
-  assert.ok(w.includes('(p)'))
-  assert.ok(!/saldoPendiente|montoOriginal|estado|motorizadoId|depositoId|uid|rol/i.test(w.replace(/ResultadoAbonoServidor/g, '')), 'el payload no lleva autoridad financiera')
+  for (const n of ["'prepararAbonoDirecto'", "'obtenerIntencionAbono'", "'descartarIntencionAbono'", "'registrarAbonoDirecto'"]) assert.ok(w.includes(n), n)
+  assert.ok(!/saldoPendiente|montoOriginal|estado|motorizadoId|depositoId|uid|rol\b|actor/i.test(w.replace(/IntencionAbono|ResultadoAbonoServidor|RespuestaPreparar/g, '')), 'el payload no lleva autoridad financiera')
+  const iPrep = w.indexOf('export interface PeticionPrepararCliente')
+  assert.ok(!w.slice(iPrep, w.indexOf('export interface PeticionAbonoCliente')).includes('operacionId:'), 'preparar no recibe un operacionId del cliente')
   assert.ok(!/retry|setTimeout|while \(|for \(/.test(w), 'sin reintentos')
 })
 
@@ -197,9 +239,9 @@ test('F4C-C5 · el writer cliente viejo desapareció: ni registrarAbonoSaldo exp
 test('F4C-C6 · propuestas y liquidaciones siguen con SU camino: handleProponerAbono crea propuestas y crearLiquidacion conserva su abono inline', () => {
   const src = sinComentarios(PAGINA())
   const p = cuerpoDe(PAGINA(), 'handleProponerAbono')
-  assert.ok(p.includes('crearPropuestaAbono(') && !p.includes('abonarEnServidor'), 'el digitador sigue PROponiendo')
+  assert.ok(p.includes('crearPropuestaAbono(') && !p.includes('abonarEnServidor') && !p.includes('prepararEnServidor'), 'el digitador sigue PROponiendo')
   assert.ok(src.includes('confirmarPropuestaAbonoCallable({ propuestaId: p.id })'), 'confirmar propuesta sigue por su callable')
   const liq = sinComentarios(leer('app', 'panel', 'gestor', 'liquidaciones', 'page.tsx'))
   assert.ok(liq.includes("tipo: 'abono_deuda_motorizado'") && liq.includes("metodoAbono: 'descuento_liquidacion'"), 'la liquidación conserva su abono inline')
-  assert.ok(!liq.includes('registrarAbonoDirecto'), 'la liquidación no se migró')
+  assert.ok(!liq.includes('registrarAbonoDirecto') && !liq.includes('prepararAbonoDirecto'), 'la liquidación no se migró')
 })

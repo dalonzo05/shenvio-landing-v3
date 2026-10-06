@@ -45,6 +45,8 @@ function mundo() {
           async getUsuario(uid) { return get(`usuarios/${uid}`); },
           async getSaldo(id) { return get(`saldos_cargo_motorizado/${id}`); },
           async getMovimiento(id) { return get(`movimientos_financieros/${id}`); },
+          async getIntencion(id) { return get(`intenciones_abono_directo/${id}`); },
+          updateIntencion(id, campos) { cola.push({ op: 'update', ruta: `intenciones_abono_directo/${id}`, datos: campos }); },
           updateSaldo(id, campos) { cola.push({ op: 'update', ruta: `saldos_cargo_motorizado/${id}`, datos: campos }); },
           crearMovimiento(id, campos) { cola.push({ op: 'create', ruta: `movimientos_financieros/${id}`, datos: campos }); },
         };
@@ -72,7 +74,9 @@ function mundo() {
   return {
     deps, hooks, put, get,
     get escrituras() { return escrituras; },
-    snapshot: () => JSON.stringify([...store].sort(([a], [b]) => a.localeCompare(b))),
+    // El estado FINANCIERO (saldos, ledger, usuarios): las intenciones se auditan aparte, con intencion().
+    snapshot: () => JSON.stringify([...store].filter(([r]) => !r.startsWith('intenciones_abono_directo/')).sort(([a], [b]) => a.localeCompare(b))),
+    intencion: (op: string) => get(`intenciones_abono_directo/${op}`),
     movimientos: () => [...store].filter(([r]) => r.startsWith('movimientos_financieros/')).map(([r, d]) => ({ id: r.split('/')[1], ...d } as Doc & { id: string })),
     saldo: (id = 's1') => get(`saldos_cargo_motorizado/${id}`)!,
   };
@@ -96,10 +100,19 @@ function sembrar(w: Mundo, opts: { saldo?: Doc; id?: string } = {}) {
   });
 }
 
-const abonar = (w: Mundo, uid: string | null = 'g1', data: Record<string, unknown> | unknown = {}) =>
-  registrarAbonoDirectoCore(w.deps, uid ?? undefined, typeof data === 'object' && data !== null && !Array.isArray(data)
+// registrarAbonoDirecto exige una INTENCIÓN preparada (la crea prepararAbonoDirecto): este helper la
+// siembra, a nombre de quien llama primero, igual que lo haría la preparación. Con `sinIntencion` no se siembra.
+const abonar = (w: Mundo, uid: string | null = 'g1', data: Record<string, unknown> | unknown = {}, sinIntencion = false) => {
+  const d = typeof data === 'object' && data !== null && !Array.isArray(data)
     ? { saldoId: 's1', monto: 40, operacionId: OP(1), metodoAbono: 'transferencia', ...(data as Record<string, unknown>) }
-    : data);
+    : data;
+  const x = d as Record<string, unknown>;
+  if (!sinIntencion && uid && typeof d === 'object' && d !== null && typeof x.operacionId === 'string' && typeof x.saldoId === 'string'
+    && typeof x.monto === 'number' && typeof x.metodoAbono === 'string' && !w.intencion(x.operacionId)) {
+    w.put(`intenciones_abono_directo/${x.operacionId}`, { saldoId: x.saldoId, monto: x.monto, metodoAbono: x.metodoAbono, actorUid: uid, actorRol: 'gestor', estado: 'preparada' });
+  }
+  return registrarAbonoDirectoCore(w.deps, uid ?? undefined, d);
+};
 
 // ── F4C-FC1/2/28 · autenticación y roles ──────────────────────────────────────
 test('F4C-FC1 · sin sesión ⇒ unauthenticated, y no se escribe nada', async () => {
@@ -191,7 +204,10 @@ test('F4C-FC10 · sobre-abono: C$500 sobre un saldo de C$100 ⇒ monto_excede_sa
   const w = mundo(); sembrar(w);
   const antes = w.snapshot();
   await assert.rejects(abonar(w, 'g1', { monto: 500 }), codigo('failed-precondition', 'monto_excede_saldo'));
-  await assert.rejects(abonar(w, 'g1', { monto: 100.01 }), codigo('failed-precondition', 'monto_excede_saldo'));
+  // cada intento es una intención distinta: el rechazo definitivo CIERRA la anterior
+  await assert.rejects(abonar(w, 'g1', { monto: 100.01, operacionId: OP(2) }), codigo('failed-precondition', 'monto_excede_saldo'));
+  assert.equal(w.intencion(OP(1))!.estado, 'rechazada', 'el rechazo definitivo cierra la intención');
+  assert.equal(w.intencion(OP(1))!.motivoRechazo, 'monto_excede_saldo');
   assert.equal(w.snapshot(), antes);
   assert.equal(w.movimientos().length, 0);
 });
@@ -217,7 +233,7 @@ test('F4C-FC11b · un saldo "pendiente" sin monto pendiente no se abona', async 
 test('F4C-FC14 · el saldo nunca queda negativo, ni con pendiente con decimales', async () => {
   const w = mundo(); sembrar(w, { saldo: { saldoPendiente: 0.3, montoOriginal: 0.3 } });
   await assert.rejects(abonar(w, 'g1', { monto: 0.31 }), codigo('failed-precondition', 'monto_excede_saldo'));
-  const r = await abonar(w, 'g1', { monto: 0.3 });
+  const r = await abonar(w, 'g1', { monto: 0.3, operacionId: OP(3) });
   assert.equal(r.saldoPendiente, 0);
   assert.ok(w.saldo().saldoPendiente >= 0);
   // aritmética de centavos: 0.1 + 0.2 no deja residuos de coma flotante
@@ -302,7 +318,7 @@ test('F4C-FC18 · retry del MISMO operacionId ⇒ ya_aplicado, mismo movimiento 
   const primera = await abonar(w, 'g1', { monto: 40 });
   const escrituras = w.escrituras;
   const antes = w.snapshot();
-  const segunda = await abonar(w, 'g2', { monto: 40 });
+  const segunda = await abonar(w, 'g1', { monto: 40 }); // el reintento es del MISMO usuario (otra pestaña, otro dispositivo)
   assert.equal(segunda.resultado, 'ya_aplicado');
   assert.equal(segunda.movimientoId, primera.movimientoId);
   assert.equal(segunda.monto, 40);
@@ -342,12 +358,12 @@ test('F4C-FC20 · mismo operacionId con OTRO saldo ⇒ conflicto_idempotencia, 0
 // ── F4C-FC21 · concurrencia misma operación ───────────────────────────────────
 test('F4C-FC21 · dos y cinco llamadas simultáneas con el MISMO operacionId ⇒ un solo efecto', async () => {
   const w = mundo(); sembrar(w);
-  const [a, b] = await Promise.all([abonar(w, 'g1'), abonar(w, 'g2')]);
+  const [a, b] = await Promise.all([abonar(w, 'g1'), abonar(w, 'g1')]);
   assert.deepEqual([a.resultado, b.resultado].sort(), ['aplicado', 'ya_aplicado']);
   assert.equal(w.movimientos().length, 1);
   assert.equal(w.saldo().saldoPendiente, 60);
   const x = mundo(); sembrar(x);
-  const rs = await Promise.all(['g1', 'g1', 'g2', 'a1', 'g1'].map((u) => abonar(x, u)));
+  const rs = await Promise.all(['g1', 'g1', 'g1', 'g1', 'g1'].map((u) => abonar(x, u)));
   assert.equal(rs.filter((r) => r.resultado === 'aplicado').length, 1);
   assert.equal(rs.filter((r) => r.resultado === 'ya_aplicado').length, 4);
   assert.equal(x.movimientos().length, 1);
@@ -450,7 +466,8 @@ test('F4C-AT1 · el adaptador escribe saldo y movimiento SOLO con tx.* dentro de
   assert.equal((callable.match(/db\.runTransaction\(/g) ?? []).length, 1, 'una sola transacción');
   const sinTx = callable.replace(/tx\.(create|update)\(/g, 'TX_$1(');
   for (const w of ['.add(', '.set(', '.create(', '.update(', '.batch(', 'bulkWriter']) assert.ok(!sinTx.includes(w), `sin ${w} fuera de la transacción`);
-  assert.equal((nucleo.match(/deps\.transaction\(/g) ?? []).length, 1);
+  assert.equal((nucleo.match(/deps\.transaction[<(]/g) ?? []).length, 1);
   assert.ok(!nucleo.includes('registrarMovimiento') && !nucleo.includes('addDoc') && !nucleo.includes('arrayUnion'));
-  assert.ok(nucleo.includes('tx.updateSaldo(') && nucleo.includes('tx.crearMovimiento('));
+  assert.ok(nucleo.includes('tx.updateSaldo(') && nucleo.includes('tx.crearMovimiento(') && nucleo.includes('tx.updateIntencion('), 'saldo, ledger e intención en la MISMA transacción');
+  assert.match(callable, /updateIntencion: \(id, campos\) => \{ tx\.update\(db\.collection\('intenciones_abono_directo'\)\.doc\(id\), campos\); \}/);
 });

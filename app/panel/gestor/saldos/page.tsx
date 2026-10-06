@@ -18,14 +18,22 @@ import {
   crearPropuestaAbono, corregirPropuestaAbono,
   crearPropuestaAbonoPendienteComprobante, completarComprobantePropuesta,
 } from '@/lib/financial-writes'
-import { registrarAbonoDirectoServidor, type PeticionAbonoCliente } from '@/lib/abono-directo-cliente'
+import {
+  descartarAbonoDirectoServidor,
+  obtenerIntencionAbonoServidor,
+  prepararAbonoDirectoServidor,
+  registrarAbonoDirectoServidor,
+  type PeticionAbonoCliente,
+} from '@/lib/abono-directo-cliente'
 import {
   ErrorAbonoDirecto,
+  decidirTrasPreparar,
   exigirAbonado,
   presentarErrorAbono,
   presentarResultadoAbono,
+  vistaIntencionAlAbrir,
+  type IntencionAbono,
 } from '@/lib/abono-directo-ux'
-import { conservarOperacion, obtenerOperacion, type OperacionAbono } from '@/lib/abono-operacion'
 import {
   LABELS_TIPO_SALDO,
   type SaldoCargoMotorizado,
@@ -84,6 +92,12 @@ function fmtDateShort(v: any): string {
   const d = tsToDate(v)
   if (!d) return '—'
   return d.toLocaleDateString('es-NI', { day: '2-digit', month: 'short' })
+}
+
+const LABELS_METODO_ABONO: Record<string, string> = {
+  transferencia: 'Transferencia',
+  descuento_liquidacion: 'Desc. liquidación',
+  ajuste_manual: 'Ajuste manual',
 }
 
 const BADGE_ESTADO: Record<EstadoSaldo, string> = {
@@ -155,8 +169,11 @@ function SaldosPageContent() {
   // operación siga recuperable. Se resetea junto con el resto del form en
   // resetAbono().
   const pendingPropuestaIdRef = useRef<string | null>(null)
-  // FIN-4C — la operación (identidad de la intención) del abono directo en curso.
-  const operacionAbonoRef = useRef<OperacionAbono | null>(null)
+  // FIN-4C — la intención de abono vive en el SERVIDOR. Aquí solo hay (1) lo que el servidor dijo al
+  // abrir el formulario y (2) un CACHÉ de UX con las operaciones aplicadas que el usuario ya reconoció
+  // en esta sesión. Ninguno es autoridad: si se pierden (recarga), el servidor vuelve a decir la verdad.
+  const [intencionAbono, setIntencionAbono] = useState<IntencionAbono | null>(null)
+  const reconocidasRef = useRef<Record<string, string>>({})
 
   // ── DIGITADOR V1 — doble control de abonos (D3) ───────────────────────────
   const [userRol, setUserRol] = useState<string | null>(null)
@@ -198,6 +215,26 @@ function SaldosPageContent() {
       setLoading(false)
     })
   }, [])
+
+  // FIN-4C — al abrir (o volver a abrir, o recargar) el formulario de un saldo, se RECONCILIA con la
+  // intención vigente del servidor: una preparada se recupera con sus datos; una aplicada que el usuario
+  // no reconoció se muestra y NO se crea otra. Si la consulta falla no pasa nada grave: preparar recupera igual.
+  useEffect(() => {
+    if (!abonoId || userRol === null || userRol === 'digitador') { setIntencionAbono(null); return }
+    let vivo = true
+    obtenerIntencionAbonoServidor(abonoId)
+      .then((r) => {
+        if (!vivo) return
+        const v = vistaIntencionAlAbrir(r.intencion, reconocidasRef.current, abonoId)
+        setIntencionAbono(v.tipo === 'ninguna' ? null : v.intencion)
+        if (v.tipo === 'pendiente') {
+          setMontoAbono(String(v.intencion.monto))
+          setMetodoAbono(v.intencion.metodoAbono as MetodoAbono)
+        }
+      })
+      .catch(() => { if (vivo) setIntencionAbono(null) })
+    return () => { vivo = false }
+  }, [abonoId, userRol])
 
   // Propuestas de abono. Digitador: Rules solo le permiten leer las SUYAS —
   // el where() acá es lo que permite a Firestore probar esa condición para un
@@ -247,8 +284,8 @@ function SaldosPageContent() {
   }
 
   function resetAbono() {
-    // Cancelar o éxito: la intención termina. Un resultado incierto NO pasa por aquí.
-    operacionAbonoRef.current = null
+    // Cerrar el formulario es SOLO de la pantalla: no toca la intención del servidor (una intención
+    // incierta o preparada sigue existiendo y se recupera al volver). Abandonarla es «Descartar».
     setAbonoId(null)
     setPropuestaCorrigiendoId(null)
     setMontoAbono('')
@@ -267,6 +304,15 @@ function SaldosPageContent() {
    * FIN-4C — el ÚNICO abono directo del producto: la callable. Lanza ErrorAbonoDirecto (con su
    * mensaje de pantalla) si el abono no quedó aplicado. Nunca reintenta por su cuenta.
    */
+  async function prepararEnServidor(p: Parameters<typeof prepararAbonoDirectoServidor>[0]) {
+    try {
+      return await prepararAbonoDirectoServidor(p)
+    } catch (e) {
+      const presentada = presentarErrorAbono(e)
+      throw new ErrorAbonoDirecto(presentada.categoria, presentada.mensaje)
+    }
+  }
+
   async function abonarEnServidor(p: PeticionAbonoCliente) {
     let presentada
     try {
@@ -295,9 +341,25 @@ function SaldosPageContent() {
 
     setSavingAbono(true)
     try {
+      // 1. La INTENCIÓN (identidad de la operación) la crea o RECUPERA el servidor: ante una recarga, otra
+      //    pestaña o un resultado incierto devuelve LA MISMA; si ya quedó aplicada, lo dice y no crea otra.
+      const preparada = await prepararEnServidor({
+        saldoId: saldo.id,
+        monto,
+        metodoAbono,
+        nota: notaAbono,
+        reconoceOperacionId: reconocidasRef.current[saldo.id],
+      })
+      const decision = decidirTrasPreparar(preparada)
+      if (decision.accion !== 'continuar') {
+        setIntencionAbono(decision.intencion)
+        setErrAbono(decision.mensaje)
+        return
+      }
+
+      // 2. El comprobante (solo si hay operación para registrar).
       let comprobanteUrl: string | undefined
       let comprobantePath: string | undefined
-
       if (comprobanteFile) {
         const abonoIndex = (saldo.abonos?.length ?? 0)
         const blob = await compressImage(comprobanteFile)
@@ -306,32 +368,48 @@ function SaldosPageContent() {
         comprobantePath = pathStorage
       }
 
-      // La identidad de la INTENCIÓN: nueva para un abono nuevo, la MISMA mientras el resultado
-      // sea incierto (un reintento tras un error temporal reusa este operacionId).
-      const operacion = obtenerOperacion(operacionAbonoRef.current, saldo.id)
-      operacionAbonoRef.current = operacion
+      // 3. El efecto financiero, con el operacionId que dio el servidor.
       await abonarEnServidor({
         saldoId: saldo.id,
         monto,
-        operacionId: operacion.operacionId,
+        operacionId: decision.operacionId,
         metodoAbono,
         nota: notaAbono,
         ...(comprobanteUrl ? { comprobanteUrl } : {}),
         ...(comprobantePath ? { comprobantePath } : {}),
       })
+      // Resultado definitivo: el usuario ya vio aplicada esta operación (caché de UX, no autoridad).
+      reconocidasRef.current[saldo.id] = decision.operacionId
+      setIntencionAbono(null)
       resetAbono()
     } catch (e: unknown) {
       console.error('Error registrando abono:', e)
-      if (e instanceof ErrorAbonoDirecto) {
-        // Un resultado definitivo cierra la operación; uno incierto la conserva para reintentar.
-        if (!conservarOperacion(e.categoria)) operacionAbonoRef.current = null
-        setErrAbono(e.message)
-      } else {
-        setErrAbono(e instanceof Error ? e.message : 'Error al registrar abono')
-      }
+      // Un error incierto NO cierra ni inventa nada: la operación sigue en el servidor y el próximo
+      // intento (aunque sea tras recargar) la recupera.
+      setErrAbono(e instanceof ErrorAbonoDirecto ? e.message : e instanceof Error ? e.message : 'Error al registrar abono')
     } finally {
       setSavingAbono(false)
     }
+  }
+
+  /** Abandonar EXPLÍCITAMENTE una intención preparada (cerrar el formulario no lo hace). */
+  async function handleDescartarIntencion() {
+    if (!intencionAbono || intencionAbono.estado !== 'preparada') return
+    try {
+      await descartarAbonoDirectoServidor(intencionAbono.operacionId)
+      setIntencionAbono(null)
+      setErrAbono(null)
+    } catch (e: unknown) {
+      setErrAbono(presentarErrorAbono(e).mensaje)
+    }
+  }
+
+  /** El abono NUEVO es una acción explícita: «ya vi que la anterior quedó aplicada y quiero otra». */
+  function handleRegistrarOtroAbono() {
+    if (!intencionAbono || intencionAbono.estado !== 'aplicada') return
+    reconocidasRef.current[intencionAbono.saldoId] = intencionAbono.operacionId
+    setIntencionAbono(null)
+    setErrAbono(null)
   }
 
   // ── Proponer / corregir abono (DIGITADOR V1) ──────────────────────────────
@@ -821,6 +899,29 @@ function SaldosPageContent() {
                   <div className="border-t border-gray-100 px-4 py-3">
                     {isAbono ? (
                       <div className="flex flex-col gap-3">
+                        {/* FIN-4C — la intención vigente del SERVIDOR (recarga/otra pestaña/otro dispositivo) */}
+                        {!esDigitador && intencionAbono && intencionAbono.saldoId === s.id && intencionAbono.estado === 'preparada' && (
+                          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex flex-col gap-1.5">
+                            <p>
+                              Hay un abono pendiente de confirmar: <strong>{fmt(intencionAbono.monto)}</strong> ({LABELS_METODO_ABONO[intencionAbono.metodoAbono] ?? intencionAbono.metodoAbono}).
+                              Continuá con esos datos o descartalo. Cerrar este formulario no lo descarta.
+                            </p>
+                            <button type="button" onClick={handleDescartarIntencion} className="self-start font-semibold underline">
+                              Descartar abono pendiente
+                            </button>
+                          </div>
+                        )}
+                        {!esDigitador && intencionAbono && intencionAbono.saldoId === s.id && intencionAbono.estado === 'aplicada' && (
+                          <div className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800 flex flex-col gap-1.5">
+                            <p>
+                              El último abono de <strong>{fmt(intencionAbono.monto)}</strong> ({LABELS_METODO_ABONO[intencionAbono.metodoAbono] ?? intencionAbono.metodoAbono}) ya está registrado.
+                              Recargar o volver no crea otro.
+                            </p>
+                            <button type="button" onClick={handleRegistrarOtroAbono} className="self-start font-semibold underline">
+                              Registrar otro abono
+                            </button>
+                          </div>
+                        )}
                         {/* Fila: monto + método */}
                         <div className="flex gap-2">
                           <input

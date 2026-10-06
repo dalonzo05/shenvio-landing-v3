@@ -19,9 +19,12 @@ export function depsRealesAbono(db: FirebaseFirestore.Firestore = admin.firestor
         getUsuario: (id) => leer('usuarios', id),
         getSaldo: (id) => leer('saldos_cargo_motorizado', id),
         getMovimiento: (id) => leer('movimientos_financieros', id),
+        getIntencion: (id) => leer('intenciones_abono_directo', id),
         updateSaldo: (id, campos) => { tx.update(db.collection('saldos_cargo_motorizado').doc(id), campos); },
         // create(): el movimiento de una operación no puede existir ya.
         crearMovimiento: (id, campos) => { tx.create(db.collection('movimientos_financieros').doc(id), campos); },
+        // La intención se cierra en la MISMA transacción que el saldo y el ledger.
+        updateIntencion: (id, campos) => { tx.update(db.collection('intenciones_abono_directo').doc(id), campos); },
       });
     }),
     serverTimestamp: () => FieldValue.serverTimestamp(),

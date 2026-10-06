@@ -27,6 +27,7 @@ export type CategoriaAbono =
   | 'saldo_inexistente'
   | 'conflicto'
   | 'integridad'
+  | 'intencion'
   | 'permiso'
   | 'temporal'
 
@@ -68,7 +69,7 @@ export const MSG_SALDO_INEXISTENTE = 'El saldo ya no existe. Actualizá la panta
 export const MSG_CONFLICTO = 'Esta operación ya se registró con otro monto o método. No se registró nada: revisá el saldo antes de continuar.'
 export const MSG_PERMISO = 'Tu usuario no tiene permiso para registrar abonos.'
 export const MSG_TEMPORAL =
-  'No sabemos si el abono llegó a registrarse. Revisá el saldo: reintentar es seguro, no se duplicará.'
+  'No sabemos si el abono llegó a registrarse. Verificaremos la operación existente: reintentar es seguro, no se duplicará.'
 const MSG_INVALIDO_BASE = 'No se registró el abono: la petición no es válida.'
 const MSG_INTEGRIDAD_BASE = 'No se registró el abono: el saldo y su movimiento de esta operación no cuadran y hay que revisarlos.'
 
@@ -106,6 +107,7 @@ export function presentarErrorAbono(e: unknown): AbonoPresentado {
     if (motivo === 'monto_excede_saldo') return { categoria: 'monto_excede', mensaje: MSG_MONTO_EXCEDE, aplicado: false }
     if (motivo === 'saldo_no_abonable') return { categoria: 'no_abonable', mensaje: MSG_NO_ABONABLE, aplicado: false }
     if (motivo === 'conflicto_idempotencia') return { categoria: 'conflicto', mensaje: MSG_CONFLICTO, aplicado: false }
+    if (motivo.startsWith('intencion_')) return { categoria: 'intencion', mensaje: MSG_INTENCION_NO_DISPONIBLE, aplicado: false }
     return {
       categoria: 'integridad',
       mensaje: mensajeServidor ? `${MSG_INTEGRIDAD_BASE} ${mensajeServidor}` : MSG_INTEGRIDAD_BASE,
@@ -120,4 +122,79 @@ export function presentarErrorAbono(e: unknown): AbonoPresentado {
 export function exigirAbonado(p: AbonoPresentado): AbonoPresentado {
   if (!p.aplicado) throw new ErrorAbonoDirecto(p.categoria, p.mensaje)
   return p
+}
+
+// ─── Intención de abono (FIN-4C, corrección) ────────────────────────────────
+//
+// La intención vive en el SERVIDOR. La pantalla no inventa identidad: la pide (preparar), la
+// recupera al abrir/recargar (obtener) y decide qué mostrar a partir de lo que el servidor dice.
+// Lo único que guarda en memoria es un CACHÉ de UX —qué operaciones aplicadas ya reconoció el
+// usuario en esta sesión—, que NO es autoridad: si se pierde, el servidor sigue diciendo la verdad
+// y la pantalla vuelve a ofrecer, de forma explícita, "Registrar otro abono".
+
+export type EstadoIntencionAbono = 'preparada' | 'aplicada' | 'rechazada'
+
+export interface IntencionAbono {
+  operacionId: string
+  saldoId: string
+  monto: number
+  metodoAbono: string
+  estado: EstadoIntencionAbono
+  movimientoId?: string
+  motivoRechazo?: string
+}
+
+export interface RespuestaPreparar {
+  ok: true
+  resultado: 'preparada' | 'recuperada' | 'ya_aplicada' | 'operacion_pendiente_existente'
+  intencion: IntencionAbono
+}
+
+export const MSG_APLICADA_RECUPERADA =
+  'Este saldo ya tiene un abono registrado con estos datos (lo recuperamos del servidor). No se creó otro. Si querés registrar OTRO abono, usá «Registrar otro abono».'
+export const MSG_PENDIENTE_EXISTENTE =
+  'Hay un abono pendiente de confirmar con otros datos. Continuá con ese o descartalo antes de iniciar otro.'
+export const MSG_INTENCION_NO_DISPONIBLE =
+  'Esta operación ya no está disponible (se cerró o es de otro usuario). Volvé a iniciar el abono.'
+
+export type DecisionPreparar =
+  /** Hay operación (nueva o recuperada): se puede registrar con ESTE operacionId. */
+  | { accion: 'continuar'; operacionId: string; recuperada: boolean }
+  /** La operación vigente ya está aplicada: se muestra y NO se crea otra. */
+  | { accion: 'mostrar_aplicada'; intencion: IntencionAbono; mensaje: string }
+  /** Hay una pendiente con otros datos: se resuelve (continuar o descartar) antes de iniciar otra. */
+  | { accion: 'resolver_pendiente'; intencion: IntencionAbono; mensaje: string }
+
+export function decidirTrasPreparar(r: Pick<RespuestaPreparar, 'resultado' | 'intencion'>): DecisionPreparar {
+  switch (r.resultado) {
+    case 'preparada':
+      return { accion: 'continuar', operacionId: r.intencion.operacionId, recuperada: false }
+    case 'recuperada':
+      return { accion: 'continuar', operacionId: r.intencion.operacionId, recuperada: true }
+    case 'ya_aplicada':
+      return { accion: 'mostrar_aplicada', intencion: r.intencion, mensaje: MSG_APLICADA_RECUPERADA }
+    default:
+      return { accion: 'resolver_pendiente', intencion: r.intencion, mensaje: MSG_PENDIENTE_EXISTENTE }
+  }
+}
+
+export type VistaIntencion =
+  | { tipo: 'ninguna' }
+  | { tipo: 'pendiente'; intencion: IntencionAbono }
+  | { tipo: 'aplicada_sin_reconocer'; intencion: IntencionAbono }
+
+/**
+ * Qué muestra la pantalla al abrir/recargar el formulario de un saldo, a partir de la intención vigente
+ * del servidor. Una aplicada que el usuario YA reconoció en esta sesión no estorba; una aplicada que
+ * no reconoció (recarga, otra pestaña, otro dispositivo) se muestra: recargar NO es iniciar otro abono.
+ */
+export function vistaIntencionAlAbrir(
+  intencion: IntencionAbono | null,
+  reconocidas: Readonly<Record<string, string>>,
+  saldoId: string,
+): VistaIntencion {
+  if (!intencion) return { tipo: 'ninguna' }
+  if (intencion.estado === 'preparada') return { tipo: 'pendiente', intencion }
+  if (intencion.estado === 'aplicada' && reconocidas[saldoId] !== intencion.operacionId) return { tipo: 'aplicada_sin_reconocer', intencion }
+  return { tipo: 'ninguna' }
 }
