@@ -15,6 +15,7 @@
 
 import { claseDeposito, fechasDeposito } from './presentacion-deposito'
 import type { DepositoRegistrado } from './deposito-orden'
+import { anularEstaPermitido } from './deposito-transiciones'
 
 const money = (n: number) => `C$ ${n.toLocaleString('es-NI')}`
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -324,6 +325,6 @@ export function accionesAdminDeposito(
   if (rol !== 'admin' || claseDeposito(dep) === 'transferencia_delivery') return { rehacer: false, anular: false }
   return {
     rehacer: dep.estado !== 'convertido_en_deuda' && dep.estado !== 'anulado',
-    anular: dep.estado !== 'anulado',
+    anular: anularEstaPermitido(dep.estado),
   }
 }

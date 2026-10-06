@@ -1879,10 +1879,18 @@ service cloud.firestore {
         let evId = despues.get('ultimoEventoId', '');
         let ab = resource.data.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio'];
         return
+          // FIN-4A — un depósito convertido en deuda NO pasa a 'anulado' por este
+          // writer genérico (ni gestor ni admin). Anularlo dejaba el saldo vivo en
+          // saldos_cargo_motorizado sin el movimiento de ledger que lo respalda: una
+          // deuda sin respaldo. Su única salida es revertir la conversión (FIN-4B).
+          // Va primero porque es la comparación más barata del bloque (presupuesto
+          // de 1000 expresiones, ver la nota de arriba).
+          (eAntes != 'convertido_en_deuda' || eDespues != 'anulado')
+
           // DEP-ACCIONES-ADMIN-ONLY — sacar un depósito de 'confirmado' es del
           // admin. Única excepción del gestor: anular un DEP tipo C al
           // revertir su cobro (que no es A/B, de ahí el `!ab`).
-          (eAntes != 'confirmado' || isAdmin() || (!ab && eDespues == 'anulado'))
+          && (eAntes != 'confirmado' || isAdmin() || (!ab && eDespues == 'anulado'))
 
           // Salir de 'devuelto' es del MOTORIZADO, con una versión nueva
           // (regla propia más abajo). Staff no confirma un depósito que sigue

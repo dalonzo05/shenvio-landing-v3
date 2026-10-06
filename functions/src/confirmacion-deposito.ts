@@ -56,34 +56,25 @@
 
 import { HttpsError } from 'firebase-functions/v2/https';
 import type { DocumentData } from 'firebase-admin/firestore';
-import { calcularDeposito } from './calculo-deposito';
 import { cuentas } from './financial-types';
+import {
+  TIPO_DEPOSITO_STORKHUB,
+  TIPO_DEPOSITO_COMERCIO,
+  MAX_ORDENES_POR_DEPOSITO,
+  demostrarDeposito,
+  esNumeroFinito,
+  rechazo,
+  type MotivoRechazo,
+} from './deposito-monto';
 
-export const TIPO_DEPOSITO_STORKHUB = 'recaudacion_motorizado_storkhub';
-export const TIPO_DEPOSITO_COMERCIO = 'recaudacion_motorizado_comercio';
+// Siguen exportados desde aquí: los tests y el adaptador de FIN-3 los importan de este módulo.
+export { TIPO_DEPOSITO_STORKHUB, TIPO_DEPOSITO_COMERCIO, MAX_ORDENES_POR_DEPOSITO };
+export type { MotivoRechazo };
 export const ESTADO_CONFIRMABLE = 'en_revision';
 export const ESTADO_CONFIRMADO = 'confirmado';
 export const EVENTO_DEPOSITO_CONFIRMADO = 'DEPOSITO_CONFIRMADO';
 
-/**
- * Tope de órdenes por depósito. La transacción escribe 1 depósito + 1 evento +
- * N órdenes + 1 movimiento, y Firestore admite 500 escrituras por transacción.
- * Un depósito real agrupa unas pocas órdenes; el tope existe para fallar con un
- * mensaje claro y no con un error opaco de Firestore.
- */
-export const MAX_ORDENES_POR_DEPOSITO = 450;
 const MAX_ID = 200;
-
-export type MotivoRechazo =
-  | 'estado_cambio'
-  | 'tipo_no_confirmable'
-  | 'sin_ordenes'
-  | 'demasiadas_ordenes'
-  | 'orden_invalida'
-  | 'gasto_invalido'
-  | 'gasto_sin_marca'
-  | 'monto_inconsistente'
-  | 'ledger_inconsistente';
 
 export type ResultadoConfirmacion = {
   ok: true;
@@ -118,14 +109,6 @@ export interface DepsConfirmacion {
   nuevoEventoId(): string;
 }
 
-function rechazo(motivo: MotivoRechazo, mensaje: string, extra: Record<string, unknown> = {}): HttpsError {
-  return new HttpsError('failed-precondition', mensaje, { motivo, ...extra });
-}
-
-function esNumeroFinito(v: unknown): v is number {
-  return typeof v === 'number' && Number.isFinite(v);
-}
-
 function idValido(v: unknown): v is string {
   return typeof v === 'string' && v.trim().length > 0 && v.length <= MAX_ID;
 }
@@ -149,15 +132,6 @@ function exigirGestorOAdmin(usuario: DocumentData | null): 'admin' | 'gestor' {
     throw new HttpsError('permission-denied', 'Solo un gestor o admin activo puede confirmar un depósito.');
   }
   return rol;
-}
-
-function idsUnicos(v: unknown): string[] {
-  if (!Array.isArray(v)) return [];
-  return [...new Set(v.filter((x): x is string => typeof x === 'string' && x.length > 0))];
-}
-
-function mismoMonto(a: unknown, b: number): boolean {
-  return esNumeroFinito(a) && Math.abs(a - b) < 0.005;
 }
 
 export async function confirmarDepositoCore(
@@ -204,79 +178,9 @@ export async function confirmarDepositoCore(
       throw rechazo('ledger_inconsistente', 'El depósito tiene movimientos activos sin estar confirmado. Hay que revisarlo antes de confirmar.', { activos: activos.length });
     }
 
-    // ── Órdenes ───────────────────────────────────────────────────────────────
-    const solicitudIds = idsUnicos(dep.solicitudIds);
-    if (solicitudIds.length === 0) throw rechazo('sin_ordenes', 'El depósito no tiene órdenes asociadas.');
-    if (solicitudIds.length > MAX_ORDENES_POR_DEPOSITO) {
-      throw rechazo('demasiadas_ordenes', `El depósito supera el máximo de ${MAX_ORDENES_POR_DEPOSITO} órdenes por confirmación.`);
-    }
-
-    const motorizadoUid = typeof dep.motorizadoUid === 'string' ? dep.motorizadoUid : '';
-    if (!motorizadoUid) throw rechazo('orden_invalida', 'El depósito no identifica a su motorizado.');
-    const motDocId = (await tx.getMotorizadoDocId(motorizadoUid)) ?? motorizadoUid;
-
-    const claveDeposito = esStorkhub ? 'storkhubDepositoId' : 'comercioDepositoId';
-    let montoBruto = 0;
-    for (const sid of solicitudIds) {
-      const o = await tx.getSolicitud(sid);
-      if (!o) throw rechazo('orden_invalida', 'Una de las órdenes del depósito ya no existe.', { solicitudId: sid });
-      if (o.estado !== 'entregado') throw rechazo('orden_invalida', 'Una de las órdenes del depósito no está entregada.', { solicitudId: sid });
-      if (o.asignacion?.motorizadoAuthUid !== motorizadoUid) {
-        throw rechazo('orden_invalida', 'Una de las órdenes no pertenece al motorizado del depósito.', { solicitudId: sid });
-      }
-      const apunta = o.registro?.deposito?.[claveDeposito];
-      if (apunta && apunta !== depositoId) {
-        throw rechazo('orden_invalida', 'Una de las órdenes ya pertenece a otro depósito.', { solicitudId: sid });
-      }
-      if (!esStorkhub) {
-        const dueno = dep.destinatarioId;
-        if (!dueno || (o.userId !== dueno && o.ownerSnapshot?.uid !== dueno)) {
-          throw rechazo('orden_invalida', 'Una de las órdenes no pertenece al comercio del depósito.', { solicitudId: sid });
-        }
-      }
-      const calculo = calcularDeposito(o);
-      montoBruto += esStorkhub ? calculo.totalAStorkhub : calculo.totalAlComercio;
-    }
-
-    // ── Gastos (FIN-2): FIN-3 CONFIRMA lo que FIN-2 ya consumió ───────────────
-    const gastosIds = idsUnicos(dep.gastosIds);
-    if (!esStorkhub && gastosIds.length > 0) {
-      throw rechazo('gasto_invalido', 'Un depósito al comercio no descuenta gastos.');
-    }
-    let gastosDescontados = 0;
-    for (const gid of gastosIds) {
-      const g = await tx.getGasto(gid);
-      if (!g) throw rechazo('gasto_invalido', 'Uno de los gastos del depósito ya no existe.', { gastoId: gid });
-      if (g.estado !== 'aprobado') throw rechazo('gasto_invalido', 'Uno de los gastos del depósito no está aprobado.', { gastoId: gid });
-      if (g.motorizadoId !== motDocId) throw rechazo('gasto_invalido', 'Uno de los gastos no pertenece al motorizado del depósito.', { gastoId: gid });
-      if (g.liquidacionId) throw rechazo('gasto_invalido', 'Uno de los gastos ya se descontó en una liquidación.', { gastoId: gid });
-      // Sin la marca de FIN-2 el gasto podría estar descontado en otro depósito.
-      // No se debilita para dejarlo pasar: depende de FIN-GASTOS-CONSUMO-BACKFILL-1.
-      if (g.consumidoEnDepositoId === undefined || g.consumidoEnDepositoId === null || g.consumidoEnDepositoId === '') {
-        throw rechazo('gasto_sin_marca', 'Uno de los gastos del depósito no tiene marca de consumo (depósito anterior a FIN-2). Requiere el backfill de gastos.', { gastoId: gid });
-      }
-      if (g.consumidoEnDepositoId !== depositoId) {
-        throw rechazo('gasto_invalido', 'Uno de los gastos ya fue consumido por otro depósito.', { gastoId: gid });
-      }
-      if (!esNumeroFinito(g.monto) || g.monto <= 0) throw rechazo('gasto_invalido', 'Uno de los gastos tiene un monto inválido.', { gastoId: gid });
-      gastosDescontados += g.monto;
-    }
-
-    // ── Monto: se DEMUESTRA, no se acepta ─────────────────────────────────────
-    const montoTotal = esStorkhub ? Math.max(0, montoBruto - gastosDescontados) : montoBruto;
-    // Un depósito anterior a los gastos no guarda montoBruto ni gastosDescontados:
-    // el bruto no se compara (no hay con qué), los gastos ausentes valen 0, y el
-    // total SIEMPRE se compara.
-    const montoCoincide = esStorkhub
-      ? mismoMonto(dep.montoTotal, montoTotal)
-        && mismoMonto(dep.gastosDescontados ?? 0, gastosDescontados)
-        && (dep.montoBruto === undefined || mismoMonto(dep.montoBruto, montoBruto))
-      : mismoMonto(dep.montoTotal, montoTotal);
-    if (!montoCoincide) {
-      throw rechazo('monto_inconsistente', 'El monto guardado del depósito no coincide con sus órdenes y gastos. No se confirma ni se corrige solo.', {
-        esperado: { montoBruto, gastosDescontados, montoTotal },
-      });
-    }
+    // ── Órdenes, gastos (FIN-2) y monto: se DEMUESTRAN (deposito-monto.ts) ─────
+    // La misma demostración que usa la conversión en deuda (FIN-4A).
+    const { solicitudIds, motDocId, montoTotal } = await demostrarDeposito(tx, dep, depositoId);
 
     // ── ESCRITURAS (todas dentro de esta transacción) ─────────────────────────
     const ahora = deps.serverTimestamp();

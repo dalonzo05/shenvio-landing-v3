@@ -164,11 +164,13 @@ test('CO13 · sobre un confirmado el gestor no tiene ninguna de las tres', () =>
   assert.deepEqual(accionesDeposito(conf, 'admin'), { pedirCorreccion: false, rehacer: true, anular: true })
 })
 
-test('CO14 · un convertido en deuda no se rehace, pero sí se puede anular', () => {
-  // El saldo vive en saldos_cargo_motorizado y Rehacer no lo anula: misma
-  // razón que eliminarLiberaOrdenes() lleva documentando desde F1.
-  assert.deepEqual(accionesDeposito({ ...A, estado: 'convertido_en_deuda' }, 'admin'),
-    { pedirCorreccion: false, rehacer: false, anular: true })
+test('CO14 · un convertido en deuda ni se rehace ni se anula (FIN-4A): su salida es revertir la conversión', () => {
+  // El saldo vive en saldos_cargo_motorizado y ni Rehacer ni Anular lo cierran:
+  // Anular dejaba una deuda viva sin el movimiento de ledger que la respalda.
+  for (const rol of ['admin', 'gestor']) {
+    assert.deepEqual(accionesDeposito({ ...A, estado: 'convertido_en_deuda' }, rol),
+      { pedirCorreccion: false, rehacer: false, anular: false }, rol)
+  }
 })
 
 test('CO15 · un anulado es terminal: ya no ofrece nada', () => {

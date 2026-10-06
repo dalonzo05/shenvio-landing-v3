@@ -44,6 +44,7 @@
 // PURO: sin Firestore, sin React. El sello de tiempo lo pasa quien llama.
 
 import type { DepositoRegistrado } from './deposito-orden'
+import { anularEstaPermitido } from './deposito-transiciones'
 import { asegurarMotivoEvento, normalizarMotivoEvento } from './deposito-eventos'
 import { presentarActor, type ActorPresentado } from './actor-resolucion'
 
@@ -240,7 +241,10 @@ export interface AccionesDeposito {
   pedirCorreccion: boolean
   /** Admin, y nunca sobre un tipo C ni sobre un convertido en deuda. */
   rehacer: boolean
-  /** Admin. Reemplaza al viejo "Eliminar" — ya no hay delete físico. */
+  /**
+   * Admin. Reemplaza al viejo "Eliminar" — ya no hay delete físico. Nunca sobre un
+   * convertido en deuda (FIN-4A): ver anularEstaPermitido().
+   */
   anular: boolean
 }
 
@@ -262,7 +266,7 @@ export function accionesDeposito(
   return {
     pedirCorreccion: ab && staff && puedePedirCorreccion(dep),
     rehacer: ab && admin && dep?.estado !== 'convertido_en_deuda' && dep?.estado !== 'anulado',
-    anular: ab && admin && dep?.estado !== 'anulado',
+    anular: ab && admin && anularEstaPermitido(dep?.estado),
   }
 }
 

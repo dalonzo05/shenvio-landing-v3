@@ -168,7 +168,8 @@ test('X14 · Rehacer / Anular: solo admin, nunca sobre un DEP tipo C', () => {
   assert.deepEqual(accionesAdminDeposito(DEP_0001, 'gestor'), { rehacer: false, anular: false })
   assert.deepEqual(accionesAdminDeposito(DEP_0001, 'digitador'), { rehacer: false, anular: false })
   assert.deepEqual(accionesAdminDeposito(DEP_0002, 'admin'), { rehacer: false, anular: false })
-  assert.deepEqual(accionesAdminDeposito({ ...DEP_0001, estado: 'convertido_en_deuda' }, 'admin'), { rehacer: false, anular: true })
+  // FIN-4A — un convertido en deuda tampoco se anula: dejaba la deuda viva sin ledger.
+  assert.deepEqual(accionesAdminDeposito({ ...DEP_0001, estado: 'convertido_en_deuda' }, 'admin'), { rehacer: false, anular: false })
 })
 
 // DEPOSITO-AUDITORIA-1 — un DEP ya anulado es terminal: no se rehace ni se

@@ -253,8 +253,9 @@ export async function crearSaldoCargo(params: {
   const ref = await addDoc(collection(db, 'saldos_cargo_motorizado'), saldoData)
 
   // 'deposito_no_realizado' NO emite movimiento de ledger aquí.
-  // El movimiento ya fue registrado por el llamador (convertirDepositoEnDeuda)
-  // como 'deposito_convertido_en_deuda': efectivo_en_poder → deuda_motorizado.
+  // El movimiento ya lo registra la conversión (la Cloud Function
+  // convertirDepositoEnDeuda, FIN-4A) como 'deposito_convertido_en_deuda':
+  // efectivo_en_poder → deuda_motorizado.
   // Emitir un segundo movimiento (deuda_motorizado → banco) sería incorrecto:
   // cancelaría la deuda y registraría un ingreso bancario que nunca ocurrió.
   if (tipo !== 'deposito_no_realizado') {
@@ -362,96 +363,12 @@ export async function anularSaldoCargo(
 }
 
 // ─── Convertir depósito pendiente en deuda ────────────────────────────────────
-
-/**
- * Convierte un depósito pendiente en un saldo a cargo del motorizado.
- *
- * - Marca el depósito como `convertido_en_deuda` en ordenes_deposito
- * - Marca las solicitudes como confirmadas (para sacarlas de pendientes)
- * - Crea un SaldoCargoMotorizado de tipo 'deposito_no_realizado'
- * - Registra movimiento en el ledger
- *
- */
-export async function convertirDepositoEnDeuda(params: {
-  depositoId: string
-  solicitudIds: string[]
-  destinatario: 'storkhub' | 'comercio'
-  monto: number
-  motorizadoId: string
-  motorizadoUid: string
-  motorizadoNombre: string
-  nota: string
-  operadorId: string
-}): Promise<string> {
-  const {
-    depositoId, solicitudIds, destinatario, monto,
-    motorizadoId, motorizadoUid, motorizadoNombre, nota, operadorId,
-  } = params
-
-  const b = writeBatch(db)
-
-  // 1. Marcar el depósito como convertido_en_deuda
-  b.update(doc(db, 'ordenes_deposito', depositoId), {
-    estado: 'convertido_en_deuda',
-    notaConversion: nota,
-    updatedAt: serverTimestamp(),
-  })
-
-  // 2. Marcar las solicitudes como "depósito gestionado" para sacarlas de pendientes
-  const fieldKey = destinatario === 'storkhub'
-    ? 'registro.deposito.confirmadoStorkhub'
-    : 'registro.deposito.confirmadoComercio'
-  const atKey = destinatario === 'storkhub'
-    ? 'registro.deposito.confirmadoStorkhubAt'
-    : 'registro.deposito.confirmadoComercioAt'
-  const idKey = destinatario === 'storkhub'
-    ? 'registro.deposito.storkhubDepositoId'
-    : 'registro.deposito.comercioDepositoId'
-
-  solicitudIds.forEach((sid) => {
-    b.update(doc(db, 'solicitudes_envio', sid), {
-      [fieldKey]: true,
-      [atKey]: serverTimestamp(),
-      [idKey]: depositoId,
-    })
-  })
-
-  await b.commit()
-
-  // 3. Crear el saldo a cargo (genera su propio movimiento interno)
-  const saldoId = await crearSaldoCargo({
-    motorizadoId,
-    motorizadoUid,
-    motorizadoNombre,
-    tipo: 'deposito_no_realizado',
-    monto,
-    origen: 'deposito',
-    depositoId,
-    nota,
-    operadorId,
-  })
-
-  // Referenciar saldoId en ordenes_deposito para mostrar en historial
-  await updateDoc(doc(db, 'ordenes_deposito', depositoId), { saldoId })
-
-  // 4. Movimiento de auditoría enriquecido
-  await registrarMovimiento(
-    'deposito_convertido_en_deuda',
-    monto,
-    operadorId,
-    `Depósito convertido en deuda · ${motorizadoNombre} · ${nota}`,
-    { motorizadoId, depositoId, saldoId },
-    {
-      cuentas: {
-        origen: cuentas.efectivoEnPoder(motorizadoId),
-        destino: cuentas.deudaMotorizado(motorizadoId),
-      },
-      propietario: destinatario === 'storkhub' ? 'storkhub' : undefined,
-    }
-  )
-
-  return saldoId
-}
+//
+// FIN-4A — convertirDepositoEnDeuda YA NO VIVE AQUÍ. La conversión de un depósito
+// en deuda (saldo + depósito + órdenes + ledger) la hace la Cloud Function
+// convertirDepositoEnDeuda en una sola transacción: functions/src/conversion-
+// deposito-deuda.ts. El cliente la invoca con lib/convertir-deposito-cliente.ts y
+// no escribe nada de eso por su cuenta.
 
 // ─── Adelantos ────────────────────────────────────────────────────────────────
 

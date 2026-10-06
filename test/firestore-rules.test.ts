@@ -1570,6 +1570,48 @@ test('A6 · el tipo C sigue anulándose como siempre desde Revertir ⇒ ALLOW (s
   }))
 })
 
+// ─── FIN-4A · un convertido en deuda no se anula por el writer genérico ──────
+//
+// Anular un depósito convertido dejaba el depósito 'anulado' y anulaba su movimiento
+// de conversión, pero el saldo seguía vivo en saldos_cargo_motorizado: una deuda sin
+// el ledger que la respalda. Su única salida es revertir la conversión (FIN-4B).
+
+test('F4A-R1 · el ADMIN no anula un convertido_en_deuda, ni con el batch auditado completo ⇒ DENY, y sigue convertido', async () => {
+  await depositoAB('convertido_en_deuda', { saldoId: 'saldo1' })
+  await assertFails(anular({ uid: UID_ADMIN, liberarOrden: true }))
+  await assertFails(anular({ uid: UID_ADMIN }))
+  assert.equal((await leerDep()).estado, 'convertido_en_deuda')
+})
+
+test('F4A-R2 · el GESTOR tampoco lo anula (ni con el write plano de la anulación) ⇒ DENY', async () => {
+  await depositoAB('convertido_en_deuda', { saldoId: 'saldo1' })
+  await assertFails(anular({ uid: UID_GESTOR }))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    estado: 'anulado', anuladoAt: serverTimestamp(), anuladoPorUid: UID_GESTOR, motivoAnulacion: 'motivo suficiente',
+  }))
+  assert.equal((await leerDep()).estado, 'convertido_en_deuda')
+})
+
+test('F4A-R3 · las demás anulaciones del admin siguen funcionando: pendiente_boucher, en_revision, devuelto y confirmado ⇒ ALLOW', async () => {
+  for (const estado of ['pendiente_boucher', 'en_revision', 'devuelto', 'confirmado']) {
+    await depositoAB(estado, estado === 'devuelto' ? { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' } : {})
+    await assertSucceeds(anular({ uid: UID_ADMIN, liberarOrden: true }))
+    assert.equal((await leerDep()).estado, 'anulado', estado)
+  }
+})
+
+test('F4A-R4 · lo no relacionado de un convertido sigue igual: una nota, y las salidas hacia revisión (revertir con boucher) ⇒ ALLOW; convertir desde en_revision y devuelto ⇒ ALLOW', async () => {
+  await depositoAB('convertido_en_deuda', { saldoId: 'saldo1' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { notaConversion: 'ajustada', updatedAt: serverTimestamp() }))
+  // la reversión con boucher (Caso B) vuelve a en_revision: sigue permitida; FIN-4B la rehará
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'en_revision', updatedAt: serverTimestamp() }))
+  // y convertir (el writer que cierra FIN-4A en el servidor) no depende de esta Rule
+  await depositoAB('en_revision')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'convertido_en_deuda', saldoId: 'saldo1' }))
+  await depositoAB('devuelto', { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'convertido_en_deuda', saldoId: 'saldo1' }))
+})
+
 // ─── Eventos: append-only (Q.36) ─────────────────────────────────────────────
 
 const evento = (extra: Record<string, unknown> = {}) => ({
@@ -3273,12 +3315,15 @@ test('FG-R6 · FG4/FG5/FG17: devuelto, en_revision (rehacer) y confirmado CONSER
   }
 })
 
-test('FG-R7 · FG6: anular un depósito CONVERTIDO EN DEUDA no libera el gasto (el batch con liberación ⇒ DENY; sin ella, la anulación sigue ⇒ ALLOW)', async () => {
+test('FG-R7 · FG6 + FIN-4A: un depósito CONVERTIDO EN DEUDA no se anula, ni liberando su gasto ni sin liberarlo ⇒ DENY, y el gasto sigue consumido', async () => {
   await sembrarGastosFin2({ gUsado: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, consumidoEnDepositoId: 'DC' } })
   await sembrarDepositoFin2('DC', 'convertido_en_deuda', ['gUsado'])
   await assertFails(batchAnularDepositoFin2(UID_ADMIN, 'DC', ['gUsado']).b.commit())
   assert.equal((await leerDepositoFin2('DC'))?.estado, 'convertido_en_deuda', 'el batch es todo o nada')
-  await assertSucceeds(batchAnularDepositoFin2(UID_ADMIN, 'DC', []).b.commit())
+  // Antes de FIN-4A esta anulación SIN liberar el gasto pasaba (⇒ ALLOW) y dejaba la
+  // deuda viva sin ledger. Ahora el writer genérico ya no anula un convertido.
+  await assertFails(batchAnularDepositoFin2(UID_ADMIN, 'DC', []).b.commit())
+  assert.equal((await leerDepositoFin2('DC'))?.estado, 'convertido_en_deuda')
   assert.equal((await leerGastoFin2('gUsado'))?.consumidoEnDepositoId, 'DC', 'el efecto económico ya ocurrió: el gasto sigue consumido')
 })
 

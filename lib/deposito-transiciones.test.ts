@@ -16,6 +16,7 @@ import {
   camposReaperturaRevision,
   camposLiberacionDeposito,
   eliminarLiberaOrdenes,
+  anularEstaPermitido,
 } from './deposito-transiciones'
 import { resumenDepositosMotorizado } from './depositos-motorizado'
 import type { EntradaDepositoOrden } from './deposito-orden'
@@ -99,6 +100,15 @@ test('D5 · eliminar no libera un depósito convertido en deuda (su saldo sigue 
   assert.equal(eliminarLiberaOrdenes('confirmado'), true)
   assert.equal(eliminarLiberaOrdenes('en_revision'), true)
   assert.equal(eliminarLiberaOrdenes('convertido_en_deuda'), false)
+})
+
+test('F4A-A1 · Anular genérico: un convertido en deuda y un anulado NO se anulan; los demás estados sí', () => {
+  assert.equal(anularEstaPermitido('convertido_en_deuda'), false)
+  assert.equal(anularEstaPermitido('anulado'), false)
+  for (const e of ['pendiente_boucher', 'en_revision', 'devuelto', 'confirmado', 'rechazado']) {
+    assert.equal(anularEstaPermitido(e), true, e)
+  }
+  assert.equal(anularEstaPermitido(undefined), true, 'sin estado no es un convertido')
 })
 
 // ── Matriz: lo que ve el motorizado ──────────────────────────────────────────

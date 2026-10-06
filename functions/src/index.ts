@@ -14,6 +14,7 @@ export { asignarCodigoOrden, asignarCodigoDeposito } from './codigos';
 export { crearAccesoMotorizado, repararAccesoMotorizado, diagnosticarAccesoMotorizado, finalizarActivacionMotorizado } from './acceso-motorizado-callables';
 export { actualizarPresenciaMotorizado } from './presencia-motorizado-callable';
 export { confirmarDeposito } from './confirmacion-deposito-callable';
+export { convertirDepositoEnDeuda } from './conversion-deposito-deuda-callable';
 
 /**
  * Daily report (DRY-RUN / LOG-ONLY): lists orders delivered more than 45

@@ -28,7 +28,13 @@ import {
   DETALLE_ESPERANDO_COMPROBANTE,
 } from '@/lib/revision-depositos-gestor'
 import { compressImage, uploadDepositoBoucher, uploadVersionBoucherDeposito } from '@/fb/storage'
-import { convertirDepositoEnDeuda } from '@/lib/financial-writes'
+import { convertirDepositoEnDeudaServidor } from '@/lib/convertir-deposito-cliente'
+import {
+  ErrorConversionDeposito,
+  exigirConvertido,
+  presentarErrorConversion,
+  presentarResultadoConversion,
+} from '@/lib/conversion-deposito-ux'
 import { confirmarDepositoServidor } from '@/lib/confirmar-deposito-cliente'
 import {
   ErrorConfirmacionDeposito,
@@ -467,6 +473,8 @@ function DepositosPageContent() {
   const [convertPendienteMotId, setConvertPendienteMotId] = useState<string | null>(null)
   const [motivoConvertPendiente, setMotivoConvertPendiente] = useState('')
   const [convertingPendienteId, setConvertingPendienteId] = useState<string | null>(null)
+  // FIN-4A — motorizadoId → depósito ya materializado cuya conversión falló: el reintento lo reutiliza.
+  const materializadoPendienteRef = useRef<Record<string, string>>({})
 
   // ── Tabla resumen: búsqueda, filtros y expansión por motorizado ─────────────
   const [busqueda, setBusqueda] = useState('')
@@ -991,6 +999,21 @@ function DepositosPageContent() {
     return exigirConfirmado(presentada)
   }
 
+  /**
+   * FIN-4A — la ÚNICA conversión financiera del producto: la callable. Lanza
+   * ErrorConversionDeposito (con su mensaje de pantalla) si el depósito no quedó
+   * convertido. Nunca reintenta por su cuenta.
+   */
+  async function convertirEnServidor(depositoId: string, nota: string) {
+    let presentada
+    try {
+      presentada = presentarResultadoConversion(await convertirDepositoEnDeudaServidor(depositoId, nota))
+    } catch (e) {
+      presentada = presentarErrorConversion(e)
+    }
+    return exigirConvertido(presentada)
+  }
+
   async function confirmarStorkhub(ordenes: Solicitud[], motId: string, motNombre: string, boucherFile: File, depositoId: string) {
     // Resolver el doc ID canónico del motorizado (motId puede ser authUid en docs antiguos)
     const motAuthUid = ordenes[0]?.asignacion?.motorizadoAuthUid ?? motId
@@ -1359,29 +1382,19 @@ function DepositosPageContent() {
 
   // ── Convertir depósito pendiente en saldo a cargo del motorizado ─────────
 
+  // FIN-4A — la pantalla ya no escribe saldo, depósito, órdenes ni ledger: invoca la
+  // callable (monto, órdenes, gastos, estado y actor los demuestra el servidor).
   async function convertirEnDeuda(dep: DepositoOrderDoc, motivo: string) {
     if (!motivo.trim()) return
     setConvirtiendo(dep.id)
+    setErrorAccion(null)
+    setAvisoAccion(null)
     try {
-      // Buscar el motorizadoId (doc ID en colección motorizado) a partir del authUid
-      const { getDocs: _getDocs, query: _query, collection: _col, where: _where } = await import('firebase/firestore')
-      const snap = await _getDocs(_query(_col(db, 'motorizado'), _where('authUid', '==', dep.motorizadoUid)))
-      const motDoc = snap.docs[0]
-      const motorizadoId = motDoc?.id ?? dep.motorizadoUid
-
-      await convertirDepositoEnDeuda({
-        depositoId: dep.id,
-        solicitudIds: dep.solicitudIds ?? [],
-        destinatario: dep.destinatario,
-        monto: dep.montoTotal,
-        motorizadoId,
-        motorizadoUid: dep.motorizadoUid,
-        motorizadoNombre: dep.motorizadoNombre,
-        nota: motivo,
-        operadorId: auth.currentUser?.uid ?? '',
-      })
+      const presentada = await convertirEnServidor(dep.id, motivo)
+      setAvisoAccion(presentada.mensaje)
     } catch (e) {
       console.error('Error convirtiendo en deuda:', e)
+      setErrorAccion(e instanceof ErrorConversionDeposito ? e.message : presentarErrorConversion(e).mensaje)
     } finally {
       setConvirtiendo(null)
       setMotivoConversion('')
@@ -1400,44 +1413,52 @@ function DepositosPageContent() {
       const motDocId = await resolverMotorizadoDocId(motAuthUid)
       const monto = gm.storkhub.total  // neto
 
-      // 1. Crear ordenes_deposito (convertirDepositoEnDeuda lo requiere existente)
-      const depositoRef = doc(collection(db, 'ordenes_deposito'))
+      // 1. Materializar el depósito en un estado seguro ('pendiente_boucher'): sin saldo,
+      //    sin ledger y sin tocar las órdenes. Si el paso 2 falla, el depósito queda
+      //    reintentable (aparece en "Por revisar" y su "→ Deuda" llama a la misma callable).
+      //    Un reintento desde este mismo grupo REUTILIZA ese depósito: crear otro
+      //    chocaría con los gastos que el primero ya consumió (FIN-2).
+      const yaMaterializado = materializadoPendienteRef.current[gm.motorizadoId]
+      const depositoRef = yaMaterializado ? doc(db, 'ordenes_deposito', yaMaterializado) : doc(collection(db, 'ordenes_deposito'))
       const depositoId = depositoRef.id
-      // FIN-2 — el depósito y la marca de consumo de sus gastos: UN solo commit.
-      const gastosIdsConsumo = gastosAprobados.filter((g) => g.motorizadoId === motDocId).map((g) => g.id)
-      const bCrear = writeBatch(db)
-      bCrear.set(depositoRef, {
-        creadoAt: serverTimestamp(),
-        tipo: 'recaudacion_motorizado_storkhub',
-        estado: 'pendiente_boucher',
-        destinatario: 'storkhub',
-        destinatarioId: 'storkhub',
-        destinatarioNombre: 'Storkhub',
-        motorizadoUid: motAuthUid,
-        motorizadoNombre: gm.motorizadoNombre,
-        solicitudIds: ordenes.map((o) => o.id),
-        montoTotal: monto,
-        montoBruto: gm.storkhub.totalBruto,
-        gastosDescontados: gm.storkhub.gastosDeducibles,
-        gastosIds: gastosIdsConsumo,
-      })
-      marcarGastosConsumidos(bCrear, (gid) => doc(db, 'gastos_motorizado', gid), gastosIdsConsumo, depositoId)
-      await bCrear.commit()
+      if (!yaMaterializado) {
+        // FIN-2 — el depósito y la marca de consumo de sus gastos: UN solo commit.
+        const gastosIdsConsumo = gastosAprobados.filter((g) => g.motorizadoId === motDocId).map((g) => g.id)
+        const bCrear = writeBatch(db)
+        bCrear.set(depositoRef, {
+          creadoAt: serverTimestamp(),
+          tipo: 'recaudacion_motorizado_storkhub',
+          estado: 'pendiente_boucher',
+          destinatario: 'storkhub',
+          destinatarioId: 'storkhub',
+          destinatarioNombre: 'Storkhub',
+          motorizadoUid: motAuthUid,
+          motorizadoNombre: gm.motorizadoNombre,
+          solicitudIds: ordenes.map((o) => o.id),
+          montoTotal: monto,
+          montoBruto: gm.storkhub.totalBruto,
+          gastosDescontados: gm.storkhub.gastosDeducibles,
+          gastosIds: gastosIdsConsumo,
+        })
+        marcarGastosConsumidos(bCrear, (gid) => doc(db, 'gastos_motorizado', gid), gastosIdsConsumo, depositoId)
+        await bCrear.commit()
+        materializadoPendienteRef.current[gm.motorizadoId] = depositoId
+      }
 
-      // 2. Convertir en deuda
-      await convertirDepositoEnDeuda({
-        depositoId,
-        solicitudIds: ordenes.map((o) => o.id),
-        destinatario: 'storkhub',
-        monto,
-        motorizadoId: motDocId,
-        motorizadoUid: motAuthUid,
-        motorizadoNombre: gm.motorizadoNombre,
-        nota: motivo,
-        operadorId: auth.currentUser?.uid ?? '',
-      })
+      // 2. FIN-4A — la conversión financiera la hace la callable (saldo, depósito, órdenes
+      //    y ledger en UNA transacción). La pantalla no escribe nada de eso.
+      const presentada = await convertirEnServidor(depositoId, motivo)
+      delete materializadoPendienteRef.current[gm.motorizadoId]
+      setErrorAccion(null)
+      setAvisoAccion(presentada.mensaje)
     } catch (e) {
       console.error('Error convirtiendo pendiente en deuda:', e)
+      const msg = e instanceof ErrorConversionDeposito ? e.message : presentarErrorConversion(e).mensaje
+      setErrorAccion(
+        materializadoPendienteRef.current[gm.motorizadoId]
+          ? `${msg} El depósito quedó registrado en "Por revisar" sin convertir: podés reintentar desde ahí.`
+          : msg,
+      )
     } finally {
       setConvertingPendienteId(null)
       setConvertPendienteMotId(null)

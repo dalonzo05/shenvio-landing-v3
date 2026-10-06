@@ -88,3 +88,17 @@ export function camposLiberacionDeposito(destino: DestinoDeposito): Record<strin
 export function eliminarLiberaOrdenes(estado: string | null | undefined): boolean {
   return estado !== 'convertido_en_deuda'
 }
+
+/**
+ * ¿La acción genérica "Anular" aplica a un depósito en este estado?
+ *
+ * FIN-4A — un depósito convertido en deuda NO se anula con ella. Anular dejaba el
+ * depósito 'anulado' y anulaba su movimiento de conversión del ledger, pero el
+ * saldo seguía vivo en saldos_cargo_motorizado: una deuda sin ledger que la
+ * respalde. La única salida de un convertido es el flujo especializado de
+ * revertir la conversión (FIN-4B), que debe resolver saldo, abonos y ledger juntos.
+ * firestore.rules aplica lo mismo del lado del servidor.
+ */
+export function anularEstaPermitido(estado: string | null | undefined): boolean {
+  return estado !== 'anulado' && estado !== 'convertido_en_deuda'
+}
