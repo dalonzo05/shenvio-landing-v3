@@ -24,7 +24,7 @@ import {
 import assert from 'node:assert/strict'
 import {
   doc, setDoc, updateDoc, getDoc, deleteField, serverTimestamp,
-  collection, query, where, limit, getDocs, writeBatch, deleteDoc,
+  collection, query, where, limit, getDocs, writeBatch, deleteDoc, addDoc,
 } from 'firebase/firestore'
 import {
   camposEventoBoucherReemplazado,
@@ -3685,4 +3685,111 @@ test('F3-R2 · gestor: depósito de comercio pendiente_boucher → en_revision c
   await sembrarMaterializacion('comercio')
   await assertSucceeds(batchMaterializar(UID_GESTOR, 'comercio').commit())
   assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'en_revision')
+})
+
+// ─── FIN-1-0 — el ledger no se borra desde ningún cliente ─────────────────────
+// `allow read, write` incluye DELETE y Firestore OR-combina los allows: el `allow delete: if false` que
+// había debajo no lo anulaba, así que gestor y admin (cliente modificado) borraban movimientos
+// (bypass L9 del diagnóstico FIN-1). Ahora read, create, update y delete se declaran por separado.
+// Estos tests fijan SOLO el delete cerrado y que create/update/read siguen como antes: cerrar su
+// contenido es FIN-1E, cuando los writers que aún los usan estén migrados a servidor.
+
+const MOV_ID = 'mov_f10'
+const movBase = (extra: Record<string, unknown> = {}) => ({
+  tipo: 'abono_deuda_motorizado', monto: 10, estado: 'activo', saldoId: 'S1', ...extra,
+})
+async function sembrarMovimiento(id = MOV_ID) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'movimientos_financieros', id), movBase())
+  })
+}
+async function existeMovimiento(id = MOV_ID): Promise<boolean> {
+  let existe = false
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    existe = (await getDoc(doc(ctx.firestore(), 'movimientos_financieros', id))).exists()
+  })
+  return existe
+}
+
+test('F1-0-R1 · el GESTOR no borra un movimiento del ledger ⇒ DENY, y el movimiento sigue ahí', async () => {
+  await sembrarMovimiento()
+  await assertFails(deleteDoc(doc(como(UID_GESTOR), 'movimientos_financieros', MOV_ID)))
+  assert.equal(await existeMovimiento(), true)
+})
+
+test('F1-0-R2 · el ADMIN tampoco ⇒ DENY', async () => {
+  await sembrarMovimiento()
+  await assertFails(deleteDoc(doc(como(UID_ADMIN), 'movimientos_financieros', MOV_ID)))
+  assert.equal(await existeMovimiento(), true)
+})
+
+test('F1-0-R3 · el DIGITADOR no borra ⇒ DENY', async () => {
+  await sembrarMovimiento()
+  await assertFails(deleteDoc(doc(como(UID_DIGITADOR), 'movimientos_financieros', MOV_ID)))
+  assert.equal(await existeMovimiento(), true)
+})
+
+test('F1-0-R4 · el MOTORIZADO, el comercio y el cliente no borran ⇒ DENY', async () => {
+  await sembrarMovimiento()
+  for (const uid of [UID_MOTO, UID_COMERCIO, UID_CLIENTE]) {
+    await assertFails(deleteDoc(doc(como(uid), 'movimientos_financieros', MOV_ID)))
+  }
+  assert.equal(await existeMovimiento(), true)
+})
+
+test('F1-0-R5 / R7 · CREATE sigue permitido a gestor y admin (hasta FIN-1E) ⇒ ALLOW', async () => {
+  await assertSucceeds(addDoc(collection(como(UID_GESTOR), 'movimientos_financieros'), movBase({ creadoPorRol: 'gestor' })))
+  await assertSucceeds(addDoc(collection(como(UID_ADMIN), 'movimientos_financieros'), movBase({ creadoPorRol: 'admin' })))
+})
+
+test('F1-0-R6 / R8 · UPDATE sigue permitido a gestor y admin (hasta FIN-1E) ⇒ ALLOW', async () => {
+  await sembrarMovimiento()
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'movimientos_financieros', MOV_ID), { estado: 'anulado', anuladoPorUid: UID_GESTOR }))
+  await sembrarMovimiento('mov_f10_b')
+  await assertSucceeds(updateDoc(doc(como(UID_ADMIN), 'movimientos_financieros', 'mov_f10_b'), { estado: 'anulado', anuladoPorUid: UID_ADMIN }))
+})
+
+test('F1-0-R9 / R10 · DELETE dentro de un writeBatch tampoco pasa (gestor y admin) ⇒ DENY, nada se borra', async () => {
+  await sembrarMovimiento('b1'); await sembrarMovimiento('b2')
+  for (const [uid, id] of [[UID_GESTOR, 'b1'], [UID_ADMIN, 'b2']] as const) {
+    const db = como(uid)
+    const b = writeBatch(db)
+    b.delete(doc(db, 'movimientos_financieros', id))
+    await assertFails(b.commit())
+  }
+  assert.equal(await existeMovimiento('b1'), true)
+  assert.equal(await existeMovimiento('b2'), true)
+})
+
+test('F1-0-R11 · un batch MIXTO (update permitido + delete) falla entero: el delete no pasa escondido y el update tampoco se aplica', async () => {
+  await sembrarMovimiento('m_upd'); await sembrarMovimiento('m_del')
+  const db = como(UID_GESTOR)
+  const b = writeBatch(db)
+  b.update(doc(db, 'movimientos_financieros', 'm_upd'), { descripcion: 'cambio' })
+  b.delete(doc(db, 'movimientos_financieros', 'm_del'))
+  await assertFails(b.commit())
+  assert.equal(await existeMovimiento('m_del'), true)
+  let descripcion: unknown
+  await env.withSecurityRulesDisabled(async (ctx) => { descripcion = (await getDoc(doc(ctx.firestore(), 'movimientos_financieros', 'm_upd'))).data()?.descripcion })
+  assert.equal(descripcion, undefined, 'atomicidad de Rules: el update del mismo batch no se aplicó')
+})
+
+test('F1-0-R12 · READ sigue igual: gestor y admin leen (get y list); digitador, motorizado y comercio no ⇒ ALLOW / DENY', async () => {
+  await sembrarMovimiento()
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await assertSucceeds(getDoc(doc(como(uid), 'movimientos_financieros', MOV_ID)))
+    await assertSucceeds(getDocs(query(collection(como(uid), 'movimientos_financieros'), limit(3))))
+  }
+  for (const uid of [UID_DIGITADOR, UID_MOTO, UID_COMERCIO]) await assertFails(getDoc(doc(como(uid), 'movimientos_financieros', MOV_ID)))
+})
+
+test('F1-0-R13 · ningún otro match reabre el delete: un solo match para movimientos_financieros, sin wildcard recursivo, y su delete es literalmente false', () => {
+  const reglas = readFileSync('firestore.rules', 'utf8').replace(/\r\n/g, '\n')
+  assert.equal((reglas.match(/match \/movimientos_financieros\/\{[a-zA-Z]+\}/g) ?? []).length, 1, 'un solo match sobre el path')
+  assert.ok(!/\{[a-zA-Z_]*=\*\*\}/.test(reglas), 'sin wildcard recursivo que pueda conceder delete por otro camino')
+  const i = reglas.indexOf('match /movimientos_financieros/{id}')
+  const bloque = reglas.slice(i, reglas.indexOf('\n    }\n', i))
+  assert.ok(/allow delete: if false;/.test(bloque), 'delete: if false')
+  assert.ok(!/allow [^:\n]*\bwrite\b[^:\n]*:/.test(bloque), 'ningún "allow ... write" (write incluye delete)')
+  assert.ok(!/allow [^:\n]*\bdelete\b[^:\n]*: if (?!false)/.test(bloque), 'ningún otro allow de delete')
 })

@@ -2177,8 +2177,15 @@ service cloud.firestore {
     // El motorizado NUNCA escribe aquí directamente: toda auditoría se genera
     // desde el servidor o desde funciones llamadas por el gestor.
     // Esto evita registros de auditoría falsos o manipulados.
+    //
+    // FIN-1-0 — `allow write` ES create + update + DELETE, y Firestore OR-combina los allows: el
+    // `allow delete: if false` de abajo NO anulaba el permiso que `write` ya concedía, así que un
+    // gestor o admin (cliente modificado) podía borrar movimientos del ledger. Se separan los
+    // métodos para que delete sea realmente false. read, create y update quedan EXACTAMENTE como
+    // estaban: cerrar su contenido es FIN-1E, después de migrar los writers que aún los usan.
     match /movimientos_financieros/{id} {
-      allow read, write: if isAdminOrGestor();
+      allow read: if isAdminOrGestor();
+      allow create, update: if isAdminOrGestor();
       allow delete: if false;
     }
 
