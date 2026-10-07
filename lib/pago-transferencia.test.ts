@@ -172,6 +172,14 @@ test('X14 · Rehacer / Anular: solo admin, nunca sobre un DEP tipo C', () => {
   assert.deepEqual(accionesAdminDeposito({ ...DEP_0001, estado: 'convertido_en_deuda' }, 'admin'), { rehacer: false, anular: false })
 })
 
+// FIN-1B — Rehacer solo se ofrece sobre un confirmado; Anular, sobre cualquier estado no terminal (la callable decide el resto).
+test('X14c · Rehacer solo sobre confirmado; Anular sobre los estados no terminales', () => {
+  for (const estado of ['pendiente_boucher', 'en_revision', 'devuelto', 'rechazado']) {
+    assert.deepEqual(accionesAdminDeposito({ ...DEP_0001, estado }, 'admin'), { rehacer: false, anular: true }, estado)
+  }
+  assert.deepEqual(accionesAdminDeposito({ ...DEP_0001, estado: 'confirmado' }, 'admin'), { rehacer: true, anular: true })
+})
+
 // DEPOSITO-AUDITORIA-1 — un DEP ya anulado es terminal: no se rehace ni se
 // vuelve a anular. Antes `eliminar` decía true para cualquier estado, porque
 // borrar un documento siempre "se puede".

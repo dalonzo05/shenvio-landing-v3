@@ -324,7 +324,9 @@ export function accionesAdminDeposito(
 ): { rehacer: boolean; anular: boolean } {
   if (rol !== 'admin' || claseDeposito(dep) === 'transferencia_delivery') return { rehacer: false, anular: false }
   return {
-    rehacer: dep.estado !== 'convertido_en_deuda' && dep.estado !== 'anulado',
+    // FIN-1B — Rehacer es de un depósito CONFIRMADO (la callable lo exige): en cualquier otro estado no hay nada que deshacer y,
+    // sin comprobante, reabrirlo dejaba un 'en_revision' sin evidencia.
+    rehacer: dep.estado === 'confirmado',
     anular: anularEstaPermitido(dep.estado),
   }
 }

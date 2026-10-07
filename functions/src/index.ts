@@ -18,6 +18,8 @@ export { convertirDepositoEnDeuda } from './conversion-deposito-deuda-callable';
 export { revertirConversionEnDeuda } from './reversion-conversion-callable';
 export { condonarDeudaMotorizado } from './condonacion-deuda-callable';
 export { anularSaldoCargo } from './anulacion-saldo-callable';
+export { rehacerDeposito } from './rehacer-deposito-callable';
+export { anularDeposito } from './anular-deposito-callable';
 export { registrarAbonoDirecto } from './abono-directo-callable';
 export { prepararAbonoDirecto, obtenerIntencionAbono, descartarIntencionAbono } from './abono-intencion-callable';
 

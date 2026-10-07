@@ -662,7 +662,7 @@ test('WF2 · en_revision → reemplazar: el DEP-N, el monto y las órdenes sobre
   assert.equal(dep.estado, 'en_revision')
 })
 
-test('WF3 · ciclo completo: en_revision → devuelto → nueva versión → en_revision → confirmado', soloNuevas, async () => {
+test('WF3 · ciclo completo del cliente: en_revision → devuelto → nueva versión → en_revision; confirmar ya NO es del cliente (FIN-1B: confirmarDeposito)', soloNuevas, async () => {
   await depositoDeFlujo('en_revision')
 
   // 1. El gestor pide corrección (depósito + evento, mismo batch).
@@ -684,16 +684,17 @@ test('WF3 · ciclo completo: en_revision → devuelto → nueva versión → en_
   assert.equal(dep.boucherVersion, 2)
   assert.equal(dep.codigo, 'DEP-0009')
 
-  // 3. El gestor confirma, con su evento.
+  // 3. El gestor ya no confirma desde el cliente: la confirmación es de la callable confirmarDeposito.
   const bConf = writeBatch(dbG)
   bConf.set(doc(dbG, 'ordenes_deposito', DEP_F),
     camposConfirmarDeposito(UID_GESTOR, serverTimestamp(), 'evConfF'), { merge: true })
   bConf.set(doc(dbG, 'ordenes_deposito', DEP_F, 'eventos', 'evConfF'),
     camposEventoDepositoConfirmado({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp()))
-  await assertSucceeds(bConf.commit())
-  assert.equal((await depActual()).estado, 'confirmado')
+  await assertFails(bConf.commit())
+  assert.equal((await depActual()).estado, 'en_revision')
 
-  // 4. Y una vez confirmado, el comprobante queda sellado también en Storage.
+  // 4. Un depósito confirmado (por la callable) tiene el comprobante sellado también en Storage.
+  await depositoDeFlujo('confirmado')
   await assertFails(subir(UID_MOTO, pathVersionBoucher(UID_MOTO, DEP_F, nuevoVersionId())))
 })
 
@@ -742,7 +743,7 @@ test('WF5 · upload OK + batch fallido: el objeto queda huérfano y NO se borra'
   assert.equal((await depActual()).boucherVersion, 2)
 })
 
-test('WF6 · anular y liberar órdenes en un batch: el DEP queda como rastro', soloNuevas, async () => {
+test('WF6 · anular y liberar órdenes en un batch desde el cliente ⇒ DENY (FIN-1B: anularDeposito)', soloNuevas, async () => {
   await depositoDeFlujo('confirmado')
   const db = firestoreDe(UID_ADMIN)
   const b = writeBatch(db)
@@ -755,15 +756,15 @@ test('WF6 · anular y liberar órdenes en un batch: el DEP queda como rastro', s
     'registro.deposito.confirmadoStorkhub': false,
     'registro.deposito.confirmadoStorkhubAt': null,
   })
-  await assertSucceeds(b.commit())
+  await assertFails(b.commit())
   const dep = await depActual()
-  assert.equal(dep.estado, 'anulado')
+  assert.equal(dep.estado, 'confirmado')
   assert.equal(dep.codigo, 'DEP-0009')
   assert.ok(dep.boucher)
   assert.deepEqual(dep.solicitudIds, [ORDEN_F])
 })
 
-test('WF7 · rehacer con evento: vuelve a revisión y deja el motivo', soloNuevas, async () => {
+test('WF7 · rehacer con evento desde el cliente ⇒ DENY (FIN-1B: rehacerDeposito); sigue confirmado y el motorizado no puede corregir', soloNuevas, async () => {
   await depositoDeFlujo('confirmado', { confirmadoPorUid: UID_GESTOR })
   const db = firestoreDe(UID_ADMIN)
   const b = writeBatch(db)
@@ -771,12 +772,12 @@ test('WF7 · rehacer con evento: vuelve a revisión y deja el motivo', soloNueva
     camposRehacerDeposito(UID_ADMIN, serverTimestamp(), 'El comprobante era de otro depósito', 'evRehF'), { merge: true })
   b.set(doc(db, 'ordenes_deposito', DEP_F, 'eventos', 'evRehF'),
     camposEventoDepositoRehecho({ uid: UID_ADMIN, rol: 'admin' }, serverTimestamp(), 'El comprobante era de otro depósito'))
-  await assertSucceeds(b.commit())
+  await assertFails(b.commit())
   const dep = await depActual()
-  assert.equal(dep.estado, 'en_revision')
-  assert.equal(dep.motivoRehacer, 'El comprobante era de otro depósito')
-  // Y ahora que está abierto, el motorizado puede corregir.
-  await assertSucceeds(corregirComoMotorizado('Ahora sí el correcto'))
+  assert.equal(dep.estado, 'confirmado')
+  assert.equal(dep.motivoRehacer, undefined)
+  // Y como no se reabrió, el motorizado no puede corregir.
+  await assertFails(corregirComoMotorizado('Ahora sí el correcto'))
 })
 
 test('WF8 · el tipo C no entra en ninguno de estos flujos', soloNuevas, async () => {
@@ -948,24 +949,24 @@ test('P1b · "Eliminar" del admin sobre un confirmado ⇒ ALLOW', f1YPuente, asy
   await assertSucceeds(deleteDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_PB)))
 })
 
-test('P1c · confirmar SIN evento, como lo escribe el web F1 ⇒ ALLOW', f1YPuente, async () => {
+test('P1c · confirmar SIN evento, como lo escribía el web F1 ⇒ DENY (FIN-1B: ni el puente lo abre)', f1YPuente, async () => {
   await depositoPuente('en_revision')
-  await assertSucceeds(setDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_PB), {
+  await assertFails(setDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_PB), {
     estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
   }, { merge: true }))
 })
 
-test('P1d · rehacer SIN evento (admin) ⇒ ALLOW', f1YPuente, async () => {
+test('P1d · rehacer SIN evento (admin) ⇒ DENY (FIN-1B: ni el puente lo abre)', f1YPuente, async () => {
   await depositoPuente('confirmado')
-  await assertSucceeds(setDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_PB), {
+  await assertFails(setDoc(doc(firestoreDe(UID_ADMIN), 'ordenes_deposito', DEP_PB), {
     estado: 'en_revision',
   }, { merge: true }))
 })
 
-test('P1e · reemplazar el boucher directo en revisión (Firestore + Storage legacy) ⇒ ALLOW', f1YPuente, async () => {
+test('P1e · reemplazar el boucher directo en revisión: Storage legacy ⇒ ALLOW, el puntero en Firestore ⇒ DENY (FIN-1B)', f1YPuente, async () => {
   await depositoPuente('en_revision')
   await assertSucceeds(subir(UID_GESTOR, `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg`))
-  await assertSucceeds(setDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_PB), {
+  await assertFails(setDoc(doc(firestoreDe(UID_GESTOR), 'ordenes_deposito', DEP_PB), {
     boucher: { url: 'https://example.test/nuevo.jpg', pathStorage: `depositos/${UID_MOTO}/${DEP_PB}/boucher.jpg` },
   }, { merge: true }))
 })
@@ -1016,7 +1017,7 @@ test('P2c · reemplazo versionado de staff ⇒ ALLOW', finalesYPuente, async () 
   await assertSucceeds(b.commit())
 })
 
-test('P2d · confirmar CON evento ⇒ ALLOW', finalesYPuente, async () => {
+test('P2d · confirmar CON evento desde el cliente ⇒ DENY (FIN-1B: es de la callable)', finalesYPuente, async () => {
   await depositoPuente('en_revision')
   const db = firestoreDe(UID_GESTOR)
   const b = writeBatch(db)
@@ -1024,10 +1025,10 @@ test('P2d · confirmar CON evento ⇒ ALLOW', finalesYPuente, async () => {
     camposConfirmarDeposito(UID_GESTOR, serverTimestamp(), 'evPB2'), { merge: true })
   b.set(doc(db, 'ordenes_deposito', DEP_PB, 'eventos', 'evPB2'),
     camposEventoDepositoConfirmado({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp()))
-  await assertSucceeds(b.commit())
+  await assertFails(b.commit())
 })
 
-test('P2e · rehacer auditado ⇒ ALLOW', finalesYPuente, async () => {
+test('P2e · rehacer auditado desde el cliente ⇒ DENY (FIN-1B: es de la callable)', finalesYPuente, async () => {
   await depositoPuente('confirmado')
   const db = firestoreDe(UID_ADMIN)
   const b = writeBatch(db)
@@ -1035,10 +1036,10 @@ test('P2e · rehacer auditado ⇒ ALLOW', finalesYPuente, async () => {
     camposRehacerDeposito(UID_ADMIN, serverTimestamp(), 'El comprobante era de otro depósito', 'evPB3'), { merge: true })
   b.set(doc(db, 'ordenes_deposito', DEP_PB, 'eventos', 'evPB3'),
     camposEventoDepositoRehecho({ uid: UID_ADMIN, rol: 'admin' }, serverTimestamp(), 'El comprobante era de otro depósito'))
-  await assertSucceeds(b.commit())
+  await assertFails(b.commit())
 })
 
-test('P2f · anular auditado, con liberación de órdenes ⇒ ALLOW', finalesYPuente, async () => {
+test('P2f · anular auditado, con liberación de órdenes, desde el cliente ⇒ DENY (FIN-1B: es de la callable)', finalesYPuente, async () => {
   await depositoPuente('confirmado')
   const db = firestoreDe(UID_ADMIN)
   const b = writeBatch(db)
@@ -1047,7 +1048,7 @@ test('P2f · anular auditado, con liberación de órdenes ⇒ ALLOW', finalesYPu
   b.set(doc(db, 'ordenes_deposito', DEP_PB, 'eventos', 'evPB4'),
     camposEventoDepositoAnulado({ uid: UID_ADMIN, rol: 'admin' }, serverTimestamp(), 'Órdenes equivocadas'))
   b.update(doc(db, 'solicitudes_envio', ORDEN_PB), { 'registro.deposito.storkhubDepositoId': null })
-  await assertSucceeds(b.commit())
+  await assertFails(b.commit())
 })
 
 // ─── El puente no abre de más ───────────────────────────────────────────────

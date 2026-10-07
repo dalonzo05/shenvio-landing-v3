@@ -237,24 +237,23 @@ function cuerpoDe(src: string, nombre: string): string {
   return src.slice(ini, fin)
 }
 
-test('F5-S1 · el writer ya no tiene un helper que commitea el ledger por su cuenta', () => {
+test('F5-S1 · la pantalla ya no lee ni anula movimientos del ledger por su cuenta (FIN-1B: lo hace la callable)', () => {
   const src = fuenteDepositosGestor()
   assert.ok(!src.includes('anularMovimientosDeDeposito'), 'desapareció el helper con commit propio')
-  assert.ok(src.includes('leerMovimientosDeDeposito'), 'queda solo la lectura')
-  const lectura = cuerpoDe(src, 'leerMovimientosDeDeposito')
-  assert.ok(!lectura.includes('.commit('), 'leer no escribe')
-  assert.ok(!lectura.includes('writeBatch'), 'leer no arma batches')
+  assert.ok(!src.includes('leerMovimientosDeDeposito'), 'desapareció también la lectura: el servidor lee el ledger dentro de su transacción')
+  assert.ok(!src.includes('agregarAnulacionDeMovimientosAlBatch'), 'la pantalla no arma la anulación del ledger')
 })
 
-test('F5-S2 · rehacer y anular: UN solo commit, y la anulación del ledger va ANTES de él, en el mismo batch', () => {
+test('F5-S2 · rehacer y anular van por callable: la pantalla no arma batch ni commit en esos handlers; la atomicidad es de la transacción del servidor', () => {
   const src = fuenteDepositosGestor()
   for (const nombre of ['rehacerDeposito', 'anularDeposito']) {
     const c = cuerpoDe(src, nombre)
-    assert.equal((c.match(/\.commit\(\)/g) ?? []).length, 1, nombre + ' hace un solo commit')
-    assert.equal((c.match(/writeBatch\(db\)/g) ?? []).length, 1, nombre + ' arma un solo batch')
-    const iAnula = c.indexOf('agregarAnulacionDeMovimientosAlBatch(b,')
-    const iCommit = c.indexOf('await b.commit()')
-    assert.ok(iAnula > 0 && iAnula < iCommit, nombre + ' anula el ledger dentro del batch, antes del commit')
-    assert.ok(c.indexOf('leerMovimientosDeDeposito') < c.indexOf('writeBatch(db)'), nombre + ' lee antes de armar el batch')
+    assert.ok(!c.includes('writeBatch'), nombre + ' no arma un batch')
+    assert.ok(!c.includes('.commit('), nombre + ' no commitea')
+    assert.ok(c.includes(nombre === 'rehacerDeposito' ? 'rehacerDepositoServidor(' : 'anularDepositoServidor('), nombre + ' invoca la callable')
+  }
+  const servidor = (f: string) => readFileSync(join(__dirname, '..', 'functions', 'src', f), 'utf8').replace(/\r/g, '')
+  for (const f of ['rehacer-deposito.ts', 'anular-deposito.ts']) {
+    assert.ok(servidor(f).includes('tx.updateMovimiento('), f + ' anula el ledger dentro de su transacción')
   }
 })

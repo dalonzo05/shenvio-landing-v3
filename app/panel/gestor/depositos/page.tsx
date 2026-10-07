@@ -11,7 +11,6 @@ import {
   getDoc,
   setDoc,
   writeBatch,
-  deleteField,
   serverTimestamp,
   Timestamp,
 } from 'firebase/firestore'
@@ -45,8 +44,6 @@ import {
 import {
   esGastoElegibleParaDeposito,
   marcarGastosConsumidos,
-  liberarGastosDeDeposito,
-  anularLiberaGastos,
 } from '@/lib/deposito-motorizado-envio'
 import { getDepositoEstado } from '@/lib/financial-types'
 import { calcularDeposito } from '@/lib/calculo-deposito'
@@ -79,6 +76,17 @@ import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { presentarActor, nombreDeUsuario } from '@/lib/actor-resolucion'
 import { puedeMutarBoucherDeposito, asegurarBoucherDepositoMutable } from '@/lib/cobro-integridad'
 import { enviadoDepositoHistorial, accionesAdminDeposito } from '@/lib/pago-transferencia'
+import { rehacerDepositoServidor } from '@/lib/rehacer-deposito-cliente'
+import { anularDepositoServidor } from '@/lib/anular-deposito-cliente'
+import {
+  MSG_MOTIVO_DEPOSITO,
+  exigirHechoDeposito,
+  operacionDeRehacer,
+  presentarErrorAccionDeposito,
+  presentarResultadoAnularDeposito,
+  presentarResultadoRehacer,
+  type IntentoRehacer,
+} from '@/lib/deposito-acciones-ux'
 import { normalizarFecha } from '@/lib/timeline-orden'
 // ── DEPOSITO-AUDITORIA-1 ─────────────────────────────────────────────────────
 import {
@@ -94,9 +102,7 @@ import {
 import {
   MOTIVO_EVENTO_MAX,
   SUBCOLECCION_EVENTOS_DEPOSITO,
-  camposEventoDepositoAnulado,
   camposEventoDepositoDevuelto,
-  camposEventoDepositoRehecho,
   filasEventosDeposito,
   motivoEventoValido,
   type EventoDepositoDoc,
@@ -106,19 +112,13 @@ import {
   ESTADO_DEVUELTO,
   ETIQUETA_DEVUELTO,
   TEXTO_ESPERANDO_CORRECCION,
-  camposAnularDeposito,
   camposPedirCorreccion,
-  camposRehacerDeposito,
   correccionSolicitada,
   puedeConfirmarDeposito,
   puedePedirCorreccion,
-  agregarAnulacionDeMovimientosAlBatch,
 } from '@/lib/deposito-correccion'
 import {
   camposEnlaceDigitacion,
-  camposReaperturaRevision,
-  camposLiberacionDeposito,
-  eliminarLiberaOrdenes,
 } from '@/lib/deposito-transiciones'
 import { IrAFicha } from '../_components/IrAFicha'
 
@@ -475,6 +475,8 @@ function DepositosPageContent() {
   const [convertingPendienteId, setConvertingPendienteId] = useState<string | null>(null)
   // FIN-4A — motorizadoId → depósito ya materializado cuya conversión falló: el reintento lo reutiliza.
   const materializadoPendienteRef = useRef<Record<string, string>>({})
+  // FIN-1B — identidad del intento de Rehacer en curso (ver rehacerDeposito): sobrevive a una respuesta perdida.
+  const intentoRehacerRef = useRef<IntentoRehacer | null>(null)
 
   // ── Tabla resumen: búsqueda, filtros y expansión por motorizado ─────────────
   const [busqueda, setBusqueda] = useState('')
@@ -1552,110 +1554,51 @@ function DepositosPageContent() {
     }
   }
 
-  // ── Movimientos financieros de un depósito (SOLO LECTURA) ─────────────────
-  // Rehacer y anular un depósito confirmado deben anular sus movimientos del
-  // ledger para que no cuente el mismo depósito dos veces. FIN-5: esa anulación
-  // ya NO tiene commit propio — se lee aquí y se agrega al batch principal con
-  // agregarAnulacionDeMovimientosAlBatch, así que el depósito, su evento, las
-  // órdenes, los gastos y el ledger cambian juntos o no cambian.
-  // No borra nada — solo marca estado: 'anulado' con trazabilidad.
+  // ── Rehacer y Anular un depósito: las hacen las callables ───────────────────
+  //
+  // FIN-1B — la pantalla ya no escribe depósito, evento, órdenes, gastos ni ledger. Antes eran dos writeBatch de cliente que
+  // decidían todo (estado destino, qué movimientos anular, qué órdenes y gastos liberar) y las Rules solo pedían "admin + un
+  // evento": un cliente modificado reabría un confirmado dejando el ledger vivo. Ahora invoca rehacerDeposito / anularDeposito
+  // (functions/src/rehacer-deposito.ts, anular-deposito.ts), que demuestran el estado, el ledger, las órdenes, los gastos y las
+  // liquidaciones dentro de UNA transacción. La pantalla manda { depositoId, motivo } (+ operacionId en Rehacer) y nada más.
 
-  async function leerMovimientosDeDeposito(depositoId: string) {
-    const snap = await getDocs(
-      query(collection(db, 'movimientos_financieros'), where('depositoId', '==', depositoId))
-    )
-    return snap.docs.map((d) => ({ ref: d.ref, estado: (d.data() as { estado?: unknown }).estado }))
-  }
-
-  // ── Rehacer depósito: vuelve a "Por revisar" para que el motorizado reenvíe ──
-
-  // DEPOSITO-AUDITORIA-1 — Rehacer ahora pide MOTIVO y deja evento.
-  // Seguía siendo admin-only y volvía el depósito a revisión, pero sin decir
-  // por qué: el documento cambiaba de estado y nadie podía reconstruir quién
-  // lo había decidido ni con qué argumento.
   async function rehacerDeposito(dep: DepositoOrderDoc, motivo: string) {
-    const uid = auth.currentUser?.uid ?? ''
-    if (!uid || !userRol) return
+    if (motivo.trim().length < 3) { setErrorAccion(MSG_MOTIVO_DEPOSITO); return }
     setErrorAccion(null)
+    setAvisoAccion(null)
+    // Un intento = un operacionId: si la respuesta se pierde y el admin reintenta, el servidor responde 'ya_rehecho'.
+    intentoRehacerRef.current = operacionDeRehacer(intentoRehacerRef.current, dep.id, motivo, () => crypto.randomUUID())
     try {
-      // 1. Leer los movimientos del ledger — el depósito no está más confirmado.
-      //    Se anulan en el MISMO batch de abajo (FIN-5): sin commit propio.
-      const movimientos = await leerMovimientosDeDeposito(dep.id)
-      // 2. Resetear estado operativo.
-      //
-      // DEPOSITOS-UX-TRAZABILIDAD-1 — en el mismo batch, las órdenes dejan de
-      // afirmar la confirmación: quedaban con confirmadoX = true mientras el
-      // depósito volvía a revisión, y el motorizado lo veía cerrado. El
-      // puntero se conserva (el depósito sigue existiendo y siendo de estas
-      // órdenes); el documento guarda su confirmación anterior como historial.
-      const destino = dep.destinatario === 'storkhub' ? 'storkhub' : 'comercio'
-      const eventoId = doc(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id
-      const b = writeBatch(db)
-      b.set(
-        doc(db, 'ordenes_deposito', dep.id),
-        camposRehacerDeposito(uid, serverTimestamp(), motivo, eventoId),
-        { merge: true },
-      )
-      b.set(
-        doc(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
-        camposEventoDepositoRehecho({ uid, rol: userRol }, serverTimestamp(), motivo),
-      )
-      ;(dep.solicitudIds ?? []).forEach((sid) => b.update(doc(db, 'solicitudes_envio', sid), camposReaperturaRevision(destino, dep.id)))
-      agregarAnulacionDeMovimientosAlBatch(b, movimientos, uid, 'Depósito revertido a revisión por gestor', serverTimestamp())
-      await b.commit()
+      let presentada
+      try {
+        presentada = presentarResultadoRehacer(await rehacerDepositoServidor(dep.id, motivo.trim(), intentoRehacerRef.current.operacionId))
+      } catch (e) {
+        presentada = presentarErrorAccionDeposito(e)
+      }
+      exigirHechoDeposito(presentada)
+      intentoRehacerRef.current = null
+      setAvisoAccion(presentada.mensaje)
       setRehaciendoId(null)
       setMotivoRehacer('')
     } catch (e) {
+      // Sin reintento automático: el resultado puede ser desconocido y el operacionId se conserva para el reintento manual.
       setErrorAccion(e instanceof Error ? e.message : 'No se pudo rehacer el depósito.')
     }
   }
 
-  // ── DEPOSITO-AUDITORIA-1: Anular (reemplaza a Eliminar) ───────────────────
-  //
-  // El viejo "Eliminar" hacía `b.delete(ordenes_deposito/{id})`. Un depósito
-  // borrado no deja nada: ni el DEP-N, ni el comprobante que respaldaba el
-  // dinero, ni las órdenes que agrupaba, ni quién lo borró. Y el aviso decía
-  // la verdad — "esta acción no se puede deshacer"—, que es exactamente el
-  // problema.
-  //
-  // Anular conserva TODO y cambia el estado. Lo único que se mantiene del
-  // comportamiento anterior es la liberación de las órdenes, con la misma
-  // excepción de siempre: un convertido en deuda no las libera, porque su
-  // saldo vive en saldos_cargo_motorizado y esto no lo anula — liberar
-  // cobraría el mismo dinero dos veces (eliminarLiberaOrdenes).
   async function anularDeposito(dep: DepositoOrderDoc, motivo: string) {
-    const uid = auth.currentUser?.uid ?? ''
-    if (!uid || !userRol) return
+    if (motivo.trim().length < 3) { setErrorAccion(MSG_MOTIVO_DEPOSITO); return }
     setErrorAccion(null)
+    setAvisoAccion(null)
     try {
-      // FIN-5 — se leen aquí y se anulan en el MISMO batch que anula el depósito.
-      const movimientos = await leerMovimientosDeDeposito(dep.id)
-      // FIN-2 — si la anulación libera las órdenes, libera también los gastos que
-      // este depósito había consumido (solo los que siguen marcados por él).
-      const gastosLeidos = anularLiberaGastos(dep.estado)
-        ? await Promise.all((dep.gastosIds ?? []).map(async (gid) => {
-            const snap = await getDoc(doc(db, 'gastos_motorizado', gid))
-            return snap.exists() ? { id: gid, ...(snap.data() as { consumidoEnDepositoId?: string | null }) } : null
-          }))
-        : []
-      const eventoId = doc(collection(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO)).id
-      const b = writeBatch(db)
-      b.set(
-        doc(db, 'ordenes_deposito', dep.id),
-        camposAnularDeposito(uid, serverTimestamp(), motivo, eventoId),
-        { merge: true },
-      )
-      b.set(
-        doc(db, 'ordenes_deposito', dep.id, SUBCOLECCION_EVENTOS_DEPOSITO, eventoId),
-        camposEventoDepositoAnulado({ uid, rol: userRol }, serverTimestamp(), motivo),
-      )
-      if (eliminarLiberaOrdenes(dep.estado)) {
-        const destino = dep.destinatario === 'storkhub' ? 'storkhub' : 'comercio'
-        ;(dep.solicitudIds ?? []).forEach((sid) => b.update(doc(db, 'solicitudes_envio', sid), camposLiberacionDeposito(destino)))
-        liberarGastosDeDeposito(b, (gid) => doc(db, 'gastos_motorizado', gid), gastosLeidos, dep.id, deleteField())
+      let presentada
+      try {
+        presentada = presentarResultadoAnularDeposito(await anularDepositoServidor(dep.id, motivo.trim()))
+      } catch (e) {
+        presentada = presentarErrorAccionDeposito(e)
       }
-      agregarAnulacionDeMovimientosAlBatch(b, movimientos, uid, 'Depósito anulado por administrador', serverTimestamp())
-      await b.commit()
+      exigirHechoDeposito(presentada)
+      setAvisoAccion(presentada.mensaje)
       setAnulandoId(null)
       setMotivoAnulacion('')
     } catch (e) {

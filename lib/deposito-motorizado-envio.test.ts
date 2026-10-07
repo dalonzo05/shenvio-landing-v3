@@ -212,11 +212,15 @@ test('FG-S2 · Gestor: la lista de gastos descontables usa la elegibilidad compa
   assert.ok(!src.includes('.filter((g: any) => !g.liquidacionId)'), 'el filtro viejo no puede volver')
 })
 
-test('FG-S3 · Gestor: anular un depósito libera sus gastos en el MISMO batch que libera sus órdenes', () => {
+test('FG-S3 · Anular un depósito libera sus gastos en el SERVIDOR, en la misma transacción que libera sus órdenes (FIN-1B)', () => {
   const src = fuenteFin2(...DEPOSITOS_GESTOR)
-  const m = src.match(/if \(eliminarLiberaOrdenes\(dep\.estado\)\) \{[\s\S]*?liberarGastosDeDeposito\(b,[\s\S]*?deleteField\(\)\)[\s\S]*?\}\s*(?:agregarAnulacionDeMovimientosAlBatch\(b,[^\n]*\)\s*)?await b\.commit\(\)/)
-  assert.ok(m, 'la liberación de gastos va dentro del if de liberación de órdenes y antes del commit')
-  assert.ok(src.includes('anularLiberaGastos(dep.estado)'), 'solo se leen/liberan gastos cuando la anulación libera órdenes')
+  assert.ok(!src.includes('liberarGastosDeDeposito'), 'la pantalla ya no libera gastos')
+  assert.ok(!src.includes('anularLiberaGastos'), 'ni decide si hay que liberarlos')
+  const srv = readFileSync(join(__dirname, '..', 'functions', 'src', 'anular-deposito.ts'), 'utf8').replace(/\r/g, '')
+  const iOrdenes = srv.indexOf('tx.updateSolicitud(')
+  const iGastos = srv.indexOf('tx.updateGasto(')
+  assert.ok(iOrdenes > 0 && iGastos > iOrdenes, 'las órdenes y los gastos se liberan juntos, dentro de la transacción')
+  assert.ok(srv.includes('gastosPropios'), 'solo se libera el gasto que consumió ESTE depósito')
 })
 
 test('FG-S4 · Gestor: un reintento de confirmar no recalcula el monto con los gastos que quedaron libres', () => {

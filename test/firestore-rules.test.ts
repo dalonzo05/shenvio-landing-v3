@@ -355,15 +355,11 @@ async function depositoConCodigo(id = 'depU', extra: Record<string, unknown> = {
   return id
 }
 
-test('N · gestor confirma un depósito sin tocar la identidad ⇒ ALLOW', async () => {
-  // HARDENING — confirmar exige su evento. El depósito nace sin boucher
-  // (pendiente_boucher), así que adjuntarlo acá es la PRIMERA subida del
-  // flujo inicial, no un reemplazo: sigue permitida sin versionar.
+test('N · gestor confirma un depósito escribiendo estado+evento a mano, sin callable ⇒ DENY (FIN-1B: confirmar es de la callable)', async () => {
+  // La identidad (codigo/secuencia) la protegen O, P, Q; lo que cambia en FIN-1B es que NINGUNA confirmación nace del cliente.
   const id = await depositoConCodigo('depN', { estado: 'pendiente_boucher' })
-  const { b } = batchConfirmar(UID_GESTOR, id, {
-    boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x' },
-  })
-  await assertSucceeds(b.commit())
+  const { b } = batchConfirmar(UID_GESTOR, id, { boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x' } })
+  await assertFails(b.commit())
 })
 
 test('O · gestor intenta cambiar el codigo del depósito ⇒ DENY', async () => {
@@ -425,13 +421,10 @@ test('R-U2 · un contador nuevo tampoco se puede crear desde el cliente', async 
 // una query acotada por motorizadoUid. Ninguna regla cambió: estos casos
 // prueban que las reglas vigentes aceptan exactamente eso, y nada más.
 
-test('W1 · gestor confirma un depósito registrado en nombre del motorizado, con quién y cuándo ⇒ ALLOW', async () => {
+test('W1 · gestor registra una confirmación a nombre del motorizado, sin callable ⇒ DENY (FIN-1B)', async () => {
   const id = await depositoConCodigo('depW1', { estado: 'pendiente_boucher' })
-  // HARDENING — mismo payload de siempre más el evento obligatorio.
-  const { b } = batchConfirmar(UID_GESTOR, id, {
-    boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x' },
-  })
-  await assertSucceeds(b.commit())
+  const { b } = batchConfirmar(UID_GESTOR, id, { boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x' } })
+  await assertFails(b.commit())
 })
 
 test('W2 · gestor registra el pago del delivery por transferencia junto con la confirmación del cobro ⇒ ALLOW', async () => {
@@ -561,25 +554,24 @@ test('Y8 · puntero al destino equivocado (comercio → depósito StorkHub) ⇒ 
 
 // ─── DEPOSITOS-UX-TRAZABILIDAD-1 (v2) · payloads del gestor ──────────────────
 
-test('Z1 · admin rehace: depósito a en_revision y la orden pierde la confirmación ⇒ ALLOW', async () => {
+test('Z1 · admin rehace por el cliente: depósito + evento + orden ⇒ DENY (FIN-1B: Rehacer es la callable rehacerDeposito)', async () => {
   await sembrarDigitacion({
     depEstado: 'confirmado',
     registro: { deposito: { storkhubDepositoId: 'depD', confirmadoStorkhub: true, confirmadoStorkhubAt: new Date() } },
   })
-  // HARDENING — Rehacer exige DEPOSITO_REHECHO con motivo, en el mismo batch.
   const { db, b } = batchRehacer(UID_ADMIN, 'depD')
   b.update(doc(db, 'solicitudes_envio', ORDEN_D), {
     'registro.deposito.storkhubDepositoId': 'depD',
     'registro.deposito.confirmadoStorkhub': false,
     'registro.deposito.confirmadoStorkhubAt': null,
   })
-  await assertSucceeds(b.commit())
+  await assertFails(b.commit())
 })
 
 // DEPOSITO-AUDITORIA-1 — el payload de Z2 era un delete del depósito. Esa
 // vía dejó de existir: el admin ANULA y libera la orden en el mismo batch,
 // con el mismo efecto operativo y sin perder el documento.
-test('Z2 · admin anula el depósito y libera la orden en el mismo batch ⇒ ALLOW', async () => {
+test('Z2 · admin anula por el cliente: depósito + evento + orden liberada ⇒ DENY (FIN-1B: Anular es la callable anularDeposito)', async () => {
   await sembrarDigitacion({
     depEstado: 'confirmado',
     registro: { deposito: { storkhubDepositoId: 'depD', confirmadoStorkhub: true, confirmadoStorkhubAt: new Date() } },
@@ -594,7 +586,7 @@ test('Z2 · admin anula el depósito y libera la orden en el mismo batch ⇒ ALL
     'registro.deposito.confirmadoStorkhub': false,
     'registro.deposito.confirmadoStorkhubAt': null,
   })
-  await assertSucceeds(b.commit())
+  await assertFails(b.commit())
 })
 
 test('Z3 · el mismo payload con delete en vez de anular ⇒ DENY', async () => {
@@ -639,7 +631,7 @@ test('BI2 · admin tampoco ⇒ DENY', async () => {
 test('BI3 · ni quitarlo, ni tocar boucherUrl (tipo C), ni cambiar estado y boucher a la vez ⇒ DENY', async () => {
   await depositoEn('confirmado')
   const db = como(UID_GESTOR)
-  await assertFails(updateDoc(doc(db, 'ordenes_deposito', 'depI'), { boucher: deleteField() }))
+  await assertFails(updateDoc(doc(db, 'ordenes_deposito', 'depI'), { boucher: null }))
   await depositoEn('confirmado', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
   await assertFails(updateDoc(doc(db, 'ordenes_deposito', 'depI'), { boucherUrl: 'https://example.test/otro.jpg' }))
   await depositoEn('confirmado')
@@ -667,9 +659,9 @@ test('BI5 · gestor anula un DEP tipo C confirmado sin tocar su comprobante ⇒ 
 
 // HARDENING — las dos mitades cambian: Rehacer exige evento, y una vez
 // abierto el depósito el reemplazo ya no es un update suelto sino una versión.
-test('BI6 · admin rehace un confirmado con evento ⇒ ALLOW; el reemplazo directo posterior ⇒ DENY', async () => {
+test('BI6 · admin NO rehace un confirmado por el cliente (FIN-1B); y el reemplazo directo del boucher sigue ⇒ DENY', async () => {
   await depositoEn('confirmado')
-  await assertSucceeds(batchRehacer(UID_ADMIN, 'depI').b.commit())
+  await assertFails(batchRehacer(UID_ADMIN, 'depI').b.commit())
   await assertFails(updateDoc(doc(como(UID_ADMIN), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
 })
 
@@ -871,7 +863,7 @@ test('H10 · orden pagada: anotar movimientoPagoId y editar campos ajenos al cob
   await assertSucceeds(updateDoc(doc(db, 'solicitudes_envio', 'ordP'), { prioridad: true, updatedAt: serverTimestamp() }))
 })
 
-test('H11 · efectivo (tipo A): confirmar el depósito del motorizado sobre una orden cobrada ⇒ ALLOW', async () => {
+test('H11 · efectivo (tipo A): el cliente ya no confirma el depósito del motorizado sobre una orden cobrada ⇒ DENY (FIN-1B: confirmarDeposito)', async () => {
   await env.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore()
     await setDoc(doc(db, 'solicitudes_envio', 'ordE'), {
@@ -881,15 +873,13 @@ test('H11 · efectivo (tipo A): confirmar el depósito del motorizado sobre una 
     })
     await setDoc(doc(db, 'ordenes_deposito', 'depA'), { ...depositoBase({ estado: 'en_revision', solicitudIds: ['ordE'] }), codigo: 'DEP-0001', secuencia: 1 })
   })
-  // HARDENING — la confirmación viaja con su evento; el resto del batch
-  // (los flags de la orden) queda igual que en F1.
   const { db, b } = batchConfirmar(UID_GESTOR, 'depA')
   b.update(doc(db, 'solicitudes_envio', 'ordE'), {
     'registro.deposito.confirmadoStorkhub': true,
     'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
     'registro.deposito.storkhubDepositoId': 'depA',
   })
-  await assertSucceeds(b.commit())
+  await assertFails(b.commit())
 })
 
 test('H12 · revertir un cobro en efectivo con depósito del motorizado: legítimo sin tocar la liquidación; cambiándola ⇒ DENY', async () => {
@@ -916,9 +906,9 @@ test('H12 · revertir un cobro en efectivo con depósito del motorizado: legíti
 // admin. El gestor conserva confirmar, devolver un depósito abierto y anular
 // el DEP tipo C al revertir su cobro.
 
-test('AD1 · admin rehace un depósito confirmado, con evento y motivo ⇒ ALLOW', async () => {
+test('AD1 · admin rehace un depósito confirmado desde el cliente, con evento y motivo ⇒ DENY (FIN-1B: rehacerDeposito)', async () => {
   await depositoEn('confirmado')
-  await assertSucceeds(batchRehacer(UID_ADMIN, 'depI').b.commit())
+  await assertFails(batchRehacer(UID_ADMIN, 'depI').b.commit())
 })
 
 test('AD2 · gestor intenta rehacer un depósito confirmado ⇒ DENY', async () => {
@@ -951,9 +941,9 @@ test('AD5 · gestor intenta borrar un depósito en revisión (viejo "Devolver") 
   await assertFails(deleteDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI')))
 })
 
-test('AD6 · gestor confirma un depósito en revisión, con evento ⇒ ALLOW (sin regresión)', async () => {
+test('AD6 · gestor confirma un depósito en revisión desde el cliente, con evento ⇒ DENY (FIN-1B: confirmarDeposito)', async () => {
   await depositoEn('en_revision')
-  await assertSucceeds(batchConfirmar(UID_GESTOR, 'depI').b.commit())
+  await assertFails(batchConfirmar(UID_GESTOR, 'depI').b.commit())
 })
 
 test('AD7 · gestor sigue anulando un DEP tipo C confirmado (Revertir), pero no un tipo A ⇒ ALLOW / DENY', async () => {
@@ -1078,7 +1068,7 @@ test('SL1 · convertido_en_deuda: gestor ni admin cambian ni quitan el boucher �
   for (const uid of [UID_GESTOR, UID_ADMIN]) {
     await depositoEn('convertido_en_deuda')
     await assertFails(updateDoc(doc(como(uid), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
-    await assertFails(updateDoc(doc(como(uid), 'ordenes_deposito', 'depI'), { boucher: deleteField() }))
+    await assertFails(updateDoc(doc(como(uid), 'ordenes_deposito', 'depI'), { boucher: null }))
   }
 })
 
@@ -1091,18 +1081,20 @@ test('SL2 · anulado: gestor ni admin cambian el boucher ni el boucherUrl del ti
   }
 })
 
-test('SL3 · sellados, lo que no es el boucher sigue como antes: saldoId tras convertir, notas ⇒ ALLOW', async () => {
+test('SL3 · sellados: los campos de conversión (saldoId, notaConversion) ya no se editan desde el cliente ⇒ DENY (FIN-1B, D8)', async () => {
   await depositoEn('convertido_en_deuda')
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { saldoId: 'saldo1' }))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { saldoId: 'saldo1' }))
   await depositoEn('anulado')
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { notaConversion: 'ok' }))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { notaConversion: 'ok' }))
 })
 
-test('SL4 · abiertos siguen abiertos: gestor reemplaza en pendiente_boucher y rechazado ⇒ ALLOW', async () => {
+test('SL4 · el boucher no se escribe suelto: pendiente_boucher y rechazado ⇒ DENY; la primera carga legítima (boucher + en_revision + updatedAt) ⇒ ALLOW', async () => {
   await depositoEn('pendiente_boucher')
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
   await depositoEn('rechazado')
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
+  await depositoEn('pendiente_boucher')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { ...NUEVO_BOUCHER, estado: 'en_revision', updatedAt: serverTimestamp() }))
 })
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1457,9 +1449,9 @@ test('D6 · de devuelto solo se sale con una versión nueva: confirmar o reabrir
   }
 })
 
-test('D6b · un devuelto todavía se puede convertir en deuda ⇒ ALLOW (la salida financiera no se cierra)', async () => {
+test('D6b · un devuelto ya no se convierte en deuda desde el cliente ⇒ DENY (FIN-1B: convertirDepositoEnDeuda)', async () => {
   await depositoAB('devuelto', { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' })
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
     estado: 'convertido_en_deuda', saldoId: 'saldo1',
   }))
 })
@@ -1500,12 +1492,10 @@ function anular(o: { uid?: string; rol?: string; motivo?: string; sinEvento?: bo
   return b.commit()
 }
 
-test('A1 · admin anula un A/B con motivo y evento, y libera la orden ⇒ ALLOW', async () => {
+test('A1 · admin NO anula un A/B por el cliente, ni con motivo, evento y orden liberada ⇒ DENY (FIN-1B: anularDeposito)', async () => {
   await depositoAB('en_revision')
-  await assertSucceeds(anular({ liberarOrden: true }))
-  const dep = await leerDep()
-  assert.equal(dep.estado, 'anulado')
-  assert.equal(dep.anuladoPorUid, UID_ADMIN)
+  await assertFails(anular({ liberarOrden: true }))
+  assert.equal((await leerDep()).estado, 'en_revision')
 })
 
 test('A2 · el gestor no anula un A/B confirmado ⇒ DENY', async () => {
@@ -1545,21 +1535,16 @@ test('A4 · delete físico del admin, en cualquier estado ⇒ DENY', async () =>
   }
 })
 
-test('A5 · el anulado conserva DEP-N, comprobante, órdenes y eventos', async () => {
+test('A5 · el intento de anular por el cliente no deja rastro: el documento, sus eventos y su orden quedan como estaban', async () => {
   await depositoAB('en_revision')
-  await assertSucceeds(anular({ eventoId: 'evAnul1' }))
-  const dep = await leerDep()
-  assert.equal(dep.codigo, 'DEP-0007')
-  assert.equal(dep.secuencia, 7)
-  assert.ok(dep.boucher)
-  assert.deepEqual(dep.solicitudIds, [ORDEN_V])
-  assert.equal(dep.motivoAnulacion, 'Depósito armado sobre las órdenes equivocadas')
-  let evento: Record<string, unknown> = {}
+  const antes = await leerDep()
+  await assertFails(anular({ eventoId: 'evAnul1' }))
+  assert.deepEqual(await leerDep(), antes)
+  let existeEvento = true
   await env.withSecurityRulesDisabled(async (ctx) => {
-    evento = ((await getDoc(doc(ctx.firestore(), 'ordenes_deposito', DEP_V, 'eventos', 'evAnul1'))).data() ?? {}) as Record<string, unknown>
+    existeEvento = (await getDoc(doc(ctx.firestore(), 'ordenes_deposito', DEP_V, 'eventos', 'evAnul1'))).exists()
   })
-  assert.equal(evento.tipo, 'DEPOSITO_ANULADO')
-  assert.equal(evento.porRol, 'admin')
+  assert.equal(existeEvento, false, 'el evento tampoco se creó (batch todo-o-nada)')
 })
 
 test('A6 · el tipo C sigue anulándose como siempre desde Revertir ⇒ ALLOW (sin regresión)', async () => {
@@ -1592,25 +1577,22 @@ test('F4A-R2 · el GESTOR tampoco lo anula (ni con el write plano de la anulaci�
   assert.equal((await leerDep()).estado, 'convertido_en_deuda')
 })
 
-test('F4A-R3 · las demás anulaciones del admin siguen funcionando: pendiente_boucher, en_revision, devuelto y confirmado ⇒ ALLOW', async () => {
+test('F4A-R3 · ninguna anulación del admin nace ya del cliente (pendiente_boucher, en_revision, devuelto, confirmado) ⇒ DENY (FIN-1B: anularDeposito)', async () => {
   for (const estado of ['pendiente_boucher', 'en_revision', 'devuelto', 'confirmado']) {
     await depositoAB(estado, estado === 'devuelto' ? { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' } : {})
-    await assertSucceeds(anular({ uid: UID_ADMIN, liberarOrden: true }))
-    assert.equal((await leerDep()).estado, 'anulado', estado)
+    await assertFails(anular({ uid: UID_ADMIN, liberarOrden: true }))
+    assert.equal((await leerDep()).estado, estado, estado)
   }
 })
 
-test('F4A-R4 · lo no relacionado de un convertido sigue igual: una nota ⇒ ALLOW; convertir desde en_revision y devuelto ⇒ ALLOW (la salida hacia revisión ya NO es del cliente: FIN-4B-R1..R3)', async () => {
+test('F4A-R4 · un convertido no se edita desde el cliente (nota, saldoId) y convertir ya no nace del cliente ⇒ DENY (FIN-1B); la salida hacia revisión sigue siendo FIN-4B-R1', async () => {
   await depositoAB('convertido_en_deuda', { saldoId: 'saldo1' })
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { notaConversion: 'ajustada', updatedAt: serverTimestamp() }))
-  // FIN-4B: la reversión (antes: convertido_en_deuda → en_revision desde el cliente) es la callable
-  // revertirConversionEnDeuda con Admin SDK. El cliente ya no sale de convertido_en_deuda (FIN-4B-R1).
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { notaConversion: 'ajustada', updatedAt: serverTimestamp() }))
   await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'en_revision', updatedAt: serverTimestamp() }))
-  // y convertir (el writer que cierra FIN-4A en el servidor) no depende de esta Rule
   await depositoAB('en_revision')
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'convertido_en_deuda', saldoId: 'saldo1' }))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'convertido_en_deuda', saldoId: 'saldo1' }))
   await depositoAB('devuelto', { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' })
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'convertido_en_deuda', saldoId: 'saldo1' }))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'convertido_en_deuda', saldoId: 'saldo1' }))
 })
 
 // ─── FIN-4B — nadie SALE de convertido_en_deuda desde el cliente ──────────────
@@ -1650,15 +1632,18 @@ test('FIN4B-R4 · convertido_en_deuda → anulado sigue bloqueado (FIN-4A) para 
   assert.equal((await leerDep()).estado, 'convertido_en_deuda')
 })
 
-test('FIN4B-R5 · lo no relacionado sigue igual: las demás transiciones (anular un en_revision, devolver, convertir) y una nota dentro de convertido ⇒ ALLOW', async () => {
+test('FIN4B-R5 · lo que quedó del cliente: devolver (pedir corrección) ⇒ ALLOW; anular, convertir y editar un convertido ⇒ DENY (FIN-1B)', async () => {
   for (const estado of ['pendiente_boucher', 'en_revision', 'devuelto', 'confirmado']) {
     await depositoAB(estado, estado === 'devuelto' ? { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' } : {})
-    await assertSucceeds(anular({ uid: UID_ADMIN, liberarOrden: true }))
-    assert.equal((await leerDep()).estado, 'anulado', estado)
+    await assertFails(anular({ uid: UID_ADMIN, liberarOrden: true }))
+    assert.equal((await leerDep()).estado, estado, estado)
   }
   await depositoAB('en_revision')
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'convertido_en_deuda', saldoId: 'saldo1' }))
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { notaConversion: 'ajustada', updatedAt: serverTimestamp() }))
+  await assertSucceeds(pedirCorreccion())
+  await depositoAB('en_revision')
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'convertido_en_deuda', saldoId: 'saldo1' }))
+  await depositoAB('convertido_en_deuda', { saldoId: 'saldo1' })
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { notaConversion: 'ajustada', updatedAt: serverTimestamp() }))
   assert.equal((await leerDep()).estado, 'convertido_en_deuda')
 })
 
@@ -1847,16 +1832,15 @@ test('AU1b · lo mismo sobre un depósito B ⇒ DENY', async () => {
   await assertFails(confirmarCon({ sinEvento: true }))
 })
 
-test('AU2 · confirmar con evento válido ⇒ ALLOW (A y B, gestor y admin)', async () => {
+test('AU2 · confirmar con evento válido desde el cliente ⇒ DENY (A y B, gestor y admin, desde en_revision y pendiente_boucher) (FIN-1B: confirmarDeposito)', async () => {
   await depositoAB('en_revision')
-  await assertSucceeds(confirmarCon())
+  await assertFails(confirmarCon())
   await depositoAB('en_revision')
-  await assertSucceeds(confirmarCon({ uid: UID_ADMIN }))
+  await assertFails(confirmarCon({ uid: UID_ADMIN }))
   await depositoAB('en_revision', { tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio' })
-  await assertSucceeds(confirmarCon())
-  // Y desde pendiente_boucher, que es el flujo del gestor que registra.
+  await assertFails(confirmarCon())
   await depositoAB('pendiente_boucher')
-  await assertSucceeds(confirmarCon())
+  await assertFails(confirmarCon())
 })
 
 test('AU3 · rehacer sin DEPOSITO_REHECHO ⇒ DENY', async () => {
@@ -1866,11 +1850,11 @@ test('AU3 · rehacer sin DEPOSITO_REHECHO ⇒ DENY', async () => {
   await assertFails(setDoc(doc(como(UID_ADMIN), 'ordenes_deposito', DEP_V), { estado: 'en_revision' }, { merge: true }))
 })
 
-test('AU4 · rehacer con evento válido ⇒ ALLOW (A y B)', async () => {
+test('AU4 · rehacer con evento válido desde el cliente ⇒ DENY (A y B) (FIN-1B: rehacerDeposito)', async () => {
   await depositoAB('confirmado')
-  await assertSucceeds(rehacerCon())
+  await assertFails(rehacerCon())
   await depositoAB('confirmado', { tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio' })
-  await assertSucceeds(rehacerCon())
+  await assertFails(rehacerCon())
 })
 
 test('AU4b · rehacer sigue siendo admin-only, con evento y todo ⇒ DENY para gestor', async () => {
@@ -1892,11 +1876,11 @@ test('AU5 · anular sin DEPOSITO_ANULADO ⇒ DENY', async () => {
   await assertFails(anular({ sinEvento: true }))
 })
 
-test('AU6 · anular con evento válido ⇒ ALLOW (A y B)', async () => {
+test('AU6 · anular con evento válido desde el cliente ⇒ DENY (A y B) (FIN-1B: anularDeposito)', async () => {
   await depositoAB('en_revision')
-  await assertSucceeds(anular())
+  await assertFails(anular())
   await depositoAB('confirmado', { tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio' })
-  await assertSucceeds(anular())
+  await assertFails(anular())
 })
 
 test('AU7 · evento del tipo equivocado para la transición ⇒ DENY', async () => {
@@ -1956,10 +1940,9 @@ test('AU10 · evento con timestamp distinto de request.time ⇒ DENY', async () 
   await assertFails(rehacerCon({ extraEvento: { at: antes } }))
 })
 
-test('AU11 · el tipo C no entra en ninguna de las tres exigencias (regresión intacta)', async () => {
-  // Su DEP nace ya confirmado junto al cobro y se revierte desde Cobros.
+test('AU11 · el tipo C: no nace de un update (en_revision → confirmado ⇒ DENY) y su reversión desde Cobros sigue ⇒ ALLOW', async () => {
   await depositoAB('en_revision', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
     estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
   }))
   await depositoAB('confirmado', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
@@ -1986,7 +1969,7 @@ test('ST1 · gestor cambia el boucher directo en en_revision, sin versión ni ev
   await assertFails(updateDoc(ref, { boucherUrl: 'https://example.test/x.jpg' }))
   await assertFails(updateDoc(ref, { boucherVersion: 7 }))
   await assertFails(updateDoc(ref, { boucherVersionId: 'inventado' }))
-  await assertFails(updateDoc(ref, { boucher: deleteField() }))
+  await assertFails(updateDoc(ref, { boucher: null }))
 })
 
 test('ST1b · y en devuelto, igual ⇒ DENY', async () => {
@@ -2072,32 +2055,30 @@ test('ST10 · convertido_en_deuda y anulado ⇒ DENY', async () => {
   }
 })
 
-test('ST11 · lo que NO es el comprobante sigue funcionando para staff', async () => {
-  // El guard mira solo los cuatro campos del puntero: confirmar, pedir
-  // corrección, convertir en deuda y anotar notas no lo tocan.
+test('ST11 · lo que sigue del cliente: pedir corrección ⇒ ALLOW; confirmar, convertir y anotar notas ⇒ DENY (FIN-1B)', async () => {
   await depositoAB('en_revision')
   await assertSucceeds(pedirCorreccion())
   await depositoAB('en_revision')
-  await assertSucceeds(confirmarCon())
+  await assertFails(confirmarCon())
   await depositoAB('en_revision')
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
     estado: 'convertido_en_deuda', saldoId: 'saldo1',
   }))
   await depositoAB('en_revision')
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
     notaConversion: 'revisado con el motorizado', updatedAt: serverTimestamp(),
   }))
 })
 
-test('ST12 · el flujo inicial no se rompe: adjuntar el PRIMER boucher sigue permitido', async () => {
-  // pendiente_boucher es la primera subida (create-first del motorizado,
-  // confirmarStorkhub/Comercio del gestor, digitación), no un reemplazo.
+test('ST12 · el flujo inicial no se rompe: la PRIMERA carga (boucher + en_revision + updatedAt) de staff y digitador ⇒ ALLOW; el boucher suelto ⇒ DENY', async () => {
   await depositoAB('pendiente_boucher')
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
     boucher: { url: 'https://example.test/primero.jpg', pathStorage: 'x' },
   }))
-  // Y el digitador completa su digitación desde 'pendiente_boucher' —primera
-  // carga, no reemplazo— igual que antes.
+  await depositoAB('pendiente_boucher')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    boucher: { url: 'https://example.test/primero.jpg', pathStorage: 'x' }, estado: 'en_revision',
+  }))
   await depositoAB('pendiente_boucher', { digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date() })
   await assertSucceeds(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V), {
     boucher: { url: 'https://example.test/dig.jpg', pathStorage: 'x' },
@@ -2106,9 +2087,9 @@ test('ST12 · el flujo inicial no se rompe: adjuntar el PRIMER boucher sigue per
   }))
 })
 
-test('ST13 · el tipo C no queda atrapado por el guard de versionado', async () => {
+test('ST13 · el tipo C ya no admite editar su comprobante desde un update suelto ⇒ DENY (FIN-1B: el tipo C solo nace confirmado y solo se anula)', async () => {
   await depositoAB('en_revision', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
     boucherUrl: 'https://example.test/c2.jpg',
   }))
 })
@@ -2146,7 +2127,7 @@ test('DG2 · sobrescribir el boucher vigente por la vía directa ⇒ DENY', asyn
   await assertFails(updateDoc(ref, { boucher: { url: 'https://example.test/x.jpg', pathStorage: 'x' } }))
   await assertFails(updateDoc(ref, { boucherUrl: 'https://example.test/x.jpg' }))
   await assertFails(updateDoc(ref, { boucherVersion: 7 }))
-  await assertFails(updateDoc(ref, { boucher: deleteField() }))
+  await assertFails(updateDoc(ref, { boucher: null }))
 })
 
 test('DG3 · reemplazo versionado en en_revision, con evento y motivo ⇒ ALLOW', async () => {
@@ -3386,32 +3367,27 @@ test('FG-R7 · FG6 + FIN-4A: un depósito CONVERTIDO EN DEUDA no se anula, ni li
   assert.equal((await leerGastoFin2('gUsado'))?.consumidoEnDepositoId, 'DC', 'el efecto económico ya ocurrió: el gasto sigue consumido')
 })
 
-test('FG-R8 · FG7: anular un depósito que libera sus órdenes libera sus gastos en el MISMO batch; después otro depósito sí puede usarlos', async () => {
+test('FG-R8 · FG7: anular un depósito que libera sus órdenes ya NO libera sus gastos desde el cliente ⇒ DENY (FIN-1B: lo hace anularDeposito)', async () => {
   await sembrarGastosFin2({ gUsado: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, consumidoEnDepositoId: 'DA' } })
   await sembrarDepositoFin2('DA', 'en_revision', ['gUsado'])
-  await assertSucceeds(batchAnularDepositoFin2(UID_ADMIN, 'DA', ['gUsado']).b.commit())
-  assert.equal((await leerDepositoFin2('DA'))?.estado, 'anulado')
-  assert.equal((await leerGastoFin2('gUsado'))?.consumidoEnDepositoId, undefined, 'liberado')
-  await assertSucceeds(batchCrearDepositoConGastos(UID_MOTO, 'DB', ['gUsado']).commit())
-  assert.equal((await leerGastoFin2('gUsado'))?.consumidoEnDepositoId, 'DB')
+  await assertFails(batchAnularDepositoFin2(UID_ADMIN, 'DA', ['gUsado']).b.commit())
+  assert.equal((await leerDepositoFin2('DA'))?.estado, 'en_revision')
+  assert.equal((await leerGastoFin2('gUsado'))?.consumidoEnDepositoId, 'DA', 'el gasto sigue consumido por DA')
 })
 
-test('FG-R9 · FG11/FG12: al anular D1 NO se limpia una marca que ya apunta a otro depósito vivo ⇒ DENY, y D1 no se anula', async () => {
+test('FG-R9 · FG11/FG12: ni anular D1 ni limpiar la marca de otro depósito desde el cliente ⇒ DENY; todo queda como estaba', async () => {
   await sembrarGastosFin2({
     gDeD1: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, consumidoEnDepositoId: 'D1' },
     gDeD2: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, consumidoEnDepositoId: 'D2' },
   })
   await sembrarDepositoFin2('D1', 'en_revision', ['gDeD1'])
   await sembrarDepositoFin2('D2', 'en_revision', ['gDeD2'])
-  // El batch intenta liberar también el gasto de D2 mientras anula D1 (sin el filtro del helper).
   const { db, b } = batchAnularDepositoFin2(UID_ADMIN, 'D1', ['gDeD1'])
   b.update(doc(db, 'gastos_motorizado', 'gDeD2'), { consumidoEnDepositoId: deleteField() })
   await assertFails(b.commit())
+  await assertFails(batchAnularDepositoFin2(UID_ADMIN, 'D1', ['gDeD1']).b.commit())
   assert.equal((await leerDepositoFin2('D1'))?.estado, 'en_revision')
-  assert.equal((await leerGastoFin2('gDeD2'))?.consumidoEnDepositoId, 'D2')
-  // El camino correcto, con el filtro, libera solo el de D1.
-  await assertSucceeds(batchAnularDepositoFin2(UID_ADMIN, 'D1', ['gDeD1', 'gDeD2'].filter((id) => id === 'gDeD1')).b.commit())
-  assert.equal((await leerGastoFin2('gDeD1'))?.consumidoEnDepositoId, undefined)
+  assert.equal((await leerGastoFin2('gDeD1'))?.consumidoEnDepositoId, 'D1')
   assert.equal((await leerGastoFin2('gDeD2'))?.consumidoEnDepositoId, 'D2')
 })
 
@@ -3531,15 +3507,13 @@ async function batchAnularFin5(uid: string, opts: { gastos?: string[]; sinEvento
   return b
 }
 
-test('F5-FR1 · REHACER válido: depósito, evento, orden y ledger cambian en UN commit ⇒ ALLOW', async () => {
+test('F5-FR1 · REHACER desde el cliente ⇒ DENY (FIN-1B: rehacerDeposito); depósito, orden y ledger quedan intactos', async () => {
   await sembrarFin5({ M1: { estado: 'activo' } })
-  await assertSucceeds((await batchRehacerFin5(UID_ADMIN)).commit())
-  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'en_revision')
-  assert.equal(await eventosDeD(), 1)
-  assert.equal((await punteroDeOrdenD()).confirmadoStorkhub, false)
-  const m1 = await leerDoc('movimientos_financieros', 'M1')
-  assert.equal(m1?.estado, 'anulado')
-  assert.equal(m1?.anuladoPorUid, UID_ADMIN)
+  const antes = await leerDoc('ordenes_deposito', 'depD')
+  await assertFails((await batchRehacerFin5(UID_ADMIN)).commit())
+  assert.deepEqual(await leerDoc('ordenes_deposito', 'depD'), antes)
+  assert.equal(await eventosDeD(), 0)
+  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'activo')
 })
 
 test('F5-FR2 · REHACER denegado (gestor no puede): NINGÚN movimiento queda anulado, ni evento, ni orden ⇒ DENY', async () => {
@@ -3552,13 +3526,13 @@ test('F5-FR2 · REHACER denegado (gestor no puede): NINGÚN movimiento queda anu
   assert.equal((await punteroDeOrdenD()).confirmadoStorkhub, true)
 })
 
-test('F5-FA1 · ANULAR válido: depósito anulado, evento, orden liberada y ledger anulado en UN commit ⇒ ALLOW', async () => {
+test('F5-FA1 · ANULAR desde el cliente ⇒ DENY (FIN-1B: anularDeposito); depósito, orden y ledger quedan intactos', async () => {
   await sembrarFin5({ M1: { estado: 'activo' } })
-  await assertSucceeds((await batchAnularFin5(UID_ADMIN)).commit())
-  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'anulado')
-  assert.equal(await eventosDeD(), 1)
-  assert.equal((await punteroDeOrdenD()).storkhubDepositoId, null)
-  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'anulado')
+  const antes = await leerDoc('ordenes_deposito', 'depD')
+  await assertFails((await batchAnularFin5(UID_ADMIN)).commit())
+  assert.deepEqual(await leerDoc('ordenes_deposito', 'depD'), antes)
+  assert.equal(await eventosDeD(), 0)
+  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'activo')
 })
 
 test('F5-FA2 · ANULAR denegado (gestor no puede): el ledger sigue activo, el depósito en su estado, la orden sin liberar ⇒ DENY', async () => {
@@ -3578,7 +3552,7 @@ test('F5-FA2b · sin su evento de auditoría el batch entero cae: el ledger NO q
   assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'confirmado')
 })
 
-test('F5-FA3 · VARIOS movimientos: anula M1 y M2 y NO reescribe M3, que ya estaba anulado', async () => {
+test('F5-FA3 · VARIOS movimientos: rehacer y anular desde el cliente ⇒ DENY y ningún movimiento cambia', async () => {
   const previo = { estado: 'anulado', anuladoPorUid: 'uidOriginal', motivoAnulacion: 'motivo original' }
   for (const accion of ['rehacer', 'anular'] as const) {
     await env.clearFirestore()
@@ -3588,51 +3562,42 @@ test('F5-FA3 · VARIOS movimientos: anula M1 y M2 y NO reescribe M3, que ya esta
       await setDoc(doc(db, 'usuarios', UID_ADMIN), { activo: true, rol: 'admin' })
     })
     await sembrarFin5({ M1: { estado: 'activo' }, M2: { estado: 'activo' }, M3: previo })
-    await assertSucceeds((await (accion === 'rehacer' ? batchRehacerFin5(UID_ADMIN) : batchAnularFin5(UID_ADMIN))).commit())
-    assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'anulado', accion)
-    assert.equal((await leerDoc('movimientos_financieros', 'M2'))?.estado, 'anulado', accion)
-    const m3 = await leerDoc('movimientos_financieros', 'M3')
-    assert.equal(m3?.anuladoPorUid, 'uidOriginal', accion + ': M3 conserva quién lo anuló')
-    assert.equal(m3?.motivoAnulacion, 'motivo original', accion)
+    await assertFails((await (accion === 'rehacer' ? batchRehacerFin5(UID_ADMIN) : batchAnularFin5(UID_ADMIN))).commit())
+    assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'activo', accion)
+    assert.equal((await leerDoc('movimientos_financieros', 'M2'))?.estado, 'activo', accion)
+    assert.equal((await leerDoc('movimientos_financieros', 'M3'))?.anuladoPorUid, 'uidOriginal', accion)
   }
 })
 
-test('F5-FA4 · SIN movimientos: rehacer y anular siguen funcionando', async () => {
+test('F5-FA4 · SIN movimientos: rehacer y anular desde el cliente también ⇒ DENY', async () => {
   await sembrarFin5({})
-  await assertSucceeds((await batchRehacerFin5(UID_ADMIN)).commit())
-  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'en_revision')
+  await assertFails((await batchRehacerFin5(UID_ADMIN)).commit())
   await env.clearFirestore()
   await env.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore()
     await setDoc(doc(db, 'usuarios', UID_ADMIN), { activo: true, rol: 'admin' })
   })
   await sembrarFin5({})
-  await assertSucceeds((await batchAnularFin5(UID_ADMIN)).commit())
-  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'anulado')
+  await assertFails((await batchAnularFin5(UID_ADMIN)).commit())
 })
 
-test('F5-FIN2 · REGRESIÓN FIN-2: anular libera órdenes Y gastos Y anula el ledger en el mismo commit; si cae, no cambia nada', async () => {
+test('F5-FIN2 · REGRESIÓN FIN-2: anular desde el cliente (gestor o admin) ⇒ DENY: ni órdenes, ni gastos, ni ledger cambian (FIN-1B: lo hace anularDeposito)', async () => {
   await sembrarFin5({ M1: { estado: 'activo' } }, { gastos: ['g1', 'g2'] })
-  // Cae (gestor): ni el gasto se libera, ni el ledger se anula.
   await assertFails((await batchAnularFin5(UID_GESTOR, { gastos: ['g1', 'g2'] })).commit())
+  await assertFails((await batchAnularFin5(UID_ADMIN, { gastos: ['g1', 'g2'] })).commit())
   assert.equal((await leerDoc('gastos_motorizado', 'g1'))?.consumidoEnDepositoId, 'depD')
+  assert.equal((await leerDoc('gastos_motorizado', 'g2'))?.consumidoEnDepositoId, 'depD')
   assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'activo')
-  // Pasa (admin): todo junto.
-  await assertSucceeds((await batchAnularFin5(UID_ADMIN, { gastos: ['g1', 'g2'] })).commit())
-  assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'anulado')
-  assert.equal((await leerDoc('gastos_motorizado', 'g1'))?.consumidoEnDepositoId, undefined)
-  assert.equal((await leerDoc('gastos_motorizado', 'g2'))?.consumidoEnDepositoId, undefined)
-  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'anulado')
-  assert.equal((await punteroDeOrdenD()).storkhubDepositoId, null)
+  assert.notEqual((await punteroDeOrdenD()).storkhubDepositoId, null)
 })
 
-test('F5-IDEM · una segunda anulación sobre un depósito ya anulado no pasa y no reescribe el ledger ⇒ DENY', async () => {
+test('F5-IDEM · anular dos veces desde el cliente ⇒ DENY las dos; no se crea ningún evento ni se reescribe el ledger', async () => {
   await sembrarFin5({ M1: { estado: 'activo' } })
-  await assertSucceeds((await batchAnularFin5(UID_ADMIN)).commit())
+  await assertFails((await batchAnularFin5(UID_ADMIN)).commit())
   const antes = await leerDoc('movimientos_financieros', 'M1')
   await assertFails((await batchAnularFin5(UID_ADMIN)).commit())
   assert.deepEqual(await leerDoc('movimientos_financieros', 'M1'), antes)
-  assert.equal(await eventosDeD(), 1, 'no se creó un segundo evento')
+  assert.equal(await eventosDeD(), 0, 'no se creó ningún evento')
 })
 
 test('F5-REPRO · REPRODUCCIÓN del bug anterior: con un commit de ledger SEPARADO y el batch principal denegado, queda confirmado + ledger anulado', async () => {
@@ -3792,4 +3757,189 @@ test('F1-0-R13 · ningún otro match reabre el delete: un solo match para movimi
   assert.ok(/allow delete: if false;/.test(bloque), 'delete: if false')
   assert.ok(!/allow [^:\n]*\bwrite\b[^:\n]*:/.test(bloque), 'ningún "allow ... write" (write incluye delete)')
   assert.ok(!/allow [^:\n]*\bdelete\b[^:\n]*: if (?!false)/.test(bloque), 'ningún otro allow de delete')
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FIN-1B — los bypasses de ordenes_deposito que quedaron cerrados (antes ALLOW, ahora DENY)
+//
+// Antes de FIN-1B el update de gestor/admin era "cualquier campo, y el estado auditado con un evento": un cliente modificado podía
+// confirmar sin callable (D1/D2), cambiar montoTotal (D3), crear un depósito ya confirmado o convertido con un saldoId inventado
+// (D4/D5), editar los campos de conversión (D8), rehacer/anular un confirmado dejando su ledger vivo (D9) y pasar a 'en_revision'
+// sin comprobante (E1). El evento obligatorio no equivalía a integridad: Rules no puede demostrar el ledger, las órdenes ni los gastos.
+// Estas pruebas son permanentes: si alguien reabre la rama amplia, caen.
+// ═════════════════════════════════════════════════════════════════════════════
+
+const flagsOrdenV = { 'registro.deposito.confirmadoStorkhub': true, 'registro.deposito.confirmadoStorkhubAt': serverTimestamp(), 'registro.deposito.storkhubDepositoId': DEP_V }
+
+test('FIN1B-D1 · gestor confirma un A en revisión SIN callable (batch depósito + evento DEPOSITO_CONFIRMADO) ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  await assertFails(confirmarCon())
+  assert.equal((await leerDep()).estado, 'en_revision')
+})
+
+test('FIN1B-D2 · gestor fabrica el RESULTADO completo de la confirmación (depósito + evento + movimiento deposito_efectivo_storkhub + flags de la orden) ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  const db = como(UID_GESTOR)
+  const b = writeBatch(db)
+  b.set(doc(db, 'ordenes_deposito', DEP_V), camposConfirmarDeposito(UID_GESTOR, serverTimestamp(), 'evFab1'), { merge: true })
+  b.set(doc(db, 'ordenes_deposito', DEP_V, 'eventos', 'evFab1'), camposEventoDepositoConfirmado({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp()))
+  b.set(doc(db, 'movimientos_financieros', 'movFab1'), { tipo: 'deposito_efectivo_storkhub', monto: 110, estado: 'activo', depositoId: DEP_V, motorizadoId: 'mot1', cuentaOrigen: 'efectivo_en_poder:mot1', cuentaDestino: 'banco_storkhub', propietario: 'storkhub', creadoPorUid: UID_GESTOR, creadoPorRol: 'gestor', at: serverTimestamp(), descripcion: 'x' })
+  b.update(doc(db, 'solicitudes_envio', ORDEN_V), flagsOrdenV)
+  await assertFails(b.commit())
+  assert.equal((await leerDep()).estado, 'en_revision')
+})
+
+test('FIN1B-D3 · gestor/admin cambian montoTotal o montoBruto de un depósito (en revisión o pendiente_boucher) ⇒ DENY', async () => {
+  for (const estado of ['pendiente_boucher', 'en_revision']) {
+    await depositoAB(estado)
+    await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { montoTotal: 1 }))
+    await assertFails(updateDoc(doc(como(UID_ADMIN), 'ordenes_deposito', DEP_V), { montoBruto: 9999, gastosDescontados: 0, gastosIds: [] }))
+    await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { solicitudIds: [ORDEN_V, 'otra'] }))
+  }
+})
+
+test('FIN1B-D4/D5 · gestor/admin CREAN un depósito A/B ya confirmado, convertido, anulado, en revisión o con boucher ⇒ DENY; solo pendiente_boucher de captura ⇒ ALLOW', async () => {
+  const intentos: Array<Record<string, unknown>> = [
+    { estado: 'convertido_en_deuda', saldoId: 'inventado', montoTotal: 9999 },
+    { estado: 'confirmado' },
+    { estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp() },
+    { estado: 'anulado' },
+    { estado: 'en_revision', boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x' } },
+    { estado: 'pendiente_boucher', saldoId: 'inventado' },
+    { estado: 'pendiente_boucher', confirmadoPorUid: UID_GESTOR },
+    { estado: 'pendiente_boucher', condonado: true },
+  ]
+  let i = 0
+  for (const quien of [UID_GESTOR, UID_ADMIN]) {
+    for (const extra of intentos) {
+      await assertFails(setDoc(doc(como(quien), 'ordenes_deposito', `dxFin1b${++i}`), depositoBase(extra)))
+    }
+    await assertFails(setDoc(doc(como(quien), 'ordenes_deposito', `dxFin1b${++i}`), depositoBase({ tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio', estado: 'confirmado' })))
+    await assertSucceeds(setDoc(doc(como(quien), 'ordenes_deposito', `dxOk${++i}`), depositoBase({ montoBruto: 110, gastosDescontados: 0, gastosIds: [], cuentasDestino: [] })))
+  }
+})
+
+test('FIN1B-D8 · gestor/admin editan saldoId / notaConversion / convertidoPorUid / convertidoAt de un convertido SIN cambiar el estado ⇒ DENY', async () => {
+  await depositoAB('convertido_en_deuda', { saldoId: 'saldo1', notaConversion: 'orig', convertidoPorUid: UID_GESTOR })
+  for (const quien of [UID_GESTOR, UID_ADMIN]) {
+    await assertFails(updateDoc(doc(como(quien), 'ordenes_deposito', DEP_V), { saldoId: 'OTRO', notaConversion: 'x' }))
+    await assertFails(updateDoc(doc(como(quien), 'ordenes_deposito', DEP_V), { convertidoPorUid: 'otro', convertidoAt: serverTimestamp() }))
+    await assertFails(updateDoc(doc(como(quien), 'ordenes_deposito', DEP_V), { condonado: true, notaCondonacion: 'x' }))
+  }
+  const dep = await leerDep()
+  assert.equal(dep.saldoId, 'saldo1'); assert.equal(dep.notaConversion, 'orig')
+})
+
+test('FIN1B-D9 · admin Rehacer/Anular de un confirmado, con el evento y SIN anular su ledger (el batch no lo exige) ⇒ DENY', async () => {
+  await depositoAB('confirmado')
+  await assertFails(rehacerCon({ uid: UID_ADMIN }))
+  await assertFails(anular({ uid: UID_ADMIN }))
+  assert.equal((await leerDep()).estado, 'confirmado')
+})
+
+test('FIN1B-E1/E1b · pendiente_boucher → en_revision SIN comprobante real ⇒ DENY (gestor, admin, motorizado, digitador y el Rehacer del admin); con comprobante ⇒ ALLOW', async () => {
+  const invalidos: Array<Record<string, string | object>> = [
+    { estado: 'en_revision', updatedAt: serverTimestamp() },
+    { estado: 'en_revision', boucher: {}, updatedAt: serverTimestamp() },
+    { estado: 'en_revision', boucher: { url: '', pathStorage: 'x' }, updatedAt: serverTimestamp() },
+    { estado: 'en_revision', boucher: { url: 'https://example.test/b.jpg' }, updatedAt: serverTimestamp() },
+    { estado: 'en_revision', boucher: 'texto', updatedAt: serverTimestamp() },
+  ]
+  for (const quien of [UID_GESTOR, UID_ADMIN]) {
+    for (const cambios of invalidos) {
+      await depositoAB('pendiente_boucher', { boucher: null })
+      await assertFails(updateDoc(doc(como(quien), 'ordenes_deposito', DEP_V), cambios))
+    }
+  }
+  await depositoAB('pendiente_boucher', { boucher: null })
+  for (const cambios of invalidos) await assertFails(updateDoc(doc(como(UID_MOTO), 'ordenes_deposito', DEP_V), cambios))
+  await depositoAB('pendiente_boucher', { boucher: null, digitadoPorUid: UID_DIGITADOR, digitadoAt: new Date() })
+  for (const cambios of invalidos) await assertFails(updateDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', DEP_V), cambios))
+  // E1b: el Rehacer del admin sobre un pendiente_boucher (la UI lo ofrecía) tampoco es una vía.
+  await depositoAB('pendiente_boucher', { boucher: null })
+  await assertFails(rehacerCon({ uid: UID_ADMIN }))
+  // Con comprobante real: ALLOW para los cuatro.
+  const ok = { estado: 'en_revision', boucher: { url: 'https://example.test/b.jpg', pathStorage: 'x' }, updatedAt: serverTimestamp() }
+  await depositoAB('pendiente_boucher', { boucher: null })
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), ok))
+  await depositoAB('pendiente_boucher', { boucher: null })
+  await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'ordenes_deposito', DEP_V), ok))
+})
+
+test('FIN1B-E3 · admin ANULA un confirmado (batch depósito + evento) sin anular su movimiento deposito_efectivo_storkhub ⇒ DENY', async () => {
+  await depositoAB('confirmado')
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'movimientos_financieros', 'movE3'), { tipo: 'deposito_efectivo_storkhub', monto: 110, estado: 'activo', depositoId: DEP_V })
+  })
+  await assertFails(anular({ uid: UID_ADMIN }))
+  let mov: Record<string, unknown> = {}
+  await env.withSecurityRulesDisabled(async (ctx) => { mov = ((await getDoc(doc(ctx.firestore(), 'movimientos_financieros', 'movE3'))).data() ?? {}) as Record<string, unknown> })
+  assert.equal(mov.estado, 'activo')
+  assert.equal((await leerDep()).estado, 'confirmado')
+})
+
+test('FIN1B-E4 · gestor/admin editan confirmadoPorUid / confirmadoAt de un confirmado sin cambiar el estado (falsifican al confirmante) ⇒ DENY', async () => {
+  await depositoAB('confirmado', { confirmadoPorUid: UID_GESTOR })
+  for (const quien of [UID_GESTOR, UID_ADMIN]) {
+    await assertFails(updateDoc(doc(como(quien), 'ordenes_deposito', DEP_V), { confirmadoPorUid: 'otro_uid', confirmadoAt: serverTimestamp() }))
+  }
+  assert.equal((await leerDep()).confirmadoPorUid, UID_GESTOR)
+})
+
+test('FIN1B-E6 · gestor/admin pasan en_revision → convertido_en_deuda con saldoId inventado por UPDATE ⇒ DENY', async () => {
+  for (const quien of [UID_GESTOR, UID_ADMIN]) {
+    await depositoAB('en_revision')
+    await assertFails(updateDoc(doc(como(quien), 'ordenes_deposito', DEP_V), {
+      estado: 'convertido_en_deuda', saldoId: 'inventado', notaConversion: 'x', convertidoPorUid: quien, convertidoAt: serverTimestamp(),
+    }))
+    assert.equal((await leerDep()).estado, 'en_revision')
+  }
+})
+
+test('FIN1B-E8 · reabrir un depósito ANULADO a confirmado, en_revision o pendiente_boucher desde el cliente ⇒ DENY (gestor y admin)', async () => {
+  for (const quien of [UID_GESTOR, UID_ADMIN]) {
+    for (const destino of ['confirmado', 'en_revision', 'pendiente_boucher']) {
+      await depositoAB('anulado', { anuladoPorUid: UID_ADMIN })
+      await assertFails(updateDoc(doc(como(quien), 'ordenes_deposito', DEP_V), { estado: destino, updatedAt: serverTimestamp() }))
+    }
+    await depositoAB('anulado', { anuladoPorUid: UID_ADMIN })
+    await assertFails(confirmarCon({ uid: quien }))
+    assert.equal((await leerDep()).estado, 'anulado')
+  }
+})
+
+test('FIN1B-E9 · admin Rehacer de un confirmado SIN tocar órdenes, gastos ni ledger (solo depósito + evento) ⇒ DENY', async () => {
+  await depositoAB('confirmado')
+  await assertFails(rehacerCon({ uid: UID_ADMIN }))
+  assert.equal((await leerDep()).estado, 'confirmado')
+})
+
+// ─── Los flujos legítimos del cliente siguen abiertos, cada uno con su lista cerrada ─────────────────────────────────────────
+
+test('FIN1B-L1 · rechazar una digitación: solo con digitadoPorUid, desde pendiente_boucher o en_revision, con {estado, rechazadoPor, rechazadoAt, motivoRechazo} ⇒ ALLOW; con otros campos, otro estado o sin digitación ⇒ DENY', async () => {
+  const rechazo = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({ estado: 'rechazado', rechazadoPor: UID_GESTOR, rechazadoAt: serverTimestamp(), motivoRechazo: 'Monto ilegible', ...extra })
+  await depositoDigitado('en_revision')
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), rechazo(), { merge: true }))
+  await depositoDigitado('pendiente_boucher')
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), rechazo(), { merge: true }))
+  // Sin digitación (lo subió el motorizado): no es un rechazo de digitación.
+  await depositoAB('en_revision')
+  await assertFails(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), rechazo(), { merge: true }))
+  // El rechazo no es un bypass: ni monto, ni confirmación, ni conversión, ni actor ajeno, ni hora inventada.
+  for (const extra of [{ montoTotal: 1 }, { saldoId: 'x' }, { confirmadoPorUid: UID_GESTOR }, { condonado: true }, { rechazadoPor: 'otro' }, { rechazadoAt: new Date() }, { motivoRechazo: '' }, { updatedAt: serverTimestamp() }]) {
+    await depositoDigitado('en_revision')
+    await assertFails(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), rechazo(extra), { merge: true }))
+  }
+  // Desde otros estados no.
+  for (const estado of ['confirmado', 'devuelto', 'anulado', 'convertido_en_deuda']) {
+    await depositoDigitado(estado)
+    await assertFails(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), rechazo(), { merge: true }))
+  }
+})
+
+test('FIN1B-L2 · el staff crea el depósito de captura (con y sin montoBruto/gastos), pasa a en_revision con comprobante, pide corrección y reemplaza versionado ⇒ ALLOW; todo con su lista cerrada', async () => {
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'dxL2a'), depositoBase({ cuentasDestino: [], montoBruto: 120, gastosDescontados: 10, gastosIds: ['g1'] })))
+  await assertSucceeds(setDoc(doc(como(UID_ADMIN), 'ordenes_deposito', 'dxL2b'), depositoBase({ tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio', destinatarioId: COMERCIO_ID })))
+  await depositoAB('en_revision')
+  await assertSucceeds(pedirCorreccion())
 })

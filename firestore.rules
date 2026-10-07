@@ -1510,8 +1510,37 @@ service cloud.firestore {
       // "A || B || (C && sinCodigoEntrante())" y la restriccion solo aplicaba
       // a la ultima rama: gestor y motorizado seguian pudiendo inyectar un
       // codigo al crear. Lo detectaron los casos L y M de la suite de Rules.
+      // FIN-1B — la creación de gestor/admin ya NO es "cualquier estado" (D4/D5): un cliente modificado podía nacer un depósito
+      // 'confirmado' o 'convertido_en_deuda' con un saldoId inventado. Solo nace:
+      //   · un A/B en 'pendiente_boucher', con la lista cerrada de campos de la captura (sin boucher ni digitación); o
+      //   · el DEP tipo C que Cobros escribe junto con su cobro, con SU lista cerrada y SU actor (ver tipoCNaceConSuCobro).
+      // Confirmar, convertir, anular y rehacer son de las callables (Admin SDK).
+      function creacionDepositoStaffValida() {
+        let d = request.resource.data;
+        return (
+            d.get('estado', '') == 'pendiente_boucher'
+            && d.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio']
+            && d.keys().hasOnly([
+                 'creadoAt', 'tipo', 'estado', 'destinatario', 'destinatarioId', 'destinatarioNombre',
+                 'cuentasDestino', 'motorizadoUid', 'motorizadoNombre', 'solicitudIds',
+                 'montoTotal', 'montoBruto', 'gastosDescontados', 'gastosIds'
+               ])
+          )
+          || (
+            d.get('tipo', '') == 'pago_delivery_deposito'
+            && d.get('estado', '') == 'confirmado'
+            && d.keys().hasOnly([
+                 'creadoAt', 'tipo', 'estado', 'destinatario', 'destinatarioId', 'destinatarioNombre',
+                 'cuentasDestino', 'motorizadoUid', 'motorizadoNombre', 'solicitudIds',
+                 'montoTotal', 'boucherUrl', 'metadata', 'confirmadoPorUid', 'confirmadoAt'
+               ])
+            && d.get('confirmadoPorUid', '') == request.auth.uid
+            && d.get('confirmadoAt', null) == request.time
+          );
+      }
+
       allow create: if (
-          isAdminOrGestor()
+          (isAdminOrGestor() && creacionDepositoStaffValida())
           || (isMotorizadoRole() && creacionDepositoMotorizadoValida())
           || (
             isDigitador()
@@ -1841,160 +1870,74 @@ service cloud.firestore {
                despues.get('ultimoEventoId', ''));
       }
 
-      // ─── Guard de la rama amplia de gestor/admin ──────────────────────
+      // ─── FIN-1B — el update de gestor/admin ya NO es una rama amplia ────────────
       //
-      // Forma de ÁRBOL, no de lista de garantías, y eso no es estilo: es el
-      // presupuesto de expresiones (ver la nota de la cabecera). Una lista
-      // plana de ocho condiciones releía el estado, el diff y el tipo en cada
-      // una y reventaba el techo de 1000 expresiones — medido, no supuesto.
+      // Antes: "cualquier campo, y el estado auditado con un evento". Eso dejaba a un cliente modificado confirmar sin callable
+      // (D1/D2), cambiar montoTotal (D3), editar saldoId/notaConversion de un convertido (D8), editar quién confirmó (E4),
+      // reabrir un anulado (E8) y rehacer/anular un confirmado dejando el ledger vivo (D9/E3/E9): el evento obligatorio no
+      // equivale a integridad, porque Rules no puede demostrar que el ledger, las órdenes y los gastos cambiaron con él.
       //
-      // Acá cada pregunta cara se hace SOLO si la anterior dice que hace
-      // falta:
+      // Ahora gestor y admin solo hacen, desde el cliente, lo que es CAPTURA o CORRECCIÓN, cada cosa con su lista cerrada de campos y
+      // su transición exacta. Confirmar, convertir, revertir, rehacer y anular son de las callables (Admin SDK), que demuestran el
+      // estado, el ledger, las órdenes, los gastos y las liquidaciones dentro de UNA transacción.
       //
-      //   · ¿cambió el estado?        si no, no hay transición que auditar
-      //   · ¿tocó el comprobante?     si no, no hay versionado que exigir
-      //
-      // La abrumadora mayoría de los updates de staff (notas, saldoId,
-      // punteros) no hacen ninguna de las dos cosas y salen por el camino
-      // barato.
-      function updateStaffAuditado() {
-        return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['codigo', 'secuencia'])
-          // STORAGE-EVIDENCIA-INTEGRIDAD-1 — el sellado de F1 vale SIEMPRE,
-          // con interruptor o sin él: un depósito cerrado no cambia de
-          // comprobante ni durante el rollout.
-          && boucherSelladoF1()
-          && estadoStaffAuditado()
-          && boucherStaffVersionado();
+      // Presupuesto de expresiones: listas de campos y transiciones explícitas, no una garantía por campo derivado.
+
+      // El comprobante tiene que ser real: URL y path de Storage. 'en_revision' sin comprobante dejaba confirmar sin evidencia (E1).
+      function boucherPresente() {
+        let d = request.resource.data;
+        return d.get(['boucher', 'url'], '') is string && d.get(['boucher', 'url'], '').size() > 0
+          && d.get(['boucher', 'pathStorage'], '') is string && d.get(['boucher', 'pathStorage'], '').size() > 0;
       }
 
-      function estadoStaffAuditado() {
-        let eAntes = resource.data.get('estado', '');
-        let eDespues = request.resource.data.get('estado', '');
-        return eAntes == eDespues || transicionStaffAuditada(eAntes, eDespues);
+      // Rechazar una digitación (rechazarDeposito): solo un depósito con digitadoPorUid, desde un estado abierto, y nada más.
+      function rechazoDigitacionValido(antes, despues, cambios) {
+        return antes.get('digitadoPorUid', null) != null
+          && cambios.hasOnly(['estado', 'rechazadoPor', 'rechazadoAt', 'motivoRechazo'])
+          && despues.get('rechazadoPor', '') == request.auth.uid
+          && despues.get('rechazadoAt', null) == request.time
+          && despues.get('motivoRechazo', null) is string
+          && despues.get('motivoRechazo', '').size() >= 1
+          && despues.get('motivoRechazo', '').size() <= 500;
       }
 
-      // Solo se llega acá cuando el estado REALMENTE cambia.
-      function transicionStaffAuditada(eAntes, eDespues) {
-        let despues = request.resource.data;
+      function capturaStaffValida(antes, despues, cambios) {
+        let eAntes = antes.get('estado', '');
+        let eDespues = despues.get('estado', '');
         let evId = despues.get('ultimoEventoId', '');
-        let ab = resource.data.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio'];
         return
-          // FIN-4A — un depósito convertido en deuda NO pasa a 'anulado' por este
-          // writer genérico (ni gestor ni admin). Anularlo dejaba el saldo vivo en
-          // saldos_cargo_motorizado sin el movimiento de ledger que lo respalda: una
-          // deuda sin respaldo. Su única salida es revertir la conversión (FIN-4B).
-          // Va primero porque es la comparación más barata del bloque (presupuesto
-          // de 1000 expresiones, ver la nota de arriba).
-          //
-          // FIN-4B — y tampoco SALE de 'convertido_en_deuda' hacia ningún otro estado
-          // (en_revision, pendiente_boucher…): revertir una conversión es la callable
-          // revertirConversionEnDeuda (Admin SDK, una sola transacción: depósito, saldo,
-          // movimiento, evento y órdenes). La salida directa dejaba el saldo vivo (o
-          // anulado) y el movimiento activo sin que nadie lo narrara. Los updates que NO
-          // cambian el estado (una nota, por ejemplo) siguen igual; FIN-1 sigue abierto.
-          (eAntes != 'convertido_en_deuda')
-
-          // DEP-ACCIONES-ADMIN-ONLY — sacar un depósito de 'confirmado' es del
-          // admin. Única excepción del gestor: anular un DEP tipo C al
-          // revertir su cobro (que no es A/B, de ahí el `!ab`).
-          && (eAntes != 'confirmado' || isAdmin() || (!ab && eDespues == 'anulado'))
-
-          // Salir de 'devuelto' es del MOTORIZADO, con una versión nueva
-          // (regla propia más abajo). Staff no confirma un depósito que sigue
-          // esperando comprobante ni lo reabre por la puerta de atrás. Se le
-          // dejan las dos salidas que no son "dar por buena la evidencia":
-          // convertirlo en deuda, y anularlo — ambas auditadas por su lado.
-          && (eAntes != 'devuelto'
-              || eDespues == 'convertido_en_deuda'
-              || (isAdmin() && eDespues == 'anulado')
-              // El reemplazo versionado de staff también sale de 'devuelto':
-              // subir el comprobante corregido devuelve el DEP a la cola del
-              // gestor. No se revalida el protocolo acá —sería pagarlo dos
-              // veces—: si el update toca el puntero, boucherStaffVersionado()
-              // lo exige entero, y si no lo toca no es un reemplazo y esta
-              // rama no lo deja pasar.
-              || (eDespues == 'en_revision'
-                  && request.resource.data.diff(resource.data).affectedKeys().hasAny(['boucher'])))
-
-          // Entrar a 'devuelto' SOLO por "Pedir corrección". Sin esto, esta
-          // misma rama —que no tiene hasOnly— dejaría escribir
-          // estado:'devuelto' sin motivo, sin actor y sin evento.
-          && (eDespues != 'devuelto'
-              || (ab && eAntes == 'en_revision'
-                  && devolucionValida(request.resource.data.diff(resource.data).affectedKeys(), evId)))
-
-          // HARDENING — anular exige su evento. Un cliente modificado podía
-          // escribir solo los campos planos y saltarse la subcolección.
-          && (eDespues != 'anulado' || !ab || anulacionValida(evId))
-
-          // HARDENING — confirmar también. No se le pide motivo (no deshace
-          // nada), pero sí que quede quién y cuándo. Tipo C fuera: su
-          // documento nace ya 'confirmado' junto al cobro, no por esta vía.
-          && (eDespues != 'confirmado' || !ab || !auditoriaF2Obligatoria()
-              || eventoEnEsteBatch('DEPOSITO_CONFIRMADO', evId))
-
-          // HARDENING — Rehacer es la ÚNICA transición que saca un A/B de
-          // 'confirmado' hacia 'en_revision'. Ya era admin-only; ahora además
-          // tiene que narrarse, con motivo. NO resuelve
-          // REHACER-ANULA-ANTES-DEL-BATCH: la anulación de los movimientos del
-          // ledger sigue siendo una escritura aparte y esa deuda de atomicidad
-          // financiera queda abierta. Lo que se vuelve obligatorio es la
-          // auditoría de la transición que sí llega a Firestore.
-          && (eAntes != 'confirmado' || eDespues != 'en_revision' || !ab
-              || !auditoriaF2Obligatoria()
-              || (isAdmin() && eventoConMotivo('DEPOSITO_REHECHO', evId)));
+          // El comprobante inicial: pendiente_boucher → en_revision, con boucher real.
+          (eAntes == 'pendiente_boucher' && eDespues == 'en_revision'
+            && cambios.hasOnly(['boucher', 'estado', 'updatedAt']) && boucherPresente())
+          // Pedir corrección: en_revision → devuelto, con motivo y evento.
+          || (eAntes == 'en_revision' && eDespues == 'devuelto' && devolucionValida(cambios, evId))
+          // Reemplazo versionado del comprobante (desde en_revision o devuelto).
+          || (eAntes in ['en_revision', 'devuelto'] && reemplazoVersionado(cambios, eDespues, evId))
+          // Rechazar una digitación.
+          || (eAntes in ['pendiente_boucher', 'en_revision'] && eDespues == 'rechazado'
+              && rechazoDigitacionValido(antes, despues, cambios));
       }
 
-      // HARDENING — el comprobante vigente SOLO cambia por versión.
-      //
-      // F1 le dejaba a gestor/admin mutar el puntero `boucher` de un depósito
-      // abierto con un setDoc suelto (modelo privilegiado, Decisión 2 de
-      // P1-S2). Después de F2 eso es una vía no versionada de cambiar
-      // evidencia: el objeto anterior deja de estar referenciado, sin versión,
-      // sin motivo y sin evento. No hay bypass de admin.
-      function boucherStaffVersionado() {
-        return !request.resource.data.diff(resource.data).affectedKeys()
-                 .hasAny(['boucher', 'boucherUrl', 'boucherVersion', 'boucherVersionId'])
-          // Durante el puente, el reemplazo directo del web F1 sigue vivo.
-          // El sellado de estados cerrados NO depende del interruptor: eso lo
-          // cierra la primera condición de cambioDeBoucherPermitido() y vale
-          // igual en las dos versiones.
-          || !auditoriaF2Obligatoria()
-          || cambioDeBoucherPermitido();
+      // Revertir un cobro anula su DEP tipo C (lib/cobro-integridad.camposAnulacionDeposito). Nada más; el tipo C se migra con Cobros.
+      function anulacionTipoCValida(antes, despues, cambios) {
+        return antes.get('estado', '') == 'confirmado'
+          && despues.get('estado', '') == 'anulado'
+          && cambios.hasOnly(['estado', 'anuladoAt', 'anuladoPorUid', 'motivoAnulacion']);
       }
 
-      // Solo se llega acá cuando el update SÍ toca el puntero.
-      //
-      //   sellados           nadie, ni admin (STORAGE-EVIDENCIA-INTEGRIDAD-1,
-      //                      ampliado a los punteros de versión: en un estado
-      //                      cerrado el comprobante no se toca, ni siquiera
-      //                      para "corregir" cuál versión dice ser).
-      //   en_revision        hay evidencia vigente que corregir: versionado.
-      //   devuelto           ídem.
-      //   pendiente_boucher  flujo INICIAL (create-first del motorizado,
-      //                      confirmarStorkhub/Comercio del gestor,
-      //                      digitación). Ahí el boucher se adjunta por
-      //                      primera vez y el reintento reescribe el mismo
-      //                      path: no es reemplazo de evidencia.
-      //   rechazado          terminal; F1 ya lo trataba así.
-      function boucherSelladoF1() {
-        return !(resource.data.get('estado', '') in ['confirmado', 'convertido_en_deuda', 'anulado'])
-          || !request.resource.data.diff(resource.data).affectedKeys()
-               .hasAny(['boucher', 'boucherUrl', 'boucherVersion', 'boucherVersionId']);
+      function updateStaffCerrado() {
+        let antes = resource.data;
+        let despues = request.resource.data;
+        let cambios = despues.diff(antes).affectedKeys();
+        let tipo = antes.get('tipo', '');
+        return !cambios.hasAny(['codigo', 'secuencia'])
+          && (
+            (tipo in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio'] && capturaStaffValida(antes, despues, cambios))
+            || (tipo == 'pago_delivery_deposito' && anulacionTipoCValida(antes, despues, cambios))
+          );
       }
 
-      function cambioDeBoucherPermitido() {
-        let eAntes = resource.data.get('estado', '');
-        return !(eAntes in ['confirmado', 'convertido_en_deuda', 'anulado'])
-          && (!(eAntes in ['en_revision', 'devuelto'])
-              || !(resource.data.get('tipo', '') in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio'])
-              || reemplazoVersionado(
-                   request.resource.data.diff(resource.data).affectedKeys(),
-                   request.resource.data.get('estado', ''),
-                   request.resource.data.get('ultimoEventoId', '')));
-      }
-
-      allow update: if isAdminOrGestor() && updateStaffAuditado();
+      allow update: if isAdminOrGestor() && updateStaffCerrado();
 
       // Motorizado: solo puede subir boucher y pasar a en_revision.
       // Mismo cambio que create/read — se exige rol motorizado activo. Los
@@ -2014,7 +1957,8 @@ service cloud.firestore {
           'estado',
           'updatedAt'
         ])
-        && request.resource.data.estado == 'en_revision';
+        && request.resource.data.estado == 'en_revision'
+        && boucherPresente();
 
       // DEPOSITO-AUDITORIA-1 — reemplazo versionado del comprobante.
       //
@@ -2035,7 +1979,8 @@ service cloud.firestore {
         && resource.data.get('digitadoPorUid', null) == request.auth.uid
         && resource.data.estado == 'pendiente_boucher'
         && request.resource.data.estado == 'en_revision'
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['boucher', 'estado', 'updatedAt']);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['boucher', 'estado', 'updatedAt'])
+        && boucherPresente();
 
       // Digitador: solo puede corregir el COMPROBANTE de su propia digitación
       // mientras el gestor todavía no la revisó (D2). Una vez 'confirmado' o
