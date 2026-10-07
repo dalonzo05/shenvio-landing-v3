@@ -14,11 +14,20 @@ import { httpsCallable } from 'firebase/functions'
 import { auth, db, functions } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
-  anularSaldoCargo, condonarDeudaMotorizado,
   crearPropuestaAbono, corregirPropuestaAbono,
   crearPropuestaAbonoPendienteComprobante, completarComprobantePropuesta,
 } from '@/lib/financial-writes'
 import { revertirConversionEnDeudaServidor } from '@/lib/revertir-conversion-cliente'
+import { condonarDeudaServidor } from '@/lib/condonar-deuda-cliente'
+import { anularSaldoServidor } from '@/lib/anular-saldo-cliente'
+import {
+  MSG_MOTIVO as MSG_MOTIVO_SALDO,
+  evaluarAnulacion,
+  exigirHecho,
+  presentarErrorAccionSaldo,
+  presentarResultadoAnulacion,
+  presentarResultadoCondonacion,
+} from '@/lib/saldo-acciones-ux'
 import {
   MSG_MOTIVO,
   depositoTieneBoucher,
@@ -634,32 +643,54 @@ function SaldosPageContent() {
       `Ingresa el motivo de la condonación (obligatorio):`
     )
     if (motivo === null) return // canceló
-    if (!motivo.trim()) { alert('Debes ingresar un motivo para condonar.'); return }
+    if (motivo.trim().length < 3) { alert(MSG_MOTIVO_SALDO); return }
     setProcesandoId(saldo.id)
     try {
-      await condonarDeudaMotorizado({
-        saldoId: saldo.id,
-        depositoId: saldo.depositoId,
-        monto: saldo.saldoPendiente,
-        motorizadoId: saldo.motorizadoId,
-        motorizadoNombre: saldo.motorizadoNombre,
-        operadorId: auth.currentUser?.uid ?? '',
-        nota: motivo.trim(),
-      })
-    } catch (e: any) {
+      // FIN-1A — la pantalla manda SOLO { saldoId, motivo }. El monto condonado (el remanente releído), el
+      // motorizado, el depósito, el actor y el rol los deriva el servidor.
+      let presentada
+      try {
+        presentada = presentarResultadoCondonacion(await condonarDeudaServidor(saldo.id, motivo.trim()))
+      } catch (e) {
+        presentada = presentarErrorAccionSaldo(e)
+      }
+      exigirHecho(presentada)
+      alert(presentada.mensaje)
+    } catch (e: unknown) {
       console.error('Error condonando deuda:', e)
-      alert('Error al condonar: ' + (e?.message ?? 'Error desconocido'))
+      alert('No se condonó: ' + (e instanceof Error ? e.message : 'Error desconocido'))
     } finally {
       setProcesandoId(null)
     }
   }
 
   async function handleAnular(saldo: Saldo) {
+    const anulabilidad = evaluarAnulacion(saldo)
+    if (!anulabilidad.anulable) { alert(anulabilidad.razon); return }
     const ok = window.confirm(
-      `¿Anular este saldo?\n\nMotorizado: ${saldo.motorizadoNombre}\nMonto: ${fmt(saldo.saldoPendiente)}\nTipo: ${LABELS_TIPO_SALDO[saldo.tipo]}\n\nEsta acción no se puede deshacer.`
+      `¿Anular este saldo?\n\nMotorizado: ${saldo.motorizadoNombre}\nMonto: ${fmt(saldo.saldoPendiente)}\nTipo: ${LABELS_TIPO_SALDO[saldo.tipo]}\n\n` +
+      `Se anulan el saldo y su movimiento contable. Esta acción no se puede deshacer.`
     )
     if (!ok) return
-    await anularSaldoCargo(saldo.id, auth.currentUser?.uid ?? '')
+    const motivo = window.prompt('Motivo de la anulación (obligatorio):')
+    if (motivo === null) return
+    if (motivo.trim().length < 3) { alert(MSG_MOTIVO_SALDO); return }
+    setProcesandoId(saldo.id)
+    try {
+      let presentada
+      try {
+        presentada = presentarResultadoAnulacion(await anularSaldoServidor(saldo.id, motivo.trim()))
+      } catch (e) {
+        presentada = presentarErrorAccionSaldo(e)
+      }
+      exigirHecho(presentada)
+      alert(presentada.mensaje)
+    } catch (e: unknown) {
+      console.error('Error anulando saldo:', e)
+      alert('No se anuló: ' + (e instanceof Error ? e.message : 'Error desconocido'))
+    } finally {
+      setProcesandoId(null)
+    }
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -1101,12 +1132,32 @@ function SaldosPageContent() {
                             </button>
                           </>
                         ) : (
-                          <button
-                            onClick={() => handleAnular(s)}
-                            className="text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition"
-                          >
-                            Anular
-                          </button>
+                          // FIN-1A — "Anular" solo es accionable en una deuda manual aparentemente virgen; en el resto
+                          // (depósito, liquidación, adelanto legacy, con abonos…) queda deshabilitado con la razón visible.
+                          // El servidor sigue siendo la autoridad.
+                          evaluarAnulacion(s).anulable ? (
+                            <button
+                              onClick={() => handleAnular(s)}
+                              disabled={procesandoId === s.id}
+                              className="text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition disabled:opacity-40"
+                            >
+                              Anular
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                disabled
+                                title={(evaluarAnulacion(s) as { razon: string }).razon}
+                                className="text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-300 cursor-not-allowed"
+                              >
+                                Anular
+                              </button>
+                              <p className="basis-full text-[11px] text-gray-500">
+                                {(evaluarAnulacion(s) as { razon: string }).razon}
+                              </p>
+                            </>
+                          )
                         )}
                         {s.tipo === 'deposito_no_realizado' && s.depositoId && !evaluarReversibilidad(s).reversible && (
                           <p className="basis-full text-[11px] text-gray-500">

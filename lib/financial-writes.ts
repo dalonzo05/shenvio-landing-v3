@@ -2,10 +2,8 @@ import {
   addDoc,
   collection,
   doc,
-  getDoc,
   getDocs,
   query,
-  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -281,20 +279,10 @@ export async function crearSaldoCargo(params: {
 // El abono por liquidación (crearLiquidacion) y la propuesta de abono (digitador) tienen sus
 // propios caminos y no pasan por aquí.
 
-/**
- * Anula un saldo a cargo del motorizado.
- */
-export async function anularSaldoCargo(
-  saldoId: string,
-  operadorId: string,
-  nota?: string
-): Promise<void> {
-  await updateDoc(doc(db, 'saldos_cargo_motorizado', saldoId), {
-    estado: 'anulado',
-    nota: nota ?? '',
-    updatedAt: serverTimestamp(),
-  })
-}
+// FIN-1A — anularSaldoCargo YA NO VIVE AQUÍ. Era un updateDoc ciego ({ estado: 'anulado', nota: '' }): no leía nada, pisaba la
+// nota y anulaba saldos con abonos o de depósito dejando su ledger vivo. La anulación (solo una deuda manual virgen cuyo
+// movimiento saldo_creado se demuestra) la hace la Cloud Function anularSaldoCargo en una transacción:
+// functions/src/anulacion-saldo.ts. El cliente la invoca con lib/anular-saldo-cliente.ts.
 
 // ─── Convertir depósito pendiente en deuda ────────────────────────────────────
 //
@@ -304,59 +292,9 @@ export async function anularSaldoCargo(
 // deposito-deuda.ts. El cliente la invoca con lib/convertir-deposito-cliente.ts y
 // no escribe nada de eso por su cuenta.
 
-// ─── Adelantos ────────────────────────────────────────────────────────────────
-
-/**
- * Registra un adelanto al motorizado.
- * Crea un movimiento financiero y un saldo a cargo de tipo 'adelanto'.
- *
- * Flujo contable:
- * StorkHub entrega efectivo al motorizado → efectivo_en_poder (owner: motorizado)
- * Se crea deuda → deuda_motorizado
- */
-export async function registrarAdelanto(params: {
-  motorizadoId: string
-  motorizadoUid: string
-  motorizadoNombre: string
-  monto: number
-  semanaKey: string
-  nota?: string
-  operadorId: string
-}): Promise<{ movimientoId: string | null; saldoId: string }> {
-  const { motorizadoId, motorizadoUid, motorizadoNombre, monto, semanaKey, nota, operadorId } = params
-
-  const movimientoId = await registrarMovimiento(
-    'adelanto_motorizado',
-    monto,
-    operadorId,
-    `Adelanto C$${monto} · ${motorizadoNombre} · Sem ${semanaKey}`,
-    { motorizadoId },
-    {
-      semanaKey,
-      cuentas: {
-        // StorkHub desembolsa → entra a efectivo_en_poder del motorizado
-        // La propiedad de ese efectivo es del motorizado (su anticipo de comisión)
-        origen: cuentas.ingresos,
-        destino: cuentas.efectivoEnPoder(motorizadoId),
-      },
-      propietario: `motorizado:${motorizadoId}`,
-    }
-  )
-
-  // El adelanto genera deuda automáticamente
-  const saldoId = await crearSaldoCargo({
-    motorizadoId,
-    motorizadoUid,
-    motorizadoNombre,
-    tipo: 'adelanto',
-    monto,
-    origen: 'manual',
-    nota: nota ?? `Adelanto semana ${semanaKey}`,
-    operadorId,
-  })
-
-  return { movimientoId, saldoId }
-}
+// FIN-1A — registrarAdelanto se retiró: no tenía ningún caller (la pantalla de liquidaciones registra el adelanto con su
+// propio movimiento) y arrastraba un saldo 'adelanto' cuyo ledger no se enlaza al saldo. crearSaldoCargo sigue aquí
+// únicamente para marcarPagada (saldo por faltante de liquidación) hasta FIN-1D.
 
 // ─── Revertir conversión en deuda ────────────────────────────────────────────
 //
@@ -366,155 +304,12 @@ export async function registrarAdelanto(params: {
 // lib/revertir-conversion-cliente.ts y no escribe nada de eso por su cuenta. Las Rules ya no dejan a ningún
 // cliente sacar un depósito de 'convertido_en_deuda'.
 
-// ─── Condonar deuda del motorizado ────────────────────────────────────────────
-
-/**
- * Condona (perdona) una deuda del motorizado originada en depósito no realizado.
- * Usar cuando StorkHub decide absorber la pérdida.
- *
- * - El saldo queda con estado 'condonado' (no 'anulado' — la deuda sí existió)
- * - deposito_convertido_en_deuda se mantiene activo como huella histórica
- * - Crea movimiento 'deuda_condonada': deuda_motorizado → perdida_condonaciones
- * - ordenes_deposito recibe señal condonado:true para display histórico
- *
- * Idempotencia (Fase F6): el saldo, el depósito y el movimiento se confirman
- * juntos dentro de una única runTransaction. Si el saldo ya está 'condonado'
- * al releerlo, la transacción aborta sin crear ningún movimiento nuevo — a lo
- * sumo un movimiento 'deuda_condonada' activo puede existir por saldoId.
- *
- * Firestore no permite where() dentro de runTransaction, así que la decisión
- * de qué ruta tomar (crear vs. saldo ya condonado vs. reconciliar un registro
- * legacy sin movimientoCondonacionId) se resuelve con una lectura previa
- * fuera de la transacción. La transacción real vuelve a leer todo lo
- * necesario antes de escribir — esa relectura es la garantía atómica, no la
- * decisión previa.
- */
-export async function condonarDeudaMotorizado(params: {
-  saldoId: string
-  depositoId: string
-  monto: number
-  motorizadoId: string
-  motorizadoNombre: string
-  operadorId: string
-  nota?: string
-}): Promise<void> {
-  const { saldoId, depositoId, motorizadoId, motorizadoNombre, operadorId, nota } = params
-  const saldoRef = doc(db, 'saldos_cargo_motorizado', saldoId)
-
-  const preSnap = await getDoc(saldoRef)
-  if (!preSnap.exists()) {
-    throw new Error(`Saldo ${saldoId} no encontrado.`)
-  }
-  const preData = preSnap.data() as SaldoCargoMotorizado
-
-  if (preData.estado === 'condonado') {
-    if (preData.movimientoCondonacionId) {
-      throw new Error('Este saldo ya fue condonado anteriormente. No se creó ningún movimiento nuevo.')
-    }
-
-    // Legacy: condonado antes de esta corrección, sin movimientoCondonacionId.
-    // Reconciliar por saldoId — nunca crear una pérdida nueva ni adivinar.
-    const legacySnap = await getDocs(
-      query(
-        collection(db, 'movimientos_financieros'),
-        where('saldoId', '==', saldoId),
-        where('tipo', '==', 'deuda_condonada'),
-        where('estado', '==', 'activo'),
-      )
-    )
-    if (legacySnap.size === 0) {
-      throw new Error('Este saldo ya está condonado pero no tiene ningún movimiento deuda_condonada activo asociado. Requiere conciliación manual — no se creó ninguna pérdida nueva.')
-    }
-    if (legacySnap.size > 1) {
-      throw new Error(`Este saldo ya está condonado y tiene ${legacySnap.size} movimientos deuda_condonada activos asociados. Requiere conciliación manual — no se modificó ni se creó nada.`)
-    }
-
-    const movimientoId = legacySnap.docs[0].id
-    const movRef = doc(db, 'movimientos_financieros', movimientoId)
-
-    // Solo vincula la referencia — no crea ni modifica montos.
-    await runTransaction(db, async (tx) => {
-      const [saldoSnap2, movSnap2] = await Promise.all([tx.get(saldoRef), tx.get(movRef)])
-      if (!saldoSnap2.exists()) throw new Error('El saldo ya no existe.')
-      const saldoData2 = saldoSnap2.data() as SaldoCargoMotorizado
-      if (saldoData2.estado !== 'condonado' || saldoData2.movimientoCondonacionId) {
-        throw new Error('El estado del saldo cambió durante la operación. Repetí la acción para volver a evaluarlo.')
-      }
-      const movData2 = movSnap2.exists() ? (movSnap2.data() as any) : null
-      if (!movData2 || movData2.estado !== 'activo' || movData2.saldoId !== saldoId || movData2.tipo !== 'deuda_condonada') {
-        throw new Error('El movimiento a vincular ya no es válido. Requiere conciliación manual.')
-      }
-      tx.update(saldoRef, { movimientoCondonacionId: movimientoId, updatedAt: serverTimestamp() })
-    })
-    return
-  }
-
-  if (preData.estado !== 'pendiente' && preData.estado !== 'abonado_parcial') {
-    throw new Error(`No se puede condonar un saldo en estado "${preData.estado}".`)
-  }
-
-  const depositoRef = doc(db, 'ordenes_deposito', depositoId)
-  const movRef = doc(collection(db, 'movimientos_financieros'))
-
-  await runTransaction(db, async (tx) => {
-    const saldoSnap = await tx.get(saldoRef)
-    if (!saldoSnap.exists()) {
-      throw new Error(`Saldo ${saldoId} no encontrado.`)
-    }
-    const saldoData = saldoSnap.data() as SaldoCargoMotorizado
-
-    if (saldoData.estado === 'condonado') {
-      throw new Error('Este saldo ya fue condonado anteriormente. No se creó ningún movimiento nuevo.')
-    }
-    if (saldoData.estado !== 'pendiente' && saldoData.estado !== 'abonado_parcial') {
-      throw new Error(`No se puede condonar un saldo en estado "${saldoData.estado}".`)
-    }
-
-    // El monto condonado es siempre el saldoPendiente real leído ahora, nunca
-    // el parámetro `monto` recibido (que puede quedar obsoleto entre el click
-    // y la ejecución si hubo un abono parcial en el medio).
-    const montoCondonado = saldoData.saldoPendiente
-    if (!(montoCondonado > 0)) {
-      throw new Error('El saldo pendiente es 0 — no hay nada que condonar.')
-    }
-
-    tx.update(saldoRef, {
-      estado: 'condonado',
-      // saldoPendiente pasa a 0: lo condonado también resuelve la deuda, no
-      // solo lo abonado — antes quedaba congelado en su valor previo,
-      // provocando que un saldo condonado se mostrara como si aún debiera
-      // dinero. montoCondonado (abajo) es el registro de CUÁNTO se perdonó;
-      // totalAbonado (derivado de abonos[], nunca de este campo) no se toca.
-      saldoPendiente: 0,
-      motivoCondonacion: nota ?? '',
-      montoCondonado,
-      movimientoCondonacionId: movRef.id,
-      condonadoAt: serverTimestamp(),
-      condonadoPorUid: operadorId,
-      updatedAt: serverTimestamp(),
-    })
-    tx.update(depositoRef, {
-      condonado: true,
-      notaCondonacion: nota ?? '',
-      updatedAt: serverTimestamp(),
-    })
-    tx.set(movRef, {
-      tipo: 'deuda_condonada',
-      monto: montoCondonado,
-      at: serverTimestamp(),
-      creadoPorUid: operadorId,
-      creadoPorRol: 'gestor',
-      descripcion: `Deuda condonada · ${motorizadoNombre}${nota ? ` · ${nota}` : ''}`,
-      estado: 'activo',
-      motorizadoId,
-      depositoId,
-      saldoId,
-      cuentaOrigen: cuentas.deudaMotorizado(motorizadoId),
-      cuentaDestino: cuentas.perdidaCondonaciones,
-      propietario: 'storkhub',
-    })
-  })
-}
+// ─── Condonar deuda del motorizado ───────────────────────────────────────────
+//
+// FIN-1A — condonarDeudaMotorizado YA NO VIVE AQUÍ. Era una transacción de cliente que recibía de la pantalla el monto, el
+// motorizado y el actor. La condonación (siempre el remanente releído, sin tocar los abonos, con un único movimiento
+// deuda_condonada y el rol real del actor) la hace la Cloud Function condonarDeudaMotorizado en una transacción:
+// functions/src/condonacion-deuda.ts. El cliente la invoca con lib/condonar-deuda-cliente.ts.
 
 // ─── Propuestas de abono (DIGITADOR V1 — doble control, D3) ──────────────────
 //
