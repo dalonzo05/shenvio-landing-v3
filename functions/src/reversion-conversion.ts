@@ -75,6 +75,10 @@ export interface TxReversion {
   getSolicitud(id: string): Promise<DocumentData | null>;
   /** TODOS los movimientos del ledger con saldoId == id (activos y anulados). */
   getMovimientosDeSaldo(saldoId: string): Promise<Array<{ id: string; data: DocumentData }>>;
+  /** TODOS los saldos con depositoId == id (vivos y anulados): el depósito completo, no solo el ciclo señalado. */
+  getSaldosDeDeposito(depositoId: string): Promise<Array<{ id: string; data: DocumentData }>>;
+  /** TODOS los movimientos del ledger con depositoId == id (activos y anulados). */
+  getMovimientosDeDeposito(depositoId: string): Promise<Array<{ id: string; data: DocumentData }>>;
   updateSaldo(id: string, campos: DocumentData): void;
   updateMovimiento(id: string, campos: DocumentData): void;
   updateDeposito(id: string, campos: DocumentData): void;
@@ -145,10 +149,10 @@ export async function revertirConversionEnDeudaCore(
     const saldo = await tx.getSaldo(saldoId);
     if (!saldo) throw new HttpsError('not-found', 'El saldo no existe.');
 
-    const inconsistente = (detalle: string) => rechazoReversion(
+    const inconsistente = (detalle: string, extra: Record<string, unknown> = {}) => rechazoReversion(
       'conversion_inconsistente',
       'No se puede verificar una reversión segura: el depósito, el saldo o su movimiento no son coherentes. No se corrige solo: hay que revisarlo.',
-      { detalle },
+      { detalle, ...extra },
     );
 
     const depositoId = saldo.depositoId;
@@ -241,6 +245,28 @@ export async function revertirConversionEnDeudaCore(
     }
     // El total persistido del depósito es el que dio el monto de la conversión: no se inventa otra fórmula.
     if (!esNumeroFinito(dep.montoTotal) || dep.montoTotal !== montoOriginal) throw inconsistente('monto_deposito_distinto');
+
+    // ── El DEPÓSITO completo no conserva otros efectos vivos (H1 y H2) ────────
+    // "Deuda virgen" no se define mirando solo el saldo señalado: un duplicado legacy (doble clic antes de
+    // FIN-4A) deja otro saldo con su propia deuda, o un movimiento contable activo del mismo depósito. Revertir
+    // el ciclo señalado reactivaría el depósito con esos efectos vivos: doble conteo. Mismas lecturas
+    // transaccionales que ya usa FIN-4A para tratarlos como inconsistencia (saldos_vivos_multiples, ledger_inconsistente).
+    //   H1  todo OTRO saldo del depósito tiene que estar CERRADO (anulado). Cualquier otro estado —pendiente,
+    //       abonado_parcial, pagado, condonado o desconocido— bloquea: un estado que no se puede demostrar
+    //       histórico no se presume seguro. Los ciclos históricos anulados conviven (reversión → reconversión).
+    //   H2  fuera del movimiento de conversión de ESTE ciclo (identidad exacta por id, sirve también para un id
+    //       legacy aleatorio), ningún movimiento del depósito puede seguir activo. Un movimiento anulado es
+    //       historia; "activo" es la misma definición del ledger: estado distinto de 'anulado'.
+    const saldosDelDeposito = await tx.getSaldosDeDeposito(depositoId);
+    const otroSaldoVivo = saldosDelDeposito.find((s) => s.id !== saldoId && s.data.estado !== 'anulado');
+    if (otroSaldoVivo) {
+      throw inconsistente('deposito_con_otro_saldo_vivo', { otroSaldoId: otroSaldoVivo.id, estadoOtroSaldo: String(otroSaldoVivo.data.estado ?? '') });
+    }
+    const movimientosDelDeposito = await tx.getMovimientosDeDeposito(depositoId);
+    const otroMovimientoVivo = movimientosDelDeposito.find((m) => m.id !== conv.id && estaVivo(m.data));
+    if (otroMovimientoVivo) {
+      throw inconsistente('deposito_con_otro_movimiento_activo', { otroMovimientoId: otroMovimientoVivo.id, tipoOtroMovimiento: String(otroMovimientoVivo.data.tipo ?? '') });
+    }
 
     // ── Órdenes: SOLO las de este depósito, y siguen vinculadas a él ──────────
     const solicitudIds = Array.isArray(dep.solicitudIds) ? [...new Set((dep.solicitudIds as unknown[]).filter(idValido))] : [];

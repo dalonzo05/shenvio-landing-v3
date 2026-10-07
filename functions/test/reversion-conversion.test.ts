@@ -67,6 +67,14 @@ function mundo() {
             return [...store].filter(([r, d]) => r.startsWith('movimientos_financieros/') && d.saldoId === saldoId)
               .map(([r, d]) => ({ id: r.split('/')[1], data: structuredClone(d) as DocumentData }));
           },
+          async getSaldosDeDeposito(depId) {
+            return [...store].filter(([r, d]) => r.startsWith('saldos_cargo_motorizado/') && d.depositoId === depId)
+              .map(([r, d]) => ({ id: r.split('/')[1], data: structuredClone(d) as DocumentData }));
+          },
+          async getMovimientosDeDeposito(depId) {
+            return [...store].filter(([r, d]) => r.startsWith('movimientos_financieros/') && d.depositoId === depId)
+              .map(([r, d]) => ({ id: r.split('/')[1], data: structuredClone(d) as DocumentData }));
+          },
           updateSaldo(id, c) { cola.push({ op: 'update', ruta: `saldos_cargo_motorizado/${id}`, datos: c }); },
           updateMovimiento(id, c) { cola.push({ op: 'update', ruta: `movimientos_financieros/${id}`, datos: c }); },
           updateDeposito(id, c) { cola.push({ op: 'update', ruta: `ordenes_deposito/${id}`, datos: c }); },
@@ -486,6 +494,123 @@ test('F4B-AT2 · el adaptador real escribe SOLO con tx.* dentro de una runTransa
   assert.ok(escrituraSaldo.length > 20 && !escrituraSaldo.includes('abonos') && !escrituraSaldo.includes('saldoPendiente') && !escrituraSaldo.includes('montoOriginal'), 'FIN-4B no toca abonos[] ni los montos del saldo');
   const idx = norm(['..', '..', 'src', 'index.ts']);
   assert.match(idx, /export \{ revertirConversionEnDeuda \} from '\.\/reversion-conversion-callable'/);
+});
+
+// ── H1 / H2 · el DEPÓSITO completo no conserva otros efectos vivos ───────────
+// Hallazgo de la preintegración: un duplicado legacy (otro saldo vivo del mismo depósito) o un movimiento activo del
+// depósito fuera del saldo señalado dejaban reactivar el depósito con esos efectos vivos (doble conteo).
+const otroSaldo = (w: Mundo, id: string, estado: string | undefined, extra: Doc = {}) => w.put(`saldos_cargo_motorizado/${id}`, {
+  motorizadoId: MOT, tipo: 'deposito_no_realizado', origen: 'deposito', depositoId: 'D1', montoOriginal: 90, saldoPendiente: 90, abonos: [],
+  ...(estado === undefined ? {} : { estado }), ...extra,
+});
+const otraConversion = (w: Mundo, id: string, saldoId: string, estado: string | undefined = 'activo') => w.put(`movimientos_financieros/${id}`, {
+  tipo: 'deposito_convertido_en_deuda', monto: 90, motorizadoId: MOT, depositoId: 'D1', saldoId,
+  cuentaOrigen: `efectivo_en_poder:${MOT}`, cuentaDestino: `deuda_motorizado:${MOT}`, ...(estado === undefined ? {} : { estado }),
+});
+const detalleDe = (d: string) => (e: unknown) => codigo('failed-precondition', 'conversion_inconsistente')(e) && (e as { details?: { detalle?: string } }).details?.detalle === d;
+
+test('F4B-H1 · otro saldo del mismo depósito que NO está anulado (pendiente, con su movimiento; abonado_parcial; pagado; condonado; estado desconocido o ausente) ⇒ conversion_inconsistente y 0 escrituras', async () => {
+  const casos: Array<[string, (w: Mundo) => void]> = [
+    ['H1-1 pendiente + su movimiento activo', (w) => { otroSaldo(w, 'S9', 'pendiente'); otraConversion(w, 'conv_S9', 'S9'); }],
+    ['H1-2 abonado_parcial', (w) => otroSaldo(w, 'S9', 'abonado_parcial', { saldoPendiente: 50, abonos: [{ monto: 40 }] })],
+    ['H1-3 pagado', (w) => otroSaldo(w, 'S9', 'pagado', { saldoPendiente: 0, abonos: [{ monto: 90 }] })],
+    ['H1-4 condonado', (w) => otroSaldo(w, 'S9', 'condonado', { saldoPendiente: 0, montoCondonado: 90 })],
+    ['H1-5 estado desconocido', (w) => otroSaldo(w, 'S9', 'raro')],
+    ['H1-5b estado ausente (schema no demostrable)', (w) => otroSaldo(w, 'S9', undefined)],
+    ['H1-5c estado con otra capitalización', (w) => otroSaldo(w, 'S9', 'Anulado')],
+  ];
+  for (const [nombre, mut] of casos) {
+    const w = mundo(); sembrar(w, { boucher: true }); mut(w);
+    await sinEfectos(w, revertir(w), detalleDe('deposito_con_otro_saldo_vivo'));
+    assert.equal(w.get('ordenes_deposito/D1')!.estado, 'convertido_en_deuda', nombre);
+    assert.equal(w.eventosDe('D1').length, 0, nombre);
+  }
+});
+
+test('F4B-H1-6 · un saldo HISTÓRICO anulado (con su movimiento anulado) NO bloquea por sí solo: el ciclo legítimo se revierte', async () => {
+  const w = mundo(); sembrar(w, { boucher: true });
+  otroSaldo(w, 'S0', 'anulado', { revertidoAt: TS(1), revertidoPorUid: 'g1', motivoReversion: 'ciclo 1' });
+  otraConversion(w, 'conv_S0', 'S0', 'anulado');
+  assert.equal((await revertir(w)).resultado, 'revertida');
+  assert.equal(w.get('saldos_cargo_motorizado/S0')!.estado, 'anulado');
+  assert.equal(w.get('saldos_cargo_motorizado/S1')!.estado, 'anulado');
+});
+
+test('F4B-H2 · un movimiento ACTIVO del mismo depósito fuera del movimiento de conversión del ciclo ⇒ conversion_inconsistente y 0 escrituras', async () => {
+  const casos: Array<[string, Doc]> = [
+    ['H2-1 deposito_efectivo_storkhub activo (el hallazgo)', { tipo: 'deposito_efectivo_storkhub', monto: 90, estado: 'activo', depositoId: 'D1', cuentaOrigen: `efectivo_en_poder:${MOT}`, cuentaDestino: 'caja_storkhub' }],
+    ['H2-2 otro movimiento activo cualquiera', { tipo: 'otro_tipo_x', monto: 5, estado: 'activo', depositoId: 'D1' }],
+    ['H2-2b movimiento sin estado: el ledger lo cuenta como activo (estado distinto de anulado)', { tipo: 'deposito_efectivo_storkhub', monto: 90, depositoId: 'D1' }],
+    ['H2-2c otra conversión activa del mismo depósito, de OTRO saldo (sin saldo propio)', { tipo: 'deposito_convertido_en_deuda', monto: 90, estado: 'activo', depositoId: 'D1', saldoId: 'S_fantasma' }],
+  ];
+  for (const [nombre, mov] of casos) {
+    const w = mundo(); sembrar(w, { boucher: true }); w.put('movimientos_financieros/otro_mov', mov);
+    await sinEfectos(w, revertir(w), detalleDe('deposito_con_otro_movimiento_activo'));
+    assert.equal(w.get('ordenes_deposito/D1')!.estado, 'convertido_en_deuda', nombre);
+  }
+});
+
+test('F4B-H2-3 · movimientos ANULADOS del mismo depósito no bloquean; H2-4 solo la conversión actual ⇒ continúa normal', async () => {
+  const w = mundo(); sembrar(w, { boucher: true });
+  w.put('movimientos_financieros/hist1', { tipo: 'deposito_efectivo_storkhub', monto: 90, estado: 'anulado', depositoId: 'D1' });
+  w.put('movimientos_financieros/hist2', { tipo: 'deposito_convertido_en_deuda', monto: 90, estado: 'anulado', depositoId: 'D1', saldoId: 'S0' });
+  assert.equal((await revertir(w)).resultado, 'revertida');
+  const solo = mundo(); sembrar(solo);
+  assert.equal((await revertir(solo)).resultado, 'revertida');
+});
+
+test('F4B-H2-5 · el movimiento de conversión actual aparece también en la consulta por depositoId y NO se cuenta como residuo (id aleatorio legacy y conv_ moderno)', async () => {
+  const l = mundo(); sembrar(l, { legacy: true });
+  const r = await revertir(l);
+  assert.equal(r.resultado, 'revertida'); assert.equal(r.movimientoId, 'XyZ9legacy');
+  const m = mundo(); sembrar(m);
+  assert.equal((await revertir(m)).movimientoId, 'conv_S1');
+  // la exclusión es por IDENTIDAD, no por tipo: otro movimiento del MISMO tipo, activo, sí bloquea
+  const x = mundo(); sembrar(x, { legacy: true });
+  x.put('movimientos_financieros/otra_conv_misma_forma', { ...x.get('movimientos_financieros/XyZ9legacy')!, saldoId: 'S1' });
+  await sinEfectos(x, revertir(x), codigo('failed-precondition', 'conversion_inconsistente'));
+});
+
+test('F4B-H1H2 · dos saldos vivos + dos conversiones activas del mismo depósito ⇒ conversion_inconsistente y 0 escrituras (el orden de detección da igual)', async () => {
+  const w = mundo(); sembrar(w, { boucher: true });
+  otroSaldo(w, 'S2', 'pendiente'); otraConversion(w, 'conv_S2', 'S2');
+  await sinEfectos(w, revertir(w), codigo('failed-precondition', 'conversion_inconsistente'));
+  await sinEfectos(w, revertir(w, 'a1', { saldoId: 'S2', motivo: 'Convertido por error' }), codigo('failed-precondition', 'conversion_inconsistente'));
+  assert.equal(w.get('ordenes_deposito/D1')!.estado, 'convertido_en_deuda');
+});
+
+test('F4B-H-HIST · caso histórico LEGÍTIMO: ciclo 1 anulado (saldo + conversión anulados) y ciclo 2 virgen y apuntado por el depósito ⇒ revertir el ciclo 2 FUNCIONA', async () => {
+  for (const boucher of [true, false]) {
+    const w = mundo(); sembrar(w, { boucher });
+    await revertir(w); // ciclo 1 revertido
+    // reconversión: ciclo 2
+    w.put('ordenes_deposito/D1', { ...w.get('ordenes_deposito/D1')!, estado: 'convertido_en_deuda', saldoId: 'S2', notaConversion: 'otra vez', convertidoPorUid: 'g1', convertidoAt: TS(30) });
+    otroSaldo(w, 'S2', 'pendiente'); otraConversion(w, 'conv_S2', 'S2');
+    w.put('solicitudes_envio/o1', ordenConvertida()); w.put('solicitudes_envio/o2', ordenConvertida());
+    const r = await revertir(w, 'g1', { saldoId: 'S2', motivo: 'otro error' });
+    assert.equal(r.resultado, 'revertida'); assert.equal(r.movimientoId, 'conv_S2');
+    assert.equal(w.get('saldos_cargo_motorizado/S1')!.estado, 'anulado');
+    assert.equal(w.get('saldos_cargo_motorizado/S2')!.estado, 'anulado');
+    assert.equal(w.eventosDe('D1').length, 2, 'un evento por ciclo');
+  }
+});
+
+test('F4B-H-RETRY · el retry tardío del ciclo 1 sigue respondiendo ya_revertida sin inspeccionar ni tocar el ciclo 2, aunque el ciclo 2 tenga residuos', async () => {
+  const w = mundo(); sembrar(w, { boucher: true });
+  await revertir(w);
+  w.put('ordenes_deposito/D1', { ...w.get('ordenes_deposito/D1')!, estado: 'convertido_en_deuda', saldoId: 'S2' });
+  otroSaldo(w, 'S2', 'pendiente'); otraConversion(w, 'conv_S2', 'S2');
+  otroSaldo(w, 'S3', 'pendiente'); // residuo en el ciclo 2: el guard nuevo NO debe afectar al retry del ciclo 1
+  w.put('movimientos_financieros/extra', { tipo: 'deposito_efectivo_storkhub', monto: 1, estado: 'activo', depositoId: 'D1' });
+  const antes = w.snapshot(); const e0 = w.escrituras;
+  assert.equal((await revertir(w)).resultado, 'ya_revertida');
+  assert.equal(w.snapshot(), antes); assert.equal(w.escrituras, e0);
+});
+
+test('F4B-H-ABONOS · el caso de abono NO cambia: saldo actual con abonos ⇒ deuda_con_abonos aunque el depósito además tenga residuos', async () => {
+  const w = mundo(); sembrar(w, { boucher: true, saldo: { estado: 'abonado_parcial', saldoPendiente: 50, abonos: [{ monto: 40 }] } });
+  otroSaldo(w, 'S9', 'pendiente'); w.put('movimientos_financieros/otro_mov', { tipo: 'x', estado: 'activo', depositoId: 'D1' });
+  await sinEfectos(w, revertir(w), codigo('failed-precondition', 'deuda_con_abonos'));
 });
 
 test('F4B-AT3 · el tipo de evento del servidor es el mismo que registra el cliente (lib/deposito-eventos.ts) y las Rules NO lo dejan crear al cliente', () => {

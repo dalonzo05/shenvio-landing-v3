@@ -24,6 +24,14 @@ export function depsRealesReversion(db: FirebaseFirestore.Firestore = admin.fire
           const snap = await tx.get(db.collection('movimientos_financieros').where('saldoId', '==', saldoId));
           return snap.docs.map((d) => ({ id: d.id, data: d.data() }));
         },
+        getSaldosDeDeposito: async (depositoId) => {
+          const snap = await tx.get(db.collection('saldos_cargo_motorizado').where('depositoId', '==', depositoId));
+          return snap.docs.map((d) => ({ id: d.id, data: d.data() }));
+        },
+        getMovimientosDeDeposito: async (depositoId) => {
+          const snap = await tx.get(db.collection('movimientos_financieros').where('depositoId', '==', depositoId));
+          return snap.docs.map((d) => ({ id: d.id, data: d.data() }));
+        },
         updateSaldo: (id, campos) => { tx.update(db.collection('saldos_cargo_motorizado').doc(id), campos); },
         updateMovimiento: (id, campos) => { tx.update(db.collection('movimientos_financieros').doc(id), campos); },
         updateDeposito: (id, campos) => { tx.update(db.collection('ordenes_deposito').doc(id), campos); },
