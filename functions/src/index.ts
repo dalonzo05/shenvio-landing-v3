@@ -15,6 +15,7 @@ export { crearAccesoMotorizado, repararAccesoMotorizado, diagnosticarAccesoMotor
 export { actualizarPresenciaMotorizado } from './presencia-motorizado-callable';
 export { confirmarDeposito } from './confirmacion-deposito-callable';
 export { convertirDepositoEnDeuda } from './conversion-deposito-deuda-callable';
+export { revertirConversionEnDeuda } from './reversion-conversion-callable';
 export { registrarAbonoDirecto } from './abono-directo-callable';
 export { prepararAbonoDirecto, obtenerIntencionAbono, descartarIntencionAbono } from './abono-intencion-callable';
 

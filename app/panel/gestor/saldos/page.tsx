@@ -14,10 +14,20 @@ import { httpsCallable } from 'firebase/functions'
 import { auth, db, functions } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
-  anularSaldoCargo, revertirConversionEnDeuda, condonarDeudaMotorizado,
+  anularSaldoCargo, condonarDeudaMotorizado,
   crearPropuestaAbono, corregirPropuestaAbono,
   crearPropuestaAbonoPendienteComprobante, completarComprobantePropuesta,
 } from '@/lib/financial-writes'
+import { revertirConversionEnDeudaServidor } from '@/lib/revertir-conversion-cliente'
+import {
+  MSG_MOTIVO,
+  depositoTieneBoucher,
+  evaluarReversibilidad,
+  exigirRevertida,
+  presentarErrorReversion,
+  presentarResultadoReversion,
+  textoConfirmacionReversion,
+} from '@/lib/reversion-conversion-ux'
 import {
   descartarAbonoDirectoServidor,
   obtenerIntencionAbonoServidor,
@@ -581,26 +591,35 @@ function SaldosPageContent() {
 
   async function handleRevertir(saldo: Saldo) {
     if (!saldo.depositoId) return
-    const ok = window.confirm(
-      `¿Revertir conversión en deuda?\n\nMotorizado: ${saldo.motorizadoNombre}\nMonto: ${fmt(saldo.saldoPendiente)}\n\n` +
-      `Esto hará lo siguiente:\n` +
-      `• El saldo a cargo quedará anulado.\n` +
-      `• El depósito volverá a estado "En revisión".\n` +
-      `• Las solicitudes asociadas volverán a aparecer como pendientes de depósito.\n` +
-      `• Auditoría mostrará nuevamente el monto como pendiente.\n\n` +
-      `Usar solo si la conversión fue un error. Esta acción no se puede deshacer.`
-    )
-    if (!ok) return
+    // FIN-4B — el servidor es la autoridad: la pantalla solo evita ofrecer lo que sabe que no procede.
+    const reversibilidad = evaluarReversibilidad(saldo)
+    if (!reversibilidad.reversible) { alert(reversibilidad.razon); return }
     setProcesandoId(saldo.id)
     try {
-      await revertirConversionEnDeuda({
-        saldoId: saldo.id,
-        depositoId: saldo.depositoId,
-        operadorId: auth.currentUser?.uid ?? '',
-      })
-    } catch (e: any) {
+      // El destino del depósito depende de si tiene boucher: el texto no promete siempre "En revisión".
+      let tieneBoucher = true
+      try {
+        const dep = await getDoc(doc(db, 'ordenes_deposito', saldo.depositoId))
+        tieneBoucher = depositoTieneBoucher(dep.data() as { boucher?: { url?: unknown; pathStorage?: unknown } } | undefined)
+      } catch {
+        // Sin poder leer el depósito no se adivina el destino: el servidor lo decide igual.
+      }
+      const ok = window.confirm(textoConfirmacionReversion({ motorizado: saldo.motorizadoNombre, monto: fmt(saldo.saldoPendiente), tieneBoucher }))
+      if (!ok) return
+      const motivo = window.prompt('Motivo de la reversión (obligatorio):')
+      if (motivo === null) return
+      if (motivo.trim().length < 3) { alert(MSG_MOTIVO); return }
+      let presentada
+      try {
+        presentada = presentarResultadoReversion(await revertirConversionEnDeudaServidor(saldo.id, motivo.trim()))
+      } catch (e) {
+        presentada = presentarErrorReversion(e)
+      }
+      exigirRevertida(presentada)
+      alert(presentada.mensaje)
+    } catch (e: unknown) {
       console.error('Error revirtiendo conversión:', e)
-      alert('Error al revertir: ' + (e?.message ?? 'Error desconocido'))
+      alert('No se revirtió: ' + (e instanceof Error ? e.message : 'Error desconocido'))
     } finally {
       setProcesandoId(null)
     }
@@ -1041,7 +1060,7 @@ function SaldosPageContent() {
                         + Proponer abono
                       </button>
                     ) : (
-                      <div className="flex gap-2">
+                      <div className="flex flex-wrap gap-2">
                         <button
                           onClick={() => { setAbonoId(s.id); setExpandedId(s.id) }}
                           className="flex-1 text-xs font-semibold px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition"
@@ -1050,14 +1069,28 @@ function SaldosPageContent() {
                         </button>
                         {s.tipo === 'deposito_no_realizado' && s.depositoId ? (
                           <>
-                            <button
-                              onClick={() => handleRevertir(s)}
-                              disabled={procesandoId === s.id}
-                              title="El depósito vuelve a revisión y las solicitudes quedan pendientes"
-                              className="text-xs font-semibold px-3 py-2 rounded-lg border border-amber-300 text-amber-700 hover:bg-amber-50 transition disabled:opacity-40"
-                            >
-                              Revertir
-                            </button>
+                            {/* FIN-4B — "Revertir" solo es accionable en una deuda aparentemente virgen; si no, se
+                                muestra la razón en vez de un botón que luego fallaría sin explicación. El servidor
+                                sigue siendo la autoridad. */}
+                            {evaluarReversibilidad(s).reversible ? (
+                              <button
+                                onClick={() => handleRevertir(s)}
+                                disabled={procesandoId === s.id}
+                                title="El depósito vuelve a revisión (o a pendiente de boucher si no tiene comprobante)"
+                                className="text-xs font-semibold px-3 py-2 rounded-lg border border-amber-300 text-amber-700 hover:bg-amber-50 transition disabled:opacity-40"
+                              >
+                                Revertir
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled
+                                title={(evaluarReversibilidad(s) as { razon: string }).razon}
+                                className="text-xs font-semibold px-3 py-2 rounded-lg border border-gray-200 text-gray-300 cursor-not-allowed"
+                              >
+                                Revertir
+                              </button>
+                            )}
                             <button
                               onClick={() => handleCondonar(s)}
                               disabled={procesandoId === s.id}
@@ -1075,8 +1108,20 @@ function SaldosPageContent() {
                             Anular
                           </button>
                         )}
+                        {s.tipo === 'deposito_no_realizado' && s.depositoId && !evaluarReversibilidad(s).reversible && (
+                          <p className="basis-full text-[11px] text-gray-500">
+                            {(evaluarReversibilidad(s) as { razon: string }).razon}
+                          </p>
+                        )}
                       </div>
                     )}
+                  </div>
+                )}
+
+                {/* FIN-4B — una deuda pagada o condonada no se revierte: se dice por qué (sin botón). */}
+                {!puedeAbono && !esDigitador && s.tipo === 'deposito_no_realizado' && s.depositoId && (s.estado === 'pagado' || s.estado === 'condonado') && (
+                  <div className="border-t border-gray-100 px-4 py-2 text-[11px] text-gray-500">
+                    {(evaluarReversibilidad(s) as { razon: string }).razon}
                   </div>
                 )}
 

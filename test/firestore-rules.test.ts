@@ -1600,16 +1600,75 @@ test('F4A-R3 · las demás anulaciones del admin siguen funcionando: pendiente_b
   }
 })
 
-test('F4A-R4 · lo no relacionado de un convertido sigue igual: una nota, y las salidas hacia revisión (revertir con boucher) ⇒ ALLOW; convertir desde en_revision y devuelto ⇒ ALLOW', async () => {
+test('F4A-R4 · lo no relacionado de un convertido sigue igual: una nota ⇒ ALLOW; convertir desde en_revision y devuelto ⇒ ALLOW (la salida hacia revisión ya NO es del cliente: FIN-4B-R1..R3)', async () => {
   await depositoAB('convertido_en_deuda', { saldoId: 'saldo1' })
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { notaConversion: 'ajustada', updatedAt: serverTimestamp() }))
-  // la reversión con boucher (Caso B) vuelve a en_revision: sigue permitida; FIN-4B la rehará
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'en_revision', updatedAt: serverTimestamp() }))
+  // FIN-4B: la reversión (antes: convertido_en_deuda → en_revision desde el cliente) es la callable
+  // revertirConversionEnDeuda con Admin SDK. El cliente ya no sale de convertido_en_deuda (FIN-4B-R1).
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'en_revision', updatedAt: serverTimestamp() }))
   // y convertir (el writer que cierra FIN-4A en el servidor) no depende de esta Rule
   await depositoAB('en_revision')
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'convertido_en_deuda', saldoId: 'saldo1' }))
   await depositoAB('devuelto', { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' })
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'convertido_en_deuda', saldoId: 'saldo1' }))
+})
+
+// ─── FIN-4B — nadie SALE de convertido_en_deuda desde el cliente ──────────────
+// Revertir una conversión es la callable revertirConversionEnDeuda (Admin SDK, no pasa por estas Rules):
+// depósito, saldo, movimiento, evento y órdenes en UNA transacción. La salida directa dejaba el saldo y
+// el ledger sin tocar (o a medias) y sin evento. Solo se cierra la SALIDA; el resto sigue como en FIN-4A.
+
+test('FIN4B-R1 · el GESTOR no saca un convertido_en_deuda a en_revision, ni con los campos de conversión limpios ⇒ DENY, y sigue convertido', async () => {
+  await depositoAB('convertido_en_deuda', { saldoId: 'saldo1', notaConversion: 'x' })
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'en_revision', updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+    estado: 'en_revision', saldoId: deleteField(), notaConversion: deleteField(), updatedAt: serverTimestamp(),
+  }))
+  assert.equal((await leerDep()).estado, 'convertido_en_deuda')
+})
+
+test('FIN4B-R2 · el ADMIN tampoco ⇒ DENY', async () => {
+  await depositoAB('convertido_en_deuda', { saldoId: 'saldo1' })
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'ordenes_deposito', DEP_V), { estado: 'en_revision', updatedAt: serverTimestamp() }))
+  assert.equal((await leerDep()).estado, 'convertido_en_deuda')
+})
+
+test('FIN4B-R3 · ni gestor ni admin lo llevan a pendiente_boucher, devuelto, confirmado ni rechazado ⇒ DENY', async () => {
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    for (const estado of ['pendiente_boucher', 'devuelto', 'confirmado', 'rechazado']) {
+      await depositoAB('convertido_en_deuda', { saldoId: 'saldo1' })
+      await assertFails(updateDoc(doc(como(uid), 'ordenes_deposito', DEP_V), { estado, updatedAt: serverTimestamp() }))
+      assert.equal((await leerDep()).estado, 'convertido_en_deuda')
+    }
+  }
+})
+
+test('FIN4B-R4 · convertido_en_deuda → anulado sigue bloqueado (FIN-4A) para gestor y admin', async () => {
+  await depositoAB('convertido_en_deuda', { saldoId: 'saldo1' })
+  await assertFails(anular({ uid: UID_ADMIN, liberarOrden: true }))
+  await assertFails(anular({ uid: UID_GESTOR }))
+  assert.equal((await leerDep()).estado, 'convertido_en_deuda')
+})
+
+test('FIN4B-R5 · lo no relacionado sigue igual: las demás transiciones (anular un en_revision, devolver, convertir) y una nota dentro de convertido ⇒ ALLOW', async () => {
+  for (const estado of ['pendiente_boucher', 'en_revision', 'devuelto', 'confirmado']) {
+    await depositoAB(estado, estado === 'devuelto' ? { devueltoPorUid: UID_GESTOR, motivoDevolucion: 'otra foto' } : {})
+    await assertSucceeds(anular({ uid: UID_ADMIN, liberarOrden: true }))
+    assert.equal((await leerDep()).estado, 'anulado', estado)
+  }
+  await depositoAB('en_revision')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'convertido_en_deuda', saldoId: 'saldo1' }))
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { notaConversion: 'ajustada', updatedAt: serverTimestamp() }))
+  assert.equal((await leerDep()).estado, 'convertido_en_deuda')
+})
+
+test('FIN4B-R6 · el cliente no puede forjar el evento DEPOSITO_CONVERSION_REVERTIDA (solo la callable lo escribe) ⇒ DENY', async () => {
+  await depositoAB('en_revision')
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await assertFails(setDoc(doc(como(uid), 'ordenes_deposito', DEP_V, 'eventos', 'ev_forjado'), {
+      tipo: 'DEPOSITO_CONVERSION_REVERTIDA', at: serverTimestamp(), porUid: uid, porRol: uid === UID_ADMIN ? 'admin' : 'gestor', motivo: 'motivo valido',
+    }))
+  }
 })
 
 // ─── Eventos: append-only (Q.36) ─────────────────────────────────────────────

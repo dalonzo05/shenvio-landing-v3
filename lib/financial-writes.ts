@@ -1,7 +1,6 @@
 import {
   addDoc,
   collection,
-  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -28,7 +27,6 @@ import type {
   PropuestaAbonoSaldo,
 } from './financial-types'
 import { cuentas } from './financial-types'
-import { camposReaperturaRevision } from './deposito-transiciones'
 
 // ─── Reglas de timestamps ─────────────────────────────────────────────────────
 //
@@ -360,112 +358,13 @@ export async function registrarAdelanto(params: {
   return { movimientoId, saldoId }
 }
 
-// ─── Revertir conversión en deuda (depósito convertido por error) ─────────────
-
-/**
- * Revierte completamente una conversión de depósito en deuda.
- * Usar cuando el gestor convirtió por error.
- *
- * - Anula saldo_cargo_motorizado
- * - Restaura ordenes_deposito a 'en_revision'
- * - Limpia confirmación en solicitudes_envio → vuelven a aparecer como pendientes
- * - Anula el movimiento deposito_convertido_en_deuda del ledger → deuda = C$0
- */
-export async function revertirConversionEnDeuda(params: {
-  saldoId: string
-  depositoId: string
-  operadorId: string
-}): Promise<void> {
-  const { saldoId, depositoId, operadorId } = params
-
-  // Leer el depósito para obtener solicitudIds, destinatario y si tenía boucher real
-  const depSnap = await getDoc(doc(db, 'ordenes_deposito', depositoId))
-  if (!depSnap.exists()) throw new Error(`ordenes_deposito/${depositoId} no encontrado`)
-  const depData = depSnap.data() as any
-  const solicitudIds: string[] = depData.solicitudIds ?? []
-  const destinatario: 'storkhub' | 'comercio' = depData.destinatario ?? 'storkhub'
-
-  // Si el depósito tiene boucher (url o pathStorage) vino de "Por revisar" (Caso B).
-  // Si no tiene boucher, fue creado directamente desde "Pendientes" para la conversión (Caso A).
-  // Esta distinción determina qué fuente de datos debe quedar activa tras el revert.
-  const tieneBoucher = !!(depData.boucher?.url || depData.boucher?.pathStorage)
-
-  const b = writeBatch(db)
-
-  b.update(doc(db, 'saldos_cargo_motorizado', saldoId), {
-    estado: 'anulado',
-    motivoAnulacion: 'revertido_por_error',
-    updatedAt: serverTimestamp(),
-  })
-
-  if (tieneBoucher) {
-    // Caso B: tenía boucher → el depósito vuelve a "Por revisar".
-    // Las solicitudes NO se liberan: si se limpiaran, el monto aparecería
-    // simultáneamente en "Pendientes" y en "Por revisar".
-    b.update(doc(db, 'ordenes_deposito', depositoId), {
-      estado: 'en_revision',
-      saldoId: deleteField(),
-      notaConversion: deleteField(),
-      updatedAt: serverTimestamp(),
-    })
-    // DEPOSITOS-UX-TRAZABILIDAD-1 — pero tampoco pueden seguir afirmando que
-    // el destino está confirmado: el depósito volvió a revisión. Conservan el
-    // puntero (por eso no reaparecen en Pendientes) y pierden confirmadoX.
-    solicitudIds.forEach((sid) => {
-      b.update(doc(db, 'solicitudes_envio', sid), camposReaperturaRevision(destinatario, depositoId))
-    })
-  } else {
-    // Caso A: sin boucher → el ordenes_deposito se anula (desaparece de "Por revisar")
-    // y se liberan las solicitudes para que vuelvan a aparecer en "Pendientes".
-    b.update(doc(db, 'ordenes_deposito', depositoId), {
-      estado: 'anulado',
-      saldoId: deleteField(),
-      notaConversion: deleteField(),
-      updatedAt: serverTimestamp(),
-    })
-
-    const fieldKey = destinatario === 'storkhub'
-      ? 'registro.deposito.confirmadoStorkhub'
-      : 'registro.deposito.confirmadoComercio'
-    const atKey = destinatario === 'storkhub'
-      ? 'registro.deposito.confirmadoStorkhubAt'
-      : 'registro.deposito.confirmadoComercioAt'
-    const idKey = destinatario === 'storkhub'
-      ? 'registro.deposito.storkhubDepositoId'
-      : 'registro.deposito.comercioDepositoId'
-
-    solicitudIds.forEach((sid) => {
-      b.update(doc(db, 'solicitudes_envio', sid), {
-        [fieldKey]: deleteField(),
-        [atKey]: deleteField(),
-        [idKey]: deleteField(),
-      })
-    })
-  }
-
-  await b.commit()
-
-  // Anular movimientos del ledger vinculados al depósito
-  const movsSnap = await getDocs(
-    query(collection(db, 'movimientos_financieros'), where('depositoId', '==', depositoId))
-  )
-  const activos = movsSnap.docs.filter((d) => {
-    const data = d.data() as any
-    return data.estado !== 'anulado' && data.tipo === 'deposito_convertido_en_deuda'
-  })
-  if (activos.length > 0) {
-    const batch2 = writeBatch(db)
-    activos.forEach((d) => {
-      batch2.update(d.ref, {
-        estado: 'anulado',
-        anuladoAt: serverTimestamp(),
-        anuladoPorUid: operadorId,
-        motivoAnulacion: 'Conversión en deuda revertida por error',
-      })
-    })
-    await batch2.commit()
-  }
-}
+// ─── Revertir conversión en deuda ────────────────────────────────────────────
+//
+// FIN-4B — revertirConversionEnDeuda YA NO VIVE AQUÍ. La reversión de una conversión a deuda (saldo,
+// depósito, movimiento, evento y órdenes) la hace la Cloud Function revertirConversionEnDeuda en UNA
+// transacción y solo sobre una deuda virgen: functions/src/reversion-conversion.ts. El cliente la invoca con
+// lib/revertir-conversion-cliente.ts y no escribe nada de eso por su cuenta. Las Rules ya no dejan a ningún
+// cliente sacar un depósito de 'convertido_en_deuda'.
 
 // ─── Condonar deuda del motorizado ────────────────────────────────────────────
 

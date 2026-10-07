@@ -26,6 +26,7 @@ import {
   EVENTO_DEPOSITO_DEVUELTO,
   EVENTO_DEPOSITO_CONFIRMADO,
   EVENTO_DEPOSITO_REHECHO,
+  EVENTO_DEPOSITO_CONVERSION_REVERTIDA,
   EVENTO_DEPOSITO_ANULADO,
 } from './deposito-eventos'
 
@@ -528,6 +529,11 @@ export function construirTimeline(
         case EVENTO_DEPOSITO_ANULADO:
           push(`deposito_anulado:${id}`, 'deposito', `${codigo} · Anulado`, e.at, {
             actorUid, actorEtiqueta: 'Anulado por', detalle: motivoDe(e.motivo),
+          })
+          break
+        case EVENTO_DEPOSITO_CONVERSION_REVERTIDA:
+          push(`deposito_conversion_revertida:${id}`, 'deposito', `${codigo} · Conversión a deuda revertida`, e.at, {
+            actorUid, actorEtiqueta: 'Revertida por', detalle: motivoDe(e.motivo),
           })
           break
         default:

@@ -54,8 +54,16 @@ export const EVENTO_DEPOSITO_CONFIRMADO = 'DEPOSITO_CONFIRMADO'
 export const EVENTO_DEPOSITO_REHECHO = 'DEPOSITO_REHECHO'
 /** Admin cierra el DEP sin borrarlo: reemplaza al viejo "Eliminar". */
 export const EVENTO_DEPOSITO_ANULADO = 'DEPOSITO_ANULADO'
+/**
+ * FIN-4B — la conversión del depósito en deuda se revirtió. Lo escribe SOLO la callable
+ * revertirConversionEnDeuda (Admin SDK, dentro de su transacción), por eso NO está en la lista
+ * cerrada de Rules ni en TIPOS_EVENTO_DEPOSITO: el cliente no puede crearlo. Guarda la conversión
+ * previa (convertidoPorUid, convertidoAt, notaConversion), el saldo y el movimiento del ciclo.
+ */
+export const EVENTO_DEPOSITO_CONVERSION_REVERTIDA = 'DEPOSITO_CONVERSION_REVERTIDA'
 
 export type TipoEventoDeposito =
+  | typeof EVENTO_DEPOSITO_CONVERSION_REVERTIDA
   | typeof EVENTO_BOUCHER_SUBIDO
   | typeof EVENTO_BOUCHER_REEMPLAZADO
   | typeof EVENTO_DEPOSITO_DEVUELTO
@@ -256,6 +264,7 @@ const ETIQUETA_EVENTO: Record<string, string> = {
   [EVENTO_DEPOSITO_CONFIRMADO]: 'Depósito confirmado',
   [EVENTO_DEPOSITO_REHECHO]: 'Depósito devuelto a revisión',
   [EVENTO_DEPOSITO_ANULADO]: 'Depósito anulado',
+  [EVENTO_DEPOSITO_CONVERSION_REVERTIDA]: 'Conversión a deuda revertida',
 }
 
 /** Último recurso: un tipo que este build no conoce. No se traduce a prosa. */

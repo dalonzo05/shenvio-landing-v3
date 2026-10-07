@@ -1885,7 +1885,14 @@ service cloud.firestore {
           // deuda sin respaldo. Su única salida es revertir la conversión (FIN-4B).
           // Va primero porque es la comparación más barata del bloque (presupuesto
           // de 1000 expresiones, ver la nota de arriba).
-          (eAntes != 'convertido_en_deuda' || eDespues != 'anulado')
+          //
+          // FIN-4B — y tampoco SALE de 'convertido_en_deuda' hacia ningún otro estado
+          // (en_revision, pendiente_boucher…): revertir una conversión es la callable
+          // revertirConversionEnDeuda (Admin SDK, una sola transacción: depósito, saldo,
+          // movimiento, evento y órdenes). La salida directa dejaba el saldo vivo (o
+          // anulado) y el movimiento activo sin que nadie lo narrara. Los updates que NO
+          // cambian el estado (una nota, por ejemplo) siguen igual; FIN-1 sigue abierto.
+          (eAntes != 'convertido_en_deuda')
 
           // DEP-ACCIONES-ADMIN-ONLY — sacar un depósito de 'confirmado' es del
           // admin. Única excepción del gestor: anular un DEP tipo C al
