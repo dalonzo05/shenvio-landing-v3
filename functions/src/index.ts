@@ -88,3 +88,4 @@ export const limpiarEvidencias = onSchedule(
   },
 );
 export { crearGastoMotorizado, anularGastoMotorizado, registrarAdelantoMotorizado, anularAdelantoMotorizado, resolverIncidenciaCobro } from './finanzas-operativas-callables';
+export { crearLiquidacionMotorizado, marcarLiquidacionPagada } from './liquidaciones-callables';

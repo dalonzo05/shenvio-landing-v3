@@ -10,6 +10,8 @@ export interface ResultadoCrearGastoServidor { ok: true; resultado: 'registrado'
 export interface ResultadoAnularGastoServidor { ok: true; resultado: 'anulado' | 'ya_anulado'; gastoId: string; movimientoId: string | null }
 export interface ResultadoRegistrarAdelantoServidor { ok: true; resultado: 'registrado' | 'ya_registrado'; operacionId: string; adelantoId: string }
 export interface ResultadoAnularAdelantoServidor { ok: true; resultado: 'anulado' | 'ya_anulado'; adelantoId: string }
+export interface ResultadoCrearLiquidacionServidor { ok: true; resultado: 'creada' | 'ya_creada'; operacionId: string; liquidacionId: string; netoAPagar: number; deudasAplicadas: number; saldoGeneradoId: string | null }
+export interface ResultadoPagarLiquidacionServidor { ok: true; resultado: 'pagada' | 'ya_pagada'; liquidacionId: string; movimientoId: string | null; netoAPagar: number }
 export interface ResultadoResolverServidor { ok: true; resultado: 'resuelto' | 'ya_resuelto'; ordenId: string; item: 'delivery' | 'producto'; decision: 'cliente_pagara' | 'se_pierde'; cobroPendiente: boolean }
 
 export interface OpPresentada {
@@ -42,6 +44,10 @@ export const MSG_ADELANTO_REGISTRADO = 'Adelanto registrado.'
 export const MSG_ADELANTO_YA_REGISTRADO = 'Este adelanto ya estaba registrado. No se registró nada nuevo.'
 export const MSG_ADELANTO_ANULADO = 'Adelanto anulado.'
 export const MSG_ADELANTO_YA_ANULADO = 'Este adelanto ya estaba anulado. No se registró nada nuevo.'
+export const MSG_LIQUIDACION_CREADA = 'Liquidación creada.'
+export const MSG_LIQUIDACION_YA_CREADA = 'Esta liquidación ya estaba creada. No se registró nada nuevo.'
+export const MSG_LIQUIDACION_PAGADA = 'Liquidación pagada.'
+export const MSG_LIQUIDACION_YA_PAGADA = 'Esta liquidación ya estaba pagada. No se registró nada nuevo.'
 export const MSG_INCIDENCIA_RESUELTA = 'Incidencia resuelta.'
 export const MSG_INCIDENCIA_YA_RESUELTA = 'Esta incidencia ya estaba resuelta con esa decisión. No se registró nada nuevo.'
 
@@ -51,7 +57,16 @@ const BLOQUEOS: Record<string, string> = {
   fecha_futura: 'La fecha del gasto no puede ser futura.',
   gasto_consumido: 'Este gasto ya se descontó en un depósito: no se puede anular. Si el depósito está mal, se corrige el depósito.',
   gasto_liquidado: 'Este gasto ya figura en una liquidación: no se puede anular. La corrección se hace aparte.',
-  semana_liquidada: 'Esa semana ya tiene una liquidación para este motorizado: no se pueden registrar ni anular adelantos.',
+  semana_liquidada: 'Esa semana ya tiene una liquidación para este motorizado: no se pueden registrar gastos ni registrar o anular adelantos.',
+  // FIN-1D — liquidaciones
+  semana_no_cerrada: 'Esa semana todavía no terminó: solo se liquidan semanas cerradas.',
+  liquidacion_existente: 'Esa semana ya tiene una liquidación para este motorizado.',
+  deposito_pendiente_conciliacion: 'Hay un depósito de esa semana todavía sin resolver (pendiente de boucher, en revisión o devuelto). Resolvelo antes de liquidar.',
+  motorizado_invalido: 'El motorizado no tiene un acceso válido: no se puede liquidar.',
+  saldo_invalido: 'Uno de los saldos elegidos ya no se puede descontar (cambió, ya no está pendiente o no es de este motorizado). Actualizá la selección e intentá de nuevo.',
+  sin_viajes: 'No hay viajes entregados en esa semana: no hay nada que liquidar.',
+  demasiados_registros: 'La liquidación tiene demasiados registros para una sola operación. Hay que dividirla: avisá a soporte.',
+  estado_invalido: 'La liquidación no está pendiente: no se puede pagar.',
   movimiento_invalido: 'El movimiento indicado no es un adelanto.',
   operacion_inconsistente: 'Esa operación ya se usó con otros datos. Volvé a intentarlo.',
   incidencia_no_abierta: 'Esa incidencia ya no está abierta (ya se resolvió). Actualizá la pantalla.',
@@ -68,6 +83,8 @@ export const presentarResultadoCrearGasto = (r: Pick<ResultadoCrearGastoServidor
 export const presentarResultadoAnularGasto = (r: Pick<ResultadoAnularGastoServidor, 'resultado'>): OpPresentada => ya(true, MSG_GASTO_ANULADO, MSG_GASTO_YA_ANULADO, r.resultado === 'anulado')
 export const presentarResultadoRegistrarAdelanto = (r: Pick<ResultadoRegistrarAdelantoServidor, 'resultado'>): OpPresentada => ya(true, MSG_ADELANTO_REGISTRADO, MSG_ADELANTO_YA_REGISTRADO, r.resultado === 'registrado')
 export const presentarResultadoAnularAdelanto = (r: Pick<ResultadoAnularAdelantoServidor, 'resultado'>): OpPresentada => ya(true, MSG_ADELANTO_ANULADO, MSG_ADELANTO_YA_ANULADO, r.resultado === 'anulado')
+export const presentarResultadoCrearLiquidacion = (r: Pick<ResultadoCrearLiquidacionServidor, 'resultado'>): OpPresentada => ya(true, MSG_LIQUIDACION_CREADA, MSG_LIQUIDACION_YA_CREADA, r.resultado === 'creada')
+export const presentarResultadoPagarLiquidacion = (r: Pick<ResultadoPagarLiquidacionServidor, 'resultado'>): OpPresentada => ya(true, MSG_LIQUIDACION_PAGADA, MSG_LIQUIDACION_YA_PAGADA, r.resultado === 'pagada')
 export const presentarResultadoResolver = (r: Pick<ResultadoResolverServidor, 'resultado'>): OpPresentada => ya(true, MSG_INCIDENCIA_RESUELTA, MSG_INCIDENCIA_YA_RESUELTA, r.resultado === 'resuelto')
 
 interface ErrorCallable {

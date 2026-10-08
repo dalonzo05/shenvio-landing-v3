@@ -5,20 +5,15 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
-  Timestamp,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
 import type {
   MovimientoFinanciero,
   TipoMovimiento,
-  TipoSaldo,
-  SaldoCargoMotorizado,
   MetodoAbono,
-  OrigenSaldo,
   PropietarioEfectivo,
   PropuestaAbonoSaldo,
 } from './financial-types'
-import { cuentas } from './financial-types'
 
 // ─── Reglas de timestamps ─────────────────────────────────────────────────────
 //
@@ -107,72 +102,9 @@ export async function registrarMovimiento(
 
 // ─── Saldos a cargo del motorizado ────────────────────────────────────────────
 
-/**
- * Crea un nuevo saldo a cargo del motorizado.
- * Usado para adelantos, depósitos no realizados, ajustes manuales.
- */
-export async function crearSaldoCargo(params: {
-  motorizadoId: string
-  motorizadoUid: string
-  motorizadoNombre: string
-  tipo: TipoSaldo
-  monto: number
-  origen: OrigenSaldo
-  depositoId?: string
-  liquidacionId?: string
-  nota?: string
-  operadorId: string
-  fecha?: Date
-}): Promise<string> {
-  const {
-    motorizadoId, motorizadoUid, motorizadoNombre, tipo, monto, origen,
-    depositoId, liquidacionId, nota, operadorId, fecha,
-  } = params
-
-  const saldoData: Omit<SaldoCargoMotorizado, 'id'> = {
-    motorizadoId,
-    motorizadoUid,
-    motorizadoNombre,
-    tipo,
-    montoOriginal: monto,
-    saldoPendiente: monto,
-    estado: 'pendiente',
-    origen,
-    ...(depositoId ? { depositoId } : {}),
-    ...(liquidacionId ? { liquidacionId } : {}),
-    fecha: fecha ? Timestamp.fromDate(fecha) : serverTimestamp(),
-    nota: nota ?? '',
-    creadoPorUid: operadorId,
-    createdAt: serverTimestamp(),
-    abonos: [],
-  }
-
-  const ref = await addDoc(collection(db, 'saldos_cargo_motorizado'), saldoData)
-
-  // 'deposito_no_realizado' NO emite movimiento de ledger aquí.
-  // El movimiento ya lo registra la conversión (la Cloud Function
-  // convertirDepositoEnDeuda, FIN-4A) como 'deposito_convertido_en_deuda':
-  // efectivo_en_poder → deuda_motorizado.
-  // Emitir un segundo movimiento (deuda_motorizado → banco) sería incorrecto:
-  // cancelaría la deuda y registraría un ingreso bancario que nunca ocurrió.
-  if (tipo !== 'deposito_no_realizado') {
-    const cuentasMovimiento: Cuentas | undefined =
-      tipo === 'adelanto'
-        ? { origen: cuentas.efectivoEnPoder(motorizadoId), destino: cuentas.deudaMotorizado(motorizadoId) }
-        : undefined // ajuste_manual y otro no tienen cuentas predefinidas
-
-    await registrarMovimiento(
-      'saldo_creado',
-      monto,
-      operadorId,
-      `Saldo a cargo (${tipo}) · ${motorizadoNombre}`,
-      { motorizadoId, saldoId: ref.id, ...(depositoId ? { depositoId } : {}) },
-      { cuentas: cuentasMovimiento }
-    )
-  }
-
-  return ref.id
-}
+// FIN-1D — crearSaldoCargo YA NO VIVE AQUÍ. Lo llamaba marcarPagada (saldo por faltante de una liquidación, sin movimiento de ledger y duplicable con un doble
+// clic). El saldo del neto negativo nace ahora al CREAR la liquidación, en la misma transacción que la liquidación y su movimiento saldo_creado: lo hace la Cloud
+// Function crearLiquidacionMotorizado (functions/src/crear-liquidacion.ts). Las Rules ya no dejan a ningún cliente crear ni mover un saldo.
 
 // FIN-4C — registrarAbonoSaldo YA NO VIVE AQUÍ. El abono directo del gestor/admin (saldo +
 // historial de abonos + ledger) lo hace la Cloud Function registrarAbonoDirecto en una sola
@@ -195,9 +127,7 @@ export async function crearSaldoCargo(params: {
 // deposito-deuda.ts. El cliente la invoca con lib/convertir-deposito-cliente.ts y
 // no escribe nada de eso por su cuenta.
 
-// FIN-1A — registrarAdelanto se retiró: no tenía ningún caller (la pantalla de liquidaciones registra el adelanto con su
-// propio movimiento) y arrastraba un saldo 'adelanto' cuyo ledger no se enlaza al saldo. crearSaldoCargo sigue aquí
-// únicamente para marcarPagada (saldo por faltante de liquidación) hasta FIN-1D.
+// FIN-1A — registrarAdelanto se retiró: no tenía ningún caller y arrastraba un saldo 'adelanto' cuyo ledger no se enlaza al saldo.
 
 // ─── Revertir conversión en deuda ────────────────────────────────────────────
 //

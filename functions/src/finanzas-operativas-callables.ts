@@ -15,8 +15,9 @@ const col = (db: FirebaseFirestore.Firestore, c: string, id: string) => db.colle
 export function depsRealesCrearGasto(db: FirebaseFirestore.Firestore = admin.firestore()): DepsCrearGasto {
   return {
     transaction: (fn) => db.runTransaction(async (tx) => {
-      const { leer } = lecturasOperativas(db, tx);
+      const { leer, liquidaciones } = lecturasOperativas(db, tx);
       return fn({
+        ...liquidaciones,
         getUsuario: (id) => leer('usuarios', id),
         getMotorizado: (id) => leer('motorizado', id),
         getOrden: (id) => leer('solicitudes_envio', id),
@@ -101,7 +102,7 @@ export function depsRealesResolver(db: FirebaseFirestore.Firestore = admin.fires
 }
 
 /** Envoltorio común: log sin datos libres (nunca la nota) y errores tipados. */
-async function correr<T extends object>(fn: string, uid: string | undefined, data: unknown, run: () => Promise<T>, resumen: (r: T) => Record<string, unknown>, mensajeInterno: string): Promise<T> {
+export async function correr<T extends object>(fn: string, uid: string | undefined, data: unknown, run: () => Promise<T>, resumen: (r: T) => Record<string, unknown>, mensajeInterno: string): Promise<T> {
   try {
     const r = await run();
     console.log(JSON.stringify({ fn, uid, ...resumen(r) }));

@@ -250,6 +250,17 @@ export interface LiquidacionMotorizado {
   estado: EstadoLiquidacion
   creadoAt: unknown
   creadoPor: string
+  // FIN-1D — los escribe el servidor (crearLiquidacionMotorizado / marcarLiquidacionPagada): ids exactos capturados, cifras derivadas y actor real.
+  efectivoEsperado?: number
+  totalDepositado?: number
+  gastosEnDepositos?: number
+  adelantosIds?: string[]
+  creadoPorUid?: string
+  creadoPorRol?: 'admin' | 'gestor'
+  pagadoPorUid?: string
+  pagadoPorRol?: 'admin' | 'gestor'
+  movimientoPagoId?: string
+  operacionId?: string
   pagadoAt?: unknown
   pagadoPor?: string
   saldoGeneradoId?: string

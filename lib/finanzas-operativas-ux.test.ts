@@ -22,6 +22,10 @@ import {
   MSG_INCIDENCIA_YA_RESUELTA,
   MSG_INCONSISTENTE_OP,
   MSG_INVALIDO_OP,
+  MSG_LIQUIDACION_CREADA,
+  MSG_LIQUIDACION_PAGADA,
+  MSG_LIQUIDACION_YA_CREADA,
+  MSG_LIQUIDACION_YA_PAGADA,
   MSG_PERMISO_OP,
   MSG_TEMPORAL_OP,
   exigirHechoOp,
@@ -30,6 +34,8 @@ import {
   presentarResultadoAnularAdelanto,
   presentarResultadoAnularGasto,
   presentarResultadoCrearGasto,
+  presentarResultadoCrearLiquidacion,
+  presentarResultadoPagarLiquidacion,
   presentarResultadoRegistrarAdelanto,
   presentarResultadoResolver,
 } from './finanzas-operativas-ux'
@@ -127,9 +133,6 @@ test('FIN1CB-K2 · Liquidaciones: el adelanto (registrar y anular) llama SOLO a 
   }
   assert.ok(reg.includes('registrarAdelantoMotorizadoServidor(selectedMotoId, monto, selectedSemana, intentoAdelantoRef.current.operacionId, notaAdelanto)'))
   assert.ok(anu.includes('anularAdelantoMotorizadoServidor(movimientoId)'))
-  // No tocó lo que es de FIN-1D: crear/cerrar liquidación y el saldo por faltante siguen donde estaban.
-  const p = sinComentarios(src)
-  assert.ok(p.includes('crearSaldoCargo(') && p.includes("'liquidacion_pago_efectivo'") && p.includes('tx.set(liqRef'), 'las liquidaciones no se tocan en este bloque')
 })
 
 test('FIN1CB-K3 · Cobros: ResolveModal llama SOLO a la callable; nada del cliente escribe resoluciones, cobroPendiente ni cobroDelivery.estado = no_cobrar/pendiente por resolución', () => {
@@ -154,4 +157,68 @@ test('FIN1CB-K4 · los wrappers entregan a httpsCallable SOLO los campos del con
   assert.ok(res.includes("functions, 'resolverIncidenciaCobro')(payload)") && res.includes('{ ordenId, item, decision }'))
   const limpio = (x: string) => x.replace(/Resultado\w+Servidor/g, '')
   for (const x of [crear, anular, reg, anAd, res]) assert.ok(!/estado|actorUid|\brol\b|creadoPor|cuenta|propietario|cobroPendiente|undefined|resueltoPor/i.test(limpio(x)), 'wrapper: campo prohibido')
+})
+
+// ═════════════════════════════════════════════════════════════════════
+// FIN-1D · liquidaciones autoritativas: presentación y contratos de la pantalla
+// ═════════════════════════════════════════════════════════════════════
+
+test('FIN1D-U1 · crear y pagar una liquidación: el resultado nuevo y el idempotente no se confunden, y ambos cuentan como hecho', () => {
+  assert.deepEqual(presentarResultadoCrearLiquidacion({ resultado: 'creada' }), { categoria: 'exito', mensaje: MSG_LIQUIDACION_CREADA, hecho: true })
+  assert.deepEqual(presentarResultadoCrearLiquidacion({ resultado: 'ya_creada' }), { categoria: 'ya_hecho', mensaje: MSG_LIQUIDACION_YA_CREADA, hecho: true })
+  assert.deepEqual(presentarResultadoPagarLiquidacion({ resultado: 'pagada' }), { categoria: 'exito', mensaje: MSG_LIQUIDACION_PAGADA, hecho: true })
+  assert.deepEqual(presentarResultadoPagarLiquidacion({ resultado: 'ya_pagada' }), { categoria: 'ya_hecho', mensaje: MSG_LIQUIDACION_YA_PAGADA, hecho: true })
+})
+
+test('FIN1D-U2 · cada rechazo nuevo del servidor se presenta con un mensaje claro y ninguno cuenta como hecho', () => {
+  const casos: Array<[string, string]> = [
+    ['semana_no_cerrada', 'todavía no terminó'],
+    ['liquidacion_existente', 'ya tiene una liquidación'],
+    ['deposito_pendiente_conciliacion', 'depósito'],
+    ['motorizado_invalido', 'acceso'],
+    ['saldo_invalido', 'saldos elegidos'],
+    ['sin_viajes', 'nada que liquidar'],
+    ['demasiados_registros', 'demasiados registros'],
+    ['estado_invalido', 'no está pendiente'],
+    ['semana_liquidada', 'gastos'],
+  ]
+  for (const [motivo, texto] of casos) {
+    const p = presentarErrorOp(err('functions/failed-precondition', motivo))
+    assert.equal(p.categoria, 'bloqueado', motivo); assert.equal(p.hecho, false, motivo)
+    assert.ok(p.mensaje.includes(texto), `${motivo}: ${p.mensaje}`)
+  }
+})
+
+test('FIN1D-K1 · Liquidaciones no escribe dinero: sin transacción, setDoc, addDoc, batch, abonos ni movimientos; solo las dos callables y el PDF', () => {
+  const src = leer('app', 'panel', 'gestor', 'liquidaciones', 'page.tsx')
+  const p = sinComentarios(src)
+  for (const prohibido of ['runTransaction', 'setDoc', 'addDoc', 'writeBatch', 'registrarMovimiento', 'crearSaldoCargo', 'arrayUnion', 'tx.set', 'tx.update', "'abono_deuda_motorizado'", "'liquidacion_pago_efectivo'", "'saldo_creado'", 'cuentas.']) {
+    assert.ok(!p.includes(prohibido), `la pantalla de Liquidaciones no usa ${prohibido}`)
+  }
+  assert.ok(!/from '@\/lib\/financial-writes'/.test(p), 'Liquidaciones ya no importa financial-writes')
+  assert.ok(p.includes('crearLiquidacionMotorizadoServidor(') && p.includes('marcarLiquidacionPagadaServidor('))
+  // El ÚNICO updateDoc que queda es el del PDF: solo pdfUrl, pdfPath y pdfGeneradoAt.
+  const updates = p.match(/updateDoc\(/g) ?? []
+  assert.equal(updates.length, 1, 'un solo updateDoc')
+  const pdf = bloque(p, 'updateDoc(doc(db, \'liquidaciones_motorizado\'', '})')
+  for (const campo of ['pdfUrl', 'pdfPath', 'pdfGeneradoAt']) assert.ok(pdf.includes(campo), campo)
+  for (const campo of ['estado', 'netoAPagar', 'pagadoPor', 'gastosIds', 'adelantos', 'saldoGeneradoId']) assert.ok(!pdf.includes(campo), `el update del PDF no toca ${campo}`)
+})
+
+test('FIN1D-K2 · la pantalla no ofrece liquidar una semana que no terminó, y manda al servidor SOLO motorizado, semana, operacionId y la selección de saldos', () => {
+  const p = sinComentarios(leer('app', 'panel', 'gestor', 'liquidaciones', 'page.tsx'))
+  assert.ok(p.includes("from '@/lib/liquidacion-ux'") && p.includes('semanaYaTermino('))
+  assert.ok(/disabled=\{saving \|\| calculo\.totalViajes === 0 \|\| !semanaCerrada\}/.test(p), 'el botón Crear se deshabilita en una semana abierta')
+  const w = sinComentarios(leer('lib', 'crear-liquidacion-cliente.ts'))
+  assert.ok(w.includes("functions, 'crearLiquidacionMotorizado')(payload)") && w.includes('{ motorizadoId, semanaKey, operacionId, saldos }'))
+  const pg = sinComentarios(leer('lib', 'pagar-liquidacion-cliente.ts'))
+  assert.ok(pg.includes("functions, 'marcarLiquidacionPagada')(payload)") && pg.includes('{ liquidacionId, operacionId }'))
+  const limpio = (x: string) => x.replace(/Resultado\w+Servidor/g, '')
+  for (const x of [w, pg]) assert.ok(!/estado|actorUid|\brol\b|creadoPor|cuenta|propietario|neto|comision|monto|gastosIds|adelantosIds|ordenesIds|depositosIds|undefined/i.test(limpio(x).replace(/netoAPagar|deudasAplicadas/g, '')), 'wrapper: campo prohibido')
+})
+
+test('FIN1D-K3 · financial-writes ya no tiene crearSaldoCargo (el saldo de una liquidación lo crea el servidor, con su ledger)', () => {
+  const fw = sinComentarios(leer('lib', 'financial-writes.ts'))
+  assert.ok(!/export async function crearSaldoCargo\b/.test(fw))
+  assert.ok(!/['"]saldos_cargo_motorizado['"]/.test(fw), 'financial-writes no toca saldos_cargo_motorizado')
 })

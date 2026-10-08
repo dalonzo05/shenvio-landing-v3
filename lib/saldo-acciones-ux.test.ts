@@ -96,10 +96,10 @@ const sinComentarios = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace
 
 test('FIN1A-C1 · los writers cliente antiguos desaparecieron: ni exportados en financial-writes, ni importados, ni usados en ninguna superficie del producto', () => {
   const writes = sinComentarios(leer('lib', 'financial-writes.ts'))
-  for (const nombre of ['condonarDeudaMotorizado', 'anularSaldoCargo', 'registrarAdelanto']) {
+  for (const nombre of ['condonarDeudaMotorizado', 'anularSaldoCargo', 'registrarAdelanto', 'crearSaldoCargo']) {
     assert.ok(!new RegExp(`export\\s+(async\\s+)?function\\s+${nombre}\\b`).test(writes), `${nombre} ya no existe en el cliente`)
   }
-  assert.ok(/export\s+async\s+function\s+crearSaldoCargo\b/.test(writes), 'crearSaldoCargo se conserva para marcarPagada hasta FIN-1D')
+  // FIN-1D — crearSaldoCargo también se retiró: el saldo del neto negativo lo crea crearLiquidacionMotorizado.
   const stack = [join(RAIZ, 'app'), join(RAIZ, 'lib')]
   const archivos: string[] = []
   while (stack.length) {
@@ -110,7 +110,7 @@ test('FIN1A-C1 · los writers cliente antiguos desaparecieron: ni exportados en 
       else if (/\.(ts|tsx)$/.test(n) && !/\.test\.ts$/.test(n) && !/-cliente\.ts$/.test(n)) archivos.push(p)
     }
   }
-  const usos = archivos.filter((p) => /\b(condonarDeudaMotorizado|anularSaldoCargo|registrarAdelanto)\b/.test(sinComentarios(readFileSync(p, 'utf8'))))
+  const usos = archivos.filter((p) => /\b(condonarDeudaMotorizado|anularSaldoCargo|registrarAdelanto|crearSaldoCargo)\b/.test(sinComentarios(readFileSync(p, 'utf8'))))
   assert.deepEqual(usos, [], 'ningún archivo del producto referencia los writers retirados (salvo los wrappers -cliente.ts, que llaman a las callables por su nombre de string)')
 })
 

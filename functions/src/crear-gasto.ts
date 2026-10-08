@@ -12,13 +12,15 @@
 
 import { HttpsError } from 'firebase-functions/v2/https';
 import type { DocumentData } from 'firebase-admin/firestore';
+import { semanaKeyDeFecha } from './cobro-semanal';
+import { liquidacionDeSemanas, type LecturasLiquidacion } from './adelantos';
 import {
   TIPO_MOV_GASTO, cuentasGasto, exigirStaffFinanzas, huellaPayload, instanteDeFechaGasto, nombreMotorizado, rechazoOp, validarPeticionCrearGasto,
 } from './finanzas-operativas-comun';
 
 export type ResultadoCrearGasto = { ok: true; resultado: 'registrado' | 'ya_registrado'; operacionId: string; gastoId: string; movimientoId: string };
 
-export interface TxCrearGasto {
+export interface TxCrearGasto extends LecturasLiquidacion {
   getUsuario(uid: string): Promise<DocumentData | null>;
   getMotorizado(id: string): Promise<DocumentData | null>;
   getOrden(id: string): Promise<DocumentData | null>;
@@ -75,6 +77,12 @@ export async function crearGastoMotorizadoCore(deps: DepsCrearGasto, uid: string
 
     const moto = await tx.getMotorizado(p.motorizadoId);
     if (!moto) throw rechazoOp('motorizado_inexistente', 'El motorizado no existe.');
+
+    // FIN-1D — una semana con liquidación (pendiente o pagada, moderna o legacy) está cerrada: no se le agregan gastos, ni retroactivos.
+    const uidMoto = typeof moto.authUid === 'string' && moto.authUid ? moto.authUid : null;
+    const semanaDelGasto = semanaKeyDeFecha(instante ?? ahora);
+    const liq = await liquidacionDeSemanas(tx, p.motorizadoId, uidMoto, [semanaDelGasto]);
+    if (liq) throw rechazoOp('semana_liquidada', 'Esa semana ya tiene una liquidación para este motorizado: no se registran gastos.', { liquidacionId: liq.id, semanaKey: liq.semanaKey });
 
     let orden: DocumentData | null = null;
     if (p.ordenId) {

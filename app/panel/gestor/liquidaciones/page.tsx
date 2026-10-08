@@ -12,19 +12,18 @@ import {
   Timestamp,
   orderBy,
   limit,
-  getDocs,
-  runTransaction,
-  arrayUnion,
 } from 'firebase/firestore'
-import { auth, db } from '@/fb/config'
+import { db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { uploadLiquidacionPDF } from '@/fb/storage'
 import Link from 'next/link'
 import { rutaOrden } from '@/lib/ruta-orden'
-import { registrarMovimiento, crearSaldoCargo } from '@/lib/financial-writes'
+import { crearLiquidacionMotorizadoServidor, type SaldoElegido } from '@/lib/crear-liquidacion-cliente'
+import { marcarLiquidacionPagadaServidor } from '@/lib/pagar-liquidacion-cliente'
+import { MSG_SEMANA_EN_CURSO, semanaYaTermino } from '@/lib/liquidacion-ux'
 import { registrarAdelantoMotorizadoServidor } from '@/lib/registrar-adelanto-cliente'
 import { anularAdelantoMotorizadoServidor } from '@/lib/anular-adelanto-cliente'
-import { exigirHechoOp, operacionDeIntento, presentarErrorOp, presentarResultadoAnularAdelanto, presentarResultadoRegistrarAdelanto, type IntentoOp } from '@/lib/finanzas-operativas-ux'
+import { exigirHechoOp, operacionDeIntento, presentarErrorOp, presentarResultadoAnularAdelanto, presentarResultadoCrearLiquidacion, presentarResultadoPagarLiquidacion, presentarResultadoRegistrarAdelanto, type IntentoOp } from '@/lib/finanzas-operativas-ux'
 import {
   Receipt,
   ChevronDown,
@@ -36,8 +35,8 @@ import {
   FileDown,
   XCircle,
 } from 'lucide-react'
-import type { SaldoCargoMotorizado, AbonoSaldo } from '@/lib/financial-types'
-import { LABELS_TIPO_SALDO, cuentas } from '@/lib/financial-types'
+import type { SaldoCargoMotorizado } from '@/lib/financial-types'
+import { LABELS_TIPO_SALDO } from '@/lib/financial-types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -111,6 +110,10 @@ type Liquidacion = {
   gastosAprobados?: number
   gastosAsumidosStorkhub?: number
   gastosIds?: string[]
+  // FIN-1D — los calcula y guarda el servidor (crearLiquidacionMotorizado): los ids exactos que capturó y lo que depositó el motorizado.
+  ordenesIds?: string[]
+  adelantosIds?: string[]
+  totalDepositado?: number
   netoAPagar: number
   estado: 'pendiente' | 'pagado'
   creadoAt?: Timestamp
@@ -681,253 +684,86 @@ function LiquidacionesPageContent() {
 
   // ── Crear liquidación ─────────────────────────────────────────────────────
   //
-  // Identidad estable (Fase F2): el documento de liquidaciones_motorizado usa
-  // un ID determinístico `${motorizadoId}_${semanaKey}` en vez de un ID
-  // aleatorio. Su propia existencia es el marcador de idempotencia — no se
-  // necesita una colección de "locks" separada. Dos pestañas o un doble clic
-  // que compitan por crear la misma liquidación terminan operando sobre el
-  // MISMO documento: Firestore solo confirma la primera transacción que
-  // escribe, y el SDK reintenta automáticamente la perdedora, que al releer
-  // encuentra el documento ya creado y no aplica nada de nuevo (mismo
-  // mecanismo ya validado para F3 y F6).
-  //
-  // Todo (saldos, abonos, movimientos, liquidación) se confirma en una sola
-  // runTransaction: no se llama a registrarAbonoSaldo (abre su propia
-  // transacción, no se puede anidar) ni a registrarMovimiento (usa addDoc
-  // fuera de transacción y traga errores) — la lógica equivalente se
-  // reconstruye inline, igual que en las correcciones F3/F5/F6.
-  async function crearLiquidacion() {
-    if (!selectedMotoId || liquidacionExistente) return
-    const moto = motorizados.find((m) => m.id === selectedMotoId)
-    if (!moto) return
+  // FIN-1D — la liquidación la crea el SERVIDOR (crearLiquidacionMotorizado, functions/src/crear-liquidacion.ts) en una transacción: lee las órdenes, los
+  // depósitos, los gastos, los adelantos y los saldos reales, calcula la fórmula (el efectivo es el MISMO de los depósitos), escribe la liquidación, los
+  // abonos de deuda, el saldo del neto negativo y el ledger, y rechaza una semana que no terminó. Esta pantalla solo manda motorizado, semana, la
+  // identidad del intento y la selección humana de saldos (con su tope opcional). El cálculo de abajo es una VISTA PREVIA: la cifra definitiva es la del
+  // servidor, que es la que queda en la liquidación.
+  const intentoLiquidacionRef = useRef<IntentoOp | null>(null)
+  const semanaCerrada = useMemo(() => semanaYaTermino(selectedSemana, Date.now()), [selectedSemana])
 
+  async function crearLiquidacion() {
+    if (!selectedMotoId || liquidacionExistente || !semanaCerrada) return
     setSaving(true); setErr(null)
     try {
-      const uid = auth.currentUser?.uid ?? ''
-      const { inicio, fin } = getSemanaRange(selectedSemana)
-      const liquidacionId = `${selectedMotoId}_${selectedSemana}`
-      const liqRef = doc(db, 'liquidaciones_motorizado', liquidacionId)
-
-      // Pre-chequeo FUERA de la transacción: Firestore no permite where()
-      // dentro de runTransaction. Esta consulta detecta tanto el propio
-      // documento determinístico (si ya existe) como cualquier liquidación
-      // legacy con ID aleatorio para el mismo motorizadoId + semanaKey.
-      const existentesSnap = await getDocs(
-        query(
-          collection(db, 'liquidaciones_motorizado'),
-          where('motorizadoId', '==', selectedMotoId),
-          where('semanaKey', '==', selectedSemana),
-        )
-      )
-      const legacyAjenos = existentesSnap.docs.filter((d) => d.id !== liquidacionId)
-      if (legacyAjenos.length === 1) {
-        setErr('Ya existe una liquidación para este motorizado y esta semana (registro histórico). No se creó ninguna nueva.')
-        return
-      }
-      if (legacyAjenos.length > 1) {
-        setErr(`Existen ${legacyAjenos.length} liquidaciones históricas para este motorizado y esta semana. Requiere conciliación manual — no se creó ni se modificó nada.`)
-        return
-      }
-
-      // Snapshot de la selección: se revalida completo dentro de la
-      // transacción, este arreglo solo dice QUÉ saldos intentar y con qué
-      // tope manual (si el gestor escribió un abono parcial).
-      const seleccion = [...saldosSeleccionados].map((sid) => {
-        const parcialStr = abonosParciales[sid]
-        const parcial = parcialStr ? parseFloat(parcialStr) : NaN
-        return { saldoId: sid, topeManual: isNaN(parcial) ? null : parcial }
-      })
-
-      const calculoSnapshot = calculo
-      const ordenesIds = ordenes.map((o) => o.id)
-      const depositosIds = depositos.map((d) => d.id)
-      const gastosIds = gastos.map((g) => g.id)
-      const motorizadoNombre = moto.nombre || moto.authUid
-
-      let yaExistia = false
-
-      await runTransaction(db, async (tx) => {
-        // 1. Releer el marcador de identidad de la liquidación.
-        const liqSnap = await tx.get(liqRef)
-        if (liqSnap.exists()) {
-          yaExistia = true
+      // Selección humana: un tope inválido NO se interpreta como "descontar el total" — se corrige antes de enviar.
+      const seleccion: SaldoElegido[] = []
+      for (const sid of saldosSeleccionados) {
+        const parcialStr = (abonosParciales[sid] ?? '').trim()
+        if (!parcialStr) { seleccion.push({ saldoId: sid }); continue }
+        const tope = Number(parcialStr)
+        if (!Number.isFinite(tope) || tope <= 0 || Math.abs(tope * 100 - Math.round(tope * 100)) > 1e-6) {
+          setErr('El abono parcial de un saldo no es válido: ingresá un monto mayor a 0 con hasta 2 decimales, o dejalo vacío para descontar el total.')
           return
         }
-
-        // 3. Releer TODOS los saldos seleccionados dentro de la transacción.
-        const saldoRefs = seleccion.map((s) => doc(db, 'saldos_cargo_motorizado', s.saldoId))
-        const saldoSnaps = await Promise.all(saldoRefs.map((r) => tx.get(r)))
-
-        // 4-6. Verificar cada saldo y calcular el abono desde el pendiente
-        // real. Política ante saldo inválido (ya pagado/condonado/anulado,
-        // o de otro motorizado): abortar TODA la liquidación — no dejar
-        // resultados parciales ni una liquidación con números distintos a
-        // los que el gestor revisó antes de confirmar.
-        let totalAplicado = 0
-        const aplicaciones: Array<{
-          saldoId: string
-          saldoRef: typeof saldoRefs[number]
-          montoAplicado: number
-          nuevoSaldo: number
-          nuevoEstado: 'pagado' | 'abonado_parcial'
-          movRef: ReturnType<typeof doc>
-        }> = []
-
-        saldoSnaps.forEach((snap, i) => {
-          const sid = seleccion[i].saldoId
-          if (!snap.exists()) {
-            throw new Error(`El saldo ${sid} ya no existe. No se creó ninguna liquidación.`)
-          }
-          const data = snap.data() as SaldoCargoMotorizado
-          if (data.motorizadoId !== selectedMotoId) {
-            throw new Error(`El saldo ${sid} no pertenece a este motorizado. No se creó ninguna liquidación.`)
-          }
-          if (data.estado !== 'pendiente' && data.estado !== 'abonado_parcial') {
-            throw new Error(`El saldo ${sid} ya no está pendiente (estado actual: "${data.estado}"). No se creó ninguna liquidación — actualizá la selección e intentá de nuevo.`)
-          }
-          const pendienteReal = data.saldoPendiente
-          if (!(pendienteReal > 0)) {
-            throw new Error(`El saldo ${sid} ya no tiene monto pendiente. No se creó ninguna liquidación.`)
-          }
-          const tope = seleccion[i].topeManual
-          const montoAplicado = tope == null ? pendienteReal : Math.min(tope, pendienteReal)
-          const nuevoSaldo = Math.max(0, pendienteReal - montoAplicado)
-          const nuevoEstado: 'pagado' | 'abonado_parcial' = nuevoSaldo <= 0 ? 'pagado' : 'abonado_parcial'
-          totalAplicado += montoAplicado
-          aplicaciones.push({
-            saldoId: sid,
-            saldoRef: saldoRefs[i],
-            montoAplicado,
-            nuevoSaldo,
-            nuevoEstado,
-            movRef: doc(collection(db, 'movimientos_financieros')),
-          })
-        })
-
-        // 7-10. Actualizar cada saldo y crear exactamente un movimiento por
-        // saldo aplicado, todo dentro de la misma transacción.
-        aplicaciones.forEach(({ saldoId, saldoRef, montoAplicado, nuevoSaldo, nuevoEstado, movRef }) => {
-          const aplicacionId = `${liquidacionId}_${saldoId}`
-          const abono: AbonoSaldo = {
-            monto: montoAplicado,
-            fecha: Timestamp.now(), // serverTimestamp() no puede usarse dentro de arrayUnion()
-            metodoAbono: 'descuento_liquidacion',
-            nota: `Descontado en liquidación ${selectedSemana}`,
-            creadoPorUid: uid,
-            liquidacionId,
-            aplicacionId,
-          }
-          tx.update(saldoRef, {
-            saldoPendiente: nuevoSaldo,
-            estado: nuevoEstado,
-            abonos: arrayUnion(abono),
-            updatedAt: serverTimestamp(),
-          })
-          tx.set(movRef, {
-            tipo: 'abono_deuda_motorizado',
-            monto: montoAplicado,
-            at: serverTimestamp(),
-            creadoPorUid: uid,
-            creadoPorRol: 'gestor',
-            descripcion: `Abono deuda (descuento_liquidacion) · ${motorizadoNombre}`,
-            estado: 'activo',
-            cuentaOrigen: cuentas.deudaMotorizado(selectedMotoId),
-            cuentaDestino: cuentas.recuperacionDeuda,
-            motorizadoId: selectedMotoId,
-            saldoId,
-            liquidacionId,
-          })
-        })
-
-        // 11-12. Crear el documento de liquidación (ID determinístico) en la
-        // misma transacción. netoAPagar y deudasAplicadas usan totalAplicado
-        // (el pendiente real releído ahora), nunca calculo.deudasAplicar (que
-        // puede estar obsoleto si otra pestaña abonó algo mientras tanto).
-        const netoAPagar =
-          calculoSnapshot.comision - calculoSnapshot.adelantos - calculoSnapshot.faltantesDeposito +
-          calculoSnapshot.gastosAsumidosStorkhub - totalAplicado
-
-        tx.set(liqRef, {
-          motorizadoId: selectedMotoId,
-          motorizadoUid: moto.authUid,
-          motorizadoNombre,
-          semanaKey: selectedSemana,
-          semanaInicio: Timestamp.fromDate(inicio),
-          semanaFin: Timestamp.fromDate(fin),
-          totalViajes: calculoSnapshot.totalViajes,
-          totalGenerado: calculoSnapshot.totalGenerado,
-          comisionPct: calculoSnapshot.comisionPct,
-          comision: calculoSnapshot.comision,
-          adelantos: calculoSnapshot.adelantos,
-          faltantesDeposito: calculoSnapshot.faltantesDeposito,
-          otrosDescuentos: 0,
-          deudasAplicadas: totalAplicado,
-          deudasAplicadasIds: aplicaciones.map((a) => a.saldoId),
-          gastosAprobados: calculoSnapshot.totalGastos,
-          gastosAsumidosStorkhub: calculoSnapshot.gastosAsumidosStorkhub,
-          gastosIds,
-          netoAPagar,
-          estado: 'pendiente',
-          creadoAt: serverTimestamp(),
-          creadoPor: uid,
-          ordenesIds,
-          depositosIds,
-        })
-      })
-
-      if (yaExistia) {
-        setErr('Esta liquidación ya fue creada anteriormente para este motorizado y semana. No se aplicó ningún cambio.')
+        seleccion.push({ saldoId: sid, tope })
       }
-    } catch (e: any) {
-      setErr(e?.message || 'Error al crear liquidación')
+      intentoLiquidacionRef.current = operacionDeIntento(intentoLiquidacionRef.current, [selectedMotoId, selectedSemana, JSON.stringify(seleccion)], () => crypto.randomUUID())
+      const r = await crearLiquidacionMotorizadoServidor(selectedMotoId, selectedSemana, intentoLiquidacionRef.current.operacionId, seleccion)
+      const p = exigirHechoOp(presentarResultadoCrearLiquidacion(r))
+      intentoLiquidacionRef.current = null
+      if (p.categoria === 'ya_hecho') setErr(p.mensaje)
+    } catch (e) {
+      const p = presentarErrorOp(e)
+      if (p.categoria !== 'temporal') intentoLiquidacionRef.current = null
+      setErr(p.mensaje)
     } finally {
       setSaving(false)
     }
   }
 
+  // FIN-1D — identidad de UN intento de pago (la conserva el reintento tras un error temporal).
+  const intentoPagoRef = useRef<IntentoOp | null>(null)
+
   async function marcarPagada(liq: Liquidacion) {
     setSaving(true); setErr(null)
+    let pagada = false
     try {
-      const uid = auth.currentUser?.uid ?? ''
+      // El servidor marca la liquidación pagada y, si el neto es positivo, registra UN movimiento con el neto RELEÍDO de la liquidación. Un doble clic no
+      // duplica nada ('ya_pagada'). El saldo de un neto negativo ya nació al crear la liquidación.
+      intentoPagoRef.current = operacionDeIntento(intentoPagoRef.current, [liq.id], () => crypto.randomUUID())
+      const r = await marcarLiquidacionPagadaServidor(liq.id, intentoPagoRef.current.operacionId)
+      exigirHechoOp(presentarResultadoPagarLiquidacion(r))
+      intentoPagoRef.current = null
+      pagada = true
+    } catch (e) {
+      const p = presentarErrorOp(e)
+      if (p.categoria !== 'temporal') intentoPagoRef.current = null
+      setErr(p.mensaje)
+    }
 
-      // Si ya tiene saldo generado no volver a crear uno
-      let saldoGeneradoId = liq.saldoGeneradoId ?? undefined
-
-      // Cuando el motorizado queda debiendo (netoAPagar < 0), crear deuda persistente
-      if (liq.netoAPagar < 0 && !saldoGeneradoId) {
-        const montoDeuda = Math.abs(liq.netoAPagar)
-        saldoGeneradoId = await crearSaldoCargo({
-          motorizadoId: liq.motorizadoId,
-          motorizadoUid: liq.motorizadoUid,
-          motorizadoNombre: liq.motorizadoNombre,
-          tipo: 'deposito_no_realizado',
-          monto: montoDeuda,
-          origen: 'liquidacion',
-          liquidacionId: liq.id,
-          nota: `Saldo pendiente liquidación ${liq.semanaKey}`,
-          operadorId: uid,
-        })
-      }
-
-      // Marcar como pagado en Firestore
-      await updateDoc(doc(db, 'liquidaciones_motorizado', liq.id), {
-        estado: 'pagado',
-        pagadoAt: serverTimestamp(),
-        pagadoPor: uid,
-        ...(saldoGeneradoId ? { saldoGeneradoId } : {}),
-      })
-
-      await registrarMovimiento('liquidacion_pago_efectivo', liq.netoAPagar, uid,
-        `Liquidación pagada sem ${liq.semanaKey} · ${liq.motorizadoNombre}`,
-        { motorizadoId: liq.motorizadoId, liquidacionId: liq.id })
-
-      // ── Generar y subir PDF ────────────────────────────────────────────────
+    // ── PDF ───────────────────────────────────────────────────────────────────
+    // NO forma parte de la transacción financiera: si falla, la liquidación sigue pagada. Se arma con lo que el SERVIDOR guardó en la liquidación y solo
+    // actualiza pdfUrl, pdfPath y pdfGeneradoAt (lo único que las Rules dejan escribir al cliente).
+    if (pagada) {
       try {
         const pdfBlob = await generateLiquidacionPDF({
           liq: { ...liq, estado: 'pagado' },
-          ordenes,
-          gastos,
-          calculo,
+          ordenes: ordenes.filter((o) => (liq.ordenesIds ?? []).includes(o.id)),
+          gastos: gastos.filter((g) => (liq.gastosIds ?? []).includes(g.id)),
+          calculo: {
+            totalViajes: liq.totalViajes,
+            totalGenerado: liq.totalGenerado,
+            comision: liq.comision,
+            comisionPct: liq.comisionPct,
+            totalDepositado: liq.totalDepositado ?? 0,
+            faltantesDeposito: liq.faltantesDeposito,
+            adelantos: liq.adelantos,
+            totalGastos: liq.gastosAprobados ?? 0,
+            gastosAsumidosStorkhub: liq.gastosAsumidosStorkhub ?? 0,
+            deudasAplicar: liq.deudasAplicadas,
+            netoAPagar: liq.netoAPagar,
+          },
         })
         const { url, pathStorage } = await uploadLiquidacionPDF(liq.id, pdfBlob)
         await updateDoc(doc(db, 'liquidaciones_motorizado', liq.id), {
@@ -939,11 +775,8 @@ function LiquidacionesPageContent() {
         // PDF falla silenciosamente — no bloquea el flujo principal
         console.error('[liquidaciones] Error generando PDF:', pdfErr)
       }
-    } catch (e: any) {
-      setErr(e?.message || 'Error')
-    } finally {
-      setSaving(false)
     }
+    setSaving(false)
   }
 
   // ── Registrar adelanto rápido ─────────────────────────────────────────────
@@ -1254,6 +1087,10 @@ function LiquidacionesPageContent() {
                 </div>
               )}
 
+              <p className="text-[11px] text-gray-400 px-1">
+                Vista previa. Al crear la liquidación el servidor recalcula todo con los datos reales y esa es la cifra definitiva.
+              </p>
+
               {/* Neto a pagar */}
               <div className={`rounded-xl px-4 py-4 flex items-center justify-between ${calculo.netoAPagar < 0 ? 'bg-red-600' : 'bg-[#004aad]'} text-white`}>
                 <div>
@@ -1329,6 +1166,7 @@ function LiquidacionesPageContent() {
               )}
 
               {err && <p className="text-xs text-red-600">{err}</p>}
+              {!liquidacionExistente && !semanaCerrada && <p className="text-xs text-gray-500">{MSG_SEMANA_EN_CURSO}</p>}
 
               {/* Acciones */}
               {liquidacionExistente ? (
@@ -1362,10 +1200,10 @@ function LiquidacionesPageContent() {
               ) : (
                 <button
                   onClick={crearLiquidacion}
-                  disabled={saving || calculo.totalViajes === 0}
+                  disabled={saving || calculo.totalViajes === 0 || !semanaCerrada}
                   className="w-full bg-[#004aad] text-white text-sm font-semibold py-2.5 rounded-xl hover:bg-[#0a49a4] transition disabled:opacity-40"
                 >
-                  {saving ? 'Creando…' : calculo.totalViajes === 0 ? 'Sin viajes en esta semana' : '+ Crear liquidación'}
+                  {saving ? 'Creando…' : !semanaCerrada ? 'Semana en curso: aún no se puede liquidar' : calculo.totalViajes === 0 ? 'Sin viajes en esta semana' : '+ Crear liquidación'}
                 </button>
               )}
 

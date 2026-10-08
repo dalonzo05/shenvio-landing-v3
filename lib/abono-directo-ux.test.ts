@@ -236,12 +236,13 @@ test('F4C-C5 · el writer cliente viejo desapareció: ni registrarAbonoSaldo exp
   assert.deepEqual(ofensores, [], 'nadie más usa el writer retirado')
 })
 
-test('F4C-C6 · propuestas y liquidaciones siguen con SU camino: handleProponerAbono crea propuestas y crearLiquidacion conserva su abono inline', () => {
+test('F4C-C6 · propuestas y liquidaciones siguen con SU camino: handleProponerAbono crea propuestas y la liquidación aplica su abono EN EL SERVIDOR (FIN-1D)', () => {
   const src = sinComentarios(PAGINA())
   const p = cuerpoDe(PAGINA(), 'handleProponerAbono')
   assert.ok(p.includes('crearPropuestaAbono(') && !p.includes('abonarEnServidor') && !p.includes('prepararEnServidor'), 'el digitador sigue PROponiendo')
   assert.ok(src.includes('confirmarPropuestaAbonoCallable({ propuestaId: p.id })'), 'confirmar propuesta sigue por su callable')
   const liq = sinComentarios(leer('app', 'panel', 'gestor', 'liquidaciones', 'page.tsx'))
-  assert.ok(liq.includes("tipo: 'abono_deuda_motorizado'") && liq.includes("metodoAbono: 'descuento_liquidacion'"), 'la liquidación conserva su abono inline')
+  // FIN-1D — el abono por liquidación ya no es inline en el cliente: lo escribe crearLiquidacionMotorizado (saldo + abono + movimiento, una transacción).
+  assert.ok(liq.includes('crearLiquidacionMotorizadoServidor(') && !liq.includes("'abono_deuda_motorizado'") && !liq.includes("'descuento_liquidacion'"), 'la liquidación aplica su abono por su callable')
   assert.ok(!liq.includes('registrarAbonoDirecto') && !liq.includes('prepararAbonoDirecto'), 'la liquidación no se migró')
 })

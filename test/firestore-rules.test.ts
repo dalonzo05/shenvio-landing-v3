@@ -24,7 +24,7 @@ import {
 import assert from 'node:assert/strict'
 import {
   doc, setDoc, updateDoc, getDoc, deleteField, serverTimestamp,
-  collection, query, where, limit, getDocs, writeBatch, deleteDoc, addDoc,
+  collection, query, where, limit, getDocs, writeBatch, deleteDoc, addDoc, Timestamp, arrayUnion,
 } from 'firebase/firestore'
 import {
   camposEventoBoucherReemplazado,
@@ -3669,7 +3669,7 @@ test('F3-R2 · gestor: depósito de comercio pendiente_boucher → en_revision c
 
 const MOV_ID = 'mov_f10'
 const movBase = (extra: Record<string, unknown> = {}) => ({
-  tipo: 'abono_deuda_motorizado', monto: 10, estado: 'activo', saldoId: 'S1', ...extra,
+  tipo: 'ajuste_manual', monto: 10, estado: 'activo', saldoId: 'S1', ...extra,
 })
 async function sembrarMovimiento(id = MOV_ID) {
   await env.withSecurityRulesDisabled(async (ctx) => {
@@ -4369,4 +4369,157 @@ test('FIN1CB-R7 · sin regresión: FIN-1C-A (DEP-C, cobros_semanales, monto, con
     updatedAt: serverTimestamp(),
   }))
   await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'dxR7'), depositoBase({ cuentasDestino: [], montoBruto: 120, gastosDescontados: 10, gastosIds: [] })))
+})
+
+// ═════════════════════════════════════════════════════════════════════
+// FIN-1D · liquidaciones, saldos y abonos de deuda AUTORITATIVOS
+//
+// Los escriben las callables crearLiquidacionMotorizado y marcarLiquidacionPagada (y las de FIN-1A/FIN-4C para saldos; todas Admin SDK, que no pasa
+// por estas Rules). Cada bypass diagnosticado (LQ1–LQ10, P1–P8, liquidacion_pago_efectivo) pasa de ALLOW a DENY; lo legítimo (leer, el PDF) sigue.
+// ═════════════════════════════════════════════════════════════════════
+
+const LIQ_ID = 'mot1_2026-W20'
+const liqBase = (extra: Record<string, unknown> = {}) => ({
+  motorizadoId: 'mot1', motorizadoUid: UID_MOTO, motorizadoNombre: 'Luigi', semanaKey: '2026-W20', totalViajes: 2, totalGenerado: 200, comisionPct: 0.8, comision: 160,
+  adelantos: 0, faltantesDeposito: 0, otrosDescuentos: 0, deudasAplicadas: 0, deudasAplicadasIds: [], gastosIds: [], netoAPagar: 160, estado: 'pagado',
+  creadoPor: UID_GESTOR, ordenesIds: ['o1', 'o2'], depositosIds: [], ...extra,
+})
+async function sembrarLiquidaciones1d() {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    await setDoc(doc(db, 'motorizado', 'mot1'), { authUid: UID_MOTO, nombre: 'Luigi' })
+    await setDoc(doc(db, 'liquidaciones_motorizado', LIQ_ID), liqBase())
+    await setDoc(doc(db, 'liquidaciones_motorizado', 'mot1_2026-W19'), liqBase({ semanaKey: '2026-W19', estado: 'pendiente' }))
+  })
+}
+
+test('FIN1D-R1 · liquidaciones: LQ1–LQ10 ⇒ DENY (crear, reescribir, "pagar", cambiar cifras, borrar) para gestor y admin; motorizado, digitador, comercio y anónimo tampoco', async () => {
+  await sembrarLiquidaciones1d()
+  for (const uid of STAFF_UIDS) {
+    const d = como(uid)
+    // LQ1–LQ8 / LQ9: crear con cifras, motorizado, semana, actor, estado, ids o adelantos arbitrarios, y duplicar la semana
+    await assertFails(setDoc(doc(d, 'liquidaciones_motorizado', 'n1-' + uid), liqBase({ comision: 999999, netoAPagar: 999999 })))
+    await assertFails(setDoc(doc(d, 'liquidaciones_motorizado', 'n2-' + uid), liqBase({ motorizadoId: 'otro', motorizadoUid: 'otroUid' })))
+    await assertFails(setDoc(doc(d, 'liquidaciones_motorizado', 'n3-' + uid), liqBase({ semanaKey: '2099-W99' })))
+    await assertFails(setDoc(doc(d, 'liquidaciones_motorizado', 'n4-' + uid), liqBase({ creadoPor: 'uid_falso' })))
+    await assertFails(setDoc(doc(d, 'liquidaciones_motorizado', 'n5-' + uid), liqBase({ estado: 'pagado', pagadoPor: 'otro', pagadoAt: serverTimestamp() })))
+    await assertFails(setDoc(doc(d, 'liquidaciones_motorizado', 'n6-' + uid), liqBase({ gastosIds: ['falso1', 'falso2'] })))
+    await assertFails(setDoc(doc(d, 'liquidaciones_motorizado', 'n7-' + uid), liqBase({ ordenesIds: ['fantasma'] })))
+    await assertFails(setDoc(doc(d, 'liquidaciones_motorizado', 'n8-' + uid), liqBase({ adelantos: 5000 })))
+    await assertFails(addDoc(collection(d, 'liquidaciones_motorizado'), liqBase({ semanaKey: '2026-W20' }))) // LQ9a: id aleatorio, misma semana
+    await assertFails(setDoc(doc(d, 'liquidaciones_motorizado', LIQ_ID), liqBase({ netoAPagar: 1 }))) // LQ9b: sobrescribir la determinista
+    // LQ10: editar cifras o estado de una liquidación existente, "pagarla", reabrirla, borrarla
+    await assertFails(updateDoc(doc(d, 'liquidaciones_motorizado', LIQ_ID), { netoAPagar: 123456 }))
+    await assertFails(updateDoc(doc(d, 'liquidaciones_motorizado', LIQ_ID), { estado: 'pendiente', pagadoPor: deleteField() }))
+    await assertFails(updateDoc(doc(d, 'liquidaciones_motorizado', 'mot1_2026-W19'), { estado: 'pagado', pagadoAt: serverTimestamp(), pagadoPor: uid }))
+    await assertFails(updateDoc(doc(d, 'liquidaciones_motorizado', 'mot1_2026-W19'), { netoAPagar: 1, gastosIds: ['x'] }))
+    await assertFails(deleteDoc(doc(d, 'liquidaciones_motorizado', LIQ_ID)))
+  }
+  for (const [uid, id] of [[UID_MOTO, 'm1'], [UID_DIGITADOR, 'm2'], [UID_COMERCIO, 'm3']] as const) {
+    await assertFails(setDoc(doc(como(uid), 'liquidaciones_motorizado', 'ns-' + id), liqBase()))
+    await assertFails(updateDoc(doc(como(uid), 'liquidaciones_motorizado', LIQ_ID), { netoAPagar: 1 }))
+    await assertFails(updateDoc(doc(como(uid), 'liquidaciones_motorizado', LIQ_ID), { pdfUrl: 'https://example.test/x.pdf', pdfPath: 'p', pdfGeneradoAt: serverTimestamp() }))
+  }
+  await assertFails(setDoc(doc(env.unauthenticatedContext().firestore(), 'liquidaciones_motorizado', 'anon'), liqBase()))
+  // Control: leer sigue (staff y el motorizado dueño; otro motorizado no).
+  await assertSucceeds(getDoc(doc(como(UID_GESTOR), 'liquidaciones_motorizado', LIQ_ID)))
+  await assertSucceeds(getDoc(doc(como(UID_MOTO), 'liquidaciones_motorizado', LIQ_ID)))
+  await assertFails(getDoc(doc(como(UID_MOTO_B), 'liquidaciones_motorizado', LIQ_ID)))
+})
+
+test('FIN1D-R2 · liquidaciones: el PDF sigue siendo del cliente — SOLO pdfUrl/pdfPath/pdfGeneradoAt de una liquidación YA pagada ⇒ ALLOW; con cualquier campo financiero, en una pendiente o cambiando el estado ⇒ DENY', async () => {
+  await sembrarLiquidaciones1d()
+  const pdf = { pdfUrl: 'https://example.test/liq.pdf', pdfPath: 'liquidaciones/mot1_2026-W20.pdf', pdfGeneradoAt: serverTimestamp() }
+  for (const uid of STAFF_UIDS) {
+    const d = como(uid)
+    await assertFails(updateDoc(doc(d, 'liquidaciones_motorizado', LIQ_ID), { ...pdf, netoAPagar: 999 }))
+    await assertFails(updateDoc(doc(d, 'liquidaciones_motorizado', LIQ_ID), { ...pdf, estado: 'pendiente' }))
+    await assertFails(updateDoc(doc(d, 'liquidaciones_motorizado', LIQ_ID), { ...pdf, gastosIds: ['x'] }))
+    await assertFails(updateDoc(doc(d, 'liquidaciones_motorizado', LIQ_ID), { ...pdf, pagadoPor: 'otro' }))
+    await assertFails(updateDoc(doc(d, 'liquidaciones_motorizado', LIQ_ID), { ...pdf, pdfOtro: 'x' }))
+    await assertFails(updateDoc(doc(d, 'liquidaciones_motorizado', 'mot1_2026-W19'), pdf)) // pendiente: el PDF solo existe al pagar
+  }
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'liquidaciones_motorizado', LIQ_ID), pdf))
+  await assertSucceeds(updateDoc(doc(como(UID_ADMIN), 'liquidaciones_motorizado', LIQ_ID), { pdfUrl: 'https://example.test/otra.pdf', pdfPath: 'otra.pdf', pdfGeneradoAt: serverTimestamp() }))
+})
+
+async function sembrarSaldos1d() {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    const s = (extra: Record<string, unknown>) => ({ motorizadoId: 'mot1', motorizadoUid: UID_MOTO, motorizadoNombre: 'Luigi', tipo: 'deposito_no_realizado', montoOriginal: 100, saldoPendiente: 100, estado: 'pendiente', origen: 'deposito', abonos: [], ...extra })
+    await setDoc(doc(db, 'saldos_cargo_motorizado', 'S1'), s({}))
+    await setDoc(doc(db, 'saldos_cargo_motorizado', 'S2'), s({ motorizadoId: 'mot2', motorizadoUid: UID_MOTO_B }))
+    await setDoc(doc(db, 'saldos_cargo_motorizado', 'S3'), s({ estado: 'anulado' }))
+    await setDoc(doc(db, 'saldos_cargo_motorizado', 'S4'), s({ estado: 'condonado', saldoPendiente: 0, montoOriginal: 50 }))
+  })
+}
+
+test('FIN1D-R3 · saldos: el cliente no crea ni mueve un saldo (P1–P8: monto arbitrario, sobrepago, ajeno, anulado, condonado, reabrir, fabricar) ⇒ DENY, gestor y admin; leer sigue', async () => {
+  await sembrarSaldos1d()
+  const abono = (monto: number) => ({ monto, metodoAbono: 'transferencia', creadoPorUid: UID_GESTOR, fecha: Timestamp.now() })
+  for (const uid of STAFF_UIDS) {
+    const d = como(uid)
+    await assertFails(updateDoc(doc(d, 'saldos_cargo_motorizado', 'S1'), { saldoPendiente: 0, estado: 'pagado', abonos: arrayUnion(abono(999)) })) // P1
+    await assertFails(updateDoc(doc(d, 'saldos_cargo_motorizado', 'S1'), { saldoPendiente: -500, abonos: arrayUnion(abono(600)) })) // P2
+    await assertFails(updateDoc(doc(d, 'saldos_cargo_motorizado', 'S2'), { saldoPendiente: 0, estado: 'pagado' })) // P3
+    await assertFails(updateDoc(doc(d, 'saldos_cargo_motorizado', 'S3'), { saldoPendiente: 0, estado: 'pagado', abonos: arrayUnion(abono(50)) })) // P7a
+    await assertFails(updateDoc(doc(d, 'saldos_cargo_motorizado', 'S4'), { saldoPendiente: 10, estado: 'abonado_parcial' })) // P7b
+    await assertFails(updateDoc(doc(d, 'saldos_cargo_motorizado', 'S4'), { saldoPendiente: 5000, estado: 'pendiente', montoOriginal: 5000 })) // P8
+    await assertFails(setDoc(doc(d, 'saldos_cargo_motorizado', 'n1-' + uid), { motorizadoId: 'mot1', montoOriginal: 1e6, saldoPendiente: 1e6, estado: 'pendiente', origen: 'liquidacion', liquidacionId: LIQ_ID, abonos: [] })) // CS1
+    await assertFails(addDoc(collection(d, 'saldos_cargo_motorizado'), { motorizadoId: 'mot1', montoOriginal: 7, saldoPendiente: 7, estado: 'pendiente', origen: 'liquidacion', liquidacionId: LIQ_ID, abonos: [] })) // CS2
+    await assertFails(deleteDoc(doc(d, 'saldos_cargo_motorizado', 'S1')))
+  }
+  for (const uid of [UID_MOTO, UID_DIGITADOR]) {
+    await assertFails(updateDoc(doc(como(uid), 'saldos_cargo_motorizado', 'S1'), { saldoPendiente: 0 }))
+    await assertFails(addDoc(collection(como(uid), 'saldos_cargo_motorizado'), { motorizadoId: 'mot1', montoOriginal: 1, saldoPendiente: 1, estado: 'pendiente', abonos: [] }))
+  }
+  // Control: leer sigue (staff, digitador y el motorizado dueño).
+  await assertSucceeds(getDoc(doc(como(UID_GESTOR), 'saldos_cargo_motorizado', 'S1')))
+  await assertSucceeds(getDoc(doc(como(UID_DIGITADOR), 'saldos_cargo_motorizado', 'S1')))
+  await assertSucceeds(getDoc(doc(como(UID_MOTO), 'saldos_cargo_motorizado', 'S1')))
+})
+
+test('FIN1D-R4 · ledger POR TIPO: abono_deuda_motorizado, liquidacion_pago_efectivo y saldo_creado no se crean, editan, anulan ni reactivan desde el cliente, ni se disfrazan ⇒ DENY; el resto del ledger (FIN-1E) sigue abierto', async () => {
+  const mov = (tipo: string, extra: Record<string, unknown> = {}) => ({ tipo, monto: 100, at: serverTimestamp(), creadoPorUid: UID_GESTOR, creadoPorRol: 'gestor', descripcion: 'x', estado: 'activo', motorizadoId: 'mot1', ...extra })
+  const tipos = ['abono_deuda_motorizado', 'liquidacion_pago_efectivo', 'saldo_creado'] as const
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    for (const t of tipos) await setDoc(doc(db, 'movimientos_financieros', 'r-' + t), { ...mov(t), at: new Date(), liquidacionId: LIQ_ID, saldoId: 'S1' })
+    await setDoc(doc(db, 'movimientos_financieros', 'libre'), { ...mov('ajuste_manual'), at: new Date() })
+  })
+  for (const uid of STAFF_UIDS) {
+    const d = como(uid)
+    for (const t of tipos) {
+      await assertFails(setDoc(doc(d, 'movimientos_financieros', `c-${t}-${uid}`), mov(t, { liquidacionId: LIQ_ID, saldoId: 'S1', cuentaOrigen: 'deuda_motorizado:mot1', cuentaDestino: 'recuperacion_deuda_liquidacion' }))) // P4/P5/PE1-PE3, PE6
+      await assertFails(setDoc(doc(d, 'movimientos_financieros', `c2-${t}-${uid}`), mov(t, { monto: 1e6, creadoPorUid: 'uid_falso', creadoPorRol: 'admin' })))
+      await assertFails(updateDoc(doc(d, 'movimientos_financieros', 'r-' + t), { monto: 7 })) // PE5
+      await assertFails(updateDoc(doc(d, 'movimientos_financieros', 'r-' + t), { estado: 'anulado', anuladoPorUid: uid })) // PE4
+      await assertFails(updateDoc(doc(d, 'movimientos_financieros', 'r-' + t), { tipo: 'ajuste_manual' })) // un reservado deja de serlo
+      await assertFails(updateDoc(doc(d, 'movimientos_financieros', 'libre'), { tipo: t })) // otro se disfraza de reservado
+      await assertFails(deleteDoc(doc(d, 'movimientos_financieros', 'r-' + t)))
+    }
+  }
+  for (const uid of [UID_MOTO, UID_DIGITADOR]) await assertFails(setDoc(doc(como(uid), 'movimientos_financieros', 'x-' + uid), mov('liquidacion_pago_efectivo')))
+  // Control (cuánto NO se cerró): FIN-1E sigue pendiente — la misma forma de escritura, con otro tipo, pasa.
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'movimientos_financieros', 'ctl'), mov('ajuste_manual')))
+  await assertSucceeds(updateDoc(doc(como(UID_ADMIN), 'movimientos_financieros', 'libre'), { descripcion: 'editada' }))
+})
+
+test('FIN1D-R5 · gastos: un gasto que una liquidación capturó (liquidacionId) NO se consume en un depósito; el cliente no escribe ni quita liquidacionId; un gasto libre sigue consumiéndose (FIN-2 intacto)', async () => {
+  await sembrarGastosFin2({
+    gLiq: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10, tipo: 'peaje_terminal', liquidacionId: LIQ_ID },
+  })
+  for (const uid of [UID_MOTO, UID_GESTOR, UID_ADMIN]) {
+    await assertFails(batchCrearDepositoConGastos(uid, 'DLiq-' + uid, ['gLiq']).commit())
+  }
+  assert.equal((await leerGastoFin2('gLiq'))?.consumidoEnDepositoId, undefined)
+  // el cliente no marca ni desmarca la liquidación de un gasto
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(doc(como(uid), 'gastos_motorizado', 'g1'), { liquidacionId: LIQ_ID }))
+    await assertFails(updateDoc(doc(como(uid), 'gastos_motorizado', 'gLiq'), { liquidacionId: deleteField() }))
+    await assertFails(updateDoc(doc(como(uid), 'gastos_motorizado', 'gLiq'), { liquidacionId: 'otra' }))
+  }
+  // Control: un gasto libre se consume en el mismo commit que crea el depósito (FIN-2 sin regresión).
+  await assertSucceeds(batchCrearDepositoConGastos(UID_MOTO, 'DLibre', ['g1']).commit())
+  assert.equal((await leerGastoFin2('g1'))?.consumidoEnDepositoId, 'DLibre')
 })

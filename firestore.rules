@@ -2047,8 +2047,11 @@ service cloud.firestore {
       // adelantos. Las Rules se combinan con OR: por eso NO se agrega un "deny" aparte sino que se excluyen estos tipos de la propia rama genérica,
       // tanto al crear como al editar (el tipo de antes Y el de después: ni se crea, ni se edita el monto, ni se anula o reactiva, ni se disfraza un
       // movimiento de otro tipo como uno de estos). El resto del ledger sigue abierto a gestor/admin hasta FIN-1E (C6/C8 globales).
+      // FIN-1D — se suman los tipos de las liquidaciones: el abono de una deuda por liquidación (abono_deuda_motorizado), el pago de la liquidación
+      // (liquidacion_pago_efectivo) y el saldo que nace de un neto negativo (saldo_creado). Los crean SOLO crearLiquidacionMotorizado y
+      // marcarLiquidacionPagada (y, para el abono directo y las propuestas, registrarAbonoDirecto y confirmarPropuestaAbono: todas Admin SDK).
       function tipoReservadoAServidor(d) {
-        return d.get('tipo', '') in ['gasto_aprobado', 'adelanto_motorizado'];
+        return d.get('tipo', '') in ['gasto_aprobado', 'adelanto_motorizado', 'abono_deuda_motorizado', 'liquidacion_pago_efectivo', 'saldo_creado'];
       }
       allow read: if isAdminOrGestor();
       allow create: if isAdminOrGestor() && !tipoReservadoAServidor(request.resource.data);
@@ -2262,7 +2265,15 @@ service cloud.firestore {
     match /liquidaciones_motorizado/{id} {
       allow read: if isAdminOrGestor()
         || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid);
-      allow create, update: if isAdminOrGestor();
+      // FIN-1D — una liquidación la crea SOLO crearLiquidacionMotorizado y la paga SOLO marcarLiquidacionPagada (Admin SDK, que no pasa por estas
+      // Rules). Antes cualquier gestor/admin podía crearla, reescribirla o "pagarla" con cualquier cifra, id y actor. Del cliente queda ÚNICAMENTE
+      // el PDF: una liquidación ya pagada admite actualizar pdfUrl, pdfPath y pdfGeneradoAt y nada más (el PDF no forma parte de la transacción
+      // financiera: si falla, la liquidación sigue pagada).
+      allow create: if false;
+      allow update: if isAdminOrGestor()
+        && resource.data.get('estado', '') == 'pagado'
+        && request.resource.data.get('estado', '') == 'pagado'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pdfUrl', 'pdfPath', 'pdfGeneradoAt']);
       allow delete: if false;
     }
 
@@ -2328,6 +2339,8 @@ service cloud.firestore {
         return depId is string
           && depId.size() > 0
           && resource.data.get('consumidoEnDepositoId', null) == null
+          // FIN-1D — un gasto que una liquidación ya capturó (liquidacionId) NO se consume en un depósito: lo descuenta UNO u OTRO, nunca ambos.
+          && resource.data.get('liquidacionId', null) == null
           && resource.data.get('estado', '') == 'aprobado'
           && request.resource.data.get('estado', '') == 'aprobado'
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['consumidoEnDepositoId'])
@@ -2366,7 +2379,10 @@ service cloud.firestore {
       allow read: if isAdminOrGestor()
         || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid)
         || isDigitador();
-      allow create, update: if isAdminOrGestor();
+      // FIN-1D — un saldo lo crean y lo mueven SOLO las callables (Admin SDK): crearLiquidacionMotorizado (saldo del neto negativo y abono por
+      // liquidación), registrarAbonoDirecto, confirmarPropuestaAbono, condonarDeudaMotorizado, anularSaldoCargo y las conversiones de depósito.
+      // Ya ningún cliente escribe aquí: antes cualquier gestor/admin podía fabricar un saldo, abonar sin límite o reabrir uno condonado.
+      allow create, update: if false;
       allow delete: if false;
     }
 

@@ -37,7 +37,16 @@ export type MotivoRechazoOp =
   | 'incidencia_no_abierta'
   | 'cobro_ya_pagado'
   | 'orden_no_entregada'
-  | 'estado_incompatible';
+  | 'estado_incompatible'
+  // FIN-1D — liquidaciones
+  | 'semana_no_cerrada'
+  | 'liquidacion_existente'
+  | 'deposito_pendiente_conciliacion'
+  | 'motorizado_invalido'
+  | 'saldo_invalido'
+  | 'sin_viajes'
+  | 'demasiados_registros'
+  | 'estado_invalido';
 
 export function rechazoOp(motivo: MotivoRechazoOp, mensaje: string, extra: Record<string, unknown> = {}): HttpsError {
   return new HttpsError('failed-precondition', mensaje, { motivo, ...extra });
@@ -47,23 +56,23 @@ export function idValido(v: unknown): v is string {
   return typeof v === 'string' && v.trim().length > 0 && v.length <= MAX_ID;
 }
 
-function objetoPlano(data: unknown): Record<string, unknown> {
+export function objetoPlano(data: unknown): Record<string, unknown> {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) throw new HttpsError('invalid-argument', 'Petición inválida.');
   return data as Record<string, unknown>;
 }
 
-function soloClaves(d: Record<string, unknown>, permitidas: readonly string[]): void {
+export function soloClaves(d: Record<string, unknown>, permitidas: readonly string[]): void {
   if (Object.keys(d).some((k) => !permitidas.includes(k))) {
     throw new HttpsError('invalid-argument', `Solo se aceptan los campos ${permitidas.join(', ')}.`);
   }
 }
 
-function operacionIdValido(v: unknown): string {
+export function operacionIdValido(v: unknown): string {
   if (typeof v !== 'string' || !RE_OPERACION_ID.test(v)) throw new HttpsError('invalid-argument', 'operacionId inválido.');
   return v;
 }
 
-function notaOpcional(v: unknown): string | null {
+export function notaOpcional(v: unknown): string | null {
   if (v === undefined || v === null) return null;
   if (typeof v !== 'string') throw new HttpsError('invalid-argument', 'La nota debe ser texto.');
   const n = v.trim();
