@@ -10,14 +10,15 @@ import {
   getDocs,
   Timestamp,
 } from 'firebase/firestore'
-import { auth, db } from '@/fb/config'
+import { db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
-import { crearGastoMotorizado, anularGastoMotorizado } from '@/lib/financial-writes'
+import { crearGastoMotorizadoServidor } from '@/lib/crear-gasto-cliente'
+import { anularGastoMotorizadoServidor } from '@/lib/anular-gasto-cliente'
+import { exigirHechoOp, operacionDeIntento, presentarErrorOp, presentarResultadoAnularGasto, presentarResultadoCrearGasto, type IntentoOp } from '@/lib/finanzas-operativas-ux'
 import {
   LABELS_TIPO_GASTO,
   type TipoGasto,
   type GastoMotorizado,
-  type OrdenSnapshot,
 } from '@/lib/financial-types'
 import { Receipt, PlusCircle, XCircle, Search, X, ChevronDown, ChevronUp } from 'lucide-react'
 import Link from 'next/link'
@@ -365,6 +366,9 @@ function GastosPageContent() {
 
   // ── Crear gasto ───────────────────────────────────────────────────────────
 
+  // FIN-1C-B — identidad de UN intento de creación (la conserva el reintento tras un error temporal).
+  const intentoCrearRef = useRef<IntentoOp | null>(null)
+
   async function handleCrear() {
     const monto = parseFloat(fMonto)
     if (!fMotorizadoId || isNaN(monto) || monto <= 0) {
@@ -374,39 +378,24 @@ function GastosPageContent() {
     const moto = motorizados.find((m) => m.id === fMotorizadoId)
     if (!moto) return
 
-    // Construir snapshot de la orden seleccionada
-    let ordenSnapshot: OrdenSnapshot | undefined
-    if (fOrden) {
-      ordenSnapshot = {
-        ordenId: fOrden.id,
-        comercioNombre: fOrden.ownerSnapshot?.companyName || fOrden.ownerSnapshot?.nombre || null,
-        clienteNombre: fOrden.entrega?.nombreApellido ?? null,
-        entregadoAt: fOrden.entregadoAt ?? null,
-        tipoEnvio: fOrden.tipoEnvio ?? null,
-        metodoEnvio: fOrden.metodoEnvio ?? null,
-        puntoLogistico: fOrden.puntoRetiroNombre ?? null,
-        precioDelivery: fOrden.confirmacion?.precioFinalCordobas ?? null,
-      }
-    }
-
     setSaving(true); setErr(null)
     try {
-      await crearGastoMotorizado({
-        motorizadoId: fMotorizadoId,
-        motorizadoNombre: moto.nombre || moto.authUid,
-        tipo: fTipo,
-        monto,
-        nota: fNota,
-        ordenId: fOrden?.id,
-        ordenSnapshot,
-        operadorId: auth.currentUser?.uid ?? '',
-        fecha: fFecha ? new Date(fFecha + 'T12:00:00') : undefined,
-      })
+      // FIN-1C-B — el gasto lo crea el SERVIDOR en una transacción (gasto + movimiento gasto_aprobado + marcador): valida el monto, la fecha (no
+      // futura), el motorizado y la orden, y arma el snapshot de la orden. La pantalla solo manda lo que el gestor escribió y el operacionId.
+      intentoCrearRef.current = operacionDeIntento(intentoCrearRef.current, [fMotorizadoId, fTipo, monto, fFecha, fNota, fOrden?.id], () => crypto.randomUUID())
+      const r = await crearGastoMotorizadoServidor(
+        { motorizadoId: fMotorizadoId, tipo: fTipo, monto, fecha: fFecha || undefined, nota: fNota, ordenId: fOrden?.id },
+        intentoCrearRef.current.operacionId,
+      )
+      exigirHechoOp(presentarResultadoCrearGasto(r))
+      intentoCrearRef.current = null
       setFMonto(''); setFNota(''); setFOrden(null)
       setFFecha(todayLocal())
       setShowForm(false)
     } catch (e: any) {
-      setErr(e?.message || 'Error al crear gasto')
+      const p = presentarErrorOp(e)
+      if (p.categoria !== 'temporal') intentoCrearRef.current = null
+      setErr(p.mensaje)
     } finally {
       setSaving(false)
     }
@@ -424,11 +413,11 @@ function GastosPageContent() {
     setAnulError(null)
 
     try {
-      const uid = auth.currentUser?.uid ?? ''
-      await anularGastoMotorizado(gasto.id, uid)
+      // FIN-1C-B — la anulación la decide el SERVIDOR: no anula un gasto ya descontado en un depósito ni liquidado.
+      exigirHechoOp(presentarResultadoAnularGasto(await anularGastoMotorizadoServidor(gasto.id)))
     } catch (e: any) {
       console.error('[gastos] Error anulando gasto:', e)
-      setAnulError(e?.message || 'Error al anular el gasto. Revisá la consola.')
+      setAnulError(presentarErrorOp(e).mensaje)
     } finally {
       setAnulandoId(null)
     }

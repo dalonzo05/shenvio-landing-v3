@@ -2,21 +2,15 @@ import {
   addDoc,
   collection,
   doc,
-  getDocs,
-  query,
   serverTimestamp,
   setDoc,
   updateDoc,
-  where,
-  writeBatch,
   Timestamp,
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
 import type {
   MovimientoFinanciero,
   TipoMovimiento,
-  TipoGasto,
-  GastoMotorizado,
   TipoSaldo,
   SaldoCargoMotorizado,
   MetodoAbono,
@@ -106,101 +100,10 @@ export async function registrarMovimiento(
 
 // ─── Gastos operativos ────────────────────────────────────────────────────────
 
-/**
- * Crea un gasto operativo para un motorizado.
- * Solo gestor puede llamar esto. Los gastos nacen como 'aprobado'.
- *
- * Cuenta origen varía por tipo:
- * - peaje_terminal: efectivo_en_poder (motorizado pagó en efectivo)
- * - pago_cargotrans: puede ser externo (comercio pagó) o efectivo_en_poder
- * - otro_gasto_operativo: efectivo_en_poder
- * destino siempre: gastos_operativos
- */
-export async function crearGastoMotorizado(params: {
-  motorizadoId: string
-  motorizadoNombre: string
-  tipo: TipoGasto
-  monto: number
-  nota?: string
-  ordenId?: string
-  ordenSnapshot?: import('./financial-types').OrdenSnapshot
-  operadorId: string
-  fecha?: Date
-}): Promise<string> {
-  const { motorizadoId, motorizadoNombre, tipo, monto, nota, ordenId, ordenSnapshot, operadorId, fecha } = params
-
-  const gastoData: Omit<GastoMotorizado, 'id'> = {
-    motorizadoId,
-    motorizadoNombre,
-    tipo,
-    monto,
-    estado: 'aprobado',
-    nota: nota ?? '',
-    ...(ordenId ? { ordenId } : {}),
-    ...(ordenSnapshot ? { ordenSnapshot } : {}),
-    // fecha es el momento del gasto (puede ser ingresado por el gestor retroactivamente)
-    fecha: fecha ? Timestamp.fromDate(fecha) : serverTimestamp(),
-    creadoPorUid: operadorId,
-    createdAt: serverTimestamp(),
-  }
-
-  const ref = await addDoc(collection(db, 'gastos_motorizado'), gastoData)
-
-  await registrarMovimiento(
-    'gasto_aprobado',
-    monto,
-    operadorId,
-    `Gasto ${tipo} · ${motorizadoNombre}`,
-    { motorizadoId, gastoId: ref.id, ...(ordenId ? { solicitudId: ordenId } : {}) },
-    {
-      cuentas: {
-        origen: cuentas.efectivoEnPoder(motorizadoId),
-        destino: cuentas.gastosOp,
-      },
-    }
-  )
-
-  return ref.id
-}
-
-/**
- * Anula un gasto operativo existente y sus movimientos del ledger.
- *
- * 1. Marca el documento en `gastos_motorizado` como anulado.
- * 2. Busca todos los movimientos en `movimientos_financieros` que referencian
- *    este gastoId y los marca como anulados (batch).
- *
- * Ambas operaciones deben ocurrir juntas para mantener consistencia entre
- * la colección operativa y el ledger financiero.
- */
-export async function anularGastoMotorizado(
-  gastoId: string,
-  operadorId: string
-): Promise<void> {
-  // 1. Anular el gasto en la colección operativa
-  await updateDoc(doc(db, 'gastos_motorizado', gastoId), {
-    estado: 'anulado',
-    updatedAt: serverTimestamp(),
-  })
-
-  // 2. Anular los movimientos del ledger vinculados por gastoId
-  const snap = await getDocs(
-    query(collection(db, 'movimientos_financieros'), where('gastoId', '==', gastoId))
-  )
-  const activos = snap.docs.filter((d) => (d.data() as any).estado !== 'anulado')
-  if (activos.length > 0) {
-    const batch = writeBatch(db)
-    activos.forEach((d) => {
-      batch.update(d.ref, {
-        estado: 'anulado',
-        anuladoAt: serverTimestamp(),
-        anuladoPorUid: operadorId,
-        motivoAnulacion: 'Gasto operativo anulado',
-      })
-    })
-    await batch.commit()
-  }
-}
+// FIN-1C-B — crearGastoMotorizado y anularGastoMotorizado YA NO VIVEN AQUÍ. Crear un gasto era un addDoc de cliente más un movimiento que tragaba
+// sus errores, y anularlo era un updateDoc ciego: se podía anular (o crear con cualquier monto) un gasto ya descontado en un depósito. Ahora las hacen
+// las Cloud Functions crearGastoMotorizado y anularGastoMotorizado en una transacción (functions/src/crear-gasto.ts y anular-gasto.ts). El cliente las
+// invoca con lib/crear-gasto-cliente.ts y lib/anular-gasto-cliente.ts y no escribe nada de eso por su cuenta.
 
 // ─── Saldos a cargo del motorizado ────────────────────────────────────────────
 

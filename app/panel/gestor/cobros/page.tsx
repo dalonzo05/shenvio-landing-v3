@@ -16,7 +16,7 @@ import {
   runTransaction,
   deleteField,
 } from 'firebase/firestore'
-import { auth, db } from '@/fb/config'
+import { db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import {
   AlertCircle,
@@ -55,6 +55,8 @@ import {
   type IntentoOperacion,
 } from '@/lib/cobro-acciones-ux'
 import { registrarCobroDeliveryServidor } from '@/lib/registrar-cobro-delivery-cliente'
+import { resolverIncidenciaCobroServidor } from '@/lib/resolver-incidencia-cliente'
+import { exigirHechoOp, presentarErrorOp, presentarResultadoResolver } from '@/lib/finanzas-operativas-ux'
 import { revertirCobroDeliveryServidor } from '@/lib/revertir-cobro-delivery-cliente'
 import { registrarPagoCobroSemanalServidor } from '@/lib/registrar-pago-cobro-semanal-cliente'
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
@@ -422,56 +424,14 @@ function ResolveModal({
     if (!tipo) return
     setSaving(true); setErr(null)
     try {
-      const uid = auth.currentUser?.uid || 'desconocido'
-      const resolucion = {
-        resueltoPor: uid,
-        at: serverTimestamp(),
-        nota: nota.trim() || null,
-        tipo,
-      }
-      const updates: any = {}
-
-      if (item === 'delivery') {
-        // Se conserva la resolución a nivel de orden por compatibilidad con
-        // el tab "Resueltas", que filtra por cobrosMotorizado.resolucion.
-        updates['cobrosMotorizado.resolucion'] = resolucion
-        if (tipo === 'cliente_pagara') {
-          // 'cliente_pagara' NO significa cobrado: el delivery sigue
-          // pendiente de cobro, solo que ya está clasificado.
-          if (!solicitud.cobroDelivery) {
-            updates['cobroDelivery.estado'] = 'pendiente'
-            updates['cobroDelivery.registradoAt'] = serverTimestamp()
-          } else if (solicitud.cobroDelivery.estado === 'no_cobrar') {
-            updates['cobroDelivery.estado'] = 'pendiente'
-          }
-        } else {
-          updates['cobroDelivery.estado'] = 'no_cobrar'
-        }
-      } else {
-        // PRODUCTO / CE: se escribe únicamente dentro de su propio submapa.
-        // `justificacion` y `monto` se preservan porque solo se tocan estas
-        // dos claves por dot-path.
-        //
-        // cobroDelivery NO se toca, ni siquiera con 'se_pierde'. Que el
-        // destinatario no haya pagado no borra el delivery: ShEnvíos ya prestó
-        // el servicio y el comercio lo sigue debiendo. Condonarlo es una
-        // decisión aparte y explícita, no un efecto colateral de clasificar
-        // la incidencia del cobro contra entrega.
-        updates['cobrosMotorizado.producto.resolucion'] = resolucion
-        updates['cobrosMotorizado.producto.estado'] =
-          tipo === 'cliente_pagara' ? 'pendiente' : 'no_cobrar'
-      }
-
-      // cobroPendiente = queda alguna incidencia SIN CLASIFICAR. No se escribe
-      // false a ciegas: si la orden tiene las dos y solo se resolvió una, la
-      // otra debe seguir apareciendo en Incidencias, en el KPI y en el badge.
-      const quedaOtra = item === 'delivery' ? productoAbierta : deliveryAbierta
-      updates.cobroPendiente = quedaOtra
-
-      await updateDoc(doc(db, 'solicitudes_envio', solicitud.id), updates)
+      // FIN-1C-B — la resolución la hace el SERVIDOR en una transacción sobre la orden: deriva el actor y la fecha, aplica la transición del
+      // cobro (cliente_pagara ⇒ pendiente; se_pierde en el delivery ⇒ no_cobrar, la condonación de siempre), recalcula cobroPendiente y nunca
+      // toca monto, precio, movimientos ni depósitos. La pantalla solo manda la orden, el ítem, la decisión y la nota.
+      const r = await resolverIncidenciaCobroServidor(solicitud.id, item, tipo, nota)
+      exigirHechoOp(presentarResultadoResolver(r))
       onClose()
     } catch (e: any) {
-      setErr(e?.message || 'Error al guardar')
+      setErr(presentarErrorOp(e).mensaje)
     } finally {
       setSaving(false)
     }

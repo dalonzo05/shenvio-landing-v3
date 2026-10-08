@@ -3415,11 +3415,11 @@ test('FG-R11 · FG10: crear D2 no cambia el snapshot histórico de D1 (gastosIds
   assert.deepEqual((await leerDepositoFin2('D2'))?.gastosIds, ['g2', 'g3'])
 })
 
-test('FG-R12 · lo demás de gastos_motorizado no cambia: el gestor crea y anula gastos ⇒ ALLOW; pero no crea uno ya consumido ni marca a mano ⇒ DENY', async () => {
+test('FG-R12 · gastos_motorizado: crear, anular y editar un gasto ya NO son del cliente (FIN-1C-B) ⇒ DENY; consumir/liberar la marca (FIN-2) sigue ⇒ ALLOW (FG-R13); no se marca a mano', async () => {
   await sembrarGastosFin2()
   const g = como(UID_GESTOR)
-  await assertSucceeds(setDoc(doc(g, 'gastos_motorizado', 'gNuevo'), { motorizadoId: 'mot1', estado: 'aprobado', monto: 5, tipo: 'peaje_terminal' }))
-  await assertSucceeds(updateDoc(doc(g, 'gastos_motorizado', 'g1'), { estado: 'anulado', updatedAt: serverTimestamp() }))
+  await assertFails(setDoc(doc(g, 'gastos_motorizado', 'gNuevo'), { motorizadoId: 'mot1', estado: 'aprobado', monto: 5, tipo: 'peaje_terminal' }))
+  await assertFails(updateDoc(doc(g, 'gastos_motorizado', 'g1'), { estado: 'anulado', updatedAt: serverTimestamp() }))
   await assertFails(setDoc(doc(g, 'gastos_motorizado', 'gPreconsumido'), { motorizadoId: 'mot1', estado: 'aprobado', monto: 5, consumidoEnDepositoId: 'DX' }))
   await assertFails(updateDoc(doc(g, 'gastos_motorizado', 'g2'), { consumidoEnDepositoId: 'DX' }))
   await assertFails(deleteDoc(doc(g, 'gastos_motorizado', 'g2')))
@@ -4100,7 +4100,7 @@ test('FIN1C-R8 · el motorizado ya no crea cobroDelivery (ni siquiera la primera
   await assertSucceeds(updateDoc(ordenRef(UID_MOTO, 'ordC8'), { estado: 'en_camino_entrega', updatedAt: serverTimestamp() }))
 })
 
-test('FIN1C-R9 · lo legítimo del cliente sigue: subir, reemplazar y quitar el boucher (gestor) y clasificar la incidencia (ResolveModal) ⇒ ALLOW', async () => {
+test('FIN1C-R9 · lo legítimo del cliente sigue: subir, reemplazar y quitar el boucher (gestor) y el comprobante del comercio ⇒ ALLOW; clasificar la incidencia (ResolveModal) ya es del servidor ⇒ DENY (FIN-1C-B)', async () => {
   // Subir (cobro pendiente con monto ya fijado).
   await sembrarOrdenCobro('ordC9')
   await assertSucceeds(updateDoc(ordenRef(UID_GESTOR, 'ordC9'), {
@@ -4136,14 +4136,14 @@ test('FIN1C-R9 · lo legítimo del cliente sigue: subir, reemplazar y quitar el 
       cobrosMotorizado: { delivery: { recibio: false } },
     })
   })
-  await assertSucceeds(updateDoc(ordenRef(UID_GESTOR, 'ordC9r'), {
+  await assertFails(updateDoc(ordenRef(UID_GESTOR, 'ordC9r'), {
     'cobrosMotorizado.resolucion': { resueltoPor: UID_GESTOR, at: serverTimestamp(), nota: null, tipo: 'cliente_pagara' },
     'cobroDelivery.estado': 'pendiente',
     'cobroDelivery.registradoAt': serverTimestamp(),
     cobroPendiente: false,
   }))
   await sembrarOrdenCobro('ordC9s')
-  await assertSucceeds(updateDoc(ordenRef(UID_GESTOR, 'ordC9s'), {
+  await assertFails(updateDoc(ordenRef(UID_GESTOR, 'ordC9s'), {
     'cobrosMotorizado.resolucion': { resueltoPor: UID_GESTOR, at: serverTimestamp(), nota: null, tipo: 'se_pierde' },
     'cobroDelivery.estado': 'no_cobrar',
     cobroPendiente: false,
@@ -4205,4 +4205,168 @@ test('FIN1C-R11 · el motorizado ya NO escribe pagoDelivery.quienPaga (credito_s
   await assertSucceeds(updateDoc(moto('qp3'), { acumulacionCobroSemanal: { estado: 'pendiente', updatedAt: serverTimestamp() } }))
   // Escribir el MISMO pagoDelivery (sin cambiarlo) tampoco es un writer: no hay diff, el update pasa.
   await assertSucceeds(updateDoc(moto('qp3'), { 'pagoDelivery.quienPaga': 'entrega', updatedAt: serverTimestamp() }))
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FIN-1C-B · gastos, adelantos y resolución de incidencias AUTORITATIVOS
+//
+// Los escriben las callables (crearGastoMotorizado, anularGastoMotorizado, registrarAdelantoMotorizado, anularAdelantoMotorizado,
+// resolverIncidenciaCobro; Admin SDK, que no pasa por estas Rules). Cada bypass diagnosticado pasa de ALLOW a DENY; lo legítimo sigue.
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function sembrarGastos1cb() {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    await setDoc(doc(db, 'motorizado', 'mot1'), { authUid: UID_MOTO, nombre: 'Luigi' })
+    await setDoc(doc(db, 'ordenes_deposito', 'DC'), { tipo: 'recaudacion_motorizado_storkhub', estado: 'confirmado', motorizadoUid: UID_MOTO, gastosIds: ['gC'], solicitudIds: [] })
+    await setDoc(doc(db, 'gastos_motorizado', 'gC'), { motorizadoId: 'mot1', tipo: 'peaje_terminal', monto: 10, estado: 'aprobado', consumidoEnDepositoId: 'DC' })
+    await setDoc(doc(db, 'gastos_motorizado', 'gL'), { motorizadoId: 'mot1', tipo: 'peaje_terminal', monto: 10, estado: 'aprobado' })
+  })
+}
+
+test('FIN1CB-R1 · gastos: el cliente no crea (legítimo, arbitrario, de otro motorizado, de monto negativo, con estado o marca inventados), no edita el monto, no anula, no borra ⇒ DENY (gestor y admin); digitador y motorizado siguen DENY', async () => {
+  await sembrarGastos1cb()
+  const nuevo = { motorizadoId: 'mot1', motorizadoNombre: 'Luigi', tipo: 'peaje_terminal', monto: 10, estado: 'aprobado', nota: '', fecha: serverTimestamp(), creadoPorUid: UID_GESTOR, createdAt: serverTimestamp() }
+  for (const uid of STAFF_UIDS) {
+    const d = como(uid)
+    await assertFails(setDoc(doc(d, 'gastos_motorizado', 'n1-' + uid), nuevo))
+    await assertFails(setDoc(doc(d, 'gastos_motorizado', 'n2-' + uid), { ...nuevo, monto: 999999, motorizadoId: 'otro', creadoPorUid: 'cualquiera' }))
+    await assertFails(setDoc(doc(d, 'gastos_motorizado', 'n3-' + uid), { ...nuevo, monto: -50 }))
+    await assertFails(setDoc(doc(d, 'gastos_motorizado', 'n4-' + uid), { ...nuevo, estado: 'pendiente' }))
+    await assertFails(setDoc(doc(d, 'gastos_motorizado', 'n5-' + uid), { ...nuevo, consumidoEnDepositoId: 'DC' }))
+    await assertFails(updateDoc(doc(d, 'gastos_motorizado', 'gC'), { monto: 1 }))
+    await assertFails(updateDoc(doc(d, 'gastos_motorizado', 'gC'), { estado: 'anulado', updatedAt: serverTimestamp() }))
+    await assertFails(updateDoc(doc(d, 'gastos_motorizado', 'gL'), { monto: 1 }))
+    await assertFails(updateDoc(doc(d, 'gastos_motorizado', 'gL'), { estado: 'anulado', updatedAt: serverTimestamp() }))
+    await assertFails(updateDoc(doc(d, 'gastos_motorizado', 'gL'), { nota: 'x' }))
+    await assertFails(deleteDoc(doc(d, 'gastos_motorizado', 'gL')))
+  }
+  for (const uid of [UID_DIGITADOR, UID_MOTO]) await assertFails(setDoc(doc(como(uid), 'gastos_motorizado', 'nd-' + uid), nuevo))
+})
+
+test('FIN1CB-R2 · gastos: la marca de consumo sigue cerrada (fabricar, quitar, reasignar ⇒ DENY) y la rama FIN-2 legítima sigue (un depósito con gastos se crea en un batch ⇒ ALLOW)', async () => {
+  await sembrarGastos1cb()
+  const g = como(UID_GESTOR)
+  await assertFails(updateDoc(doc(g, 'gastos_motorizado', 'gL'), { consumidoEnDepositoId: 'DEPX' }))
+  await assertFails(updateDoc(doc(g, 'gastos_motorizado', 'gL'), { consumidoEnDepositoId: 'DC' }))
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'gastos_motorizado', 'gC'), { consumidoEnDepositoId: deleteField() }))
+  await assertFails(updateDoc(doc(g, 'gastos_motorizado', 'gC'), { consumidoEnDepositoId: 'DEP9' }))
+  await sembrarGastosFin2({ gq: { motorizadoId: 'mot1', estado: 'aprobado', monto: 10 } })
+  await assertSucceeds(batchCrearDepositoConGastos(UID_MOTO, 'DUno', ['gq']).commit())
+  assert.equal((await leerGastoFin2('gq'))?.consumidoEnDepositoId, 'DUno')
+})
+
+test('FIN1CB-R3 · ledger POR TIPO: gestor y admin no crean, editan, anulan ni reactivan un gasto_aprobado ni un adelanto_motorizado, ni disfrazan otro movimiento como uno de ellos ⇒ DENY', async () => {
+  const mov = (tipo: string, extra: Record<string, unknown> = {}) => ({ tipo, monto: 100, at: serverTimestamp(), creadoPorUid: UID_GESTOR, creadoPorRol: 'gestor', descripcion: 'x', estado: 'activo', motorizadoId: 'mot1', ...extra })
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    await setDoc(doc(db, 'movimientos_financieros', 'adel'), { ...mov('adelanto_motorizado'), semanaKey: '2026-W20', cuentaOrigen: 'caja_storkhub', cuentaDestino: 'deuda_motorizado:mot1', at: new Date() })
+    await setDoc(doc(db, 'movimientos_financieros', 'gast'), { ...mov('gasto_aprobado'), gastoId: 'gL', cuentaOrigen: 'efectivo_en_poder:mot1', cuentaDestino: 'gastos_operativos', at: new Date() })
+    await setDoc(doc(db, 'movimientos_financieros', 'otro'), { ...mov('pago_recibido'), solicitudId: 'x', at: new Date() })
+  })
+  for (const uid of STAFF_UIDS) {
+    const d = como(uid)
+    await assertFails(setDoc(doc(d, 'movimientos_financieros', 'a1-' + uid), mov('adelanto_motorizado', { semanaKey: '2026-W20', cuentaOrigen: 'caja_storkhub', cuentaDestino: 'deuda_motorizado:mot1' })))
+    await assertFails(setDoc(doc(d, 'movimientos_financieros', 'a3-' + uid), mov('adelanto_motorizado', { creadoPorUid: 'otroUid', creadoPorRol: 'admin' })))
+    await assertFails(setDoc(doc(d, 'movimientos_financieros', 'a7-' + uid), mov('adelanto_motorizado', { motorizadoId: 'ajeno', monto: 1e7 })))
+    await assertFails(setDoc(doc(d, 'movimientos_financieros', 'g5-' + uid), mov('gasto_aprobado', { monto: 5000, cuentaOrigen: 'efectivo_en_poder:mot1', cuentaDestino: 'gastos_operativos' })))
+    await assertFails(updateDoc(doc(d, 'movimientos_financieros', 'adel'), { monto: 1 }))
+    await assertFails(updateDoc(doc(d, 'movimientos_financieros', 'adel'), { estado: 'anulado', anuladoAt: serverTimestamp(), anuladoPorUid: uid, motivoAnulacion: 'x' }))
+    await assertFails(updateDoc(doc(d, 'movimientos_financieros', 'gast'), { monto: 1 }))
+    await assertFails(updateDoc(doc(d, 'movimientos_financieros', 'gast'), { estado: 'anulado', anuladoAt: serverTimestamp() }))
+    // Disfraces: otro movimiento que pasa a ser de un tipo reservado, o uno reservado que deja de serlo.
+    await assertFails(updateDoc(doc(d, 'movimientos_financieros', 'otro'), { tipo: 'adelanto_motorizado' }))
+    await assertFails(updateDoc(doc(d, 'movimientos_financieros', 'otro'), { tipo: 'gasto_aprobado' }))
+    await assertFails(updateDoc(doc(d, 'movimientos_financieros', 'adel'), { tipo: 'pago_recibido' }))
+    await assertFails(deleteDoc(doc(d, 'movimientos_financieros', 'adel')))
+  }
+  await assertFails(setDoc(doc(como(UID_DIGITADOR), 'movimientos_financieros', 'ad-dig'), mov('adelanto_motorizado')))
+  // Control (cuánto NO se cerró): el resto del ledger sigue abierto hasta FIN-1E — la misma forma de escritura, con otro tipo, pasa.
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'movimientos_financieros', 'ctl'), mov('pago_recibido', { solicitudId: 'x' })))
+  await assertSucceeds(updateDoc(doc(como(UID_ADMIN), 'movimientos_financieros', 'otro'), { descripcion: 'editada' }))
+})
+
+test('FIN1CB-R4 · solicitudes: la resolución de incidencias es del servidor: no_cobrar ni se crea ni se deshace, no se firma una resolución, no se toca cobroPendiente ni cobrosMotorizado ⇒ DENY (gestor y admin)', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'rz1'), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0300', secuencia: 300, confirmacion: { precioFinalCordobas: 100 }, cobroPendiente: true,
+      cobrosMotorizado: { delivery: { recibio: false }, producto: { recibio: true, monto: 60 } },
+      cobroDelivery: { estado: 'pendiente', monto: 100, tipoCliente: 'contado', quienPaga: 'entrega' },
+    })
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'rz2'), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0301', secuencia: 301, confirmacion: { precioFinalCordobas: 100 },
+      cobroDelivery: { estado: 'no_cobrar', monto: 100, tipoCliente: 'contado', quienPaga: 'entrega' },
+    })
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'rz3'), { ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0302', secuencia: 302, confirmacion: { precioFinalCordobas: 100 }, cobroPendiente: true })
+  })
+  const firma = { resueltoPor: 'otra-persona', at: serverTimestamp(), nota: null, tipo: 'se_pierde' }
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(ordenRef(uid, 'rz1'), { 'cobroDelivery.estado': 'no_cobrar' }))                      // se_pierde (condonar)
+    await assertFails(updateDoc(ordenRef(uid, 'rz2'), { 'cobroDelivery.estado': 'pendiente' }))                      // deshacer la condonación
+    await assertFails(updateDoc(ordenRef(uid, 'rz1'), { 'cobrosMotorizado.resolucion': firma }))                     // actor falso
+    await assertFails(updateDoc(ordenRef(uid, 'rz1'), { 'cobrosMotorizado.producto.resolucion': firma, 'cobrosMotorizado.producto.estado': 'no_cobrar' }))
+    await assertFails(updateDoc(ordenRef(uid, 'rz1'), { cobroPendiente: false }))
+    await assertFails(updateDoc(ordenRef(uid, 'rz1'), { cobrosMotorizado: deleteField() }))
+    await assertFails(updateDoc(ordenRef(uid, 'rz3'), { 'cobroDelivery.estado': 'pendiente', 'cobroDelivery.registradoAt': serverTimestamp(), 'cobrosMotorizado.resolucion': firma, cobroPendiente: false })) // ResolveModal sobre orden sin cobroDelivery
+    // Una orden condonada no se toca desde el cliente (ni su boucher).
+    await assertFails(updateDoc(ordenRef(uid, 'rz2'), { 'cobroDelivery.estado': 'en_revision_deposito', 'cobroDelivery.boucherVigente': 'gestor', 'cobroDelivery.boucherGestor': { url: 'https://example.test/g.jpg', path: 'p', at: serverTimestamp() } }))
+  }
+  // El motorizado tampoco escribe cobroPendiente (lo escribe el servidor al entregar) y sigue avisando "en camino".
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'rz4'), { ...ordenBase({ estado: 'retirado', asignacion: { motorizadoAuthUid: UID_MOTO, motorizadoNombre: 'John Pork', estadoAceptacion: 'aceptada' } }), codigo: 'SH-0303', secuencia: 303 })
+  })
+  await assertFails(updateDoc(ordenRef(UID_MOTO, 'rz4'), { cobroPendiente: true }))
+  await assertSucceeds(updateDoc(ordenRef(UID_MOTO, 'rz4'), { estado: 'en_camino_entrega', updatedAt: serverTimestamp() }))
+})
+
+test('FIN1CB-R5 · Q4 residual: gestor y admin no editan, después de creada la orden, los inputs de la fórmula del monto (cobrosMotorizado.*, pagoDelivery.*, cobroContraEntrega.*, tipoCliente) ⇒ DENY; el resto de la orden sigue editable ⇒ ALLOW', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'q4'), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0310', secuencia: 310, confirmacion: { precioFinalCordobas: 100 },
+      pagoDelivery: { quienPaga: 'entrega', deducirDelCobroContraEntrega: true }, cobroContraEntrega: { aplica: true, monto: 60 },
+      cobrosMotorizado: { delivery: { recibio: false }, producto: { recibio: true, monto: 60 } },
+    })
+  })
+  for (const uid of STAFF_UIDS) {
+    for (const cambio of [
+      { 'cobrosMotorizado.producto.recibio': false }, { 'cobrosMotorizado.producto.monto': 1 }, { 'cobrosMotorizado.delivery.recibio': true },
+      { 'pagoDelivery.deducirDelCobroContraEntrega': false }, { 'pagoDelivery.quienPaga': 'credito_semanal' }, { 'cobroContraEntrega.monto': 1 }, { 'cobroContraEntrega.aplica': false },
+      { tipoCliente: 'credito' }, { pagoDelivery: { quienPaga: 'entrega' } },
+    ]) await assertFails(updateDoc(ordenRef(uid, 'q4'), cambio))
+    await assertSucceeds(updateDoc(ordenRef(uid, 'q4'), { prioridad: true, updatedAt: serverTimestamp() }))
+  }
+})
+
+test('FIN1CB-R6 · marcadores server-only: operaciones_gasto y operaciones_adelanto no se leen ni se escriben desde ningún rol del cliente ⇒ DENY', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'operaciones_gasto', 'crear_op-12345678'), { tipo: 'crear_gasto', actorUid: 'x' })
+    await setDoc(doc(ctx.firestore(), 'operaciones_adelanto', 'registrar_op-12345678'), { tipo: 'registrar_adelanto', actorUid: 'x' })
+  })
+  for (const [col, id] of [['operaciones_gasto', 'crear_op-12345678'], ['operaciones_adelanto', 'registrar_op-12345678']]) {
+    for (const uid of [UID_GESTOR, UID_ADMIN, UID_MOTO, UID_COMERCIO, UID_DIGITADOR]) {
+      await assertFails(getDoc(doc(como(uid), col, id)))
+      await assertFails(setDoc(doc(como(uid), col, 'precreado-' + uid), { tipo: 'x' }))
+      await assertFails(updateDoc(doc(como(uid), col, id), { actorUid: 'y' }))
+      await assertFails(deleteDoc(doc(como(uid), col, id)))
+    }
+  }
+})
+
+test('FIN1CB-R7 · sin regresión: FIN-1C-A (DEP-C, cobros_semanales, monto, confirmacion, pagado) y FIN-1B (depósitos A/B) siguen como estaban', async () => {
+  await sembrarOrdenCobro('ordR7')
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(ordenRef(uid, 'ordR7'), { 'cobroDelivery.estado': 'pagado' }))
+    await assertFails(updateDoc(ordenRef(uid, 'ordR7'), { 'cobroDelivery.monto': 1 }))
+    await assertFails(updateDoc(ordenRef(uid, 'ordR7'), { 'confirmacion.precioFinalCordobas': 1 }))
+    await assertFails(setDoc(doc(como(uid), 'cobros_semanales', 'csR7-' + uid), { clienteUid: COMERCIO_ID, totalMonto: 1 }))
+    await assertFails(setDoc(doc(como(uid), 'ordenes_deposito', 'depTC-' + uid), depositoTipoC({ solicitudIds: ['ordR7'], confirmadoPorUid: uid })))
+  }
+  // El boucher legítimo sigue (mismo recorrido de la misma regla).
+  await assertSucceeds(updateDoc(ordenRef(UID_GESTOR, 'ordR7'), {
+    'cobroDelivery.estado': 'en_revision_deposito',
+    'cobroDelivery.boucherGestor': { url: 'https://example.test/g.jpg', path: 'p', at: serverTimestamp() },
+    'cobroDelivery.boucherVigente': 'gestor',
+    updatedAt: serverTimestamp(),
+  }))
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'dxR7'), depositoBase({ cuentasDestino: [], montoBruto: 120, gastosDescontados: 10, gastosIds: [] })))
 })

@@ -137,17 +137,17 @@ test('FIN1C-K1 · los writers financieros de Cobros llaman SOLO a las callables:
   assert.ok(!/collection\(db, 'movimientos_financieros'\)/.test(p))
 })
 
-test('FIN1C-K2 · lo legítimo de Cobros sigue en el cliente: boucher (subir, reemplazar, quitar) y ResolveModal; y la pantalla sigue LEYENDO cobros_semanales', () => {
+test('FIN1C-K2 · lo legítimo de Cobros sigue en el cliente: boucher (subir, reemplazar, quitar); ResolveModal conserva su UI pero ya resuelve por callable (FIN-1C-B); y la pantalla sigue LEYENDO cobros_semanales', () => {
   const p = sinComentarios(leer('app', 'panel', 'gestor', 'cobros', 'page.tsx'))
   for (const n of ['handleQuitar', 'handleReemplazar', 'handleGestorBoucherUpload', 'handleResolver', 'asegurarBoucherCobroMutable']) {
     assert.ok(new RegExp(`\\b${n}\\b`).test(p), `${n} sigue (flujo legítimo)`)
   }
-  assert.ok(p.includes("'cobrosMotorizado.resolucion'") && p.includes("'cobrosMotorizado.producto.resolucion'"), 'ResolveModal conserva sus campos')
+  assert.ok(!p.includes("'cobrosMotorizado.resolucion'") && !p.includes("'cobrosMotorizado.producto.resolucion'"), 'ResolveModal ya no escribe sus campos: los escribe resolverIncidenciaCobro')
   assert.ok(p.includes("collection(db, 'cobros_semanales')"), 'la pantalla lee cobros_semanales')
-  // Lo único que el cliente escribe en cobroDelivery.estado es pendiente / en_revision_deposito / no_cobrar (las Rules lo exigen igual).
+  // Lo único que el cliente escribe en cobroDelivery.estado es pendiente / en_revision_deposito (boucher); 'no_cobrar' y 'pagado' son del servidor (las Rules lo exigen igual).
   const estados = [...p.matchAll(/'cobroDelivery\.estado':\s*([^,\n}]+)/g)].map((m) => m[1].trim())
   assert.ok(estados.length > 0)
-  for (const e of estados) assert.ok(!e.includes('pagado'), `estado escrito por el cliente: ${e}`)
+  for (const e of estados) assert.ok(!e.includes('pagado') && !e.includes('no_cobrar'), `estado escrito por el cliente: ${e}`)
 })
 
 test('FIN1C-K3 · los wrappers entregan a httpsCallable SOLO los campos del contrato (sin monto, estado, movimientos, depósitos, actor ni rol)', () => {

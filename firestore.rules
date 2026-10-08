@@ -903,8 +903,11 @@ service cloud.firestore {
       function cobroDeliveryStaffCerrado() {
         return !('cobroDelivery' in request.resource.data.diff(resource.data).affectedKeys())
           || (
-            cobroAnt().get('estado', '') != 'pagado'
-            && cobroNue().get('estado', '') in ['pendiente', 'en_revision_deposito', 'no_cobrar']
+            // FIN-1C-B — 'no_cobrar' (la condonación del delivery) lo escribe SOLO resolverIncidenciaCobro: el cliente ni la crea ni la deshace, y una orden
+            // condonada no se toca desde el cliente. Un cobroDelivery que no existía solo nace con la subida de un boucher (en_revision_deposito).
+            cobroAnt().get('estado', '') in ['', 'pendiente', 'en_revision_deposito']
+            && cobroNue().get('estado', '') in ['pendiente', 'en_revision_deposito']
+            && (cobroAnt().get('estado', '') != '' || cobroNue().get('estado', '') == 'en_revision_deposito')
             && cobroNue().diff(cobroAnt()).affectedKeys().hasOnly([
                  'estado', 'boucherGestor', 'boucherVigente', 'boucherUrl', 'boucherPath', 'boucherAt', 'subidoPor',
                  'monto', 'tipoCliente', 'quienPaga', 'registradoAt'
@@ -915,12 +918,20 @@ service cloud.firestore {
             )
           );
       }
+      // FIN-1C-B — cierra la edición de cliente POST-creación de la resolución de incidencias (cobrosMotorizado, cobroPendiente) y de los inputs que
+      // alimentan el monto del cobro (pagoDelivery, cobroContraEntrega, tipoCliente). La CREACIÓN de la orden no pasa por aquí (es otra rama); ningún
+      // writer legítimo de gestor/admin los toca después: los escribe el servidor.
+      function inputsDeCobroIntactos() {
+        return !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['cobroPendiente', 'cobrosMotorizado', 'pagoDelivery', 'cobroContraEntrega', 'tipoCliente']);
+      }
       function confirmacionIntacta() {
         return !('confirmacion' in request.resource.data.diff(resource.data).affectedKeys());
       }
       function cobroPagadoIntegro() {
         return cobroDeliveryStaffCerrado()
           && confirmacionIntacta()
+          && inputsDeCobroIntactos()
           // Una orden pagada con su DEP tipo C no cambia su puntero ni su confirmación a StorkHub desde el cliente.
           && (cobroAnt().get('estado', '') != 'pagado' || !liquidacionEsTipoC() || liquidacionStorkhubIntacta());
       }
@@ -1127,7 +1138,6 @@ service cloud.firestore {
           'evidencias',
           'evidenciasTerminal',
           'evidenciasCargotrans',
-          'cobroPendiente',
           'registro',
           'acumulacionCobroSemanal'
         ])
@@ -2033,8 +2043,18 @@ service cloud.firestore {
     // métodos para que delete sea realmente false. read, create y update quedan EXACTAMENTE como
     // estaban: cerrar su contenido es FIN-1E, después de migrar los writers que aún los usan.
     match /movimientos_financieros/{id} {
+      // FIN-1C-B — los movimientos de gasto (gasto_aprobado) y de adelanto (adelanto_motorizado) los crean y anulan SOLO las callables de gastos y
+      // adelantos. Las Rules se combinan con OR: por eso NO se agrega un "deny" aparte sino que se excluyen estos tipos de la propia rama genérica,
+      // tanto al crear como al editar (el tipo de antes Y el de después: ni se crea, ni se edita el monto, ni se anula o reactiva, ni se disfraza un
+      // movimiento de otro tipo como uno de estos). El resto del ledger sigue abierto a gestor/admin hasta FIN-1E (C6/C8 globales).
+      function tipoReservadoAServidor(d) {
+        return d.get('tipo', '') in ['gasto_aprobado', 'adelanto_motorizado'];
+      }
       allow read: if isAdminOrGestor();
-      allow create, update: if isAdminOrGestor();
+      allow create: if isAdminOrGestor() && !tipoReservadoAServidor(request.resource.data);
+      allow update: if isAdminOrGestor()
+        && !tipoReservadoAServidor(resource.data)
+        && !tipoReservadoAServidor(request.resource.data);
       allow delete: if false;
     }
 
@@ -2328,9 +2348,11 @@ service cloud.firestore {
           && get(rutaDeposito(depId)).data.get('estado', '') != 'convertido_en_deuda';
       }
 
-      allow create: if isAdminOrGestor()
-        && !('consumidoEnDepositoId' in request.resource.data.keys());
-      allow update: if isAdminOrGestor() && !tocaMarcaDeConsumo();
+      // FIN-1C-B — crear un gasto y anularlo (o editarlo) son SOLO de las callables crearGastoMotorizado / anularGastoMotorizado (Admin SDK, que
+      // no pasa por estas Rules). Antes cualquier gestor/admin podía crear un gasto con monto, estado y actor arbitrarios, cambiar el monto de uno ya
+      // descontado en un depósito o anularlo. Del cliente quedan SOLO las dos ramas de FIN-2 sobre la marca (consumir al crear el depósito y
+      // liberar al anularlo), que no pueden tocar monto, estado ni nada más.
+      allow create: if false;
       allow update: if consumoDeGastoValido() || liberacionDeGastoValida();
       allow delete: if false;
     }

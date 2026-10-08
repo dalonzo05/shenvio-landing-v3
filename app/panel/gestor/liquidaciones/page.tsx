@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   collection,
   onSnapshot,
@@ -22,6 +22,9 @@ import { uploadLiquidacionPDF } from '@/fb/storage'
 import Link from 'next/link'
 import { rutaOrden } from '@/lib/ruta-orden'
 import { registrarMovimiento, crearSaldoCargo } from '@/lib/financial-writes'
+import { registrarAdelantoMotorizadoServidor } from '@/lib/registrar-adelanto-cliente'
+import { anularAdelantoMotorizadoServidor } from '@/lib/anular-adelanto-cliente'
+import { exigirHechoOp, operacionDeIntento, presentarErrorOp, presentarResultadoAnularAdelanto, presentarResultadoRegistrarAdelanto, type IntentoOp } from '@/lib/finanzas-operativas-ux'
 import {
   Receipt,
   ChevronDown,
@@ -945,6 +948,9 @@ function LiquidacionesPageContent() {
 
   // ── Registrar adelanto rápido ─────────────────────────────────────────────
 
+  // FIN-1C-B — identidad de UN intento de adelanto (la conserva el reintento tras un error temporal).
+  const intentoAdelantoRef = useRef<IntentoOp | null>(null)
+
   async function handleAdelanto() {
     const monto = parseFloat(montoAdelanto)
     if (isNaN(monto) || monto <= 0 || !selectedMotoId) return
@@ -952,29 +958,19 @@ function LiquidacionesPageContent() {
     if (!moto) return
     setSavingAdelanto(true)
     try {
-      const uid = auth.currentUser?.uid ?? ''
-      // Movimiento financiero con doble entrada
-      // caja_storkhub → deuda_motorizado (gestor entrega efectivo, motorizado queda debiendo)
-      await registrarMovimiento(
-        'adelanto_motorizado',
-        monto,
-        uid,
-        `Adelanto C$${monto} · ${moto.nombre || moto.authUid} · Sem ${selectedSemana}`,
-        { motorizadoId: selectedMotoId },
-        {
-          semanaKey: selectedSemana,
-          cuentas: {
-            origen: cuentas.caja,
-            destino: cuentas.deudaMotorizado(selectedMotoId),
-          },
-          propietario: `motorizado:${selectedMotoId}`,
-        }
-      )
+      // FIN-1C-B — el adelanto lo registra el SERVIDOR (movimiento adelanto_motorizado, cuentas, propietario, actor y rol) y rechaza una semana ya
+      // liquidada. La pantalla solo manda motorizado, monto, semana, nota y el operacionId.
+      intentoAdelantoRef.current = operacionDeIntento(intentoAdelantoRef.current, [selectedMotoId, monto, selectedSemana, notaAdelanto], () => crypto.randomUUID())
+      const r = await registrarAdelantoMotorizadoServidor(selectedMotoId, monto, selectedSemana, intentoAdelantoRef.current.operacionId, notaAdelanto)
+      exigirHechoOp(presentarResultadoRegistrarAdelanto(r))
+      intentoAdelantoRef.current = null
       setMontoAdelanto('')
       setNotaAdelanto('')
       setShowAdelanto(false)
     } catch (e: any) {
-      console.error('Error registrando adelanto:', e)
+      const p = presentarErrorOp(e)
+      if (p.categoria !== 'temporal') intentoAdelantoRef.current = null
+      setErr(p.mensaje)
     } finally {
       setSavingAdelanto(false)
     }
@@ -985,15 +981,10 @@ function LiquidacionesPageContent() {
   async function anularAdelanto(movimientoId: string) {
     setAnulandoAdelantoId(movimientoId)
     try {
-      const uid = auth.currentUser?.uid ?? ''
-      await updateDoc(doc(db, 'movimientos_financieros', movimientoId), {
-        estado: 'anulado',
-        anuladoAt: serverTimestamp(),
-        anuladoPorUid: uid,
-        motivoAnulacion: 'Adelanto anulado por gestor',
-      })
+      // FIN-1C-B — la anulación la decide el SERVIDOR: un adelanto coherente y de una semana SIN liquidación; nunca se reactiva.
+      exigirHechoOp(presentarResultadoAnularAdelanto(await anularAdelantoMotorizadoServidor(movimientoId)))
     } catch (e: any) {
-      console.error('[liquidaciones] Error anulando adelanto:', e)
+      setErr(presentarErrorOp(e).mensaje)
     } finally {
       setAnulandoAdelantoId(null)
     }
