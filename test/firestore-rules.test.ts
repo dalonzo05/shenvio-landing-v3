@@ -4174,3 +4174,35 @@ test('FIN1C-DEUDA-FIN1E · DEUDA EXPLÍCITA: el ledger global (movimientos_finan
   // propósito: cuando FIN-1E cierre el ledger tiene que cambiarse aquí, a la vista.
   await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'movimientos_financieros', 'movDeuda1'), { tipo: 'pago_recibido', estado: 'activo', monto: 1, solicitudId: 'x', at: serverTimestamp(), creadoPorUid: UID_GESTOR, creadoPorRol: 'gestor', descripcion: 'deuda FIN-1E' }))
 })
+
+test('FIN1C-R11 · el motorizado ya NO escribe pagoDelivery.quienPaga (credito_semanal → entrega, transferencia → entrega, ni mapa completo), antes ni después de entregar ⇒ DENY; sus señales legítimas siguen ⇒ ALLOW', async () => {
+  const sembrarMoto = async (id: string, estado: string, pagoDelivery: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'solicitudes_envio', id), {
+        ...ordenBase({ estado, asignacion: { motorizadoAuthUid: UID_MOTO, motorizadoNombre: 'John Pork', estadoAceptacion: 'aceptada' } }),
+        codigo: 'SH-1100', secuencia: 1100, pagoDelivery, ...extra,
+      })
+    })
+  }
+  const moto = (id: string) => doc(como(UID_MOTO), 'solicitudes_envio', id)
+  // credito_semanal → entrega (con la orden en camino, retirada o ya entregada).
+  for (const estado of ['retirado', 'en_camino_entrega', 'entregado']) {
+    await sembrarMoto('qp1' + estado, estado, { tipo: 'credito_semanal', quienPaga: 'credito_semanal' }, { tipoCliente: 'credito' })
+    await assertFails(updateDoc(moto('qp1' + estado), { 'pagoDelivery.quienPaga': 'entrega' }))
+    await assertFails(updateDoc(moto('qp1' + estado), { pagoDelivery: { tipo: 'credito_semanal', quienPaga: 'entrega' } }))
+    // Tampoco junto a una señal legítima (estado) en el mismo write.
+    if (estado === 'retirado') await assertFails(updateDoc(moto('qp1' + estado), { estado: 'en_camino_entrega', 'pagoDelivery.quienPaga': 'entrega', updatedAt: serverTimestamp() }))
+  }
+  // transferencia → entrega, y cualquier otro campo de pagoDelivery.
+  await sembrarMoto('qp2', 'en_camino_entrega', { tipo: 'contado', quienPaga: 'transferencia', montoSugerido: 90 })
+  await assertFails(updateDoc(moto('qp2'), { 'pagoDelivery.quienPaga': 'entrega' }))
+  await assertFails(updateDoc(moto('qp2'), { 'pagoDelivery.montoSugerido': 1 }))
+  await assertFails(updateDoc(moto('qp2'), { 'pagoDelivery.deducirDelCobroContraEntrega': true }))
+  // Control: sus operaciones legítimas siguen (mismo recorrido de la misma regla).
+  await sembrarMoto('qp3', 'retirado', { tipo: 'contado', quienPaga: 'entrega' })
+  await assertSucceeds(updateDoc(moto('qp3'), { estado: 'en_camino_entrega', updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(moto('qp3'), { evidencias: { entrega: 'https://example.test/e.jpg' }, updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(moto('qp3'), { acumulacionCobroSemanal: { estado: 'pendiente', updatedAt: serverTimestamp() } }))
+  // Escribir el MISMO pagoDelivery (sin cambiarlo) tampoco es un writer: no hay diff, el update pasa.
+  await assertSucceeds(updateDoc(moto('qp3'), { 'pagoDelivery.quienPaga': 'entrega', updatedAt: serverTimestamp() }))
+})

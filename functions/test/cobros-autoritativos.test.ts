@@ -255,16 +255,85 @@ test('FIN1C-C9 · no entregada, crédito, no cobrable e incidencia abierta se re
   assert.equal(w.escrituras, 0);
 });
 
-test('FIN1C-C10 · una transferencia exige el boucher vigente de la orden', async () => {
-  const w = mundo(); usuarios(w); orden(w, 'S1');
+// El flujo propio de transferencia (quienPaga = 'transferencia', el de BoucherModal) conserva su contrato: exige el boucher vigente.
+const TRANSF = { pagoDelivery: { quienPaga: 'transferencia' } };
+test('FIN1C-C10 · el flujo propio de transferencia (quienPaga = transferencia, BoucherModal) exige el boucher vigente de la orden', async () => {
+  const w = mundo(); usuarios(w); orden(w, 'S1', TRANSF);
   await assert.rejects(cobrar(w, 'g1', pet(['S1'], 'transferencia')), codigo('failed-precondition', 'boucher_requerido'));
-  orden(w, 'S2', {}, { estado: 'en_revision_deposito', boucherVigente: 'gestor', boucherComercio: { url: 'https://e/c.jpg' } });
+  orden(w, 'S2', TRANSF, { estado: 'en_revision_deposito', boucherVigente: 'gestor', boucherComercio: { url: 'https://e/c.jpg' } });
   await assert.rejects(cobrar(w, 'g1', { ...pet(['S2'], 'transferencia'), operacionId: OP2 }), codigo('failed-precondition', 'boucher_requerido'));
-  orden(w, 'S3', {}, { estado: 'en_revision_deposito', boucherVigente: 'comercio', boucherComercio: { url: 'https://e/c.jpg' } });
+  // La condición sale del documento: también la marca guardada en cobroDelivery.quienPaga.
+  orden(w, 'S2b', {}, { quienPaga: 'transferencia' });
+  await assert.rejects(cobrar(w, 'g1', { ...pet(['S2b'], 'transferencia'), operacionId: 'op-cccccccc' }), codigo('failed-precondition', 'boucher_requerido'));
+  orden(w, 'S3', TRANSF, { estado: 'en_revision_deposito', boucherVigente: 'comercio', boucherComercio: { url: 'https://e/c.jpg' } });
   const r = await cobrar(w, 'g1', { ...pet(['S3'], 'transferencia'), operacionId: 'op-aaaaaaaa' });
   assert.equal(w.get(`ordenes_deposito/${r.depositoIds[0]}`)!.boucherUrl, 'https://e/c.jpg');
   // Efectivo no exige boucher.
-  orden(w, 'S4'); await cobrar(w, 'g1', { ...pet(['S4']), operacionId: 'op-bbbbbbbb' });
+  orden(w, 'S4', TRANSF); await cobrar(w, 'g1', { ...pet(['S4']), operacionId: 'op-bbbbbbbb' });
+});
+
+test('FIN1C-F1 · PagoContadoModal: transferencia SIN boucher en una orden normal ⇒ pago registrado, 1 pago_recibido y 1 DEP-C con boucherUrl null', async () => {
+  const w = mundo(); usuarios(w); orden(w, 'S1');
+  const r = await cobrar(w, 'g1', pet(['S1'], 'transferencia'));
+  assert.equal(r.resultado, 'registrado'); assert.equal(r.total, 100);
+  assert.equal(w.movimientos().length, 1); assert.equal(w.movimientos()[0].data.monto, 100); assert.equal(w.movimientos()[0].data.depositoId, r.depositoIds[0]);
+  const deps = w.depositos(); assert.equal(deps.length, 1);
+  const d = deps[0].data;
+  assert.equal(d.tipo, 'pago_delivery_deposito'); assert.equal(d.estado, 'confirmado'); assert.deepEqual(d.solicitudIds, ['S1']); assert.equal(d.montoTotal, 100);
+  assert.equal(d.boucherUrl, null); assert.equal(d.confirmadoPorUid, 'g1'); assert.equal(d.motorizadoUid, 'mot1'); assert.equal(d.destinatario, 'storkhub');
+  const o = w.raw('solicitudes_envio/S1') as { cobroDelivery: Doc; registro: { deposito: Doc } };
+  assert.equal(o.cobroDelivery.estado, 'pagado'); assert.equal(o.registro.deposito.storkhubDepositoId, deps[0].id);
+});
+
+test('FIN1C-F2 · transferencia sin boucher CON nota ⇒ la nota se preserva (notaPago y referencia del DEP-C)', async () => {
+  const w = mundo(); usuarios(w); orden(w, 'S1');
+  await cobrar(w, 'g1', pet(['S1'], 'transferencia', { nota: ' ref BAC 998877 ' }));
+  assert.equal((w.raw('solicitudes_envio/S1') as { cobroDelivery: Doc }).cobroDelivery.notaPago, 'ref BAC 998877');
+  assert.equal((w.depositos()[0].data.metadata as Doc).referencia, 'ref BAC 998877');
+});
+
+test('FIN1C-F3 · transferencia sin boucher SIN nota ⇒ PASS (la nota sigue siendo opcional); referencia null', async () => {
+  const w = mundo(); usuarios(w); orden(w, 'S1');
+  const r = await cobrar(w, 'g1', pet(['S1'], 'transferencia'));
+  assert.equal(r.resultado, 'registrado');
+  assert.equal((w.depositos()[0].data.metadata as Doc).referencia, null);
+  assert.ok(!('notaPago' in (w.raw('solicitudes_envio/S1') as { cobroDelivery: Doc }).cobroDelivery));
+});
+
+test('FIN1C-F4 · flujo BoucherModal (quienPaga = transferencia) sin boucher ⇒ boucher_requerido y nada se escribe', async () => {
+  const w = mundo(); usuarios(w); orden(w, 'S1', TRANSF);
+  await assert.rejects(cobrar(w, 'g1', pet(['S1'], 'transferencia')), codigo('failed-precondition', 'boucher_requerido'));
+  assert.equal(w.escrituras, 0);
+});
+
+test('FIN1C-F5 · flujo BoucherModal con boucher vigente ⇒ PASS y el DEP-C guarda el comprobante', async () => {
+  const w = mundo(); usuarios(w); orden(w, 'S1', TRANSF, conBoucher);
+  const r = await cobrar(w, 'g1', pet(['S1'], 'transferencia'));
+  assert.equal(w.get(`ordenes_deposito/${r.depositoIds[0]}`)!.boucherUrl, 'https://e/b.jpg');
+  // Una orden normal CON boucher (subido por el comercio/gestor) también lo conserva.
+  orden(w, 'S2', {}, conBoucher);
+  const r2 = await cobrar(w, 'g1', { ...pet(['S2'], 'transferencia'), operacionId: OP2 });
+  assert.equal(w.get(`ordenes_deposito/${r2.depositoIds[0]}`)!.boucherUrl, 'https://e/b.jpg');
+});
+
+test('FIN1C-F6 · efectivo sigue sin DEP-C, con o sin boucher', async () => {
+  const w = mundo(); usuarios(w); orden(w, 'S1'); orden(w, 'S2', TRANSF, conBoucher);
+  await cobrar(w, 'g1', pet(['S1', 'S2'], 'efectivo'));
+  assert.equal(w.depositos().length, 0); assert.equal(w.movimientos().length, 2);
+});
+
+test('FIN1C-F7 · el monto sigue autoritativo sin boucher: guardado manipulado ⇒ monto_inconsistente; el payload no admite monto', async () => {
+  const w = mundo(); usuarios(w); orden(w, 'S1', {}, { monto: 999 });
+  await assert.rejects(cobrar(w, 'g1', pet(['S1'], 'transferencia')), codigo('failed-precondition', 'monto_inconsistente'));
+  await assert.rejects(cobrar(w, 'g1', pet(['S1'], 'transferencia', { monto: 1, boucherUrl: 'https://x' })), codigo('invalid-argument'));
+  assert.equal(w.escrituras, 0);
+});
+
+test('FIN1C-F8 · lote mixto de transferencia: la orden de flujo BoucherModal sin boucher rechaza TODO el lote; la normal sin boucher pasa sola', async () => {
+  const w = mundo(); usuarios(w); orden(w, 'N1'); orden(w, 'B1', TRANSF);
+  await assert.rejects(cobrar(w, 'g1', pet(['N1', 'B1'], 'transferencia')), codigo('failed-precondition', 'boucher_requerido'));
+  assert.equal(w.escrituras, 0);
+  assert.equal((await cobrar(w, 'g1', { ...pet(['N1'], 'transferencia'), operacionId: OP2 })).resultado, 'registrado');
 });
 
 test('FIN1C-C11 · puntero_ocupado: la orden ya apunta a un depósito de Storkhub o figura confirmada', async () => {

@@ -86,7 +86,13 @@ export function evaluarOrdenParaCobro(
 
   const boucherUrl = boucherVigenteDeCobro(cd);
   if (formaPago === 'transferencia') {
-    if (!boucherUrl) throw rechazoCobro('boucher_requerido', 'Una transferencia exige el comprobante (boucher) de la orden.', { solicitudId: ordenId });
+    // Dos flujos, distinguidos por el DOCUMENTO de la orden (nunca por el cliente):
+    //  · la orden cuyo flujo propio es transferencia (quienPaga = 'transferencia', la que la pantalla resuelve con BoucherModal)
+    //    conserva su contrato: exige el boucher vigente;
+    //  · una orden normal que el gestor marca pagada por transferencia (PagoContadoModal) NO lo exige, como siempre: el DEP tipo C
+    //    nace sin comprobante (boucherUrl null).
+    const flujoTransferencia = cd?.quienPaga === 'transferencia' || orden.pagoDelivery?.quienPaga === 'transferencia';
+    if (flujoTransferencia && !boucherUrl) throw rechazoCobro('boucher_requerido', 'Una transferencia exige el comprobante (boucher) de la orden.', { solicitudId: ordenId });
     const dep = (orden.registro as { deposito?: Record<string, unknown> } | undefined)?.deposito;
     const puntero = dep?.storkhubDepositoId;
     if ((puntero !== undefined && puntero !== null && puntero !== '') || dep?.confirmadoStorkhub === true) {
