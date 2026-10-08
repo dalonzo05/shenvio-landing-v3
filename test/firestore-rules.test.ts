@@ -427,9 +427,7 @@ test('W1 · gestor registra una confirmación a nombre del motorizado, sin calla
   await assertFails(b.commit())
 })
 
-test('W2 · gestor registra el pago del delivery por transferencia junto con la confirmación del cobro ⇒ ALLOW', async () => {
-  // COBROS-PAGO-INTEGRIDAD-1: un DEP tipo C ya no nace suelto. Es la forma
-  // real de BoucherModal/PagoContadoModal: DEP + orden pagada, en una escritura.
+test('W2 · gestor registra el pago del delivery por transferencia (DEP tipo C + orden pagada) desde el cliente ⇒ DENY (FIN-1C-A: registrarCobroDelivery)', async () => {
   await env.withSecurityRulesDisabled(async (ctx) => {
     await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ord1'), {
       ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0001', secuencia: 1,
@@ -440,7 +438,7 @@ test('W2 · gestor registra el pago del delivery por transferencia junto con la 
   const b = writeBatch(db)
   b.set(doc(db, 'ordenes_deposito', 'depW2'), depositoTipoC({ solicitudIds: ['ord1'], montoTotal: 110 }))
   b.update(doc(db, 'solicitudes_envio', 'ord1'), confirmacionTipoC('depW2'))
-  await assertSucceeds(b.commit())
+  await assertFails(b.commit())
 })
 
 test('W3 · el motorizado lista SUS depósitos con where(motorizadoUid == uid) ⇒ ALLOW', async () => {
@@ -647,14 +645,16 @@ test('BI4 · gestor reemplaza el boucher de un depósito en revisión por la ví
   await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), NUEVO_BOUCHER))
 })
 
-test('BI5 · gestor anula un DEP tipo C confirmado sin tocar su comprobante ⇒ ALLOW', async () => {
+test('BI5 · ni gestor ni admin anulan un DEP tipo C confirmado desde el cliente ⇒ DENY (FIN-1C-A: revertirCobroDelivery)', async () => {
   await depositoEn('confirmado', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), {
-    estado: 'anulado',
-    anuladoAt: serverTimestamp(),
-    anuladoPorUid: UID_GESTOR,
-    motivoAnulacion: 'Reversión de cobro contado por gestor',
-  }))
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await assertFails(updateDoc(doc(como(uid), 'ordenes_deposito', 'depI'), {
+      estado: 'anulado',
+      anuladoAt: serverTimestamp(),
+      anuladoPorUid: uid,
+      motivoAnulacion: 'Reversión de cobro contado por gestor',
+    }))
+  }
 })
 
 // HARDENING — las dos mitades cambian: Rehacer exige evento, y una vez
@@ -773,7 +773,7 @@ function reversion(db: ReturnType<typeof como>, opts: { anularMov?: boolean; anu
   return b.commit()
 }
 
-test('H1 · confirmación inicial legítima (DEP-C + orden pagada en un batch) ⇒ ALLOW', async () => {
+test('H1 · confirmación inicial (DEP-C + orden pagada en un batch) desde el cliente ⇒ DENY (FIN-1C-A)', async () => {
   await env.withSecurityRulesDisabled(async (ctx) => {
     await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordP'), {
       ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0003', secuencia: 3,
@@ -784,10 +784,12 @@ test('H1 · confirmación inicial legítima (DEP-C + orden pagada en un batch) �
   const b = writeBatch(db)
   b.set(doc(db, 'ordenes_deposito', 'depNuevo'), depositoTipoC())
   b.update(doc(db, 'solicitudes_envio', 'ordP'), confirmacionTipoC('depNuevo'))
-  await assertSucceeds(b.commit())
+  await assertFails(b.commit())
+  // Ni la orden sola, sin DEP: el resultado de un pago no lo escribe el cliente.
+  await assertFails(updateDoc(doc(db, 'solicitudes_envio', 'ordP'), confirmacionTipoC('depNuevo')))
 })
 
-test('H1b · también sobre una orden sin cobroDelivery previo (PagoContadoModal) ⇒ ALLOW', async () => {
+test('H1b · tampoco sobre una orden sin cobroDelivery previo (PagoContadoModal) ⇒ DENY (FIN-1C-A)', async () => {
   await env.withSecurityRulesDisabled(async (ctx) => {
     await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordP'), { ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0003', secuencia: 3 })
   })
@@ -795,7 +797,7 @@ test('H1b · también sobre una orden sin cobroDelivery previo (PagoContadoModal
   const b = writeBatch(db)
   b.set(doc(db, 'ordenes_deposito', 'depNuevo'), depositoTipoC())
   b.update(doc(db, 'solicitudes_envio', 'ordP'), { ...confirmacionTipoC('depNuevo'), 'cobroDelivery.monto': 80 })
-  await assertSucceeds(b.commit())
+  await assertFails(b.commit())
 })
 
 test('H2 · ataque: reconfirmar una orden ya pagada con un segundo DEP-C ⇒ DENY', async () => {
@@ -851,15 +853,16 @@ test('H8 · ataque: revertir sin anular el movimiento, o sin anular el DEP-C ⇒
   await assertFails(reversion(como(UID_GESTOR), { anularDep: false }))
 })
 
-test('H9 · reversión legítima completa (cobro + movimiento + DEP-C + orden) ⇒ ALLOW', async () => {
+test('H9 · reversión completa (cobro + movimiento + DEP-C + orden) desde el cliente ⇒ DENY (FIN-1C-A: revertirCobroDelivery)', async () => {
   await sembrarPagadaTipoC()
-  await assertSucceeds(reversion(como(UID_GESTOR)))
+  await assertFails(reversion(como(UID_GESTOR)))
+  await assertFails(reversion(como(UID_ADMIN)))
 })
 
-test('H10 · orden pagada: anotar movimientoPagoId y editar campos ajenos al cobro ⇒ ALLOW', async () => {
+test('H10 · orden pagada: anotar movimientoPagoId ⇒ DENY (el cobro pagado no se toca); editar campos ajenos al cobro ⇒ ALLOW', async () => {
   await sembrarPagadaTipoC()
   const db = como(UID_GESTOR)
-  await assertSucceeds(updateDoc(doc(db, 'solicitudes_envio', 'ordP'), { 'cobroDelivery.movimientoPagoId': 'movP' }))
+  await assertFails(updateDoc(doc(db, 'solicitudes_envio', 'ordP'), { 'cobroDelivery.movimientoPagoId': 'movP' }))
   await assertSucceeds(updateDoc(doc(db, 'solicitudes_envio', 'ordP'), { prioridad: true, updatedAt: serverTimestamp() }))
 })
 
@@ -882,7 +885,7 @@ test('H11 · efectivo (tipo A): el cliente ya no confirma el depósito del motor
   await assertFails(b.commit())
 })
 
-test('H12 · revertir un cobro en efectivo con depósito del motorizado: legítimo sin tocar la liquidación; cambiándola ⇒ DENY', async () => {
+test('H12 · revertir un cobro en efectivo con depósito del motorizado desde el cliente ⇒ DENY, toque o no la liquidación (FIN-1C-A)', async () => {
   const sembrar = async () => env.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore()
     await setDoc(doc(db, 'solicitudes_envio', 'ordP'), {
@@ -894,8 +897,7 @@ test('H12 · revertir un cobro en efectivo con depósito del motorizado: legíti
     await setDoc(doc(db, 'movimientos_financieros', 'movP'), { tipo: 'pago_recibido', estado: 'activo', solicitudId: 'ordP', monto: 110 })
   })
   await sembrar()
-  // Legítimo: el depósito del motorizado es otro dinero y no se toca.
-  await assertSucceeds(reversion(como(UID_GESTOR), { anularDep: false, liberarOrden: false }))
+  await assertFails(reversion(como(UID_GESTOR), { anularDep: false, liberarOrden: false }))
   await sembrar()
   await assertFails(reversion(como(UID_GESTOR), { anularDep: false, liberarOrden: true }))
 })
@@ -946,9 +948,9 @@ test('AD6 · gestor confirma un depósito en revisión desde el cliente, con eve
   await assertFails(batchConfirmar(UID_GESTOR, 'depI').b.commit())
 })
 
-test('AD7 · gestor sigue anulando un DEP tipo C confirmado (Revertir), pero no un tipo A ⇒ ALLOW / DENY', async () => {
+test('AD7 · gestor ya no anula un DEP tipo C confirmado desde el cliente (FIN-1C-A), ni un tipo A ⇒ DENY', async () => {
   await depositoEn('confirmado', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { estado: 'anulado', anuladoAt: serverTimestamp() }))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { estado: 'anulado', anuladoAt: serverTimestamp() }))
   await depositoEn('confirmado')
   await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'depI'), { estado: 'anulado', anuladoAt: serverTimestamp() }))
 })
@@ -1547,9 +1549,9 @@ test('A5 · el intento de anular por el cliente no deja rastro: el documento, su
   assert.equal(existeEvento, false, 'el evento tampoco se creó (batch todo-o-nada)')
 })
 
-test('A6 · el tipo C sigue anulándose como siempre desde Revertir ⇒ ALLOW (sin regresión)', async () => {
+test('A6 · el tipo C se anula SOLO en el servidor (FIN-1C-A): ni la forma exacta de Revertir pasa desde el cliente ⇒ DENY', async () => {
   await depositoAB('confirmado', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
     estado: 'anulado', anuladoAt: serverTimestamp(), anuladoPorUid: UID_GESTOR,
     motivoAnulacion: 'Reversión de cobro contado por gestor',
   }))
@@ -1940,13 +1942,13 @@ test('AU10 · evento con timestamp distinto de request.time ⇒ DENY', async () 
   await assertFails(rehacerCon({ extraEvento: { at: antes } }))
 })
 
-test('AU11 · el tipo C: no nace de un update (en_revision → confirmado ⇒ DENY) y su reversión desde Cobros sigue ⇒ ALLOW', async () => {
+test('AU11 · el tipo C: no nace de un update (en_revision → confirmado ⇒ DENY) y tampoco se anula desde el cliente ⇒ DENY (FIN-1C-A)', async () => {
   await depositoAB('en_revision', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
   await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
     estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp(),
   }))
   await depositoAB('confirmado', { tipo: 'pago_delivery_deposito', boucherUrl: 'https://example.test/c.jpg' })
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), {
     estado: 'anulado', anuladoAt: serverTimestamp(), anuladoPorUid: UID_GESTOR,
     motivoAnulacion: 'Reversión de cobro contado por gestor',
   }))
@@ -2411,6 +2413,12 @@ test('VR15 · gestor y admin conservan lo administrativo y lo financiero (la asi
   // Confirmar: intacto.
   const id = await ordenConCodigo('vr15', { estado: 'pendiente_confirmacion' })
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), {
+    estado: 'confirmada',
+    updatedAt: serverTimestamp(),
+  }))
+  // FIN-1C-A: el precio confirmado (confirmacion.precioFinalCordobas) lo escribe asignarMotorizado, no el cliente.
+  const idP = await ordenConCodigo('vr15p', { estado: 'pendiente_confirmacion' })
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', idP), {
     estado: 'confirmada',
     confirmacion: { precioFinalCordobas: 90, confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp() },
     updatedAt: serverTimestamp(),
@@ -3942,4 +3950,227 @@ test('FIN1B-L2 · el staff crea el depósito de captura (con y sin montoBruto/ga
   await assertSucceeds(setDoc(doc(como(UID_ADMIN), 'ordenes_deposito', 'dxL2b'), depositoBase({ tipo: 'recaudacion_motorizado_comercio', destinatario: 'comercio', destinatarioId: COMERCIO_ID })))
   await depositoAB('en_revision')
   await assertSucceeds(pedirCorreccion())
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FIN-1C-A · cobros, tipo C y cobros_semanales AUTORITATIVOS
+//
+// Los escribe el servidor (registrarCobroDelivery, revertirCobroDelivery, registrarPagoCobroSemanal; Admin SDK, que no pasa por estas
+// Rules). Desde el cliente ya no se puede fabricar un cobro pagado, un DEP tipo C, una semana pagada ni el monto/precio que los determina.
+// Lo legítimo del cliente (boucher, ResolveModal) sigue pasando.
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function sembrarOrdenCobro(id: string, extra: Record<string, unknown> = {}) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', id), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0100', secuencia: 100,
+      confirmacion: { precioFinalCordobas: 100, confirmadoPorUid: 'srv' },
+      pagoDelivery: { quienPaga: 'entrega' },
+      cobroDelivery: { estado: 'pendiente', monto: 100, tipoCliente: 'contado', quienPaga: 'entrega' },
+      ...extra,
+    })
+  })
+}
+const ordenRef = (uid: string, id: string) => doc(como(uid), 'solicitudes_envio', id)
+const STAFF_UIDS = [UID_GESTOR, UID_ADMIN]
+
+test('FIN1C-R1 · el DEP tipo C no se crea desde el cliente: ni gestor ni admin, ni suelto ni junto a su orden, ni motorizado ni digitador ⇒ DENY', async () => {
+  await sembrarOrdenCobro('ordC1')
+  for (const uid of STAFF_UIDS) {
+    await assertFails(setDoc(doc(como(uid), 'ordenes_deposito', 'depTC-' + uid), depositoTipoC({ solicitudIds: ['ordC1'], confirmadoPorUid: uid })))
+    const db = como(uid)
+    const b = writeBatch(db)
+    b.set(doc(db, 'ordenes_deposito', 'depTCb-' + uid), depositoTipoC({ solicitudIds: ['ordC1'], confirmadoPorUid: uid }))
+    b.update(doc(db, 'solicitudes_envio', 'ordC1'), confirmacionTipoC('depTCb-' + uid))
+    await assertFails(b.commit())
+  }
+  await assertFails(setDoc(doc(como(UID_MOTO), 'ordenes_deposito', 'depTCm'), depositoTipoC({ motorizadoUid: UID_MOTO })))
+  await assertFails(setDoc(doc(como(UID_DIGITADOR), 'ordenes_deposito', 'depTCd'), { ...depositoTipoC({ estado: 'pendiente_boucher' }), digitadoPorUid: UID_DIGITADOR, digitadoAt: serverTimestamp() }))
+  // Control: el depósito de captura A/B sigue naciendo (FIN-1B sin regresión).
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'ordenes_deposito', 'dxC1ok'), depositoBase({ cuentasDestino: [], montoBruto: 120, gastosDescontados: 10, gastosIds: [] })))
+})
+
+test('FIN1C-R2 · un cobro NO pasa a pagado desde el cliente: ni por campo, ni por mapa completo, ni con sus campos de pago ⇒ DENY', async () => {
+  await sembrarOrdenCobro('ordC2')
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(ordenRef(uid, 'ordC2'), { 'cobroDelivery.estado': 'pagado' }))
+    await assertFails(updateDoc(ordenRef(uid, 'ordC2'), { 'cobroDelivery.estado': 'pagado', 'cobroDelivery.pagadoAt': serverTimestamp(), 'cobroDelivery.formaPago': 'efectivo', 'cobroDelivery.confirmadoPor': uid }))
+    await assertFails(updateDoc(ordenRef(uid, 'ordC2'), { cobroDelivery: { estado: 'pagado', monto: 100, tipoCliente: 'contado', quienPaga: 'entrega', pagadoAt: serverTimestamp() } }))
+    // Ni los campos de pago sueltos con el estado intacto.
+    for (const campo of ['pagadoAt', 'formaPago', 'confirmadoPor', 'confirmadoAt', 'metodoPagoReal', 'movimientoPagoId', 'notaPago']) {
+      await assertFails(updateDoc(ordenRef(uid, 'ordC2'), { ['cobroDelivery.' + campo]: campo.endsWith('At') ? serverTimestamp() : 'x' }))
+    }
+    // Ni borrar el mapa.
+    await assertFails(updateDoc(ordenRef(uid, 'ordC2'), { cobroDelivery: deleteField() }))
+  }
+})
+
+test('FIN1C-R3 · un cobro YA pagado es inmutable para el cliente: ni revertir, ni anotar, ni tocar el boucher ⇒ DENY', async () => {
+  await sembrarPagadaTipoC()
+  for (const uid of STAFF_UIDS) {
+    for (const cambio of [
+      { 'cobroDelivery.estado': 'pendiente' },
+      { 'cobroDelivery.monto': 1 },
+      { 'cobroDelivery.notaPago': 'x' },
+      { 'cobroDelivery.boucherVigente': deleteField() },
+      { 'cobroDelivery.formaPago': 'efectivo' },
+    ]) await assertFails(updateDoc(ordenRef(uid, 'ordP'), cambio))
+  }
+})
+
+test('FIN1C-R4 · cobroDelivery.monto es inmutable; solo nace en una orden legacy sin monto y con el precio confirmado de la propia orden', async () => {
+  await sembrarOrdenCobro('ordC4')
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(ordenRef(uid, 'ordC4'), { 'cobroDelivery.monto': 1 }))
+    await assertFails(updateDoc(ordenRef(uid, 'ordC4'), { 'cobroDelivery.monto': 0 }))
+    await assertFails(updateDoc(ordenRef(uid, 'ordC4'), { cobroDelivery: { estado: 'pendiente', monto: 5, tipoCliente: 'contado', quienPaga: 'entrega' } }))
+    // Mismo valor: no es un cambio.
+    await assertSucceeds(updateDoc(ordenRef(uid, 'ordC4'), { 'cobroDelivery.monto': 100, updatedAt: serverTimestamp() }))
+  }
+  // Legacy: sin cobroDelivery, el gestor sube el boucher (GestorBoucherUpload) y preserva el precio confirmado ⇒ ALLOW; otro valor ⇒ DENY.
+  const subida = (monto: number) => ({
+    'cobroDelivery.estado': 'en_revision_deposito',
+    'cobroDelivery.boucherGestor': { url: 'https://example.test/g.jpg', path: 'evidencias/ordC4b/delivery_boucher_gestor.jpg', at: serverTimestamp() },
+    'cobroDelivery.boucherVigente': 'gestor',
+    'cobroDelivery.monto': monto,
+    'cobroDelivery.tipoCliente': 'contado',
+    'cobroDelivery.quienPaga': 'transferencia',
+    'cobroDelivery.registradoAt': serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  })
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordC4b'), { ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0101', secuencia: 101, confirmacion: { precioFinalCordobas: 100 } })
+  })
+  await assertFails(updateDoc(ordenRef(UID_GESTOR, 'ordC4b'), subida(7)))
+  await assertSucceeds(updateDoc(ordenRef(UID_GESTOR, 'ordC4b'), subida(100)))
+})
+
+test('FIN1C-R5 · confirmacion (precioFinalCordobas) no se escribe desde el cliente: ni gestor ni admin, ni editando ni borrando ⇒ DENY', async () => {
+  await sembrarOrdenCobro('ordC5')
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(ordenRef(uid, 'ordC5'), { 'confirmacion.precioFinalCordobas': 1 }))
+    await assertFails(updateDoc(ordenRef(uid, 'ordC5'), { confirmacion: { precioFinalCordobas: 1 } }))
+    await assertFails(updateDoc(ordenRef(uid, 'ordC5'), { confirmacion: deleteField() }))
+  }
+  // El motorizado tampoco (AR9 sigue vigente) ni el comercio.
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordC5m'), { ...ordenBase({ estado: 'en_camino_entrega' }), codigo: 'SH-0102', secuencia: 102, asignacion: ASIGNACION_ACEPTADA, confirmacion: { precioFinalCordobas: 100 } })
+  })
+  await assertFails(updateDoc(ordenRef(UID_MOTO, 'ordC5m'), { 'confirmacion.precioFinalCordobas': 1 }))
+  await assertFails(updateDoc(ordenRef(UID_COMERCIO, 'ordC5'), { 'confirmacion.precioFinalCordobas': 1 }))
+})
+
+test('FIN1C-R6 · cobros_semanales: gestor y admin LEEN, pero ni crean, ni actualizan, ni borran; el resto de los roles ni leen ⇒ ALLOW / DENY', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'cobros_semanales', 'cs1'), { clienteUid: COMERCIO_ID, semanaKey: '2026-W20', totalMonto: 300, totalPagado: 0, estado: 'pendiente', pagos: [], ordenesIds: ['a'] })
+  })
+  for (const uid of STAFF_UIDS) {
+    await assertSucceeds(getDoc(doc(como(uid), 'cobros_semanales', 'cs1')))
+    await assertFails(setDoc(doc(como(uid), 'cobros_semanales', 'csNuevo-' + uid), { clienteUid: COMERCIO_ID, semanaKey: '2026-W21', totalMonto: 1, totalPagado: 1, estado: 'pagado', pagos: [], ordenesIds: [] }))
+    await assertFails(updateDoc(doc(como(uid), 'cobros_semanales', 'cs1'), { totalPagado: 300, estado: 'pagado' }))
+    await assertFails(updateDoc(doc(como(uid), 'cobros_semanales', 'cs1'), { totalMonto: 1 }))
+    await assertFails(updateDoc(doc(como(uid), 'cobros_semanales', 'cs1'), { pagos: [] }))
+    await assertFails(deleteDoc(doc(como(uid), 'cobros_semanales', 'cs1')))
+  }
+  for (const uid of [UID_COMERCIO, UID_MOTO, UID_DIGITADOR]) await assertFails(getDoc(doc(como(uid), 'cobros_semanales', 'cs1')))
+})
+
+test('FIN1C-R7 · operaciones_cobro es server-only: nadie la lee ni la escribe desde el cliente (default-deny) ⇒ DENY', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'operaciones_cobro', 'cobro_op-12345678'), { tipo: 'cobro_delivery', ordenIds: ['a'], actorUid: 'x' })
+  })
+  for (const uid of [UID_GESTOR, UID_ADMIN, UID_MOTO, UID_COMERCIO, UID_DIGITADOR]) {
+    await assertFails(getDoc(doc(como(uid), 'operaciones_cobro', 'cobro_op-12345678')))
+    await assertFails(setDoc(doc(como(uid), 'operaciones_cobro', 'cobro_nuevo-' + uid), { tipo: 'cobro_delivery' }))
+    await assertFails(updateDoc(doc(como(uid), 'operaciones_cobro', 'cobro_op-12345678'), { ordenIds: [] }))
+    await assertFails(deleteDoc(doc(como(uid), 'operaciones_cobro', 'cobro_op-12345678')))
+  }
+})
+
+test('FIN1C-R8 · el motorizado ya no crea cobroDelivery (ni siquiera la primera vez, ni con un monto cualquiera) pero sigue avisando "en camino" ⇒ DENY / ALLOW', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordC8'), { ...ordenBase({ estado: 'retirado' }), codigo: 'SH-0103', secuencia: 103, asignacion: ASIGNACION_ACEPTADA, confirmacion: { precioFinalCordobas: 100 } })
+  })
+  await assertFails(updateDoc(ordenRef(UID_MOTO, 'ordC8'), {
+    cobroDelivery: { monto: 1, tipoCliente: 'contado', quienPaga: 'entrega', estado: 'pagado', registradoAt: serverTimestamp() },
+  }))
+  await assertFails(updateDoc(ordenRef(UID_MOTO, 'ordC8'), {
+    'cobroDelivery.estado': 'pagado',
+  }))
+  await assertSucceeds(updateDoc(ordenRef(UID_MOTO, 'ordC8'), { estado: 'en_camino_entrega', updatedAt: serverTimestamp() }))
+})
+
+test('FIN1C-R9 · lo legítimo del cliente sigue: subir, reemplazar y quitar el boucher (gestor) y clasificar la incidencia (ResolveModal) ⇒ ALLOW', async () => {
+  // Subir (cobro pendiente con monto ya fijado).
+  await sembrarOrdenCobro('ordC9')
+  await assertSucceeds(updateDoc(ordenRef(UID_GESTOR, 'ordC9'), {
+    'cobroDelivery.estado': 'en_revision_deposito',
+    'cobroDelivery.boucherGestor': { url: 'https://example.test/g.jpg', path: 'evidencias/ordC9/delivery_boucher_gestor.jpg', at: serverTimestamp() },
+    'cobroDelivery.boucherVigente': 'gestor',
+    'cobroDelivery.monto': 100,
+    'cobroDelivery.tipoCliente': 'contado',
+    'cobroDelivery.quienPaga': 'transferencia',
+    'cobroDelivery.registradoAt': serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }))
+  // Reemplazar.
+  await assertSucceeds(updateDoc(ordenRef(UID_ADMIN, 'ordC9'), {
+    'cobroDelivery.boucherGestor': { url: 'https://example.test/g2.jpg', path: 'evidencias/ordC9/delivery_boucher_gestor.jpg', at: serverTimestamp() },
+    'cobroDelivery.boucherVigente': 'gestor',
+    updatedAt: serverTimestamp(),
+  }))
+  // Quitar (vuelve a pendiente y limpia el puntero plano).
+  await assertSucceeds(updateDoc(ordenRef(UID_GESTOR, 'ordC9'), {
+    'cobroDelivery.estado': 'pendiente',
+    'cobroDelivery.boucherVigente': deleteField(),
+    'cobroDelivery.boucherUrl': deleteField(),
+    'cobroDelivery.boucherPath': deleteField(),
+    'cobroDelivery.boucherAt': deleteField(),
+    'cobroDelivery.subidoPor': deleteField(),
+    updatedAt: serverTimestamp(),
+  }))
+  // ResolveModal: 'cliente_pagara' sobre una orden SIN cobroDelivery (nace pendiente, sin monto) y 'se_pierde' (no_cobrar).
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordC9r'), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0104', secuencia: 104, cobroPendiente: true, confirmacion: { precioFinalCordobas: 100 },
+      cobrosMotorizado: { delivery: { recibio: false } },
+    })
+  })
+  await assertSucceeds(updateDoc(ordenRef(UID_GESTOR, 'ordC9r'), {
+    'cobrosMotorizado.resolucion': { resueltoPor: UID_GESTOR, at: serverTimestamp(), nota: null, tipo: 'cliente_pagara' },
+    'cobroDelivery.estado': 'pendiente',
+    'cobroDelivery.registradoAt': serverTimestamp(),
+    cobroPendiente: false,
+  }))
+  await sembrarOrdenCobro('ordC9s')
+  await assertSucceeds(updateDoc(ordenRef(UID_GESTOR, 'ordC9s'), {
+    'cobrosMotorizado.resolucion': { resueltoPor: UID_GESTOR, at: serverTimestamp(), nota: null, tipo: 'se_pierde' },
+    'cobroDelivery.estado': 'no_cobrar',
+    cobroPendiente: false,
+  }))
+  // El comprobante del COMERCIO también sigue (su regla propia).
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordC9c'), { ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0105', secuencia: 105 })
+  })
+  await assertSucceeds(updateDoc(ordenRef(UID_COMERCIO, 'ordC9c'), {
+    'cobroDelivery.estado': 'en_revision_deposito',
+    'cobroDelivery.boucherComercio': { url: 'https://example.test/c.jpg', path: 'evidencias/ordC9c/delivery_boucher_comercio.jpg', at: serverTimestamp() },
+    'cobroDelivery.boucherVigente': 'comercio',
+    updatedAt: serverTimestamp(),
+  }))
+})
+
+test('FIN1C-R10 · FIN-1B sin regresión: el staff sigue creando y capturando depósitos A/B; confirmar, rehacer y anular siguen siendo del servidor ⇒ ALLOW / DENY', async () => {
+  await depositoAB('pendiente_boucher')
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { boucher: { url: 'https://example.test/b.jpg', pathStorage: 'depositos/x/b.jpg' }, estado: 'en_revision', updatedAt: serverTimestamp() }))
+  await depositoAB('en_revision')
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'ordenes_deposito', DEP_V), { estado: 'confirmado', confirmadoPorUid: UID_GESTOR, confirmadoAt: serverTimestamp() }))
+  await depositoAB('confirmado')
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'ordenes_deposito', DEP_V), { estado: 'anulado', anuladoAt: serverTimestamp(), anuladoPorUid: UID_ADMIN, motivoAnulacion: 'xxx' }))
+})
+
+test('FIN1C-DEUDA-FIN1E · DEUDA EXPLÍCITA: el ledger global (movimientos_financieros) sigue abierto a gestor/admin; se cierra en FIN-1E', async () => {
+  // C6/C8 del diagnóstico: un pago_recibido o un movimiento cualquiera aún puede crearse desde el cliente. Este test PINEA la deuda a
+  // propósito: cuando FIN-1E cierre el ledger tiene que cambiarse aquí, a la vista.
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'movimientos_financieros', 'movDeuda1'), { tipo: 'pago_recibido', estado: 'activo', monto: 1, solicitudId: 'x', at: serverTimestamp(), creadoPorUid: UID_GESTOR, creadoPorRol: 'gestor', descripcion: 'deuda FIN-1E' }))
 })

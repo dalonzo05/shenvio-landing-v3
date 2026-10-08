@@ -856,25 +856,18 @@ service cloud.firestore {
         && noTocaCodigo()
         && cobroPagadoIntegro();
 
-      // ── COBROS-PAGO-INTEGRIDAD-1 · un cobro pagado es evidencia cerrada ──────
+      // ── COBROS-PAGO-INTEGRIDAD-1 / FIN-1C-A · el resultado de un pago NO lo escribe el cliente ──
       //
-      // Los writers (Cobros) ya lo impiden con transacciones; esto es la misma
-      // regla del lado del servidor, para un cliente de gestor modificado.
-      // Sobre una orden con cobroDelivery.estado == 'pagado' el gestor solo
-      // puede:
-      //
-      //   · dejarla pagada: el cobro no cambia —salvo anotar
-      //     movimientoPagoId, que los flujos escriben después del pago— y, si
-      //     su liquidación es un DEP tipo C, el puntero y la confirmación a
-      //     StorkHub quedan intactos (no se reconfirma ni se cambia de DEP);
-      //   · revertirla con la forma EXACTA de revertirPagada, validada sobre
-      //     el estado FINAL del batch/transacción (getAfter): cobro 'pendiente'
-      //     sin pagadoAt ni formaPago, su movimiento pago_recibido anulado y,
-      //     si la liquidación era tipo C, ese DEP anulado y la orden sin
-      //     puntero ni confirmación.
-      //
-      // Un depósito del motorizado (tipo A/B) sobre una orden cobrada en
-      // efectivo NO se restringe acá: es otro dinero, con su propio flujo.
+      // Antes los writers de Cobros eran transacciones de CLIENTE y estas Rules solo validaban su forma. Ahora el pago, su reversión y el
+      // DEP tipo C los hacen registrarCobroDelivery / revertirCobroDelivery (Admin SDK, que no pasa por estas Rules), así que el gestor/admin
+      // desde el navegador ya NO puede:
+      //   · llevar cobroDelivery.estado a 'pagado', ni escribir pagadoAt, formaPago, confirmadoPor/At, metodoPagoReal ni movimientoPagoId;
+      //   · tocar un cobro que ya está 'pagado' (revertirlo es revertirCobroDelivery);
+      //   · cambiar cobroDelivery.monto: lo fija el servidor al entregar. Solo en una orden legacy SIN monto puede nacer, y con el precio
+      //     confirmado de la propia orden;
+      //   · escribir confirmacion (precioFinalCordobas): solo asignarMotorizado.
+      // Lo legítimo del cliente sigue: el boucher (subir, reemplazar, quitar) y clasificar la incidencia (ResolveModal: estado pendiente /
+      // no_cobrar). Un depósito del motorizado (tipo A/B) sobre una orden cobrada en efectivo NO se restringe acá: es otro dinero.
       function cobroAnt() {
         let c = resource.data.get('cobroDelivery', {});
         return c is map ? c : {};
@@ -903,35 +896,33 @@ service cloud.firestore {
           && exists(/databases/$(database)/documents/ordenes_deposito/$(depId))
           && get(/databases/$(database)/documents/ordenes_deposito/$(depId)).data.get('tipo', '') == 'pago_delivery_deposito';
       }
-      function liberacionTipoCConAnulacion() {
-        let depId = liqAnt().get('storkhubDepositoId', '');
-        return liqNue().get('storkhubDepositoId', null) == null
-          && liqNue().get('confirmadoStorkhub', false) == false
-          && liqNue().get('confirmadoStorkhubAt', null) == null
-          && getAfter(/databases/$(database)/documents/ordenes_deposito/$(depId)).data.get('estado', '') == 'anulado';
+      function precioConfirmadoAnt() {
+        let c = resource.data.get('confirmacion', {});
+        return (c is map ? c : {}).get('precioFinalCordobas', 0);
       }
-      function cobroSigueSellado() {
-        return cobroNue().get('estado', '') == 'pagado'
-          && cobroNue().diff(cobroAnt()).affectedKeys().hasOnly(['movimientoPagoId'])
-          && (!liquidacionEsTipoC() || liquidacionStorkhubIntacta());
+      function cobroDeliveryStaffCerrado() {
+        return !('cobroDelivery' in request.resource.data.diff(resource.data).affectedKeys())
+          || (
+            cobroAnt().get('estado', '') != 'pagado'
+            && cobroNue().get('estado', '') in ['pendiente', 'en_revision_deposito', 'no_cobrar']
+            && cobroNue().diff(cobroAnt()).affectedKeys().hasOnly([
+                 'estado', 'boucherGestor', 'boucherVigente', 'boucherUrl', 'boucherPath', 'boucherAt', 'subidoPor',
+                 'monto', 'tipoCliente', 'quienPaga', 'registradoAt'
+               ])
+            && (
+              cobroNue().get('monto', null) == cobroAnt().get('monto', null)
+              || (!('monto' in cobroAnt()) && cobroNue().get('monto', null) == precioConfirmadoAnt())
+            )
+          );
       }
-      function reversionDeCobroLegitima() {
-        let nue = cobroNue();
-        let movId = nue.get('movimientoPagoId', '');
-        return nue.get('estado', '') == 'pendiente'
-          && !('pagadoAt' in nue)
-          && !('formaPago' in nue)
-          && nue.diff(cobroAnt()).affectedKeys().hasOnly(['estado', 'pagadoAt', 'formaPago', 'notaPago', 'movimientoPagoId'])
-          && movId is string
-          && movId != ''
-          && getAfter(/databases/$(database)/documents/movimientos_financieros/$(movId)).data.get('estado', '') == 'anulado'
-          && getAfter(/databases/$(database)/documents/movimientos_financieros/$(movId)).data.get('solicitudId', '') == id
-          && (liquidacionEsTipoC() ? liberacionTipoCConAnulacion() : liquidacionStorkhubIntacta());
+      function confirmacionIntacta() {
+        return !('confirmacion' in request.resource.data.diff(resource.data).affectedKeys());
       }
       function cobroPagadoIntegro() {
-        return cobroAnt().get('estado', '') != 'pagado'
-          || cobroSigueSellado()
-          || reversionDeCobroLegitima();
+        return cobroDeliveryStaffCerrado()
+          && confirmacionIntacta()
+          // Una orden pagada con su DEP tipo C no cambia su puntero ni su confirmación a StorkHub desde el cliente.
+          && (cobroAnt().get('estado', '') != 'pagado' || !liquidacionEsTipoC() || liquidacionStorkhubIntacta());
       }
 
       // DEPOSITOS-UX-TRAZABILIDAD-1 — el digitador ENLAZA las órdenes al
@@ -1022,39 +1013,8 @@ service cloud.firestore {
       // helpers que se llaman entre sí fue lo que agotó el presupuesto del
       // motor en P1-S2B ("maximum of 1000 expressions").
 
-      // cobroDelivery: el motorizado lo ORIGINA al entregar y nunca lo vuelve
-      // a tocar (app/panel/motorizado/page.tsx, cambiarEstado() en la
-      // transición a 'entregado', única escritura viva). Por eso solo se
-      // admite la PRIMERA aparición del mapa: si ya existía, deniega — un
-      // update posterior no corresponde a ningún flujo real y sería la vía
-      // para pisar lo que escribieron el comercio o el gestor.
-      //
-      // quienPaga admite '' a propósito: el código hace
-      // `o.pagoDelivery?.quienPaga ?? ''`, así que una orden sin ese dato
-      // produce legítimamente cadena vacía.
-      // 'pagado' también es legítimo: el motorizado cobró en mano al entregar.
-      // Lo que no puede es acompañarlo de pagadoAt/confirmadoPor/formaPago —
-      // hasOnly() los deja fuera por construcción, igual que cualquier clave
-      // futura y todos los campos de boucher.
-      function cobroDeliveryDeMotorizadoValido() {
-        let ant = resource.data;
-        let nue = request.resource.data;
-        let cd = nue.get('cobroDelivery', {});
-        return !('cobroDelivery' in nue.diff(ant).affectedKeys())
-          || (
-            !('cobroDelivery' in ant)
-            && cd is map
-            && cd.keys().hasOnly(['monto', 'tipoCliente', 'quienPaga', 'estado', 'registradoAt', 'semanaKey'])
-            && cd.keys().hasAll(['monto', 'tipoCliente', 'quienPaga', 'estado', 'registradoAt'])
-            && cd.get('monto', -1) is number
-            && cd.get('tipoCliente', '') in ['contado', 'credito']
-            && cd.get('quienPaga', null) is string
-            && cd.get('quienPaga', 'x') in ['', 'credito_semanal', 'transferencia', 'entrega', 'recoleccion']
-            && cd.get('estado', '') in ['pendiente', 'pagado', 'no_cobrar']
-            && cd.get('registradoAt', null) == request.time
-            && (!('semanaKey' in cd) || cd.get('semanaKey', null) is string)
-          );
-      }
+      // FIN-1C-A — el motorizado ya NO escribe cobroDelivery: lo fija el servidor al entregar (la transición a 'entregado' va por
+      // confirmarTransicionConCobro). Antes se admitía la primera aparición del mapa desde el cliente, con un monto cualquiera.
 
       // registro: el motorizado solo marca el ID del depósito que acaba de
       // crear (registro.deposito.storkhubDepositoId / .comercioDepositoId).
@@ -1184,13 +1144,11 @@ service cloud.firestore {
           'evidenciasTerminal',
           'evidenciasCargotrans',
           'cobroPendiente',
-          'cobroDelivery',
           'registro',
           'pagoDelivery',
           'acumulacionCobroSemanal'
         ])
         && marcadorSoloPendiente()
-        && cobroDeliveryDeMotorizadoValido()
         && registroDeMotorizadoValido()
         && pagoDeliveryDeMotorizadoValido();
 
@@ -1432,8 +1390,12 @@ service cloud.firestore {
     // El comercio tampoco lee su propio cobro semanal: nunca pudo, el
     // producto funciona así, y abrirlo ahora sería ampliar superficie sin
     // necesidad demostrada.
+    // FIN-1C-A — los cobros semanales los crea y acumula el servidor (acumularCobroSemanalPorOrden) y los paga registrarPagoCobroSemanal
+    // (Admin SDK, que no pasa por estas Rules). El cliente solo LEE: antes cualquier gestor/admin podía fabricar una semana "pagada" o
+    // cambiar su total y su historial de pagos sin ledger.
     match /cobros_semanales/{docId} {
-      allow read, write: if isAdminOrGestor();
+      allow read: if isAdminOrGestor();
+      allow create, update, delete: if false;
     }
 
     // Órdenes de depósito: agrupan viajes por motorizado + destino, almacenan boucher único
@@ -1525,17 +1487,6 @@ service cloud.firestore {
                  'cuentasDestino', 'motorizadoUid', 'motorizadoNombre', 'solicitudIds',
                  'montoTotal', 'montoBruto', 'gastosDescontados', 'gastosIds'
                ])
-          )
-          || (
-            d.get('tipo', '') == 'pago_delivery_deposito'
-            && d.get('estado', '') == 'confirmado'
-            && d.keys().hasOnly([
-                 'creadoAt', 'tipo', 'estado', 'destinatario', 'destinatarioId', 'destinatarioNombre',
-                 'cuentasDestino', 'motorizadoUid', 'motorizadoNombre', 'solicitudIds',
-                 'montoTotal', 'boucherUrl', 'metadata', 'confirmadoPorUid', 'confirmadoAt'
-               ])
-            && d.get('confirmadoPorUid', '') == request.auth.uid
-            && d.get('confirmadoAt', null) == request.time
           );
       }
 
@@ -1552,31 +1503,9 @@ service cloud.firestore {
           )
         )
         && sinCodigoEntrante()
-        && pagoTipoCSoloAlConfirmar(depositoId);
-
-      // COBROS-PAGO-INTEGRIDAD-1 — un DEP tipo C (pago del delivery por
-      // transferencia) solo nace junto con la confirmación de SU cobro, en el
-      // mismo batch/transacción: una sola orden, que ANTES no estaba pagada y
-      // DESPUÉS está pagada y apunta a este depósito. Así no puede crearse un
-      // segundo DEP-C para una orden ya pagada, ni uno suelto sin cobro.
-      function pagoTipoCSoloAlConfirmar(depositoId) {
-        return request.resource.data.get('tipo', '') != 'pago_delivery_deposito'
-          || tipoCNaceConSuCobro(depositoId);
-      }
-      function tipoCNaceConSuCobro(depositoId) {
-        let ids = request.resource.data.get('solicitudIds', []);
-        return ids is list
-          && ids.size() == 1
-          && request.resource.data.get('estado', '') == 'confirmado'
-          && ordenNoPagadaAntesYPagadaDespues(ids[0], depositoId);
-      }
-      function ordenNoPagadaAntesYPagadaDespues(ordenId, depositoId) {
-        let antes = get(/databases/$(database)/documents/solicitudes_envio/$(ordenId)).data;
-        let despues = getAfter(/databases/$(database)/documents/solicitudes_envio/$(ordenId)).data;
-        return antes.get(['cobroDelivery', 'estado'], '') != 'pagado'
-          && despues.get(['cobroDelivery', 'estado'], '') == 'pagado'
-          && despues.get(['registro', 'deposito', 'storkhubDepositoId'], '') == depositoId;
-      }
+        // FIN-1C-A — el DEP tipo C (pago de delivery por transferencia) lo crea SOLO registrarCobroDelivery (Admin SDK), junto con su cobro
+        // y su pago_recibido. Ningún rol lo crea desde el cliente, ni siquiera "confirmado" por un gestor/admin.
+        && request.resource.data.get('tipo', '') != 'pago_delivery_deposito';
 
       // STORAGE ORPHANS BLOQUE 1: 'resource != null' en cada rama no-staff
       // — digitarDepositoStorkhub/digitarDepositoComercio (depositos/page.tsx)
@@ -1918,13 +1847,6 @@ service cloud.firestore {
               && rechazoDigitacionValido(antes, despues, cambios));
       }
 
-      // Revertir un cobro anula su DEP tipo C (lib/cobro-integridad.camposAnulacionDeposito). Nada más; el tipo C se migra con Cobros.
-      function anulacionTipoCValida(antes, despues, cambios) {
-        return antes.get('estado', '') == 'confirmado'
-          && despues.get('estado', '') == 'anulado'
-          && cambios.hasOnly(['estado', 'anuladoAt', 'anuladoPorUid', 'motivoAnulacion']);
-      }
-
       function updateStaffCerrado() {
         let antes = resource.data;
         let despues = request.resource.data;
@@ -1932,8 +1854,8 @@ service cloud.firestore {
         let tipo = antes.get('tipo', '');
         return !cambios.hasAny(['codigo', 'secuencia'])
           && (
+            // FIN-1C-A — el tipo C se anula SOLO en revertirCobroDelivery (servidor): ya no hay rama de update de cliente para él.
             (tipo in ['recaudacion_motorizado_storkhub', 'recaudacion_motorizado_comercio'] && capturaStaffValida(antes, despues, cambios))
-            || (tipo == 'pago_delivery_deposito' && anulacionTipoCValida(antes, despues, cambios))
           );
       }
 

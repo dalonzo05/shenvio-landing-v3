@@ -20,6 +20,9 @@ export { condonarDeudaMotorizado } from './condonacion-deuda-callable';
 export { anularSaldoCargo } from './anulacion-saldo-callable';
 export { rehacerDeposito } from './rehacer-deposito-callable';
 export { anularDeposito } from './anular-deposito-callable';
+export { registrarCobroDelivery } from './registrar-cobro-delivery-callable';
+export { revertirCobroDelivery } from './revertir-cobro-delivery-callable';
+export { registrarPagoCobroSemanal } from './registrar-pago-cobro-semanal-callable';
 export { registrarAbonoDirecto } from './abono-directo-callable';
 export { prepararAbonoDirecto, obtenerIntencionAbono, descartarIntencionAbono } from './abono-intencion-callable';
 

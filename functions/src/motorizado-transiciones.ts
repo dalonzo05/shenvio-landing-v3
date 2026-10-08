@@ -47,6 +47,7 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { FieldValue } from 'firebase-admin/firestore';
 import { semanaKeyDeFecha } from './cobro-semanal';
+import { calcularMontoCobroDelivery } from './cobro-delivery-monto';
 import { responderAsignacionEnTransaccion, leerProtocoloRespuesta } from './asignacion-respuesta';
 import {
   resolverFormaPago,
@@ -300,9 +301,12 @@ function construirCobroDelivery(
   deliveryAnswer: RespuestaCobro | null,
   productoAnswer: RespuestaCobro | null,
 ): Record<string, unknown> {
-  const precioDelivery = orden.confirmacion?.precioFinalCordobas ?? 0;
-  const quienPaga = orden.pagoDelivery?.quienPaga ?? '';
-  const esCredito = orden.tipoCliente === 'credito' || quienPaga === 'credito_semanal';
+  // FIN-1C-A: la matemática del monto vive en cobro-delivery-monto.ts (la reutilizan las callables de cobro).
+  const productoNoRecibido = productoAnswer
+    ? productoAnswer.recibio === false
+    : orden.cobrosMotorizado?.producto?.recibio === false;
+  const { precioDelivery, quienPaga, esCredito, aplicaFaltante, cubiertoPorDeposito, faltanteDelivery, monto } =
+    calcularMontoCobroDelivery(orden, productoNoRecibido);
   const esRecoleccion = quienPaga === 'recoleccion';
   const motorizadoYaCobro =
     deliveryAnswer?.recibio === true ||
@@ -319,27 +323,10 @@ function construirCobroDelivery(
   // una transacción abierta que ya escribe cobroDelivery. Se calcula acá para
   // que nazca atómico con la confirmación del dinero recibido, sin agregar un
   // segundo write ni un documento aparte (ver B1.2B, secciones 7-10).
-  const deducir = orden.pagoDelivery?.deducirDelCobroContraEntrega === true;
-  const ceAplica = orden.cobroContraEntrega?.aplica === true;
-  const montoProducto = ceAplica ? (orden.cobroContraEntrega?.monto || 0) : 0;
-  // Efectivo del CE realmente en manos del motorizado.
-  const productoNoRecibido = productoAnswer
-    ? productoAnswer.recibio === false
-    : orden.cobrosMotorizado?.producto?.recibio === false;
-  const productoDisponible = productoNoRecibido ? 0 : montoProducto;
-
-  const aplicaFaltante = deducir && !esCredito && precioDelivery > 0;
-  const cubiertoPorDeposito = aplicaFaltante
-    ? Math.min(productoDisponible, precioDelivery)
-    : 0;
-  const faltanteDelivery = aplicaFaltante
-    ? Math.max(0, precioDelivery - productoDisponible)
-    : 0;
-
   const patch: Record<string, unknown> = {
     // `monto` es el PENDIENTE real de cobro, no el precio de lista: es lo que
     // leen Cobros y la vista del comercio. Sin deducción no cambia nada.
-    monto: aplicaFaltante ? faltanteDelivery : precioDelivery,
+    monto,
     tipoCliente: esCredito ? 'credito' : 'contado',
     quienPaga,
     estado: precioDelivery === 0 ? 'no_cobrar' : esCredito ? 'pendiente' : motorizadoYaCobro ? 'pagado' : 'pendiente',

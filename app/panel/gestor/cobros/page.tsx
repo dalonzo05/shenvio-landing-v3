@@ -10,7 +10,6 @@ import {
   where,
   doc,
   getDoc,
-  getDocs,
   updateDoc,
   serverTimestamp,
   Timestamp,
@@ -19,7 +18,6 @@ import {
 } from 'firebase/firestore'
 import { auth, db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
-import { registrarMovimiento } from '@/lib/financial-writes'
 import {
   AlertCircle,
   ShieldCheck,
@@ -44,16 +42,21 @@ import {
   type EntradaIncidencia,
 } from '@/lib/incidencia-cobro'
 import { mostrarCodigo } from '@/lib/codigo-humano'
-import { liquidacionDeposito, camposConfirmacionDeposito } from '@/lib/presentacion-deposito'
+import { liquidacionDeposito } from '@/lib/presentacion-deposito'
+import { puedeMutarBoucherCobro, asegurarBoucherCobroMutable } from '@/lib/cobro-integridad'
 import {
-  puedeMutarBoucherCobro,
-  asegurarCobroConfirmable,
-  asegurarBoucherCobroMutable,
-  camposReversionCobro,
-  planReversionDeposito,
-  camposAnulacionDeposito,
-  MOTIVO_ANULACION_REVERSION,
-} from '@/lib/cobro-integridad'
+  exigirHechoCobro,
+  operacionDeCobro,
+  operacionDeReversion,
+  presentarErrorAccionCobro,
+  presentarResultadoCobro,
+  presentarResultadoPagoSemanal,
+  presentarResultadoReversion,
+  type IntentoOperacion,
+} from '@/lib/cobro-acciones-ux'
+import { registrarCobroDeliveryServidor } from '@/lib/registrar-cobro-delivery-cliente'
+import { revertirCobroDeliveryServidor } from '@/lib/revertir-cobro-delivery-cliente'
+import { registrarPagoCobroSemanalServidor } from '@/lib/registrar-pago-cobro-semanal-cliente'
 import { fechaHoraOperativa } from '@/lib/fecha-operativa'
 import { momentoCobro, resumenAtencionCobros } from '@/lib/pago-transferencia'
 import { montoDeliveryCobrado } from '@/lib/monto-delivery'
@@ -206,6 +209,9 @@ type ContadoSub = 'por_orden' | 'por_cliente' | 'pagados'
 type IncidenciasTab = 'pendientes' | 'resueltos'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// FIN-1C-A — identidad de UN intento de cobro/reversión (la conserva el reintento tras un error temporal).
+const nuevaOperacionId = () => crypto.randomUUID()
 
 function fmtFecha(ts?: { toDate?: () => Date }) {
   const d = ts?.toDate?.()
@@ -607,13 +613,6 @@ function ResolveModal({
 
 // ─── Pago Modal (Crédito) ─────────────────────────────────────────────────────
 
-// Sobrepago detectado dentro de la transacción — nunca se reduce el monto
-// silenciosamente, se bloquea y se informa el saldo real.
-class SaldoInsuficienteError extends Error {
-  constructor(public saldoReal: number) {
-    super('SALDO_INSUFICIENTE')
-  }
-}
 
 function PagoModal({
   cobroSemanal,
@@ -664,104 +663,21 @@ function PagoModal({
     setSaving(true); setErr(null)
 
     const pagoId = pagoIdRef.current!
-    const uid = auth.currentUser?.uid || 'desconocido'
-    const cobroRef = doc(db, 'cobros_semanales', cobroSemanal.id)
-    const movRef = doc(db, 'movimientos_financieros', `pago_semanal_${cobroSemanal.id}_${pagoId}`)
-    const notaTrim = nota.trim() || null
-
     try {
-      const resultadoTx = await runTransaction(db, async (tx) => {
-        const snap = await tx.get(cobroRef)
-        if (!snap.exists()) throw new Error('Este cobro semanal ya no existe.')
-        const data = snap.data() as CobroSemanal
-
-        if (typeof data.totalMonto !== 'number' || !(data.totalMonto > 0)) {
-          throw new Error('El cobro semanal tiene un totalMonto inválido — no se puede registrar el pago.')
-        }
-
-        const totalPagadoReal = data.totalPagado || 0
-        const pagosActuales = Array.isArray(data.pagos) ? data.pagos : []
-
-        // Idempotencia — chequeo primario: ¿este pagoId ya está en pagos[]?
-        const yaEnPagos = pagosActuales.some((p) => p.pagoId === pagoId)
-        // Defensa adicional: ¿el movimiento determinístico ya existe? Cubre
-        // el caso borde de una relectura que aún no reflejara pagos[] pero sí
-        // el movimiento — no debería ocurrir dentro de la misma transacción
-        // atómica, pero es la señal más fuerte disponible de "ya se aplicó".
-        const movSnap = yaEnPagos ? null : await tx.get(movRef)
-        if (yaEnPagos || movSnap?.exists()) {
-          return { yaRegistrado: true as const }
-        }
-
-        // Consistencia histórica: se documenta, nunca se repara aquí.
-        const sumaPagosHistorica = pagosActuales.reduce((s, p) => s + (p.monto || 0), 0)
-        if (Math.abs(sumaPagosHistorica - totalPagadoReal) > 0.009) {
-          console.warn(
-            `[cobros_semanales] Inconsistencia histórica en ${cobroSemanal.id}: totalPagado=${totalPagadoReal} ` +
-            `vs suma(pagos[])=${sumaPagosHistorica}. No se repara automáticamente — requiere conciliación manual. ` +
-            'El nuevo pago se registra igual, usando totalPagado como fuente de verdad.'
-          )
-        }
-
-        const saldoPendienteReal = data.totalMonto - totalPagadoReal
-        if (montoNum > saldoPendienteReal) {
-          throw new SaldoInsuficienteError(saldoPendienteReal)
-        }
-
-        const nuevoTotalPagado = totalPagadoReal + montoNum
-        const nuevoEstado: CobroSemanal['estado'] =
-          nuevoTotalPagado === data.totalMonto ? 'pagado' : nuevoTotalPagado > 0 ? 'parcial' : 'pendiente'
-
-        const pagoEntry = {
-          pagoId,
-          monto: montoNum,
-          at: Timestamp.now(), // serverTimestamp() no puede usarse dentro de un array literal
-          nota: notaTrim,
-          registradoPor: uid,
-          formaPago: null,
-          referencia: notaTrim,
-          movimientoPagoId: movRef.id,
-        }
-
-        tx.update(cobroRef, {
-          totalPagado: nuevoTotalPagado,
-          estado: nuevoEstado,
-          pagos: [...pagosActuales, pagoEntry],
-          updatedAt: serverTimestamp(),
-          ...(nuevoEstado === 'pagado' ? { pagadoAt: serverTimestamp() } : {}),
-        })
-
-        tx.set(movRef, {
-          tipo: 'pago_recibido',
-          monto: montoNum,
-          at: serverTimestamp(),
-          creadoPorUid: uid,
-          creadoPorRol: 'gestor',
-          descripcion: `Pago crédito semanal · ${cobroSemanal.clienteCompany || cobroSemanal.clienteNombre} · sem ${cobroSemanal.semanaKey}`,
-          estado: 'activo',
-          comercioId: cobroSemanal.clienteUid,
-          semanaKey: cobroSemanal.semanaKey,
-          metadata: { cobroSemanalId: cobroSemanal.id, pagoId },
-        })
-
-        return { yaRegistrado: false as const }
-      })
-
+      // FIN-1C-A — el pago lo registra el SERVIDOR en una transacción: relee el cobro semanal, valida el saldo real, agrega el pago,
+      // recalcula totalPagado/estado y crea el movimiento. La pantalla solo manda { pagoId, cobroSemanalId, monto, nota }.
+      const r = await registrarPagoCobroSemanalServidor(cobroSemanal.id, montoNum, pagoId, nota)
+      const p = presentarResultadoPagoSemanal(r)
       try { sessionStorage.removeItem(storageKey) } catch {}
-
-      if (resultadoTx.yaRegistrado) {
+      if (p.categoria === 'ya_hecho') {
         setResultado('ya_registrado')
       } else {
         setResultado('exito')
         setTimeout(onClose, 900)
       }
     } catch (e: any) {
-      if (e instanceof SaldoInsuficienteError) {
-        setErr(`El monto excede el saldo pendiente real (${fmt(e.saldoReal)}).`)
-      } else {
-        setErr(e?.message || 'Error al registrar el pago')
-      }
-      // monto y nota se conservan a propósito: el usuario no pierde lo ingresado.
+      setErr(presentarErrorAccionCobro(e, fmt).mensaje)
+      // monto y nota se conservan a propósito: el usuario no pierde lo ingresado. El pagoId también: el reintento es idempotente.
     } finally {
       savingRef.current = false
       setSaving(false)
@@ -941,60 +857,21 @@ function BoucherModal({
     }
   }
 
+  const intentoRef = useRef<IntentoOperacion | null>(null)
   async function handleConfirmar() {
     setSaving(true); setErr(null)
     try {
-      const uid = auth.currentUser?.uid || 'desconocido'
-      const montoFinal = monto ?? 0
-      const depositoRef = doc(collection(db, 'ordenes_deposito'))
-      const depositoId = depositoRef.id
-      const solRef = doc(db, 'solicitudes_envio', orden.id)
-      // COBROS-PAGO-INTEGRIDAD-1 — transacción con guard: se relee la orden y,
-      // si ya está pagada, no se escribe NADA (ni DEP, ni orden, ni el
-      // movimiento de abajo, que solo corre si la transacción se confirmó).
-      // Sin esto, "Confirmar pago" desde Historial cobrados duplicaba el DEP
-      // tipo C, el pago_recibido y el puntero.
-      await runTransaction(db, async (tx) => {
-      const actual = await tx.get(solRef)
-      asegurarCobroConfirmable((actual.data() as { cobroDelivery?: CobroDelivery } | undefined)?.cobroDelivery)
-      tx.set(depositoRef, {
-        creadoAt: serverTimestamp(),
-        tipo: 'pago_delivery_deposito',
-        estado: 'confirmado',
-        destinatario: 'storkhub',
-        destinatarioId: 'storkhub',
-        destinatarioNombre: 'Storkhub',
-        cuentasDestino: [],
-        motorizadoUid: orden.asignacion?.motorizadoId ?? '',
-        motorizadoNombre: orden.asignacion?.motorizadoNombre ?? '',
-        solicitudIds: [orden.id],
-        montoTotal: montoFinal,
-        // P1-S2B: se desnormaliza la URL del comprobante VIGENTE, resuelta por
-        // el puntero — nunca "el último objeto que exista".
-        boucherUrl: urlBoucherVigente(orden.cobroDelivery) ?? null,
-        metadata: { clienteNombre: nombre },
-        // DEPOSITOS-UX-TRAZABILIDAD-1 — el documento nace 'confirmado' por el
-        // gestor: queda dicho quién y cuándo. Del UID de la sesión, nunca del
-        // 'desconocido' de respaldo que usa el movimiento.
-        ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
-      })
-      tx.update(solRef, {
-        'cobroDelivery.estado': 'pagado',
-        'cobroDelivery.pagadoAt': serverTimestamp(),
-        'cobroDelivery.formaPago': 'transferencia',
-        'cobroDelivery.confirmadoPor': uid,
-        'cobroDelivery.confirmadoAt': serverTimestamp(),
-        'registro.deposito.confirmadoStorkhub': true,
-        'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
-        'registro.deposito.storkhubDepositoId': depositoId,
-      })
-      })
-      await registrarMovimiento('pago_recibido', montoFinal, uid,
-        `Pago delivery por transferencia confirmado · ${nombre}`,
-        { solicitudId: orden.id, depositoId })
+      // FIN-1C-A — el cobro por transferencia lo registra el SERVIDOR: recalcula el monto, exige el boucher vigente, crea el DEP tipo C
+      // y el pago_recibido, y marca la orden, todo en una transacción. La pantalla solo manda { operacionId, ordenIds, formaPago }.
+      intentoRef.current = operacionDeCobro(intentoRef.current, [orden.id], 'transferencia', nuevaOperacionId)
+      const r = await registrarCobroDeliveryServidor([orden.id], 'transferencia', intentoRef.current.operacionId)
+      exigirHechoCobro(presentarResultadoCobro(r))
+      intentoRef.current = null
       onClose()
     } catch (e: any) {
-      setErr(e?.message || 'Error al guardar')
+      const p = presentarErrorAccionCobro(e, fmt)
+      if (p.categoria !== 'temporal') intentoRef.current = null
+      setErr(p.mensaje)
     } finally {
       setSaving(false)
     }
@@ -1110,92 +987,22 @@ function PagoContadoModal({
   const monto = orden.cobroDelivery?.monto ?? (orden as any).confirmacion?.precioFinalCordobas
   const nombre = getClienteNombre(orden, nombres)
 
+  const intentoRef = useRef<IntentoOperacion | null>(null)
   async function handleConfirmar() {
-    if (!formaPago) { setErr('Selecciona la forma de cobro'); return }
+    if (formaPago !== 'efectivo' && formaPago !== 'transferencia') { setErr('Selecciona la forma de cobro'); return }
     setSaving(true); setErr(null)
     try {
-      const uid = auth.currentUser?.uid || 'desconocido'
-      const montoFinal = monto ?? 0
-      const updates: any = {
-        'cobroDelivery.estado': 'pagado',
-        'cobroDelivery.pagadoAt': serverTimestamp(),
-        'cobroDelivery.formaPago': formaPago,
-        'cobroDelivery.confirmadoPor': uid,
-        'cobroDelivery.confirmadoAt': serverTimestamp(),
-        'cobroDelivery.metodoPagoReal': formaPago === 'efectivo' ? 'efectivo' : 'transferencia_deposito',
-      }
-      if (nota.trim()) updates['cobroDelivery.notaPago'] = nota.trim()
-      if (!orden.cobroDelivery) {
-        updates['cobroDelivery.monto'] = (orden as any).confirmacion?.precioFinalCordobas ?? 0
-        updates['cobroDelivery.tipoCliente'] = orden.tipoCliente || 'contado'
-        updates['cobroDelivery.quienPaga'] = orden.pagoDelivery?.quienPaga || ''
-        updates['cobroDelivery.registradoAt'] = serverTimestamp()
-      }
-
-      if (formaPago === 'transferencia') {
-        // Crear registro de depósito por transferencia del cliente
-        const depositoRef = doc(collection(db, 'ordenes_deposito'))
-        const depositoId = depositoRef.id
-        const solRef = doc(db, 'solicitudes_envio', orden.id)
-        // COBROS-PAGO-INTEGRIDAD-1 — mismo guard que BoucherModal: nunca un
-        // segundo DEP tipo C ni un segundo movimiento sobre un cobro pagado.
-        await runTransaction(db, async (tx) => {
-        const actual = await tx.get(solRef)
-        asegurarCobroConfirmable((actual.data() as { cobroDelivery?: CobroDelivery } | undefined)?.cobroDelivery)
-        tx.set(depositoRef, {
-          creadoAt: serverTimestamp(),
-          tipo: 'pago_delivery_deposito',
-          estado: 'confirmado',
-          destinatario: 'storkhub',
-          destinatarioId: 'storkhub',
-          destinatarioNombre: 'Storkhub',
-          cuentasDestino: [],
-          motorizadoUid: orden.asignacion?.motorizadoId ?? '',
-          motorizadoNombre: orden.asignacion?.motorizadoNombre ?? '',
-          solicitudIds: [orden.id],
-          montoTotal: montoFinal,
-          metadata: { referencia: nota.trim() || null, clienteNombre: nombre },
-          // DEPOSITOS-UX-TRAZABILIDAD-1 — ver arriba: nace confirmado por el gestor.
-          ...camposConfirmacionDeposito(auth.currentUser?.uid, serverTimestamp()),
-        })
-        tx.update(solRef, {
-          ...updates,
-          'registro.deposito.confirmadoStorkhub': true,
-          'registro.deposito.confirmadoStorkhubAt': serverTimestamp(),
-          'registro.deposito.storkhubDepositoId': depositoId,
-        })
-        })
-        const movId = await registrarMovimiento('pago_recibido', montoFinal, uid,
-          `Pago delivery por transferencia confirmado · ${nombre}`,
-          { solicitudId: orden.id, depositoId })
-        // Enlace mínimo y aditivo para que revertirPagada (ver F5) pueda ubicar
-        // este movimiento sin ambigüedad. No cambia la atomicidad ni la
-        // idempotencia de este flujo individual — eso queda fuera de alcance
-        // de esta corrección (solo F3/F5). Si registrarMovimiento falla
-        // silenciosamente (retorna null), la solicitud queda sin
-        // movimientoPagoId y una reversión futura usará el fallback legacy.
-        if (movId) {
-          await updateDoc(doc(db, 'solicitudes_envio', orden.id), { 'cobroDelivery.movimientoPagoId': movId })
-        }
-      } else {
-        const solRef = doc(db, 'solicitudes_envio', orden.id)
-        await runTransaction(db, async (tx) => {
-          const actual = await tx.get(solRef)
-          // COBROS-PAGO-INTEGRIDAD-1 — tampoco en efectivo: un segundo
-          // pago_recibido sobre un cobro ya pagado duplicaría el ledger.
-          asegurarCobroConfirmable((actual.data() as { cobroDelivery?: CobroDelivery } | undefined)?.cobroDelivery)
-          tx.update(solRef, updates)
-        })
-        const movId = await registrarMovimiento('pago_recibido', montoFinal, uid,
-          `Pago contado confirmado · ${nombre} · ${formaPago}`,
-          { solicitudId: orden.id })
-        if (movId) {
-          await updateDoc(doc(db, 'solicitudes_envio', orden.id), { 'cobroDelivery.movimientoPagoId': movId })
-        }
-      }
+      // FIN-1C-A — el cobro lo registra el SERVIDOR: recalcula el monto desde la orden, crea el pago_recibido (y, en transferencia, el
+      // DEP tipo C) y marca la orden en una transacción. La pantalla solo manda { operacionId, ordenIds, formaPago, nota }.
+      intentoRef.current = operacionDeCobro(intentoRef.current, [orden.id], formaPago, nuevaOperacionId)
+      const r = await registrarCobroDeliveryServidor([orden.id], formaPago, intentoRef.current.operacionId, nota)
+      exigirHechoCobro(presentarResultadoCobro(r))
+      intentoRef.current = null
       onClose()
     } catch (e: any) {
-      setErr(e?.message || 'Error al guardar')
+      const p = presentarErrorAccionCobro(e, fmt)
+      if (p.categoria !== 'temporal') intentoRef.current = null
+      setErr(p.mensaje)
     } finally {
       setSaving(false)
     }
@@ -1537,94 +1344,22 @@ function CobrosPageContent() {
 
   // (marcarPagada es invocado desde PagoContadoModal — ver modal arriba)
 
-  // Revierte un cobro contado ya pagado. La solicitud y el movimiento
-  // pago_recibido asociado se leen y escriben dentro de una única
-  // runTransaction: o se revierten los dos juntos, o ninguno cambia.
-  //
-  // - Si la solicitud ya tiene cobroDelivery.movimientoPagoId (pagos creados
-  //   por el flujo corregido), lo usamos directo.
-  // - Si no lo tiene (registros legacy, o pagados por el modal individual —
-  //   que queda fuera de alcance de esta corrección), lo resolvemos ANTES de
-  //   abrir la transacción con una query por solicitudId: Firestore no
-  //   permite where() dentro de runTransaction, solo tx.get(docRef). Si la
-  //   query no encuentra exactamente un movimiento activo, bloqueamos sin
-  //   escribir nada y pedimos conciliación manual.
+  // Revierte un cobro contado ya pagado. FIN-1C-A — lo hace el SERVIDOR en una transacción: demuestra el movimiento pago_recibido (por
+  // movimientoPagoId, o legacy solo si hay EXACTAMENTE uno activo y coherente), lo anula, anula el DEP tipo C si lo hay y devuelve el cobro
+  // a pendiente. La pantalla solo manda { operacionId, ordenId }. Un intento que no se pudo confirmar (error temporal) conserva su
+  // operacionId: el reintento es seguro. Cualquier otro resultado lo descarta.
+  const intentoReversionRef = useRef<IntentoOperacion | null>(null)
   async function revertirPagada(orden: Solicitud) {
-    const uid = auth.currentUser?.uid || 'desconocido'
-    const solRef = doc(db, 'solicitudes_envio', orden.id)
-
-    let movimientoId = orden.cobroDelivery?.movimientoPagoId ?? null
-    if (!movimientoId) {
-      const legacySnap = await getDocs(
-        query(
-          collection(db, 'movimientos_financieros'),
-          where('solicitudId', '==', orden.id),
-          where('tipo', '==', 'pago_recibido'),
-          where('estado', '==', 'activo'),
-        )
-      )
-      if (legacySnap.size === 0) {
-        throw new Error('No se encontró ningún movimiento pago_recibido activo para esta solicitud. No se revirtió nada — requiere conciliación manual.')
-      }
-      if (legacySnap.size > 1) {
-        throw new Error(`Se encontraron ${legacySnap.size} movimientos pago_recibido activos para esta solicitud. No se revirtió nada — requiere conciliación manual.`)
-      }
-      movimientoId = legacySnap.docs[0].id
+    intentoReversionRef.current = operacionDeReversion(intentoReversionRef.current, orden.id, nuevaOperacionId)
+    try {
+      const r = await revertirCobroDeliveryServidor(orden.id, intentoReversionRef.current.operacionId)
+      exigirHechoCobro(presentarResultadoReversion(r))
+      intentoReversionRef.current = null
+    } catch (e) {
+      const p = presentarErrorAccionCobro(e, fmt)
+      if (p.categoria !== 'temporal') intentoReversionRef.current = null
+      throw new Error(p.mensaje)
     }
-    const movRef = doc(db, 'movimientos_financieros', movimientoId)
-
-    await runTransaction(db, async (tx) => {
-      const [solSnap, movSnap] = await Promise.all([tx.get(solRef), tx.get(movRef)])
-      if (!solSnap.exists()) {
-        throw new Error('La solicitud ya no existe.')
-      }
-      const data = solSnap.data() as any
-      const cobro = data.cobroDelivery as CobroDelivery | undefined
-      if (!cobro || cobro.estado !== 'pagado') {
-        throw new Error('Esta solicitud ya no está en estado pagado (probablemente ya fue revertida).')
-      }
-      if (!movSnap.exists()) {
-        throw new Error('El movimiento financiero asociado no existe. No se revirtió nada — requiere conciliación manual.')
-      }
-      const movData = movSnap.data() as any
-      if (movData.solicitudId !== orden.id || movData.tipo !== 'pago_recibido') {
-        throw new Error('El movimiento encontrado no corresponde a esta solicitud. No se revirtió nada — requiere conciliación manual.')
-      }
-      if (movData.estado === 'anulado') {
-        throw new Error('El movimiento ya está anulado pero la solicitud seguía marcada como pagada. No se revirtió nada — requiere conciliación manual.')
-      }
-
-      // COBROS-PAGO-INTEGRIDAD-1 — el pago por transferencia tiene además su
-      // DEP tipo C, que quedaba 'confirmado' con la orden marcada
-      // confirmadoStorkhub: cobro pendiente + liquidación confirmada. Se lee
-      // en esta misma transacción (antes de cualquier escritura) y, si es
-      // tipo C, se anula — no se borra — y la orden se libera. Un depósito
-      // del motorizado (tipo A/B) es otro dinero y no se toca.
-      const punteroId = (data.registro?.deposito?.storkhubDepositoId as string | undefined) ?? null
-      const depRef = punteroId ? doc(db, 'ordenes_deposito', punteroId) : null
-      const depSnap = depRef ? await tx.get(depRef) : null
-      const plan = planReversionDeposito(
-        punteroId,
-        depSnap?.exists() ? { id: depSnap.id, ...(depSnap.data() as { tipo?: string; estado?: string }) } : null,
-      )
-
-      tx.update(solRef, {
-        // movimientoPagoId se conserva a propósito: queda apuntando al
-        // movimiento (ahora anulado) como rastro de auditoría de que este
-        // cobro fue pagado y luego revertido.
-        ...camposReversionCobro(deleteField(), movimientoId),
-        ...plan.camposOrden,
-      })
-      if (plan.anularDepositoId && depRef) {
-        tx.update(depRef, camposAnulacionDeposito(auth.currentUser?.uid, serverTimestamp(), MOTIVO_ANULACION_REVERSION))
-      }
-      tx.update(movRef, {
-        estado: 'anulado',
-        anuladoAt: serverTimestamp(),
-        anuladoPorUid: uid,
-        motivoAnulacion: 'Reversión de cobro contado por gestor',
-      })
-    })
   }
 
   // Contado pagados (historial)
@@ -1675,67 +1410,22 @@ function CobrosPageContent() {
       })
   }, [contadoSub, contadoPagados])
 
-  // Marca pagado un grupo de cobros contado (mismo cliente + día) en una sola
-  // runTransaction. Por cada solicitud:
-  //  - se relee dentro de la transacción (nunca se confía en el prop `o`);
-  //  - si ya está pagada se omite (protege contra doble clic, doble pestaña
-  //    y reintentos: el segundo intento no encuentra nada pendiente que hacer);
-  //  - se crea exactamente un movimiento pago_recibido con el mismo tipo,
-  //    monto y referencia (solicitudId) que usa el flujo individual aprobado
-  //    (PagoContadoModal.handleConfirmar) — ese flujo tampoco fija cuentaOrigen/
-  //    cuentaDestino para 'pago_recibido' (tipo legacy sin doble entrada), así
-  //    que aquí se replica ese mismo comportamiento, sin inventar campos nuevos;
-  //  - se guarda cobroDelivery.movimientoPagoId con el ID del movimiento recién
-  //    creado, para que revertirPagada pueda ubicarlo sin ambigüedad.
-  // Todo ocurre dentro de la misma transacción: si falla la escritura de
-  // cualquier movimiento, Firestore descarta también las actualizaciones de
-  // las solicitudes — no puede quedar un pago parcialmente aplicado al grupo.
-  async function marcarGrupoPagado(ordenes: Solicitud[], formaPago: string) {
-    const uid = auth.currentUser?.uid || 'desconocido'
-    const solicitudRefs = ordenes.map((o) => doc(db, 'solicitudes_envio', o.id))
-
-    await runTransaction(db, async (tx) => {
-      const snaps = await Promise.all(solicitudRefs.map((ref) => tx.get(ref)))
-
-      snaps.forEach((snap, i) => {
-        if (!snap.exists()) return
-        const data = snap.data() as any
-        const cobroActual = data.cobroDelivery as CobroDelivery | undefined
-        // Ya pagada (por este mismo intento en otra pestaña, o un reintento
-        // anterior que sí llegó a escribir): no se toca ni se duplica.
-        if (cobroActual?.estado === 'pagado') return
-
-        const o = ordenes[i]
-        const monto = cobroActual?.monto ?? (data as any).confirmacion?.precioFinalCordobas ?? 0
-        const nombre = getClienteNombre(o, comercioNames)
-        const movRef = doc(collection(db, 'movimientos_financieros'))
-
-        const updates: any = {
-          'cobroDelivery.estado': 'pagado',
-          'cobroDelivery.pagadoAt': serverTimestamp(),
-          'cobroDelivery.formaPago': formaPago,
-          'cobroDelivery.movimientoPagoId': movRef.id,
-        }
-        if (!cobroActual) {
-          updates['cobroDelivery.monto'] = monto
-          updates['cobroDelivery.tipoCliente'] = o.tipoCliente || 'contado'
-          updates['cobroDelivery.quienPaga'] = o.pagoDelivery?.quienPaga || ''
-          updates['cobroDelivery.registradoAt'] = serverTimestamp()
-        }
-
-        tx.update(solicitudRefs[i], updates)
-        tx.set(movRef, {
-          tipo: 'pago_recibido',
-          monto,
-          at: serverTimestamp(),
-          creadoPorUid: uid,
-          creadoPorRol: 'gestor',
-          descripcion: `Pago contado confirmado (lote) · ${nombre} · ${formaPago}`,
-          estado: 'activo',
-          solicitudId: o.id,
-        })
-      })
-    })
+  // Marca pagado un grupo de cobros contado (mismo cliente + día). FIN-1C-A — lo hace el SERVIDOR en UNA transacción: todo el grupo o
+  // nada (una orden ya pagada o incoherente rechaza el lote entero), un pago_recibido por orden y, en transferencia, un DEP tipo C por
+  // orden. La pantalla solo manda { operacionId, ordenIds, formaPago }.
+  const intentoGrupoRef = useRef<IntentoOperacion | null>(null)
+  async function marcarGrupoPagado(ordenes: Solicitud[], formaPago: 'efectivo' | 'transferencia') {
+    const ids = ordenes.map((o) => o.id)
+    intentoGrupoRef.current = operacionDeCobro(intentoGrupoRef.current, ids, formaPago, nuevaOperacionId)
+    try {
+      const r = await registrarCobroDeliveryServidor(ids, formaPago, intentoGrupoRef.current.operacionId)
+      exigirHechoCobro(presentarResultadoCobro(r))
+      intentoGrupoRef.current = null
+    } catch (e) {
+      const p = presentarErrorAccionCobro(e, fmt)
+      if (p.categoria !== 'temporal') intentoGrupoRef.current = null
+      throw new Error(p.mensaje)
+    }
   }
 
   // ── Subida de boucher por gestor ───────────────────────────────────────────
