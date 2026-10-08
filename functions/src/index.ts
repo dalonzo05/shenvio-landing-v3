@@ -1,8 +1,14 @@
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import * as admin from 'firebase-admin';
 import { Timestamp } from 'firebase-admin/firestore';
+import { setGlobalOptions } from 'firebase-functions/v2';
 
 admin.initializeApp();
+
+// OPS-MAXINSTANCES-1 — política de escalado de las Functions v2: tope de 20 instancias por Function.
+// Es solo escalado y costo; la integridad financiera no depende de esto (transacciones, idempotencia, Rules).
+// Debe ejecutarse antes de los exports de abajo. Una Function puede declarar su propio maxInstances si de verdad lo necesita.
+setGlobalOptions({ maxInstances: 20 });
 
 export { asignarMotorizado } from './asignacion-motorizado-callable';
 
