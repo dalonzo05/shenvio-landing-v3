@@ -9,6 +9,7 @@
 
 import type { DocumentData } from 'firebase-admin/firestore';
 import { calcularDeposito } from './calculo-deposito';
+import { baseComisionAprobada, type MotivoBaseNoDemostrable } from './precio-orden';
 import { esNumeroFinito } from './deposito-monto';
 
 export const COMISION_PCT = 0.8;
@@ -49,11 +50,19 @@ export function ordenesElegibles(ordenes: DocConId[], motorizadoId: string, ini:
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
-/** Comisión de la orden: la base real aprobada (deliveryBase, o el precio final si no hay desglose), sin el 80%. */
-export function baseComisionOrden(o: DocumentData): number {
-  const base = o.precioDesglose?.deliveryBase;
-  if (base !== undefined && base !== null) return aCentavos(base);
-  return aCentavos(o.confirmacion?.precioFinalCordobas);
+/**
+ * Base de la comisión de la orden, en centavos y SIN el 80%: la que el servidor aprobó al confirmar el precio (o la que deriva de la tarifa canónica si la orden es
+ * anterior al snapshot). NUNCA `precioDesglose.deliveryBase` tal cual lo escribió el cliente. `null` = no se puede demostrar: esa orden no se paga, se concilia.
+ */
+export function baseComisionOrden(o: DocumentData): number | null {
+  const r = baseComisionAprobada(o);
+  return r.ok ? aCentavos(r.base) : null;
+}
+
+/** Por qué una orden no tiene base de comisión demostrable (para el rechazo de la liquidación); null si la tiene. */
+export function motivoBaseNoDemostrable(o: DocumentData): MotivoBaseNoDemostrable | null {
+  const r = baseComisionAprobada(o);
+  return r.ok ? null : r.motivo;
 }
 
 /** Efectivo que el motorizado le debe a StorkHub por la orden: la MISMA semántica que el depósito (calcularDeposito). */

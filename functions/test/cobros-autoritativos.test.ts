@@ -699,3 +699,14 @@ test('FIN1C-K1 · la fórmula del monto vive en UN módulo y la usan la entrega 
   assert.ok(!/Math\.max\(0, precioDelivery/.test(src('motorizado-transiciones.ts')), 'la matemática del faltante ya no está duplicada');
   assert.ok(/Math\.max\(0, precioDelivery/.test(src('cobro-delivery-monto.ts')));
 });
+
+test('FIN1F-F15 · una orden SIN precio confirmado no produce cobro legítimo: el monto del delivery es 0 aunque el cliente haya dejado un montoSugerido (incluso en fuera_managua)', () => {
+  for (const orden of [
+    { pagoDelivery: { quienPaga: 'entrega', montoSugerido: 150 } },
+    { tipoServicio: 'fuera_managua', pagoDelivery: { quienPaga: 'entrega', montoSugerido: 888888 } },
+    { confirmacion: {}, precioDesglose: { deliveryBase: 5000 }, pagoDelivery: { quienPaga: 'entrega', montoSugerido: 5000 } },
+  ]) {
+    const r = calcularMontoCobroDelivery(orden);
+    assert.equal(r.precioDelivery, 0); assert.equal(r.monto, 0);
+  }
+});

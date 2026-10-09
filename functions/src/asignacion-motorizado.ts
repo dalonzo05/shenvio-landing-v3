@@ -1,5 +1,6 @@
 import { HttpsError } from 'firebase-functions/v2/https';
 import type { DocumentData } from 'firebase-admin/firestore';
+import { derivarBaseComision, type MotivoBaseNoDemostrable } from './precio-orden';
 
 type Documento = DocumentData;
 export const MSG_NO_ELEGIBLE = 'El motorizado ya no está disponible para nuevas asignaciones.';
@@ -44,6 +45,13 @@ const estadosAsignacionInicial = ['pendiente_confirmacion', 'confirmada'];
 const estadosReasignables = ['asignada', 'en_camino_retiro'];
 
 const precioValido = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+
+// PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1 — por qué no se puede cerrar la base de la comisión de esta orden.
+const MSG_BASE_NO_DEMOSTRABLE: Record<MotivoBaseNoDemostrable, string> = {
+  sin_precio_confirmado: 'Ingresá un precio final válido.',
+  cotizacion_inconsistente: 'La cotización de la orden no coincide con la tarifa de su distancia. Revisala antes de confirmar el precio.',
+  cotizacion_incompleta: 'La orden trae una cotización sin distancia que se pueda verificar. Revisala antes de confirmar el precio.',
+};
 const idValido = (v: unknown): v is string => typeof v === 'string' && v.trim() === v && v.length > 0 && v.length <= 200 && !v.includes('/');
 
 export function leerPeticionAsignacion(data: unknown): PeticionAsignacion {
@@ -105,6 +113,11 @@ export async function asignarMotorizadoCore(deps: DepsAsignacion, uid: string | 
         (p.operacion === 'reasignar' && !estadosReasignables.includes(s.estado))) {
       throw new HttpsError('failed-precondition', 'Esta orden ya avanzó y no permite reasignar el motorizado.', { motivo: 'solicitud_no_reasignable' });
     }
+    // Una orden solo queda ASIGNADA con el precio financieramente cerrado. 'sugerido' y 'reasignar' no fijan ni cambian el precio (el payload ni lo admite), así
+    // que exigen que ya esté confirmado: antes un gestor podía pasar la orden a 'confirmada' sin precio y asignarla 'sugerido' (E2).
+    if (p.operacion !== 'confirmar' && !precioValido(s.confirmacion?.precioFinalCordobas)) {
+      throw new HttpsError('failed-precondition', 'Primero confirmá el precio final de la orden.', { motivo: 'precio_sin_confirmar' });
+    }
     const m = p.motorizadoId === null ? null : await tx.getMotorizado(p.motorizadoId);
     if (p.motorizadoId !== null && !esElegibleParaNuevaAsignacion(m)) {
       throw new HttpsError('failed-precondition', MSG_NO_ELEGIBLE, { motivo: 'motorizado_no_elegible' });
@@ -115,7 +128,11 @@ export async function asignarMotorizadoCore(deps: DepsAsignacion, uid: string | 
       const debeConfirmar = s.estado === 'pendiente_confirmacion' || !precioValido(s.confirmacion?.precioFinalCordobas) || p.precioEditado;
       if (debeConfirmar) {
         if (!precioValido(p.precioFinal)) throw new HttpsError('invalid-argument', 'Ingresá un precio final válido.');
-        patch.confirmacion = { precioFinalCordobas: p.precioFinal, confirmadoPorUid: uid, confirmadoAt: ahora };
+        // El servidor deja, junto al precio final, la BASE de la comisión derivada con la tarifa canónica (snapshot). El precio final puede incluir recargos;
+        // la base no. Una cotización que no cuadra con la tarifa no se confirma: el desglose que escribió el cliente no es autoridad.
+        const base = derivarBaseComision({ ...s, confirmacion: { precioFinalCordobas: p.precioFinal } });
+        if (!base.ok) throw new HttpsError('failed-precondition', MSG_BASE_NO_DEMOSTRABLE[base.motivo], { motivo: base.motivo });
+        patch.confirmacion = { precioFinalCordobas: p.precioFinal, comisionBaseCordobas: base.base, comisionBaseOrigen: base.origen, confirmadoPorUid: uid, confirmadoAt: ahora };
       } else if (p.precioFinal !== undefined) {
         throw new HttpsError('invalid-argument', 'Modificar el precio requiere edición explícita.');
       }

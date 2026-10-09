@@ -29,7 +29,7 @@ import {
 import { analizarSaldo } from './saldo-acciones-comun';
 import { atribuirDepositos } from './liquidacion-depositos';
 import {
-  aCentavos, aMonto, adelantosDeSemana, baseComisionOrden, COMISION_PCT, efectivoAStorkhubOrden, formulaLiquidacion,
+  aCentavos, aMonto, adelantosDeSemana, baseComisionOrden, COMISION_PCT, motivoBaseNoDemostrable, efectivoAStorkhubOrden, formulaLiquidacion,
   gastosCandidatos, ordenesElegibles, type DocConId,
 } from './liquidacion-calculo';
 import type { LecturasLiquidacion } from './adelantos';
@@ -190,6 +190,15 @@ export async function crearLiquidacionMotorizadoCore(deps: DepsCrearLiquidacion,
       }
     }
 
+    // PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1 — la comisión solo se paga sobre una base que el servidor aprobó. Una orden sin precio confirmado, o cuya cotización no se
+    // demuestra con la tarifa canónica, no se liquida con un valor del cliente: se concilia (antes de cualquier escritura).
+    for (const o of ordenes) {
+      const motivo = motivoBaseNoDemostrable(o.data);
+      if (motivo !== null) {
+        throw rechazoOp('conciliacion_requerida', 'Una orden de la semana no tiene un precio demostrable para calcular la comisión. Hay que conciliarla: no se crea ni se modifica nada.', { ordenId: o.id, motivoPrecio: motivo });
+      }
+    }
+
     // Depósitos: la semana económica de un depósito la dan SUS ÓRDENES, no su creadoAt (el del lunes por el efectivo del domingo es de la semana anterior).
     // Uno relevante NO terminal bloquea la liquidación; la contribución de cada uno a esta semana es exacta o es conciliacion_requerida
     // (liquidacion-depositos.ts, con la misma demostración que usan la confirmación y la conversión).
@@ -249,7 +258,7 @@ export async function crearLiquidacionMotorizadoCore(deps: DepsCrearLiquidacion,
     }
 
     // ── La fórmula (todo en centavos) ─────────────────────────────────────────
-    const centavosBase = ordenes.reduce((s, o) => s + baseComisionOrden(o.data), 0);
+    const centavosBase = ordenes.reduce((s, o) => s + (baseComisionOrden(o.data) ?? 0), 0);
     const centavosEfectivo = ordenes.reduce((s, o) => s + efectivoAStorkhubOrden(o.data), 0);
     const centavosGastosLiq = gastos.reduce((s, g) => s + aCentavos(g.data.monto), 0);
     const centavosDepositado = atribuidos.reduce((s, d) => s + d.contribucion, 0);

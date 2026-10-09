@@ -16,6 +16,7 @@ import {
 import { auth, db } from '@/fb/config'
 import { useModuleGuard } from '../../_hooks/useModuleGuard'
 import { getMapsLoader } from '@/lib/googleMaps'
+import { tarifa } from '@/lib/tarifa-envio'
 import { getZonasActivas } from '@/fb/zonas'
 import { clasificarOrdenCompleto, type ZonaGeografica } from '@/lib/zonas'
 import { useResolucionPunto, pareceEntradaDirecta, MSG_ENTRADA_NO_RESUELTA } from '@/lib/useResolucionPunto'
@@ -127,37 +128,7 @@ function coordsMatch(a: LatLng | null, b: LatLng | null) {
   return Math.abs(a.lat - b.lat) < 0.00005 && Math.abs(a.lng - b.lng) < 0.00005
 }
 
-function tarifa(km: number): number {
-  if (km < 2) return 70
-  if (km < 4) return 80
-  if (km < 6) return 90
-  if (km < 8) return 110
-  if (km < 10) return 120
-  if (km < 12) return 130
-  if (km < 14) return 150
-  if (km < 16) return 160
-  if (km < 18) return 180
-  if (km < 20) return 190
-  if (km < 22) return 210
-  if (km < 24) return 220
-  if (km < 26) return 240
-  if (km < 28) return 250
-  if (km < 30) return 270
-  if (km < 32) return 280
-  if (km < 34) return 300
-  if (km < 36) return 310
-  if (km < 38) return 330
-  if (km < 40) return 340
-  if (km < 42) return 360
-  if (km < 44) return 370
-  if (km < 46) return 390
-  if (km < 48) return 400
-  if (km < 50) return 420
-  if (km < 52) return 430
-  if (km < 54) return 440
-  return -1
-}
-
+// La tarifa vive en lib/tarifa-envio.ts (UNA fórmula: aquí solo PREVIEW; el servidor la usa como autoridad al confirmar el precio).
 async function calcularDistancia(o: LatLng, d: LatLng): Promise<{ km: number; precio: number } | null> {
   const key = `${CACHE_PREFIX}${o.lat.toFixed(5)},${o.lng.toFixed(5)}-${d.lat.toFixed(5)},${d.lng.toFixed(5)}`
   try {

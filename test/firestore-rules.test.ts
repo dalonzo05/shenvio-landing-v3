@@ -4845,3 +4845,84 @@ test('FIN1E-P6 · el digitador conserva su ruta de enlace (sin regresión) y no 
   await sembrarDigitacion({ destinatario: 'storkhub' })
   await assertFails(updateDoc(doc(como(UID_DIGITADOR), 'solicitudes_envio', ORDEN_D), { 'registro.deposito.confirmadoStorkhub': true }))
 })
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1 — el precio que decide el servidor no nace de un cliente
+//
+//  · `confirmacion` (precio final + base de la comisión) la escribe SOLO asignarMotorizado; `entregadoAt` e `historial.entregadoAt` SOLO la Function de entrega.
+//    FIN-1E cerró editarlos después de crear; esto cierra plantarlos AL crear, para todo rol que crea órdenes.
+//  · El preview (precioDesglose, cotizacion, pagoDelivery.montoSugerido) sigue siendo del cliente: nada financiero lo toma como autoridad.
+// ═════════════════════════════════════════════════════════════════════════════
+
+const CREADORES_PRECIO = [['comercio', UID_COMERCIO], ['gestor', UID_GESTOR], ['admin', UID_ADMIN]] as const
+const previewValido = () => ({
+  tipoServicio: 'normal',
+  precioDesglose: { deliveryBase: 150, recargoZona: 0, recargoServicio: 0, totalCobrado: 150 },
+  cotizacion: { distanciaKm: 13.859, precioSugerido: 150 },
+  pagoDelivery: { tipo: 'contado', quienPaga: 'entrega', montoSugerido: 150 },
+})
+const ordenPersonalPrecio = (extra: Record<string, unknown> = {}) => ({
+  userId: UID_CLIENTE, comercioUid: UID_CLIENTE, ownerSnapshot: { uid: UID_CLIENTE, nombre: 'Cliente' },
+  estado: 'pendiente_confirmacion', tipoCliente: 'contado', createdAt: serverTimestamp(), ...previewValido(), ...extra,
+})
+
+test('FIN1F-R1 · crear una orden normal con su preview (precioDesglose, cotizacion, montoSugerido) y un historial sin fecha de entrega ⇒ ALLOW (comercio, cliente, gestor, admin)', async () => {
+  for (const [rol, uid] of CREADORES_PRECIO) {
+    await assertSucceeds(nacer(uid, `p1_${rol}`, ordenBase({ ...previewValido() })))
+    await assertSucceeds(nacer(uid, `p1h_${rol}`, ordenBase({ ...previewValido(), historial: { creadaAt: serverTimestamp() } })))
+  }
+  await assertSucceeds(nacer(UID_CLIENTE, 'p1_cliente', ordenPersonalPrecio()))
+})
+
+test('FIN1F-R2 · crear con `confirmacion` plantada (solo el precio, completa, vacía o null) ⇒ DENY para todo rol', async () => {
+  const plantas = [
+    { confirmacion: { precioFinalCordobas: 1 } },
+    { confirmacion: { precioFinalCordobas: 1, comisionBaseCordobas: 99999, comisionBaseOrigen: 'tarifa_distancia', confirmadoPorUid: UID_COMERCIO, confirmadoAt: serverTimestamp() } },
+    { confirmacion: {} },
+    { confirmacion: null },
+  ]
+  for (const [rol, uid] of CREADORES_PRECIO) {
+    for (const [i, planta] of plantas.entries()) await assertFails(nacer(uid, `p2_${rol}_${i}`, ordenBase({ ...previewValido(), ...planta })))
+  }
+  for (const [i, planta] of plantas.entries()) await assertFails(nacer(UID_CLIENTE, `p2_cliente_${i}`, ordenPersonalPrecio(planta)))
+})
+
+test('FIN1F-R3 · crear con `entregadoAt` plantado ⇒ DENY para todo rol', async () => {
+  for (const [rol, uid] of CREADORES_PRECIO) {
+    await assertFails(nacer(uid, `p3_${rol}`, ordenBase({ entregadoAt: serverTimestamp() })))
+    await assertFails(nacer(uid, `p3n_${rol}`, ordenBase({ entregadoAt: null })))
+  }
+  await assertFails(nacer(UID_CLIENTE, 'p3_cliente', ordenPersonalPrecio({ entregadoAt: Timestamp.fromDate(new Date('2026-09-01T10:00:00Z')) })))
+})
+
+test('FIN1F-R4 · crear con `historial.entregadoAt` plantado ⇒ DENY para todo rol; el resto del historial sí se escribe', async () => {
+  for (const [rol, uid] of CREADORES_PRECIO) {
+    await assertFails(nacer(uid, `p4_${rol}`, ordenBase({ historial: { entregadoAt: serverTimestamp() } })))
+    await assertFails(nacer(uid, `p4b_${rol}`, ordenBase({ historial: { creadaAt: serverTimestamp(), entregadoAt: null } })))
+  }
+  await assertFails(nacer(UID_CLIENTE, 'p4_cliente', ordenPersonalPrecio({ historial: { entregadoAt: serverTimestamp() } })))
+  await assertSucceeds(nacer(UID_COMERCIO, 'p4_ok', ordenBase({ historial: { creadaAt: serverTimestamp(), nota: 'x' } })))
+})
+
+test('FIN1F-R5 · después de crear, el precio sigue protegido: staff no escribe confirmacion, precioDesglose ni el estado de asignación ⇒ DENY; el preview no cambia', async () => {
+  const id = await ordenConCodigo('p5', { ...previewValido(), estado: 'pendiente_confirmacion' })
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(doc(como(uid), 'solicitudes_envio', id), { confirmacion: { precioFinalCordobas: 1, comisionBaseCordobas: 99999 }, updatedAt: serverTimestamp() }))
+    await assertFails(updateDoc(doc(como(uid), 'solicitudes_envio', id), { 'confirmacion.comisionBaseCordobas': 99999 }))
+    await assertFails(updateDoc(doc(como(uid), 'solicitudes_envio', id), { 'precioDesglose.deliveryBase': 99999 }))
+    await assertFails(updateDoc(doc(como(uid), 'solicitudes_envio', id), { 'pagoDelivery.montoSugerido': 99999 }))
+  }
+  assert.equal(((await leerDoc('solicitudes_envio', id)) as { precioDesglose: { deliveryBase: number } }).precioDesglose.deliveryBase, 150)
+  assert.equal((await leerDoc('solicitudes_envio', id))?.confirmacion, undefined)
+})
+
+test('FIN1F-R6 · asignar NO es del cliente: pasar a asignada con una asignación fabricada, con o sin precio, ⇒ DENY (asignarMotorizado exige el precio cerrado; ver FIN1F-F5/F7)', async () => {
+  const sin = await ordenConCodigo('p6a', { ...previewValido(), estado: 'confirmada' })
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(doc(como(uid), 'solicitudes_envio', sin), { estado: 'asignada', asignacion: { motorizadoAuthUid: UID_MOTO, motorizadoNombre: 'X', estadoAceptacion: 'aceptada' }, updatedAt: serverTimestamp() }))
+    await assertFails(updateDoc(doc(como(uid), 'solicitudes_envio', sin), { estado: 'asignada', updatedAt: serverTimestamp() }))
+  }
+  assert.equal((await leerDoc('solicitudes_envio', sin))?.estado, 'confirmada')
+  // control: lo que NO toca el precio sigue siendo del staff (FIN-1E no quedó inmutable)
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', sin), { notaInterna: 'llamar antes', updatedAt: serverTimestamp() }))
+})

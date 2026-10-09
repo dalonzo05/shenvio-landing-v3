@@ -225,13 +225,17 @@ test('M2 · nulls explícitos se tratan como ausentes', () => {
   assert.equal(r.montoTotal, 0)
 })
 
-test('M3 · fuera_managua cae al montoSugerido si no hay precio confirmado', () => {
-  const r = calcularDeposito(orden({
-    confirmacion: { precioFinalCordobas: 0 },
-    tipoServicio: 'fuera_managua',
-    pagoDelivery: { quienPaga: 'recoleccion', montoSugerido: 250 },
-  }))
-  assert.equal(r.totalAStorkhub, 250)
+test('M3 · fuera_managua SIN precio confirmado ya NO cae al montoSugerido del cliente (PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1): no hay delivery que cobrar', () => {
+  for (const confirmacion of [{ precioFinalCordobas: 0 }, {}, null, undefined, { precioFinalCordobas: null }]) {
+    const r = calcularDeposito(orden({
+      confirmacion: confirmacion as never,
+      tipoServicio: 'fuera_managua',
+      pagoDelivery: { quienPaga: 'recoleccion', montoSugerido: 250 },
+    }))
+    assert.equal(r.totalAStorkhub, 0)
+    assert.equal(r.tieneDelivery, false)
+    assert.equal(r.montoDelivery, 0)
+  }
 })
 
 test('M4 · el precio confirmado gana sobre el sugerido', () => {

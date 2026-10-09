@@ -680,8 +680,20 @@ service cloud.firestore {
           && request.resource.data.get('estado', '') in ['pendiente_confirmacion', 'programada'];
       }
 
+      // PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1 — lo que decide el servidor no nace de un cliente. `confirmacion` (el precio final y la base de la comisión) la
+      // escribe SOLO asignarMotorizado; `entregadoAt` e `historial.entregadoAt` (la semana de liquidación) los fija SOLO la Function que marca la entrega. FIN-1E
+      // ya cerró editarlos DESPUÉS de crear; esto cierra plantarlos AL crear, para todo rol que crea órdenes (comercio, cliente, gestor, admin). `precioDesglose`,
+      // `cotizacion` y `pagoDelivery.montoSugerido` siguen siendo del cliente porque son el PREVIEW: ninguna operación financiera los toma como autoridad.
+      function creacionSinAutoridadDeServidor() {
+        let h = request.resource.data.get('historial', {});
+        return !('confirmacion' in request.resource.data)
+          && !('entregadoAt' in request.resource.data)
+          && !(h is map && 'entregadoAt' in h);
+      }
+
       allow create: if isActiveUser()
         && nacimientoSinAsignacion()
+        && creacionSinAutoridadDeServidor()
         && (
           ordenDeComercio()
             // Un comercio solo puede crear órdenes a su propio nombre: el
@@ -799,8 +811,11 @@ service cloud.firestore {
       // rechazar, cancelar y reactivar siguen exactamente como estaban, igual
       // que todas las escrituras que NO mueven estado (registro.deposito.*,
       // cobroDelivery.*, cobroPendiente…), que pasan por conservaEstado().
+      // PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1 — 'asignada' también: dejar una orden asignada es de asignarMotorizado (Admin SDK), que exige el precio final
+      // confirmado y deja la base de la comisión. Ningún cliente (staff incluido) escribe el estado 'asignada' a mano: la asignación (el mapa) ya no la fabrica
+      // el cliente desde MOTO-ASIGNACION-RULES-CIERRE-1, y ahora tampoco el estado que la anuncia.
       function esEstadoOperativoDeViaje(estadoOrden) {
-        return estadoOrden in ['en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado'];
+        return estadoOrden in ['asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado'];
       }
 
       function conservaEstado() {

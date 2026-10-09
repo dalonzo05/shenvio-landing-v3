@@ -97,12 +97,10 @@ export function calcularDeposito(orden: EntradaCalculoDeposito): ResultadoCalcul
   const ceAplica = !!orden.cobroContraEntrega?.aplica
   const montoProducto = ceAplica ? (orden.cobroContraEntrega?.monto || 0) : 0
 
-  // Para fuera_managua el precio confirmado puede no existir todavía; se cae
-  // al monto sugerido. Sin este fallback el gestor veía 0 en órdenes que el
-  // motorizado sí contaba (divergencia #2 de B1-FIN-0).
-  const precioDelivery =
-    orden.confirmacion?.precioFinalCordobas ||
-    (orden.tipoServicio === 'fuera_managua' ? (orden.pagoDelivery?.montoSugerido || 0) : 0)
+  // PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1 — SOLO el precio confirmado. Antes, en fuera_managua sin precio confirmado, el delivery salía de
+  // pagoDelivery.montoSugerido: un valor que escribe el cliente al crear la orden, o sea dinero real sobre un monto que nadie aprobó. Una orden solo opera
+  // asignada y asignarMotorizado exige el precio confirmado, así que ya no hay un caso legítimo que dependa de ese respaldo. Sin precio confirmado no hay delivery.
+  const precioDelivery = orden.confirmacion?.precioFinalCordobas || 0
 
   const quienPaga = orden.pagoDelivery?.quienPaga || ''
   const deducir = !!orden.pagoDelivery?.deducirDelCobroContraEntrega

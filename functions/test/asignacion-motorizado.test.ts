@@ -178,7 +178,7 @@ for (const [name, estado, permitido] of [
   test(name, async () => {
     const e = escenario();
     const anterior = { motorizadoId: 'anterior', motorizadoAuthUid: 'uid-anterior' };
-    e.orden({ estado, updatedAt: stamp(1), asignacion: anterior });
+    e.orden({ estado, updatedAt: stamp(1), asignacion: anterior, confirmacion: { precioFinalCordobas: 130 } });
     if (permitido) {
       await e.run({ operacion: 'reasignar', estadoEsperado: estado });
       assert.equal(e.writes.length, 1);
@@ -281,7 +281,7 @@ test('RG15 confirmar también queda bloqueado sobre una solicitud ya asignada (a
 
 test('RG15b reasignar en en_camino_retiro vuelve a estado asignada (semántica ya existente de nueva asignación)', async () => {
   const e = escenario();
-  e.orden({ estado: 'en_camino_retiro', updatedAt: stamp(1), asignacion: { motorizadoId: 'anterior' } });
+  e.orden({ estado: 'en_camino_retiro', updatedAt: stamp(1), asignacion: { motorizadoId: 'anterior' }, confirmacion: { precioFinalCordobas: 130 } });
   await e.run({ operacion: 'reasignar', estadoEsperado: 'en_camino_retiro' });
   assert.equal(e.actual().estado, 'asignada');
   assert.equal(e.actual().asignacion.motorizadoId, 'm1');
@@ -295,4 +295,86 @@ test('confirmar sigue funcionando para asignación inicial desde pendiente_confi
     assert.equal(e.writes.length, 1);
     assert.equal(e.actual().estado, 'asignada');
   }
+});
+
+// ═══ PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1 · una orden solo queda asignada con el precio cerrado, y el servidor deja la base de la comisión ═══
+
+const motivoDe = (m: string) => (err: unknown) => (err as { details?: { motivo?: string } }).details?.motivo === m;
+const pendiente = (extra: Record<string, unknown> = {}) => ({ estado: 'pendiente_confirmacion', updatedAt: stamp(1), ...extra });
+const confirmarP = { operacion: 'confirmar', estadoEsperado: 'pendiente_confirmacion' } as const;
+
+test('FIN1F-F1 confirmar un precio válido deja el snapshot del servidor: precio final + base de comisión derivada de la tarifa (13.859 km → 150)', async () => {
+  const e = escenario(); e.orden(pendiente({ cotizacion: { distanciaKm: 13.859 }, precioDesglose: { deliveryBase: 150, totalCobrado: 150 } }));
+  await e.run({ ...confirmarP, precioFinal: 150 });
+  const c = e.actual().confirmacion;
+  assert.equal(c.precioFinalCordobas, 150); assert.equal(c.comisionBaseCordobas, 150); assert.equal(c.comisionBaseOrigen, 'tarifa_distancia');
+  assert.equal(c.confirmadoPorUid, 'gestor'); assert.equal(e.actual().estado, 'asignada');
+});
+
+test('FIN1F-F10 SH-0012: precio final 260 con recargo 50 → la base del snapshot es 210 (NO 260)', async () => {
+  const e = escenario(); e.orden(pendiente({ cotizacion: { distanciaKm: 21.759 }, precioDesglose: { deliveryBase: 210, recargoZona: 50, totalCobrado: 260 } }));
+  await e.run({ ...confirmarP, precioFinal: 260 });
+  assert.equal(e.actual().confirmacion.precioFinalCordobas, 260); assert.equal(e.actual().confirmacion.comisionBaseCordobas, 210);
+});
+
+test('FIN1F-F2/F3/F4 precio 0, negativo, texto, NaN, Infinity → rechazado, 0 escrituras', async () => {
+  for (const precio of [0, -5, -0.01, '150', 'abc', NaN, Infinity, -Infinity, null, {}, [150]]) {
+    const e = escenario(); e.orden(pendiente());
+    await assert.rejects(e.run({ ...confirmarP, precioFinal: precio as never }), codigo('invalid-argument'), String(precio));
+    assert.equal(e.writes.length, 0, String(precio));
+  }
+  const e = escenario(); e.orden(pendiente()); // confirmar sin precio alguno
+  await assert.rejects(e.run({ ...confirmarP }), codigo('invalid-argument')); assert.equal(e.writes.length, 0);
+});
+
+test('FIN1F-F5 sugerido sobre una orden SIN precio confirmado → precio_sin_confirmar, 0 escrituras (la orden no queda asignada)', async () => {
+  for (const confirmacion of [undefined, {}, { precioFinalCordobas: 0 }, { precioFinalCordobas: -3 }, { precioFinalCordobas: 'x' }, { precioFinalCordobas: NaN }]) {
+    const e = escenario(); e.orden({ estado: 'confirmada', updatedAt: stamp(1), ...(confirmacion === undefined ? {} : { confirmacion }) });
+    await assert.rejects(e.run({ operacion: 'sugerido', estadoEsperado: 'confirmada' }), (err: unknown) => codigo('failed-precondition')(err) && motivoDe('precio_sin_confirmar')(err));
+    assert.equal(e.writes.length, 0); assert.equal(e.actual().estado, 'confirmada');
+  }
+});
+
+test('FIN1F-F5b sugerido CON precio confirmado sigue funcionando (sin regresión) y no toca la confirmación', async () => {
+  const e = escenario(); const antes = e.actual().confirmacion;
+  await e.run({ operacion: 'sugerido', estadoEsperado: 'confirmada' });
+  assert.equal(e.actual().estado, 'asignada'); assert.deepEqual(e.actual().confirmacion, antes);
+});
+
+test('FIN1F-F6 reasignar con precio confirmado → PASS y conserva el snapshot; F7 sin precio confirmado → precio_sin_confirmar', async () => {
+  const e = escenario(); const conf = { precioFinalCordobas: 150, comisionBaseCordobas: 150, comisionBaseOrigen: 'tarifa_distancia', confirmadoPorUid: 'g0' };
+  e.orden({ estado: 'asignada', updatedAt: stamp(1), asignacion: { motorizadoId: 'anterior' }, confirmacion: conf });
+  await e.run({ operacion: 'reasignar', estadoEsperado: 'asignada' });
+  assert.deepEqual(e.actual().confirmacion, conf); assert.equal(e.actual().asignacion.motorizadoId, 'm1');
+  const e2 = escenario(); e2.orden({ estado: 'asignada', updatedAt: stamp(1), asignacion: { motorizadoId: 'anterior' } });
+  await assert.rejects(e2.run({ operacion: 'reasignar', estadoEsperado: 'asignada' }), (err: unknown) => motivoDe('precio_sin_confirmar')(err));
+  assert.equal(e2.writes.length, 0);
+});
+
+test('FIN1F-E1 confirmar con un desglose fabricado (deliveryBase 5000 contra 13.859 km) NO se confirma: cotizacion_inconsistente, 0 escrituras', async () => {
+  const e = escenario(); e.orden(pendiente({ cotizacion: { distanciaKm: 13.859 }, precioDesglose: { deliveryBase: 5000, totalCobrado: 5000 } }));
+  await assert.rejects(e.run({ ...confirmarP, precioFinal: 150 }), (err: unknown) => codigo('failed-precondition')(err) && motivoDe('cotizacion_inconsistente')(err));
+  assert.equal(e.writes.length, 0); assert.equal(e.actual().estado, 'pendiente_confirmacion');
+});
+
+test('FIN1F-E1b desglose sin distancia verificable → cotizacion_incompleta; distancia fuera del tarifario con desglose → inconsistente', async () => {
+  const e = escenario(); e.orden(pendiente({ precioDesglose: { deliveryBase: 5000 } }));
+  await assert.rejects(e.run({ ...confirmarP, precioFinal: 150 }), motivoDe('cotizacion_incompleta')); assert.equal(e.writes.length, 0);
+  const e2 = escenario(); e2.orden(pendiente({ cotizacion: { distanciaKm: 80 }, precioDesglose: { deliveryBase: 5000 } }));
+  await assert.rejects(e2.run({ ...confirmarP, precioFinal: 150 }), motivoDe('cotizacion_inconsistente')); assert.equal(e2.writes.length, 0);
+});
+
+test('FIN1F-BASE sin desglose ni cotización, o con distancia fuera del tarifario y sin desglose (cotización manual): la base es el precio final que fijó el gestor', async () => {
+  const e = escenario(); e.orden(pendiente());
+  await e.run({ ...confirmarP, precioFinal: 90 });
+  assert.equal(e.actual().confirmacion.comisionBaseCordobas, 90); assert.equal(e.actual().confirmacion.comisionBaseOrigen, 'precio_final_sin_desglose');
+  const e2 = escenario(); e2.orden(pendiente({ cotizacion: { distanciaKm: 80 } }));
+  await e2.run({ ...confirmarP, precioFinal: 700 });
+  assert.equal(e2.actual().confirmacion.comisionBaseCordobas, 700); assert.equal(e2.actual().confirmacion.comisionBaseOrigen, 'precio_final_sin_desglose');
+});
+
+test('FIN1F-EDIT editar el precio de una orden ya confirmada recalcula la base con la misma fórmula', async () => {
+  const e = escenario(); e.orden({ estado: 'confirmada', updatedAt: stamp(1), cotizacion: { distanciaKm: 21.759 }, precioDesglose: { deliveryBase: 210 }, confirmacion: { precioFinalCordobas: 210, comisionBaseCordobas: 210 } });
+  await e.run({ operacion: 'confirmar', precioEditado: true, precioFinal: 260 });
+  assert.equal(e.actual().confirmacion.precioFinalCordobas, 260); assert.equal(e.actual().confirmacion.comisionBaseCordobas, 210);
 });

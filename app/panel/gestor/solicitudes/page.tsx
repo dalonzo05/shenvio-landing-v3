@@ -1965,9 +1965,9 @@ function GestorSolicitudesPageContent() {
                           {typeof s.confirmacion?.precioFinalCordobas === 'number' ? (
                             <div className="font-semibold text-xs text-gray-900">{money(s.confirmacion.precioFinalCordobas)}</div>
                           ) : typeof (s as any)?.pagoDelivery?.montoSugerido === 'number' ? (
-                            <div className="text-[11px] text-gray-500">~{money((s as any).pagoDelivery.montoSugerido)}</div>
+                            <div className="text-[11px] text-gray-500" title="Estimado del cliente: el precio final se fija al confirmar la orden">~{money((s as any).pagoDelivery.montoSugerido)} <span className="text-gray-400">· estimado</span></div>
                           ) : typeof s?.cotizacion?.precioSugerido === 'number' ? (
-                            <div className="text-[11px] text-gray-500">~{money(s.cotizacion.precioSugerido)}</div>
+                            <div className="text-[11px] text-gray-500" title="Estimado del cliente: el precio final se fija al confirmar la orden">~{money(s.cotizacion.precioSugerido)} <span className="text-gray-400">· estimado</span></div>
                           ) : (
                             <div className="text-[11px] text-gray-400">—</div>
                           )}

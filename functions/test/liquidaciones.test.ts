@@ -162,7 +162,7 @@ function base(w: Mundo) {
 
 const orden = (ms: number, extra: Doc = {}): Doc => ({
   estado: 'entregado', asignacion: { motorizadoId: 'm1', motorizadoAuthUid: 'u1' }, entregadoAt: TS(ms),
-  confirmacion: { precioFinalCordobas: 100 }, precioDesglose: { deliveryBase: 100 }, pagoDelivery: { quienPaga: 'efectivo' }, ...extra,
+  confirmacion: { precioFinalCordobas: 100, comisionBaseCordobas: 100, comisionBaseOrigen: 'tarifa_distancia' }, precioDesglose: { deliveryBase: 100 }, pagoDelivery: { quienPaga: 'efectivo' }, ...extra,
 });
 const deposito = (monto: number, estado = 'confirmado', extra: Doc = {}): Doc => ({
   motorizadoUid: 'u1', tipo: 'recaudacion_motorizado_storkhub', estado, montoTotal: monto, solicitudIds: ['o1', 'o2'], creadoAt: TS(MID), ...extra,
@@ -428,11 +428,85 @@ test('L18 · el delivery deducido del cobro contra entrega solo cuenta lo que el
   assert.equal(w.raw(`liquidaciones_motorizado/${LIQ}`).efectivoEsperado, 40);
 });
 
-test('L19 · fuera de Managua usa el monto sugerido del delivery', async () => {
+test('L19 · fuera de Managua SIN precio confirmado ya NO usa el monto sugerido del cliente: no se liquida (conciliacion_requerida), 0 escrituras', async () => {
   const w = mundo(); base(w);
   w.put('solicitudes_envio/o1', orden(MID, { tipoServicio: 'fuera_managua', confirmacion: {}, pagoDelivery: { quienPaga: 'efectivo', montoSugerido: 150 } }));
+  const antes = w.snapshot(); const esc = w.escrituras;
+  await assert.rejects(crear(w), codigo('failed-precondition', 'conciliacion_requerida'));
+  assert.equal(w.snapshot(), antes); assert.equal(w.escrituras, esc);
+  // y calcularDeposito ya no le inventa un delivery
+  assert.equal(efectivoAStorkhubOrden({ tipoServicio: 'fuera_managua', confirmacion: {}, pagoDelivery: { quienPaga: 'efectivo', montoSugerido: 888888 } }), 0);
+});
+
+// ── PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1 · la comisión solo se paga sobre una base que el servidor aprobó ──
+
+const conSnapshot = (base: number, final: number, extra: Doc = {}): Doc => ({ confirmacion: { precioFinalCordobas: final, comisionBaseCordobas: base, comisionBaseOrigen: 'tarifa_distancia' }, ...extra });
+
+test('FIN1F-F8 / E1 · el deliveryBase fabricado por el cliente (5000) NO mueve la comisión: se paga sobre la base aprobada (150)', async () => {
+  const w = mundo(); base(w);
+  w.put('solicitudes_envio/o1', orden(MID, { ...conSnapshot(150, 150), precioDesglose: { deliveryBase: 5000, totalCobrado: 5000 }, cotizacion: { distanciaKm: 13.859 } }));
+  w.put('ordenes_deposito/d1', deposito(150, 'confirmado', { solicitudIds: ['o1'] }));
   await crear(w);
-  assert.equal(w.raw(`liquidaciones_motorizado/${LIQ}`).efectivoEsperado, 150);
+  const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
+  assert.equal(l.comision, 120); assert.equal(l.netoAPagar, 120); assert.notEqual(l.comision, 4000);
+});
+
+test('FIN1F-F9 / E2 · una orden ENTREGADA sin precio confirmado no paga comisión: conciliacion_requerida, 0 escrituras', async () => {
+  const w = mundo(); base(w);
+  w.put('solicitudes_envio/o1', orden(MID, { confirmacion: undefined, precioDesglose: { deliveryBase: 150 }, cotizacion: { distanciaKm: 13.859 } }));
+  delete (w.raw('solicitudes_envio/o1') as Doc).confirmacion;
+  const antes = w.snapshot(); const esc = w.escrituras;
+  await assert.rejects(crear(w), (e: unknown) => codigo('failed-precondition', 'conciliacion_requerida')(e) && (e as { details?: { motivoPrecio?: string } }).details?.motivoPrecio === 'sin_precio_confirmado');
+  assert.equal(w.snapshot(), antes); assert.equal(w.escrituras, esc); assert.equal(w.liquidaciones().length, 0);
+});
+
+test('FIN1F-F10 / SH-0012 · precio final 260 = base 210 + recargo 50: la comisión sigue siendo el 80% de 210 (168), NO de 260', async () => {
+  const w = mundo(); base(w);
+  w.put('solicitudes_envio/o1', orden(MID, conSnapshot(210, 260, { precioDesglose: { deliveryBase: 210, recargoZona: 50, totalCobrado: 260 } })));
+  w.put('ordenes_deposito/d1', deposito(260, 'confirmado', { solicitudIds: ['o1'] }));
+  await crear(w);
+  const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
+  assert.equal(l.comision, 168); assert.notEqual(l.comision, 208);
+});
+
+test('FIN1F-F10b · lo mismo SIN snapshot (orden anterior al cambio): la base se deriva de la distancia (21.759 km → 210), no del precio final', async () => {
+  const w = mundo(); base(w);
+  w.put('solicitudes_envio/o1', orden(MID, { confirmacion: { precioFinalCordobas: 260 }, precioDesglose: { deliveryBase: 210, recargoZona: 50, totalCobrado: 260 }, cotizacion: { distanciaKm: 21.759 } }));
+  w.put('ordenes_deposito/d1', deposito(260, 'confirmado', { solicitudIds: ['o1'] }));
+  await crear(w);
+  assert.equal(w.raw(`liquidaciones_motorizado/${LIQ}`).comision, 168);
+});
+
+test('FIN1F-SH0010 · regresión del caso legítimo: 13.859 km → 150, confirmado 150 ⇒ comisión 120, igual que antes', async () => {
+  const w = mundo(); base(w);
+  w.put('solicitudes_envio/o1', orden(MID, { confirmacion: { precioFinalCordobas: 150 }, precioDesglose: { deliveryBase: 150, totalCobrado: 150 }, cotizacion: { distanciaKm: 13.859, precioSugerido: 150 } }));
+  w.put('ordenes_deposito/d1', deposito(150, 'confirmado', { solicitudIds: ['o1'] }));
+  await crear(w);
+  const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
+  assert.equal(l.comision, 120); assert.equal(l.netoAPagar, 120);
+});
+
+test('FIN1F-LEG · sin snapshot, una cotización que NO se demuestra con la tarifa no se paga (inconsistente / incompleta), con motivo y 0 escrituras', async () => {
+  for (const [nombre, extra, motivo] of [
+    ['deliveryBase fabricado contra la distancia', { precioDesglose: { deliveryBase: 5000 }, cotizacion: { distanciaKm: 13.859 } }, 'cotizacion_inconsistente'],
+    ['deliveryBase sin distancia verificable', { precioDesglose: { deliveryBase: 5000 } }, 'cotizacion_incompleta'],
+    ['deliveryBase con distancia fuera del tarifario', { precioDesglose: { deliveryBase: 5000 }, cotizacion: { distanciaKm: 80 } }, 'cotizacion_inconsistente'],
+  ] as const) {
+    const w = mundo(); base(w);
+    w.put('solicitudes_envio/o1', orden(MID, { confirmacion: { precioFinalCordobas: 150 }, ...extra } as Doc));
+    const antes = w.snapshot(); const esc = w.escrituras;
+    await assert.rejects(crear(w), (e: unknown) => codigo('failed-precondition', 'conciliacion_requerida')(e) && (e as { details?: { motivoPrecio?: string } }).details?.motivoPrecio === motivo, nombre);
+    assert.equal(w.snapshot(), antes, nombre); assert.equal(w.escrituras, esc, nombre);
+  }
+});
+
+test('FIN1F-LEG2 · sin desglose ni cotización (orden anterior): la base es el precio final que el gestor fijó (la regla que ya existía)', async () => {
+  const w = mundo(); base(w);
+  w.put('solicitudes_envio/o1', orden(MID, { confirmacion: { precioFinalCordobas: 50 }, precioDesglose: undefined }));
+  delete (w.raw('solicitudes_envio/o1') as Doc).precioDesglose;
+  w.put('ordenes_deposito/d1', deposito(50, 'confirmado', { solicitudIds: ['o1'] }));
+  await crear(w);
+  assert.equal(w.raw(`liquidaciones_motorizado/${LIQ}`).comision, 40);
 });
 
 test('L20 · un depósito relevante NO terminal bloquea la liquidación; anulado, rechazado, sin órdenes de la semana y de comercio no', async () => {
@@ -884,8 +958,11 @@ test('la fórmula trabaja en centavos exactos y es la del diseño', () => {
   const r = formulaLiquidacion({ baseComision: 1010, efectivoEsperado: 1010, gastosLiquidacion: 10, gastosEnDepositos: 0, depositado: 900, adelantos: 100, deudasAplicadas: 33 });
   // comisión = round(1010×0.8)=808; a depositar = 1000; faltante = 100; neto = 808 − 100 − 100 + 0 − 33 = 575
   assert.equal(r.comision, 808); assert.equal(r.totalADepositar, 1000); assert.equal(r.faltantesDeposito, 100); assert.equal(r.netoAPagar, 575);
-  assert.equal(baseComisionOrden({ precioDesglose: { deliveryBase: 80.1 }, confirmacion: { precioFinalCordobas: 999 } }), 8010);
+  // la base sale del snapshot del servidor; un deliveryBase del cliente sin respaldo NO se usa
+  assert.equal(baseComisionOrden({ precioDesglose: { deliveryBase: 80.1 }, confirmacion: { precioFinalCordobas: 999, comisionBaseCordobas: 80.1 } }), 8010);
+  assert.equal(baseComisionOrden({ precioDesglose: { deliveryBase: 80.1 }, confirmacion: { precioFinalCordobas: 999 } }), null);
   assert.equal(baseComisionOrden({ confirmacion: { precioFinalCordobas: 55.55 } }), 5555);
+  assert.equal(baseComisionOrden({ precioDesglose: { deliveryBase: 80 } }), null);
 });
 
 test('atomicidad: si cualquier escritura falla, NO queda nada a medias (ni liquidación, ni abonos, ni marcas, ni saldo)', async () => {
