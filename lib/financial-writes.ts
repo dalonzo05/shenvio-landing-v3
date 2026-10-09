@@ -1,6 +1,4 @@
 import {
-  addDoc,
-  collection,
   doc,
   serverTimestamp,
   setDoc,
@@ -8,10 +6,7 @@ import {
 } from 'firebase/firestore'
 import { db } from '@/fb/config'
 import type {
-  MovimientoFinanciero,
-  TipoMovimiento,
   MetodoAbono,
-  PropietarioEfectivo,
   PropuestaAbonoSaldo,
 } from './financial-types'
 
@@ -27,71 +22,8 @@ import type {
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ─── Tipos auxiliares ─────────────────────────────────────────────────────────
-
-type Cuentas = {
-  origen: string
-  destino: string
-}
-
-type RefsMovimiento = Pick<
-  MovimientoFinanciero,
-  'solicitudId' | 'depositoId' | 'motorizadoId' | 'comercioId' | 'saldoId' | 'gastoId' | 'liquidacionId'
->
-
-// ─── Registrar movimiento ─────────────────────────────────────────────────────
-
-/**
- * Registra un evento financiero en el ledger (movimientos_financieros).
- * Solo gestor/admin puede leer esta colección.
- *
- * Estrategia Fase 1: el ledger es auditoría enriquecida.
- * Las cuentas (origen/destino) son opcionales mientras se migra gradualmente.
- * A partir de Fase 4, todas las escrituras deben incluirlas.
- *
- * Esta función nunca lanza — los errores se logean sin interrumpir al llamador.
- * @returns ID del documento creado, o null si hubo error
- */
-export async function registrarMovimiento(
-  tipo: TipoMovimiento,
-  monto: number,
-  operadorId: string,
-  descripcion: string,
-  refs?: Partial<RefsMovimiento>,
-  opciones?: {
-    cuentas?: Cuentas
-    propietario?: PropietarioEfectivo
-    semanaKey?: string
-    metadata?: Record<string, unknown>
-    rol?: MovimientoFinanciero['creadoPorRol']
-  }
-): Promise<string | null> {
-  try {
-    const payload: Omit<MovimientoFinanciero, 'id'> = {
-      tipo,
-      monto,
-      at: serverTimestamp(),
-      creadoPorUid: operadorId,
-      creadoPorRol: opciones?.rol ?? 'gestor',
-      descripcion,
-      estado: 'activo',
-      ...(refs ?? {}),
-      ...(opciones?.cuentas ? {
-        cuentaOrigen: opciones.cuentas.origen,
-        cuentaDestino: opciones.cuentas.destino,
-      } : {}),
-      ...(opciones?.propietario ? { propietario: opciones.propietario } : {}),
-      ...(opciones?.semanaKey ? { semanaKey: opciones.semanaKey } : {}),
-      ...(opciones?.metadata ? { metadata: opciones.metadata } : {}),
-    }
-
-    const docRef = await addDoc(collection(db, 'movimientos_financieros'), payload)
-    return docRef.id
-  } catch (err) {
-    console.error('[financial-writes] Error registrando movimiento:', err)
-    return null
-  }
-}
+// FIN-1E — registrarMovimiento YA NO VIVE AQUÍ. Era el addDoc de cliente al ledger (movimientos_financieros) y ya no tenía ningún llamador: las Rules cierran
+// create, update y delete del ledger a todo cliente. Todo movimiento lo escribe una Cloud Function (Admin SDK) en la misma transacción que el hecho que registra.
 
 // ─── Gastos operativos ────────────────────────────────────────────────────────
 

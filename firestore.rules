@@ -854,7 +854,9 @@ service cloud.firestore {
         && transicionDesdeCerradoValida()
         && destinoOperativoProhibido()
         && noTocaCodigo()
-        && cobroPagadoIntegro();
+        && cobroPagadoIntegro()
+        && historialEntregadoIntacto()
+        && registroDepositoValido(false);
 
       // ── COBROS-PAGO-INTEGRIDAD-1 / FIN-1C-A · el resultado de un pago NO lo escribe el cliente ──
       //
@@ -923,7 +925,46 @@ service cloud.firestore {
       // writer legítimo de gestor/admin los toca después: los escribe el servidor.
       function inputsDeCobroIntactos() {
         return !request.resource.data.diff(resource.data).affectedKeys()
-          .hasAny(['cobroPendiente', 'cobrosMotorizado', 'pagoDelivery', 'cobroContraEntrega', 'tipoCliente']);
+          .hasAny(['cobroPendiente', 'cobrosMotorizado', 'pagoDelivery', 'cobroContraEntrega', 'tipoCliente',
+                   // FIN-1E — inputs de la comisión, del efectivo y de la semana de liquidación: ningún writer de cliente los toca después de crear la
+                   // orden (precioDesglose y tipoServicio nacen con ella; entregadoAt lo fija confirmarTransicionConCobro con el Admin SDK).
+                   'precioDesglose', 'tipoServicio', 'entregadoAt']);
+      }
+
+      // FIN-1E — historial.entregadoAt (el respaldo de la fecha de entrega) no cambia ni se borra desde el cliente: ausente→valor, valor→otro y valor→ausente
+      // son todos DENY. El resto de historial (rechazadaAt, canceladaAt…) sigue siendo escribible por su flujo.
+      function historialEntregadoIntacto() {
+        let a = resource.data.get('historial', {});
+        let n = request.resource.data.get('historial', {});
+        return (a is map ? a : {}).get('entregadoAt', null) == (n is map ? n : {}).get('entregadoAt', null);
+      }
+
+      // FIN-1E — punteros de depósito de la orden. confirmado* son SOLO del servidor. El id de vínculo (storkhubDepositoId / comercioDepositoId) solo nace
+      // (ausente→id) y solo hacia un depósito que, DESPUÉS del batch (getAfter), lista esta orden, va a ese destino y espera comprobante o está en revisión
+      // (y, para el motorizado, es SUYO); una vez fijado no cambia ni se borra desde el cliente (liberarlo es del servidor). Es el patrón que ya usaba la
+      // rama del digitador. Cada mapa y cada getAfter se evalúan UNA sola vez: el motor tiene un presupuesto de 1000 expresiones.
+      function depositoVinculaOrden(depId, destino, exigeDueno) {
+        let dep = getAfter(/databases/$(database)/documents/ordenes_deposito/$(depId)).data;
+        return id in dep.get('solicitudIds', [])
+          && dep.get('destinatario', '') == destino
+          && dep.get('estado', '') in ['pendiente_boucher', 'en_revision']
+          && (!exigeDueno || dep.get('motorizadoUid', '') == request.auth.uid);
+      }
+
+      function punteroDepositoOk(ant, nue, destino, exigeDueno) {
+        return ant == nue
+          || (ant == null && nue is string && nue.size() > 0 && depositoVinculaOrden(nue, destino, exigeDueno));
+      }
+
+      function registroDepositoValido(exigeDueno) {
+        let a = liqAnt();
+        let n = liqNue();
+        return !('registro' in request.resource.data.diff(resource.data).affectedKeys())
+          || (
+            !n.diff(a).affectedKeys().hasAny(['confirmadoStorkhub', 'confirmadoStorkhubAt', 'confirmadoComercio', 'confirmadoComercioAt'])
+            && punteroDepositoOk(a.get('storkhubDepositoId', null), n.get('storkhubDepositoId', null), 'storkhub', exigeDueno)
+            && punteroDepositoOk(a.get('comercioDepositoId', null), n.get('comercioDepositoId', null), 'comercio', exigeDueno)
+          );
       }
       function confirmacionIntacta() {
         return !('confirmacion' in request.resource.data.diff(resource.data).affectedKeys());
@@ -1134,7 +1175,6 @@ service cloud.firestore {
           'estado',
           'updatedAt',
           'historial',
-          'entregadoAt',
           'evidencias',
           'evidenciasTerminal',
           'evidenciasCargotrans',
@@ -1142,7 +1182,10 @@ service cloud.firestore {
           'acumulacionCobroSemanal'
         ])
         && marcadorSoloPendiente()
-        && registroDeMotorizadoValido();
+        && registroDeMotorizadoValido()
+        // FIN-1E — su historial no toca la fecha de entrega, y el puntero que fija debe apuntar a SU depósito, que lista la orden.
+        && historialEntregadoIntacto()
+        && registroDepositoValido(true);
 
       // ── Bloque 2A (PROVISIONAL): boucher de pago del comercio ──────────────
       // Hasta ahora no existía NINGUNA rama de update para rol 'Comercio'
@@ -2043,22 +2086,14 @@ service cloud.firestore {
     // métodos para que delete sea realmente false. read, create y update quedan EXACTAMENTE como
     // estaban: cerrar su contenido es FIN-1E, después de migrar los writers que aún los usan.
     match /movimientos_financieros/{id} {
-      // FIN-1C-B — los movimientos de gasto (gasto_aprobado) y de adelanto (adelanto_motorizado) los crean y anulan SOLO las callables de gastos y
-      // adelantos. Las Rules se combinan con OR: por eso NO se agrega un "deny" aparte sino que se excluyen estos tipos de la propia rama genérica,
-      // tanto al crear como al editar (el tipo de antes Y el de después: ni se crea, ni se edita el monto, ni se anula o reactiva, ni se disfraza un
-      // movimiento de otro tipo como uno de estos). El resto del ledger sigue abierto a gestor/admin hasta FIN-1E (C6/C8 globales).
-      // FIN-1D — se suman los tipos de las liquidaciones: el abono de una deuda por liquidación (abono_deuda_motorizado), el pago de la liquidación
-      // (liquidacion_pago_efectivo) y el saldo que nace de un neto negativo (saldo_creado). Los crean SOLO crearLiquidacionMotorizado y
-      // marcarLiquidacionPagada (y, para el abono directo y las propuestas, registrarAbonoDirecto y confirmarPropuestaAbono: todas Admin SDK).
-      function tipoReservadoAServidor(d) {
-        return d.get('tipo', '') in ['gasto_aprobado', 'adelanto_motorizado', 'abono_deuda_motorizado', 'liquidacion_pago_efectivo', 'saldo_creado'];
-      }
+      // FIN-1E — el ledger es SOLO del servidor. Ningún frontend crea, edita, anula ni borra un movimiento: los 11 tipos que existen (gasto_aprobado,
+      // adelanto_motorizado, abono_deuda_motorizado, saldo_creado, liquidacion_pago_efectivo, pago_recibido, deuda_condonada,
+      // deposito_convertido_en_deuda, deposito_efectivo_storkhub, deposito_efectivo_comercio y el legacy deposito_confirmado) los escriben las Cloud Functions
+      // (Admin SDK, que no pasa por estas Rules) y no queda ningún writer de cliente. Antes la rama genérica dejaba a gestor y admin fabricar un
+      // pago_recibido con cualquier monto, actor y cuentas, o editar y anular cualquier movimiento no reservado. La seguridad ya NO depende de enumerar
+      // tipos: un tipo futuro nace cerrado. No hay otro allow, wildcard ni collectionGroup que lo reabra. Se conserva la lectura de gestor y admin.
       allow read: if isAdminOrGestor();
-      allow create: if isAdminOrGestor() && !tipoReservadoAServidor(request.resource.data);
-      allow update: if isAdminOrGestor()
-        && !tipoReservadoAServidor(resource.data)
-        && !tipoReservadoAServidor(request.resource.data);
-      allow delete: if false;
+      allow create, update, delete: if false;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2504,8 +2539,9 @@ service cloud.firestore {
     match /adelantos_motorizado/{id} {
       allow read: if isAdminOrGestor()
         || (isMotorizadoRole() && resource.data.motorizadoUid == request.auth.uid);
-      allow create, update: if isAdminOrGestor();
-      allow delete: if false;
+      // FIN-1E — colección legacy: ningún writer ni lector vivo (los adelantos son movimientos adelanto_motorizado, que escribe la callable). Se
+      // conserva la lectura y se cierra la escritura: nadie vuelve a fabricar un adelanto aquí.
+      allow create, update, delete: if false;
     }
 
     // Zonas geográficas: solo gestor/admin escribe; cualquier usuario activo puede leer

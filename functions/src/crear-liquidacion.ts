@@ -175,6 +175,21 @@ export async function crearLiquidacionMotorizadoCore(deps: DepsCrearLiquidacion,
     const ordenes = ordenesElegibles(await tx.getOrdenesEntregadasDelMotorizado(p.motorizadoId), p.motorizadoId, ini, fn);
     if (ordenes.length === 0) throw rechazoOp('sin_viajes', 'No hay viajes entregados en esa semana: no hay nada que liquidar.', { semanaKey: p.semanaKey });
 
+    // FIN-1E — una orden no se liquida dos veces. Su semana la fija entregadoAt (ya inmutable desde el cliente), pero un entregadoAt legacy corrido o una
+    // liquidación vieja con otro corte pudo dejarla en una liquidación previa del MISMO motorizado: si alguna candidata ya figura en el ordenesIds de
+    // CUALQUIER liquidación suya (pendiente o pagada, de esta u otra semana), el pago de esta semana la contaría otra vez → no se crea nada.
+    // Reutiliza delMotorizado (consultas por igualdad sobre motorizadoId/motorizadoUid, sin índice compuesto nuevo). Una liquidación legacy sin ordenesIds
+    // NO cuenta: solo se compara contra lo que la liquidación declara explícitamente.
+    const candidatas = new Set(ordenes.map((o) => o.id));
+    for (const l of delMotorizado) {
+      const ids = l.data.ordenesIds;
+      if (!Array.isArray(ids)) continue;
+      const repetida = ids.find((x) => typeof x === 'string' && candidatas.has(x));
+      if (repetida !== undefined) {
+        throw rechazoOp('conciliacion_requerida', 'Una de las órdenes de esa semana ya figura en otra liquidación de este motorizado. Hay que conciliarlo: no se crea ni se modifica nada.', { ordenId: String(repetida), liquidacionId: l.id });
+      }
+    }
+
     // Depósitos: la semana económica de un depósito la dan SUS ÓRDENES, no su creadoAt (el del lunes por el efectivo del domingo es de la semana anterior).
     // Uno relevante NO terminal bloquea la liquidación; la contribución de cada uno a esta semana es exacta o es conciliacion_requerida
     // (liquidacion-depositos.ts, con la misma demostración que usan la confirmación y la conversión).

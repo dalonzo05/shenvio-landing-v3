@@ -6,7 +6,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   ErrorOp,
@@ -238,3 +238,24 @@ test('FIN1D-K4 · con la liquidación ya creada, la tarjeta del neto muestra las
   const pagar = bloque(p, 'async function marcarPagada(', 'async function handleAdelanto()')
   assert.ok(pagar.includes('marcarLiquidacionPagadaServidor(liq.id, intentoPagoRef.current.operacionId)') && !pagar.slice(0, pagar.indexOf('// PDF') > 0 ? pagar.indexOf('PDF') : pagar.length).includes('calculo.'), 'pagar no manda ni recalcula montos')
 })
+
+test('FIN1E-K1 · ningún código de cliente escribe el ledger: registrarMovimiento ya no existe y ninguna pantalla ni lib hace create/update/delete sobre movimientos_financieros', () => {
+  const raiz = process.cwd();
+  const fw = readFileSync(join(raiz, 'lib', 'financial-writes.ts'), 'utf8');
+  assert.ok(!/export\s+(async\s+)?function\s+registrarMovimiento/.test(fw), 'registrarMovimiento fue eliminado');
+  assert.ok(!/import\s*\{[^}]*\baddDoc\b/.test(fw), 'financial-writes ya no importa addDoc');
+  const fuentes: string[] = [];
+  const recorrer = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      const p = join(dir, e.name);
+      if (e.isDirectory()) recorrer(p);
+      else if (/\.(ts|tsx)$/.test(e.name) && !/\.test\.tsx?$/.test(e.name)) fuentes.push(p);
+    }
+  };
+  for (const d of ['app', 'lib', 'components', 'fb']) { try { recorrer(join(raiz, d)); } catch { /* carpeta ausente */ } }
+  assert.ok(fuentes.length > 50, 'se recorrió el código del cliente');
+  const escritura = /\b(addDoc|setDoc|updateDoc|deleteDoc)\(\s*(collection|doc)\(\s*db\s*,\s*['"]movimientos_financieros['"]|\.(set|update|delete|create)\(\s*doc\(\s*db\s*,\s*['"]movimientos_financieros['"]/;
+  const infractores = fuentes.filter((p) => escritura.test(readFileSync(p, 'utf8')));
+  assert.deepEqual(infractores, [], 'nadie escribe el ledger desde el cliente');
+});

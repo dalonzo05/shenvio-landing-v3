@@ -2446,11 +2446,16 @@ test('VR15 · gestor y admin conservan lo administrativo y lo financiero (la asi
     estado: 'cancelada',
     updatedAt: serverTimestamp(),
   }))
-  // Y una escritura financiera sobre una orden YA entregada, que no mueve
-  // estado, sigue permitida: es la que usa lib/financial-writes.ts.
+  // FIN-1E: este caso pineaba como ALLOW que el gestor escribiera un puntero de depósito SUELTO (depX) en una orden entregada. Ese contrato cambió a
+  // propósito: el puntero solo nace hacia un depósito real que lista la orden (batch del flujo, getAfter). Lo suelto es DENY; el caso legítimo vive en
+  // FIN1E-P1..P4. Una escritura que no mueve estado ni toca un input financiero (nota interna) sigue permitida.
   const id4 = await ordenConCodigo('vr15d', { estado: 'entregado' })
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id4), {
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id4), {
     'registro.deposito.storkhubDepositoId': 'depX',
+    updatedAt: serverTimestamp(),
+  }))
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id4), {
+    notaInterna: 'revisar con el comercio',
     updatedAt: serverTimestamp(),
   }))
 })
@@ -3608,20 +3613,20 @@ test('F5-IDEM · anular dos veces desde el cliente ⇒ DENY las dos; no se crea 
   assert.equal(await eventosDeD(), 0, 'no se creó ningún evento')
 })
 
-test('F5-REPRO · REPRODUCCIÓN del bug anterior: con un commit de ledger SEPARADO y el batch principal denegado, queda confirmado + ledger anulado', async () => {
+test('F5-REPRO · el bug anterior YA NO se puede reproducir (FIN-1E): el commit de ledger SEPARADO se deniega, así que nunca queda confirmado + ledger anulado', async () => {
   await sembrarFin5({ M1: { estado: 'activo' } })
-  // El patrón viejo: el ledger se anula y se commitea solo...
+  // El patrón viejo: el ledger se anulaba y se commiteaba solo... FIN-1E: ese commit es DENY.
   const db = como(UID_GESTOR)
   const viejo = writeBatch(db)
   agregarAnulacionDeMovimientosAlBatch(viejo, await leerMovsDeD(db), UID_GESTOR, 'Depósito revertido a revisión por gestor', serverTimestamp())
-  await assertSucceeds(viejo.commit())
+  await assertFails(viejo.commit())
   // ...y después el batch principal es denegado.
   const principal = writeBatch(db)
   principal.set(doc(db, 'ordenes_deposito', 'depD'), camposRehacerDeposito(UID_GESTOR, serverTimestamp(), 'motivo suficiente', 'evF5'), { merge: true })
   principal.set(doc(db, 'ordenes_deposito', 'depD', 'eventos', 'evF5'), camposEventoDepositoRehecho({ uid: UID_GESTOR, rol: 'gestor' }, serverTimestamp(), 'motivo suficiente'))
   await assertFails(principal.commit())
   assert.equal((await leerDoc('ordenes_deposito', 'depD'))?.estado, 'confirmado')
-  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'anulado', 'el estado inconsistente que FIN-5 elimina del writer')
+  assert.equal((await leerDoc('movimientos_financieros', 'M1'))?.estado, 'activo', 'el ledger no cambió: el estado inconsistente ya no es alcanzable desde el cliente')
 })
 
 // ─── F3 · FIN-3 · el gestor MATERIALIZA el depósito; la confirmación es de la callable ──
@@ -3710,16 +3715,17 @@ test('F1-0-R4 · el MOTORIZADO, el comercio y el cliente no borran ⇒ DENY', as
   assert.equal(await existeMovimiento(), true)
 })
 
-test('F1-0-R5 / R7 · CREATE sigue permitido a gestor y admin (hasta FIN-1E) ⇒ ALLOW', async () => {
-  await assertSucceeds(addDoc(collection(como(UID_GESTOR), 'movimientos_financieros'), movBase({ creadoPorRol: 'gestor' })))
-  await assertSucceeds(addDoc(collection(como(UID_ADMIN), 'movimientos_financieros'), movBase({ creadoPorRol: 'admin' })))
+test('F1-0-R5 / R7 · CREATE ya NO lo permite el cliente (FIN-1E: el ledger es solo del servidor) ⇒ DENY a gestor y admin', async () => {
+  await assertFails(addDoc(collection(como(UID_GESTOR), 'movimientos_financieros'), movBase({ creadoPorRol: 'gestor' })))
+  await assertFails(addDoc(collection(como(UID_ADMIN), 'movimientos_financieros'), movBase({ creadoPorRol: 'admin' })))
 })
 
-test('F1-0-R6 / R8 · UPDATE sigue permitido a gestor y admin (hasta FIN-1E) ⇒ ALLOW', async () => {
+test('F1-0-R6 / R8 · UPDATE ya NO lo permite el cliente (FIN-1E) ⇒ DENY a gestor y admin; el movimiento queda intacto', async () => {
   await sembrarMovimiento()
-  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'movimientos_financieros', MOV_ID), { estado: 'anulado', anuladoPorUid: UID_GESTOR }))
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'movimientos_financieros', MOV_ID), { estado: 'anulado', anuladoPorUid: UID_GESTOR }))
   await sembrarMovimiento('mov_f10_b')
-  await assertSucceeds(updateDoc(doc(como(UID_ADMIN), 'movimientos_financieros', 'mov_f10_b'), { estado: 'anulado', anuladoPorUid: UID_ADMIN }))
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'movimientos_financieros', 'mov_f10_b'), { estado: 'anulado', anuladoPorUid: UID_ADMIN }))
+  assert.equal((await leerDoc('movimientos_financieros', MOV_ID))?.estado, 'activo')
 })
 
 test('F1-0-R9 / R10 · DELETE dentro de un writeBatch tampoco pasa (gestor y admin) ⇒ DENY, nada se borra', async () => {
@@ -3762,9 +3768,9 @@ test('F1-0-R13 · ningún otro match reabre el delete: un solo match para movimi
   assert.ok(!/\{[a-zA-Z_]*=\*\*\}/.test(reglas), 'sin wildcard recursivo que pueda conceder delete por otro camino')
   const i = reglas.indexOf('match /movimientos_financieros/{id}')
   const bloque = reglas.slice(i, reglas.indexOf('\n    }\n', i))
-  assert.ok(/allow delete: if false;/.test(bloque), 'delete: if false')
+  assert.ok(/allow create, update, delete: if false;/.test(bloque), 'create, update y delete: if false (FIN-1E)')
   assert.ok(!/allow [^:\n]*\bwrite\b[^:\n]*:/.test(bloque), 'ningún "allow ... write" (write incluye delete)')
-  assert.ok(!/allow [^:\n]*\bdelete\b[^:\n]*: if (?!false)/.test(bloque), 'ningún otro allow de delete')
+  assert.ok(!/allow [^:\n]*\b(delete|create|update)\b[^:\n]*: if (?!false)/.test(bloque), 'ningún otro allow de escritura')
 })
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -4169,10 +4175,11 @@ test('FIN1C-R10 · FIN-1B sin regresión: el staff sigue creando y capturando de
   await assertFails(updateDoc(doc(como(UID_ADMIN), 'ordenes_deposito', DEP_V), { estado: 'anulado', anuladoAt: serverTimestamp(), anuladoPorUid: UID_ADMIN, motivoAnulacion: 'xxx' }))
 })
 
-test('FIN1C-DEUDA-FIN1E · DEUDA EXPLÍCITA: el ledger global (movimientos_financieros) sigue abierto a gestor/admin; se cierra en FIN-1E', async () => {
-  // C6/C8 del diagnóstico: un pago_recibido o un movimiento cualquiera aún puede crearse desde el cliente. Este test PINEA la deuda a
-  // propósito: cuando FIN-1E cierre el ledger tiene que cambiarse aquí, a la vista.
-  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'movimientos_financieros', 'movDeuda1'), { tipo: 'pago_recibido', estado: 'activo', monto: 1, solicitudId: 'x', at: serverTimestamp(), creadoPorUid: UID_GESTOR, creadoPorRol: 'gestor', descripcion: 'deuda FIN-1E' }))
+test('FIN1C-DEUDA-FIN1E · DEUDA SALDADA en FIN-1E: el ledger global (movimientos_financieros) ya NO está abierto a gestor/admin (C6/C8) ⇒ DENY', async () => {
+  // C6/C8 del diagnóstico: un pago_recibido o un movimiento cualquiera podía crearse desde el cliente. Este test pineaba esa deuda como ALLOW; FIN-1E la cerró.
+  for (const uid of STAFF_UIDS) {
+    await assertFails(setDoc(doc(como(uid), 'movimientos_financieros', 'movDeuda1-' + uid), { tipo: 'pago_recibido', estado: 'activo', monto: 1, solicitudId: 'x', at: serverTimestamp(), creadoPorUid: uid, creadoPorRol: 'gestor', descripcion: 'deuda FIN-1E' }))
+  }
 })
 
 test('FIN1C-R11 · el motorizado ya NO escribe pagoDelivery.quienPaga (credito_semanal → entrega, transferencia → entrega, ni mapa completo), antes ni después de entregar ⇒ DENY; sus señales legítimas siguen ⇒ ALLOW', async () => {
@@ -4281,9 +4288,9 @@ test('FIN1CB-R3 · ledger POR TIPO: gestor y admin no crean, editan, anulan ni r
     await assertFails(deleteDoc(doc(d, 'movimientos_financieros', 'adel')))
   }
   await assertFails(setDoc(doc(como(UID_DIGITADOR), 'movimientos_financieros', 'ad-dig'), mov('adelanto_motorizado')))
-  // Control (cuánto NO se cerró): el resto del ledger sigue abierto hasta FIN-1E — la misma forma de escritura, con otro tipo, pasa.
-  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'movimientos_financieros', 'ctl'), mov('pago_recibido', { solicitudId: 'x' })))
-  await assertSucceeds(updateDoc(doc(como(UID_ADMIN), 'movimientos_financieros', 'otro'), { descripcion: 'editada' }))
+  // Control (FIN-1E): ya NO hay "resto del ledger" abierto — la misma forma de escritura, con cualquier otro tipo, también es DENY.
+  await assertFails(setDoc(doc(como(UID_GESTOR), 'movimientos_financieros', 'ctl'), mov('pago_recibido', { solicitudId: 'x' })))
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'movimientos_financieros', 'otro'), { descripcion: 'editada' }))
 })
 
 test('FIN1CB-R4 · solicitudes: la resolución de incidencias es del servidor: no_cobrar ni se crea ni se deshace, no se firma una resolución, no se toca cobroPendiente ni cobrosMotorizado ⇒ DENY (gestor y admin)', async () => {
@@ -4479,7 +4486,7 @@ test('FIN1D-R3 · saldos: el cliente no crea ni mueve un saldo (P1–P8: monto a
   await assertSucceeds(getDoc(doc(como(UID_MOTO), 'saldos_cargo_motorizado', 'S1')))
 })
 
-test('FIN1D-R4 · ledger POR TIPO: abono_deuda_motorizado, liquidacion_pago_efectivo y saldo_creado no se crean, editan, anulan ni reactivan desde el cliente, ni se disfrazan ⇒ DENY; el resto del ledger (FIN-1E) sigue abierto', async () => {
+test('FIN1D-R4 · ledger POR TIPO: abono_deuda_motorizado, liquidacion_pago_efectivo y saldo_creado no se crean, editan, anulan ni reactivan desde el cliente, ni se disfrazan ⇒ DENY; el resto del ledger también (FIN-1E)', async () => {
   const mov = (tipo: string, extra: Record<string, unknown> = {}) => ({ tipo, monto: 100, at: serverTimestamp(), creadoPorUid: UID_GESTOR, creadoPorRol: 'gestor', descripcion: 'x', estado: 'activo', motorizadoId: 'mot1', ...extra })
   const tipos = ['abono_deuda_motorizado', 'liquidacion_pago_efectivo', 'saldo_creado'] as const
   await env.withSecurityRulesDisabled(async (ctx) => {
@@ -4500,9 +4507,9 @@ test('FIN1D-R4 · ledger POR TIPO: abono_deuda_motorizado, liquidacion_pago_efec
     }
   }
   for (const uid of [UID_MOTO, UID_DIGITADOR]) await assertFails(setDoc(doc(como(uid), 'movimientos_financieros', 'x-' + uid), mov('liquidacion_pago_efectivo')))
-  // Control (cuánto NO se cerró): FIN-1E sigue pendiente — la misma forma de escritura, con otro tipo, pasa.
-  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'movimientos_financieros', 'ctl'), mov('ajuste_manual')))
-  await assertSucceeds(updateDoc(doc(como(UID_ADMIN), 'movimientos_financieros', 'libre'), { descripcion: 'editada' }))
+  // Control (FIN-1E): el cierre es total — la misma forma de escritura, con un tipo libre, también es DENY.
+  await assertFails(setDoc(doc(como(UID_GESTOR), 'movimientos_financieros', 'ctl'), mov('ajuste_manual')))
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'movimientos_financieros', 'libre'), { descripcion: 'editada' }))
 })
 
 test('FIN1D-R5 · gastos: un gasto que una liquidación capturó (liquidacionId) NO se consume en un depósito; el cliente no escribe ni quita liquidacionId; un gasto libre sigue consumiéndose (FIN-2 intacto)', async () => {
@@ -4522,4 +4529,319 @@ test('FIN1D-R5 · gastos: un gasto que una liquidación capturó (liquidacionId)
   // Control: un gasto libre se consume en el mismo commit que crea el depósito (FIN-2 sin regresión).
   await assertSucceeds(batchCrearDepositoConGastos(UID_MOTO, 'DLibre', ['g1']).commit())
   assert.equal((await leerGastoFin2('g1'))?.consumidoEnDepositoId, 'DLibre')
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FIN-1E — cierre final del perímetro financiero
+//
+//  · movimientos_financieros es SOLO del servidor: create, update y delete son DENY para todo cliente, sin excepciones por tipo (L1–L14).
+//  · Los inputs financieros de la orden (precioDesglose, tipoServicio, entregadoAt, historial.entregadoAt) y los punteros de depósito
+//    (confirmado*, depositoId) no los escribe el cliente (O1–O8, P1–P6). La Function que marca la entrega usa el Admin SDK y no pasa por aquí.
+// ═════════════════════════════════════════════════════════════════════════════
+
+const TIPOS_LEDGER = [
+  'gasto_aprobado', 'adelanto_motorizado', 'abono_deuda_motorizado', 'saldo_creado', 'liquidacion_pago_efectivo', 'pago_recibido',
+  'deuda_condonada', 'deposito_convertido_en_deuda', 'deposito_efectivo_storkhub', 'deposito_efectivo_comercio', 'deposito_confirmado',
+  'ajuste_manual', 'tipo_futuro_que_aun_no_existe',
+] as const
+const movLedger1e = (tipo: string, extra: Record<string, unknown> = {}) => ({
+  tipo, monto: 100, estado: 'activo', saldoId: 'S1', motorizadoId: 'mot1', creadoPorUid: UID_GESTOR, creadoPorRol: 'gestor', descripcion: 'x', ...extra,
+})
+async function sembrarLedger1e() {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    for (const t of TIPOS_LEDGER) await setDoc(doc(ctx.firestore(), 'movimientos_financieros', 'm-' + t), movLedger1e(t, { at: new Date() }))
+  })
+}
+async function ledgerIntacto1e() {
+  for (const t of TIPOS_LEDGER) {
+    const m = await leerDoc('movimientos_financieros', 'm-' + t)
+    assert.equal(m?.monto, 100, 'el monto de ' + t + ' no cambió')
+    assert.equal(m?.estado, 'activo', t + ' sigue activo')
+    assert.equal(m?.tipo, t, 'el tipo de ' + t + ' no cambió')
+  }
+}
+
+test('FIN1E-L1 · CREATE de cualquier tipo del ledger (los 11 reales, ajuste_manual y un tipo futuro) por gestor y admin con setDoc ⇒ DENY', async () => {
+  for (const uid of STAFF_UIDS) {
+    for (const t of TIPOS_LEDGER) await assertFails(setDoc(doc(como(uid), 'movimientos_financieros', `c-${t}-${uid}`), movLedger1e(t, { at: serverTimestamp() })))
+  }
+})
+
+test('FIN1E-L2 · CREATE con addDoc (id automático) ⇒ DENY; en particular un pago_recibido fabricado (C6) ⇒ DENY', async () => {
+  for (const uid of STAFF_UIDS) {
+    await assertFails(addDoc(collection(como(uid), 'movimientos_financieros'), movLedger1e('pago_recibido', { solicitudId: 'x', monto: 1e6, at: serverTimestamp() })))
+    await assertFails(addDoc(collection(como(uid), 'movimientos_financieros'), movLedger1e('ajuste_manual', { at: serverTimestamp() })))
+  }
+})
+
+test('FIN1E-L3 · CREATE dentro de un writeBatch ⇒ DENY, y el batch entero falla (la nota interna del mismo batch tampoco se aplica)', async () => {
+  const id = await ordenConCodigo('l3', { estado: 'entregado' })
+  for (const uid of STAFF_UIDS) {
+    const db = como(uid)
+    const b = writeBatch(db)
+    b.set(doc(db, 'movimientos_financieros', 'b-' + uid), movLedger1e('pago_recibido', { at: serverTimestamp() }))
+    b.update(doc(db, 'solicitudes_envio', id), { notaInterna: 'no debería aplicarse' })
+    await assertFails(b.commit())
+  }
+  assert.equal((await leerDoc('solicitudes_envio', id))?.notaInterna, undefined)
+})
+
+test('FIN1E-L4 · UPDATE de monto, de estado/anulación, de tipo y de descripción sobre cualquier tipo ⇒ DENY; el ledger no cambia', async () => {
+  await sembrarLedger1e()
+  for (const uid of STAFF_UIDS) {
+    for (const t of TIPOS_LEDGER) {
+      await assertFails(updateDoc(doc(como(uid), 'movimientos_financieros', 'm-' + t), { monto: 1 }))
+      await assertFails(updateDoc(doc(como(uid), 'movimientos_financieros', 'm-' + t), { estado: 'anulado', anuladoPorUid: uid, anuladoAt: serverTimestamp(), motivoAnulacion: 'x' }))
+      await assertFails(updateDoc(doc(como(uid), 'movimientos_financieros', 'm-' + t), { tipo: 'pago_recibido' }))
+      await assertFails(updateDoc(doc(como(uid), 'movimientos_financieros', 'm-' + t), { descripcion: 'editada' }))
+    }
+  }
+  await ledgerIntacto1e()
+})
+
+test('FIN1E-L5 · DELETE de cualquier tipo, suelto o en batch ⇒ DENY; todos siguen ahí', async () => {
+  await sembrarLedger1e()
+  for (const uid of STAFF_UIDS) {
+    for (const t of TIPOS_LEDGER) await assertFails(deleteDoc(doc(como(uid), 'movimientos_financieros', 'm-' + t)))
+    const db = como(uid)
+    const b = writeBatch(db)
+    b.delete(doc(db, 'movimientos_financieros', 'm-pago_recibido'))
+    await assertFails(b.commit())
+  }
+  await ledgerIntacto1e()
+})
+
+test('FIN1E-L6 · setDoc con merge sobre un movimiento existente ⇒ DENY (no es un camino de update disfrazado)', async () => {
+  await sembrarLedger1e()
+  for (const uid of STAFF_UIDS) await assertFails(setDoc(doc(como(uid), 'movimientos_financieros', 'm-ajuste_manual'), { monto: 7, estado: 'anulado' }, { merge: true }))
+  await ledgerIntacto1e()
+})
+
+test('FIN1E-L7 · digitador, motorizado, comercio, cliente y anónimo tampoco escriben el ledger (create, update, delete) ⇒ DENY', async () => {
+  await sembrarLedger1e()
+  const clientes = [como(UID_DIGITADOR), como(UID_MOTO), como(UID_COMERCIO), como(UID_CLIENTE), env.unauthenticatedContext().firestore()]
+  for (const db of clientes) {
+    await assertFails(setDoc(doc(db, 'movimientos_financieros', 'x-' + Math.random()), movLedger1e('pago_recibido', { at: serverTimestamp() })))
+    await assertFails(updateDoc(doc(db, 'movimientos_financieros', 'm-ajuste_manual'), { monto: 1 }))
+    await assertFails(deleteDoc(doc(db, 'movimientos_financieros', 'm-ajuste_manual')))
+  }
+  await ledgerIntacto1e()
+})
+
+test('FIN1E-L8 · una subcolección bajo un movimiento tampoco se abre: no hay wildcard que la cubra ⇒ DENY', async () => {
+  await sembrarLedger1e()
+  for (const uid of STAFF_UIDS) await assertFails(setDoc(doc(como(uid), 'movimientos_financieros', 'm-ajuste_manual', 'sub', 's1'), { x: 1 }))
+})
+
+test('FIN1E-L9 · el cliente no reabre el ledger por otra colección: un collectionGroup de escritura no existe en las Rules, y adelantos_motorizado (legacy) queda cerrado ⇒ DENY', async () => {
+  const reglas = readFileSync('firestore.rules', 'utf8').replace(/\r\n/g, '\n')
+  assert.ok(!/match \/\{[a-zA-Z_]+=\*\*\}/.test(reglas), 'sin wildcard recursivo (ni collectionGroup) en ninguna parte')
+  assert.equal((reglas.match(/movimientos_financieros/g) ?? []).filter(() => true).length >= 1, true)
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'adelantos_motorizado', 'adL'), { motorizadoUid: UID_MOTO, motorizadoId: 'mot1', monto: 50 })
+  })
+  for (const uid of STAFF_UIDS) {
+    await assertFails(setDoc(doc(como(uid), 'adelantos_motorizado', 'nuevo-' + uid), { motorizadoUid: UID_MOTO, motorizadoId: 'mot1', monto: 1e6 }))
+    await assertFails(updateDoc(doc(como(uid), 'adelantos_motorizado', 'adL'), { monto: 1 }))
+    await assertFails(deleteDoc(doc(como(uid), 'adelantos_motorizado', 'adL')))
+    await assertSucceeds(getDoc(doc(como(uid), 'adelantos_motorizado', 'adL')))
+  }
+  await assertSucceeds(getDoc(doc(como(UID_MOTO), 'adelantos_motorizado', 'adL')))
+  assert.equal((await leerDoc('adelantos_motorizado', 'adL'))?.monto, 50)
+})
+
+test('FIN1E-L10 · estructura: un solo match del ledger, create/update/delete literalmente false, y tipoReservadoAServidor ya no existe', () => {
+  const reglas = readFileSync('firestore.rules', 'utf8').replace(/\r\n/g, '\n')
+  assert.equal((reglas.match(/match \/movimientos_financieros\/\{[a-zA-Z]+\}/g) ?? []).length, 1)
+  const i = reglas.indexOf('match /movimientos_financieros/{id}')
+  const bloque = reglas.slice(i, reglas.indexOf('\n    }\n', i))
+  const allows = bloque.split('\n').filter((l) => /^\s*allow /.test(l)).map((l) => l.trim())
+  assert.deepEqual(allows, ['allow read: if isAdminOrGestor();', 'allow create, update, delete: if false;'])
+  assert.ok(!/tipoReservadoAServidor/.test(reglas), 'la lista de tipos reservados ya no es el control: el ledger nace cerrado')
+})
+
+test('FIN1E-L11 · CONTROL: gestor y admin siguen LEYENDO el ledger (get y list) ⇒ ALLOW; digitador, motorizado y comercio no ⇒ DENY', async () => {
+  await sembrarLedger1e()
+  for (const uid of STAFF_UIDS) {
+    await assertSucceeds(getDoc(doc(como(uid), 'movimientos_financieros', 'm-pago_recibido')))
+    await assertSucceeds(getDocs(query(collection(como(uid), 'movimientos_financieros'), limit(5))))
+  }
+  for (const uid of [UID_DIGITADOR, UID_MOTO, UID_COMERCIO]) await assertFails(getDoc(doc(como(uid), 'movimientos_financieros', 'm-pago_recibido')))
+})
+
+// ─── Órdenes · inputs financieros inmutables desde el cliente ────────────────
+
+const TS_ENTREGA = Timestamp.fromDate(new Date('2026-09-30T15:00:00Z'))
+async function sembrarOrdenFin1e(id: string, extra: Record<string, unknown> = {}) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    // `undefined` en extra = el campo NO existe en la orden sembrada (ausente, no null).
+    const doc1e: Record<string, unknown> = {
+      ...ordenBase({
+        estado: 'en_camino_entrega',
+        asignacion: { motorizadoAuthUid: UID_MOTO, motorizadoId: 'mot1', motorizadoNombre: 'John Pork', estadoAceptacion: 'aceptada' },
+      }),
+      codigo: 'SH-2001', secuencia: 2001,
+      precioDesglose: { deliveryBase: 80, extraKm: 10 }, tipoServicio: 'estandar',
+      entregadoAt: TS_ENTREGA, historial: { entregadoAt: TS_ENTREGA, creadaAt: TS_ENTREGA },
+      registro: { deposito: { storkhubDepositoId: 'DEPX', confirmadoStorkhub: false, comercioDepositoId: 'DEPC', confirmadoComercio: false } },
+      ...extra,
+    }
+    for (const k of Object.keys(doc1e)) if (doc1e[k] === undefined) delete doc1e[k]
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', id), doc1e)
+  })
+  return id
+}
+
+test('FIN1E-O1 · staff: precioDesglose no cambia, no se borra, no se completa y no se anida (el comisión del motorizado sale de aquí) ⇒ DENY', async () => {
+  const id = await sembrarOrdenFin1e('o1')
+  const sinP = await sembrarOrdenFin1e('o1b', { precioDesglose: undefined })
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(ordenRef(uid, id), { 'precioDesglose.deliveryBase': 1 }))
+    await assertFails(updateDoc(ordenRef(uid, id), { precioDesglose: { deliveryBase: 9999 } }))
+    await assertFails(updateDoc(ordenRef(uid, id), { precioDesglose: deleteField() }))
+    await assertFails(updateDoc(ordenRef(uid, sinP), { precioDesglose: { deliveryBase: 1 } }))                                  // ausente → valor
+  }
+  assert.deepEqual((await leerDoc('solicitudes_envio', id))?.precioDesglose, { deliveryBase: 80, extraKm: 10 })
+})
+
+test('FIN1E-O2 · staff: tipoServicio no cambia ni se borra ⇒ DENY', async () => {
+  const id = await sembrarOrdenFin1e('o2')
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(ordenRef(uid, id), { tipoServicio: 'express' }))
+    await assertFails(updateDoc(ordenRef(uid, id), { tipoServicio: deleteField() }))
+  }
+  assert.equal((await leerDoc('solicitudes_envio', id))?.tipoServicio, 'estandar')
+})
+
+test('FIN1E-O3 · staff: entregadoAt (la semana de liquidación) no cambia, no se borra y no nace desde el cliente ⇒ DENY', async () => {
+  const id = await sembrarOrdenFin1e('o3')
+  const sin = await sembrarOrdenFin1e('o3b', { entregadoAt: undefined, historial: {} })
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(ordenRef(uid, id), { entregadoAt: Timestamp.fromDate(new Date('2026-10-05T10:00:00Z')) }))
+    await assertFails(updateDoc(ordenRef(uid, id), { entregadoAt: deleteField() }))
+    await assertFails(updateDoc(ordenRef(uid, sin), { entregadoAt: serverTimestamp() }))
+  }
+  assert.deepEqual((await leerDoc('solicitudes_envio', id))?.entregadoAt, TS_ENTREGA)
+})
+
+test('FIN1E-O4 · staff: historial.entregadoAt — ausente→valor, valor→otro y valor→ausente ⇒ DENY; el resto del historial sí se escribe ⇒ ALLOW', async () => {
+  const id = await sembrarOrdenFin1e('o4')
+  const sin = await sembrarOrdenFin1e('o4b', { historial: { creadaAt: TS_ENTREGA } })
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(ordenRef(uid, sin), { 'historial.entregadoAt': serverTimestamp() }))                                  // ausente → valor
+    await assertFails(updateDoc(ordenRef(uid, id), { 'historial.entregadoAt': Timestamp.fromDate(new Date('2026-10-05T10:00:00Z')) })) // valor → otro
+    await assertFails(updateDoc(ordenRef(uid, id), { 'historial.entregadoAt': deleteField() }))                                       // valor → ausente
+    await assertFails(updateDoc(ordenRef(uid, id), { historial: { creadaAt: TS_ENTREGA } }))                                          // reemplazar el mapa entero
+    await assertSucceeds(updateDoc(ordenRef(uid, id), { 'historial.nota': 'otro campo del historial', updatedAt: serverTimestamp() })) // control
+  }
+  assert.deepEqual((await leerDoc('solicitudes_envio', id) as { historial: { entregadoAt: unknown } }).historial.entregadoAt, TS_ENTREGA)
+})
+
+test('FIN1E-O5 · staff: confirmadoStorkhub/At y confirmadoComercio/At (la confirmación del depósito es de la callable) ⇒ DENY, en cualquier sentido', async () => {
+  const id = await sembrarOrdenFin1e('o5')
+  for (const uid of STAFF_UIDS) {
+    for (const campo of ['confirmadoStorkhub', 'confirmadoComercio']) {
+      await assertFails(updateDoc(ordenRef(uid, id), { [`registro.deposito.${campo}`]: true }))
+      await assertFails(updateDoc(ordenRef(uid, id), { [`registro.deposito.${campo}At`]: serverTimestamp() }))
+      await assertFails(updateDoc(ordenRef(uid, id), { [`registro.deposito.${campo}`]: deleteField() }))
+    }
+  }
+  assert.equal(((await leerDoc('solicitudes_envio', id)) as { registro: { deposito: { confirmadoStorkhub: boolean } } }).registro.deposito.confirmadoStorkhub, false)
+})
+
+test('FIN1E-O6 · staff: un depositoId ya fijado no se reemplaza ni se borra (aunque el nuevo depósito exista y liste la orden) ⇒ DENY', async () => {
+  const id = await sembrarOrdenFin1e('o6')
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'ordenes_deposito', 'DEPY'), { ...depositoBase({ estado: 'en_revision', solicitudIds: [id] }), codigo: 'DEP-0009', secuencia: 9 })
+  })
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(ordenRef(uid, id), { 'registro.deposito.storkhubDepositoId': 'DEPY' }))
+    await assertFails(updateDoc(ordenRef(uid, id), { 'registro.deposito.storkhubDepositoId': deleteField() }))
+    await assertFails(updateDoc(ordenRef(uid, id), { 'registro.deposito.comercioDepositoId': null }))
+  }
+  assert.equal(((await leerDoc('solicitudes_envio', id)) as { registro: { deposito: { storkhubDepositoId: string } } }).registro.deposito.storkhubDepositoId, 'DEPX')
+})
+
+test('FIN1E-O7 · motorizado: entregadoAt y historial.entregadoAt ya no los escribe él (cierra OC1: mover su orden de semana) ⇒ DENY; sus campos legítimos siguen ⇒ ALLOW', async () => {
+  const id = await sembrarOrdenFin1e('o7')
+  const sin = await sembrarOrdenFin1e('o7b', { entregadoAt: undefined, historial: {} })
+  await assertFails(updateDoc(ordenRef(UID_MOTO, id), { entregadoAt: Timestamp.fromDate(new Date('2026-10-05T10:00:00Z')), updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(ordenRef(UID_MOTO, id), { entregadoAt: deleteField() }))
+  await assertFails(updateDoc(ordenRef(UID_MOTO, sin), { entregadoAt: serverTimestamp(), updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(ordenRef(UID_MOTO, id), { 'historial.entregadoAt': Timestamp.fromDate(new Date('2026-10-05T10:00:00Z')) }))
+  await assertFails(updateDoc(ordenRef(UID_MOTO, id), { 'historial.entregadoAt': deleteField() }))
+  await assertFails(updateDoc(ordenRef(UID_MOTO, sin), { 'historial.entregadoAt': serverTimestamp() }))
+  await assertFails(updateDoc(ordenRef(UID_MOTO, id), { 'registro.deposito.confirmadoStorkhub': true }))
+  await assertSucceeds(updateDoc(ordenRef(UID_MOTO, id), { evidencias: { entrega: 'https://example.test/e.jpg' }, updatedAt: serverTimestamp() }))
+  assert.deepEqual((await leerDoc('solicitudes_envio', id))?.entregadoAt, TS_ENTREGA)
+})
+
+test('FIN1E-O8 · CONTROL logístico: la orden NO quedó inmutable — notas, metadatos y avisos del flujo siguen ⇒ ALLOW (staff y motorizado)', async () => {
+  const id = await sembrarOrdenFin1e('o8')
+  for (const uid of STAFF_UIDS) {
+    await assertSucceeds(updateDoc(ordenRef(uid, id), { notaInterna: 'llamar antes de llegar ' + uid, updatedAt: serverTimestamp() }))
+    await assertSucceeds(updateDoc(ordenRef(uid, id), { 'metadata.prioridad': 'alta', updatedAt: serverTimestamp() }))
+  }
+  await assertSucceeds(updateDoc(ordenRef(UID_MOTO, id), { evidencias: { retiro: 'https://example.test/r.jpg' }, updatedAt: serverTimestamp() }))
+})
+
+// ─── Punteros de depósito: solo hacia un depósito real que lista la orden ────
+
+test('FIN1E-P1 · RUTA LEGÍTIMA: gestor y admin pasan el depósito a en_revision y fijan el puntero en SUS órdenes en un batch (getAfter lo respalda) ⇒ ALLOW, el puntero queda', async () => {
+  for (const [uid, destino] of [[UID_GESTOR, 'storkhub'], [UID_ADMIN, 'comercio']] as const) {
+    await sembrarMaterializacion(destino)
+    await assertSucceeds(batchMaterializar(uid, destino).commit())
+    const campo = destino === 'storkhub' ? 'storkhubDepositoId' : 'comercioDepositoId'
+    for (const o of [ORDEN_D, 'ordD2']) {
+      assert.equal(((await leerDoc('solicitudes_envio', o)) as { registro: { deposito: Record<string, unknown> } }).registro.deposito[campo], 'depD')
+    }
+  }
+})
+
+test('FIN1E-P2 · puntero hacia un depósito que NO lista la orden, hacia uno inexistente o con otro destinatario ⇒ DENY', async () => {
+  await sembrarDigitacion({ destinatario: 'storkhub', solicitudIds: ['otraOrden'] })
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', ORDEN_D), camposEnlaceDigitacion('storkhub', 'depD')))        // no lista la orden
+  await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', ORDEN_D), camposEnlaceDigitacion('storkhub', 'depNoExiste'))) // inexistente
+  await sembrarDigitacion({ destinatario: 'comercio', solicitudIds: [ORDEN_D] })
+  await assertFails(updateDoc(doc(como(UID_ADMIN), 'solicitudes_envio', ORDEN_D), camposEnlaceDigitacion('storkhub', 'depD')))         // destinatario comercio, puntero storkhub
+  assert.equal(((await leerDoc('solicitudes_envio', ORDEN_D)) as { registro?: unknown }).registro, undefined)
+})
+
+test('FIN1E-P3 · puntero hacia un depósito ya confirmado/anulado (no espera comprobante ni está en revisión) ⇒ DENY', async () => {
+  for (const depEstado of ['confirmado', 'anulado', 'convertido_en_deuda']) {
+    await sembrarDigitacion({ destinatario: 'storkhub', depEstado })
+    await assertFails(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', ORDEN_D), camposEnlaceDigitacion('storkhub', 'depD')))
+  }
+})
+
+test('FIN1E-P4 · una vez fijado, el puntero es inmutable desde el cliente: otro id, null o borrarlo ⇒ DENY (liberarlo es del servidor)', async () => {
+  await sembrarDigitacion({ destinatario: 'storkhub', depEstado: 'en_revision', registro: { deposito: { storkhubDepositoId: 'depD' } } })
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'ordenes_deposito', 'depE'), { ...depositoBase({ estado: 'en_revision', solicitudIds: [ORDEN_D] }), codigo: 'DEP-0010', secuencia: 10 })
+  })
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(doc(como(uid), 'solicitudes_envio', ORDEN_D), { 'registro.deposito.storkhubDepositoId': 'depE' }))
+    await assertFails(updateDoc(doc(como(uid), 'solicitudes_envio', ORDEN_D), { 'registro.deposito.storkhubDepositoId': null }))
+    await assertFails(updateDoc(doc(como(uid), 'solicitudes_envio', ORDEN_D), { 'registro.deposito.storkhubDepositoId': deleteField() }))
+  }
+})
+
+test('FIN1E-P5 · motorizado: fija el puntero SOLO hacia su propio depósito que lista la orden ⇒ ALLOW; hacia el de otro motorizado ⇒ DENY', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore()
+    await setDoc(doc(db, 'solicitudes_envio', 'pm1'), { ...ordenBase({ estado: 'entregado', asignacion: { motorizadoAuthUid: UID_MOTO, motorizadoNombre: 'John Pork', estadoAceptacion: 'aceptada' } }), codigo: 'SH-3001', secuencia: 3001 })
+    await setDoc(doc(db, 'solicitudes_envio', 'pm2'), { ...ordenBase({ estado: 'entregado', asignacion: { motorizadoAuthUid: UID_MOTO, motorizadoNombre: 'John Pork', estadoAceptacion: 'aceptada' } }), codigo: 'SH-3002', secuencia: 3002 })
+    await setDoc(doc(db, 'ordenes_deposito', 'depMio'), { ...depositoBase({ estado: 'en_revision', solicitudIds: ['pm1'], motorizadoUid: UID_MOTO }), codigo: 'DEP-0020', secuencia: 20 })
+    await setDoc(doc(db, 'ordenes_deposito', 'depAjeno'), { ...depositoBase({ estado: 'en_revision', solicitudIds: ['pm2'], motorizadoUid: UID_MOTO_B }), codigo: 'DEP-0021', secuencia: 21 })
+  })
+  await assertFails(updateDoc(ordenRef(UID_MOTO, 'pm2'), { 'registro.deposito.storkhubDepositoId': 'depAjeno', updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(ordenRef(UID_MOTO, 'pm2'), { 'registro.deposito.storkhubDepositoId': 'depMio', updatedAt: serverTimestamp() })) // el suyo, pero no lista pm2
+  await assertSucceeds(updateDoc(ordenRef(UID_MOTO, 'pm1'), { 'registro.deposito.storkhubDepositoId': 'depMio', updatedAt: serverTimestamp() }))
+})
+
+test('FIN1E-P6 · el digitador conserva su ruta de enlace (sin regresión) y no puede tocar confirmado* ⇒ ALLOW / DENY', async () => {
+  await sembrarDigitacion({ destinatario: 'storkhub' })
+  await assertSucceeds(batchDigitacion('storkhubDepositoId'))
+  await sembrarDigitacion({ destinatario: 'storkhub' })
+  await assertFails(updateDoc(doc(como(UID_DIGITADOR), 'solicitudes_envio', ORDEN_D), { 'registro.deposito.confirmadoStorkhub': true }))
 })

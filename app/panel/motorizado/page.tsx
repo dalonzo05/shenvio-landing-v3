@@ -11,7 +11,6 @@ import { auth, db, functions } from '@/fb/config';
 import { presenciaVisible } from '@/lib/motorizado-presencia';
 import { httpsCallable } from 'firebase/functions';
 import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBoucher, uploadVersionBoucherDeposito, type TipoEvidencia } from '@/fb/storage'
-import { registrarMovimiento } from '@/lib/financial-writes';
 import { calcularDeposito } from '@/lib/calculo-deposito';
 import { mostrarCodigo } from '@/lib/codigo-humano';
 import { nombreMotorizadoParaRegistro } from '@/lib/presentacion-deposito';

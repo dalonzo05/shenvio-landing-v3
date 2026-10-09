@@ -341,6 +341,33 @@ test('L12/L13 · legacy: una liquidación con id aleatorio de esa semana → liq
   assert.equal((await crear(w3)).resultado, 'creada');
 });
 
+test('FIN1E-G1 · una orden candidata que ya figura en el ordenesIds de OTRA liquidación del mismo motorizado → conciliacion_requerida, 0 escrituras', async () => {
+  for (const [nombre, previa] of [
+    ['moderna de otra semana (pagada)', { motorizadoId: 'm1', motorizadoUid: 'u1', semanaKey: '2026-W19', estado: 'pagado', ordenesIds: ['o1', 'ox'] }],
+    ['moderna de otra semana (pendiente)', { motorizadoId: 'm1', motorizadoUid: 'u1', semanaKey: '2026-W19', estado: 'pendiente', ordenesIds: ['o2'] }],
+    ['legacy que SÍ declara la orden (solo con uid)', { motorizadoUid: 'u1', semanaKey: '2026-W18', estado: 'pagado', ordenesIds: ['o1'] }],
+  ] as const) {
+    const w = mundo(); semanaNormal(w); w.put('ordenes_deposito/d1', deposito(200));
+    w.put('liquidaciones_motorizado/liq_previa', previa as unknown as Doc);
+    const antes = w.snapshot(); const esc = w.escrituras;
+    await assert.rejects(crear(w), codigo('failed-precondition', 'conciliacion_requerida'), nombre);
+    assert.equal(w.snapshot(), antes, nombre); assert.equal(w.escrituras, esc, nombre); assert.equal(w.liquidaciones().length, 1, nombre);
+  }
+});
+
+test('FIN1E-G2 · CONTROL: sin orden repetida la liquidación sigue su flujo — la previa sin ordenesIds (legacy), con ordenes de OTRO motorizado o con otras órdenes no estorba', async () => {
+  for (const [nombre, previa] of [
+    ['legacy sin ordenesIds', { motorizadoId: 'm1', semanaKey: '2026-W19', estado: 'pagado' }],
+    ['ordenesIds sin ninguna candidata', { motorizadoId: 'm1', motorizadoUid: 'u1', semanaKey: '2026-W19', estado: 'pagado', ordenesIds: ['otraOrden'] }],
+    ['ordenesIds no es un arreglo', { motorizadoId: 'm1', semanaKey: '2026-W19', estado: 'pagado', ordenesIds: 'o1' }],
+    ['la repetida está en la liquidación de OTRO motorizado', { motorizadoId: 'm2', motorizadoUid: 'u2', semanaKey: '2026-W19', estado: 'pagado', ordenesIds: ['o1', 'o2'] }],
+  ] as const) {
+    const w = mundo(); semanaNormal(w); w.put('ordenes_deposito/d1', deposito(200));
+    w.put('liquidaciones_motorizado/liq_previa', previa as unknown as Doc);
+    assert.equal((await crear(w)).resultado, 'creada', nombre);
+  }
+});
+
 test('L14 · las órdenes de la semana se derivan en horario de Managua, de ESTE motorizado y solo entregadas', async () => {
   const w = mundo(); base(w);
   w.put('solicitudes_envio/dentro_ini', orden(INI));              // lunes 00:00:00.000 Managua

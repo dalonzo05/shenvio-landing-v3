@@ -9,7 +9,6 @@ import {
 } from 'firebase/firestore';
 import { auth, db } from '@/fb/config';
 import { compressImage, uploadEvidencia, uploadEvidenciaPath, uploadDepositoBoucher, type TipoEvidencia } from '@/fb/storage'
-import { registrarMovimiento } from '@/lib/financial-writes';
 import { registrarAceptacion, registrarRechazo, actualizarUbicacionOperativa } from '@/lib/motorizado-stats';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
