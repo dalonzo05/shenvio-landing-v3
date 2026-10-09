@@ -23,6 +23,7 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
+import { exigirCreditoAutorizado } from './credito-elegibilidad';
 
 type Payload = { ordenId?: unknown };
 
@@ -201,6 +202,14 @@ export const acumularCobroSemanalPorOrden = onCall<Payload>(async (request) => {
       tx.update(ordenRef, marcadorAcumulado);
       return { yaAcumulada: true, totalMonto: cobroSnap.data()!.totalMonto as number };
     }
+
+    // CREDIT-ELIGIBILITY-1 — esta callable es alcanzable por sí sola (el motorizado la invoca con un ordenId), no solo detrás de confirmarTransicionConCobro: una
+    // orden de crédito de un comercio no autorizado (legacy, o creada con Admin SDK) no puede abrir ni engrosar una deuda en cobros_semanales. Se evalúa con la orden
+    // releída DENTRO de la transacción, DESPUÉS de la rama idempotente (que solo corrige el marcador, sin dinero) y antes de cualquier write de dinero.
+    await exigirCreditoAutorizado(ordenSnap.data() ?? orden, ordenId, async (comercioId) => {
+      const c = await tx.get(db.collection('comercios').doc(comercioId));
+      return c.exists ? c.data() : null;
+    });
 
     if (!cobroSnap.exists) {
       // ── Alta de la semana: nace sin cobrar ─────────────────────────────

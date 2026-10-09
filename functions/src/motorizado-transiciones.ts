@@ -47,6 +47,7 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { FieldValue } from 'firebase-admin/firestore';
 import { semanaKeyDeFecha } from './cobro-semanal';
+import { exigirCreditoAutorizado } from './credito-elegibilidad';
 import { calcularMontoCobroDelivery } from './cobro-delivery-monto';
 import { responderAsignacionEnTransaccion, leerProtocoloRespuesta } from './asignacion-respuesta';
 import {
@@ -447,6 +448,15 @@ export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async
         `La orden tiene que estar en '${estadoRequerido}' para pasar a '${nuevo}' (está en '${orden.estado}').`,
       );
     }
+
+    // ── CREDIT-ELIGIBILITY-1: la orden de crédito se autoriza contra el perfil del comercio, ANTES de calcular ni escribir nada ──
+    // Es la primera comprobación con efecto: calcDeposito, construirCobroDelivery y el marcador acumulacionCobroSemanal tratan la orden como crédito porque la
+    // orden lo dice. Una orden de crédito de un comercio que no lo tiene (o de un cliente individual, o legacy) falla cerrada: sin convertirla a contado y sin
+    // ningún write (ni cobroDelivery, ni cobros_semanales, ni depósito, ni ledger).
+    await exigirCreditoAutorizado(orden, solicitudId, async (comercioId) => {
+      const c = await tx.get(db.collection('comercios').doc(comercioId));
+      return c.exists ? c.data() : null;
+    });
 
     const dep = calcDeposito(orden);
     const { showDelivery, showProducto, showCargotransCobro, deducirDelCE } = calcularShowFlags(orden, dep, nuevo);

@@ -780,6 +780,26 @@ service cloud.firestore {
         );
       }
 
+      // CREDIT-ELIGIBILITY-1 — el crédito semanal no lo elige quien crea la orden: lo autoriza el perfil del comercio (`comercios/{id}.tipoCliente`), que solo
+      // escribe el gestor/admin (camposEditablesComercio no lo incluye). Antes el CREATE aceptaba `tipoCliente: 'credito'` sin comprobarlo y la orden seguía el flujo
+      // de crédito: delivery sin cobro en la calle, fuera del depósito y acumulado como deuda en cobros_semanales.
+      //
+      // "Es crédito" es cualquiera de las tres señales que las Functions leen (tipoCliente, pagoDelivery.quienPaga, pagoDelivery.tipo): si una dice crédito y otra contado,
+      // se exige elegibilidad igual (un `tipoCliente: 'contado'` con `quienPaga: 'credito_semanal'` activa el crédito en confirmarTransicionConCobro). Misma definición que
+      // functions/src/credito-elegibilidad.ts. pagoDelivery nunca llega aquí null ni con otro tipo: creacionMapasSoloClavesPermitidas (antes en el allow) le llama .keys() y
+      // un valor que no es mapa deniega; ausente cae al default {}. No reordenar esta condición antes de aquella.
+      //
+      // Una orden de crédito exige comercioId (la orden de un cliente individual no lo lleva ⇒ DENY: no tiene fuente de elegibilidad) y que el comercio sea 'credito'. Campo
+      // ausente = contado. Gestor y admin no están exentos: para crédito deben cambiar primero el perfil del comercio. Va AL FINAL del allow y solo gasta el `get` cuando la
+      // orden es de crédito: una orden de contado paga unas pocas expresiones de comparación.
+      function creacionCreditoAutorizado() {
+        let d = request.resource.data;
+        let pd = d.get('pagoDelivery', {});
+        return (d.get('tipoCliente', null) != 'credito' && pd.get('quienPaga', null) != 'credito_semanal' && pd.get('tipo', null) != 'credito_semanal')
+          || (comercioIdEntrante() is string
+              && get(/databases/$(database)/documents/comercios/$(comercioIdEntrante())).data.get('tipoCliente', 'contado') == 'credito');
+      }
+
       allow create: if isActiveUser()
         && creacionSoloClavesPermitidas()
         && nacimientoSinAsignacion()
@@ -789,7 +809,8 @@ service cloud.firestore {
         && (!('createdAt' in request.resource.data) || request.resource.data.createdAt == request.time)
         && creacionDuenoValido()
         // IDENTIDAD-HUMANA-1: el codigo lo pone el trigger, nunca quien crea.
-        && sinCodigoEntrante();
+        && sinCodigoEntrante()
+        && creacionCreditoAutorizado();
 
       // DIGITADOR V1: lectura amplia de órdenes entregadas necesaria para
       // construir la misma lista de "pendientes de depósito" que ve el

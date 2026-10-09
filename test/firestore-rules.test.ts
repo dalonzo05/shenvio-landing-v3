@@ -4988,13 +4988,19 @@ test('FIN1G-C1 · los payloads REALES de las dos pantallas siguen creando ⇒ AL
     ['normal con cotización', {}],
     ['sin cotización (viaje anterior)', { tieneCotizacion: false, cotizacion: { origenTextoGoogle: null, destinoTextoGoogle: null, origenCoord: null, destinoCoord: null, distanciaKm: null, precioSugerido: null, fuentePrecio: 'viaje_anterior' }, precioDesglose: null }],
     ['programada', { estado: 'programada', programado: { tipo: 'ambos', retiro: { fecha: '2026-10-20', hora: '09:00', fechaHoraISO: '2026-10-20T09:00' }, entrega: { fecha: '2026-10-20', hora: null, fechaHoraISO: '2026-10-20' } } }],
-    ['crédito semanal', { tipoCliente: 'credito', pagoDelivery: { tipo: 'credito_semanal', quienPaga: 'credito_semanal', montoSugerido: 150 } }],
     ['sin paquete ni recargo', { paquete: null, recargoZona: { aplica: false } }],
     ['fuera de Managua, bus/terminal', { tipoServicio: 'fuera_managua', fueraManagua: { metodoEnvio: 'bus_terminal', destinoFinal: 'León', puntoLogisticoId: 'p1', puntoLogisticoNombre: 'Terminal', puntoLogisticoTipo: 'terminal', coordsPuntoLogistico: COORD_G, direccionPuntoLogistico: 'x', horarioApertura: '06:00', horarioCierre: '18:00', notaPuntoLogistico: null, terminalSugerida: 'Terminal', transporteNombre: 'Bus', transporteCelular: '8', transporteHoraSalida: '10:00', transporteNota: null } }],
     ['fuera de Managua, cargotrans', { tipoServicio: 'fuera_managua', fueraManagua: { metodoEnvio: 'cargotrans', destinoFinal: null, puntoLogisticoId: null, puntoLogisticoNombre: null, puntoLogisticoTipo: null, coordsPuntoLogistico: null, direccionPuntoLogistico: null, horarioApertura: null, horarioCierre: null, notaPuntoLogistico: null, cantidadPaquetes: 2, notaCargotrans: null, pagoCargotrans: 'efectivo_motorizado' } }],
   ]
   for (const [rol, uid, mk] of ROLES_G) {
     for (const [nombre, extra] of variantes) await assertSucceeds(nacerG(uid, mk(extra)).then(() => undefined, (e) => { throw new Error(`${rol} · ${nombre}: ${e.message}`) }))
+  }
+  // CREDIT-ELIGIBILITY-1: el crédito semanal es un payload real, pero solo se crea sobre un comercio configurado como crédito (y nunca para un cliente individual).
+  await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), 'comercios', COMERCIO_ID), { name: 'Mariposita', authUid: UID_COMERCIO, tipoCliente: 'credito' }))
+  const credito = { tipoCliente: 'credito', pagoDelivery: { tipo: 'credito_semanal', quienPaga: 'credito_semanal', montoSugerido: 150 } }
+  for (const [rol, uid, mk] of ROLES_G) {
+    if (rol === 'cliente') await assertFails(nacerG(uid, mk(credito)))
+    else await assertSucceeds(nacerG(uid, mk(credito)).then(() => undefined, (e) => { throw new Error(`${rol} · crédito semanal: ${e.message}`) }))
   }
 })
 
@@ -5135,4 +5141,122 @@ test('FIN1G-C16 · una orden creada de forma legítima sigue pudiendo crecer: el
   const id = 'g_post'
   await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), payloadStaffG(UID_GESTOR)))
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), { notaInterna: 'llamar antes', updatedAt: serverTimestamp() }))
+})
+
+// ─── CREDIT-ELIGIBILITY-1 · el CREATE de crédito exige comercios/{id}.tipoCliente == 'credito' ──────────────
+//
+// Fuente de verdad: el perfil del comercio (solo gestor/admin lo escriben). "Es crédito" = tipoCliente == 'credito' O pagoDelivery.quienPaga == 'credito_semanal' O
+// pagoDelivery.tipo == 'credito_semanal' (las señales que leen las Functions). Campo ausente en el perfil = contado. Gestor y admin no están exentos. El cliente
+// individual no tiene fuente de elegibilidad ⇒ el crédito se deniega. Los payloads son los reales de las dos pantallas (payloadComercioG / payloadStaffG).
+const PAGO_CREDITO = { tipo: 'credito_semanal', quienPaga: 'credito_semanal', montoSugerido: 150 }
+const CREDITO_COMPLETO = { tipoCliente: 'credito', pagoDelivery: PAGO_CREDITO }
+const PAGO_CONTADO = { tipo: 'contado', quienPaga: 'recoleccion', montoSugerido: 150, deducirDelCobroContraEntrega: false }
+
+/** Fija el perfil del comercio: 'credito' | 'contado' | undefined (campo ausente). */
+async function perfilComercio(tipoCliente: 'credito' | 'contado' | undefined) {
+  await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), 'comercios', COMERCIO_ID),
+    { name: 'Mariposita', authUid: UID_COMERCIO, ...(tipoCliente ? { tipoCliente } : {}) }))
+}
+const CREADORES_CREDITO: Array<[string, string, (e?: Record<string, unknown>) => Record<string, unknown>]> = [
+  ['comercio', UID_COMERCIO, payloadComercioG],
+  ['gestor', UID_GESTOR, (e = {}) => payloadStaffG(UID_GESTOR, e)],
+  ['admin', UID_ADMIN, (e = {}) => payloadStaffG(UID_ADMIN, e)],
+]
+
+test('CREDIT-R1 · comercio con perfil credito crea una orden de crédito (payload real) ⇒ ALLOW', async () => {
+  await perfilComercio('credito')
+  await assertSucceeds(nacerG(UID_COMERCIO, payloadComercioG(CREDITO_COMPLETO)))
+})
+
+test('CREDIT-R2 · comercio con perfil contado intenta planta tipoCliente=credito (con o sin pagoDelivery de crédito) ⇒ DENY', async () => {
+  await perfilComercio('contado')
+  await assertFails(nacerG(UID_COMERCIO, payloadComercioG(CREDITO_COMPLETO)))
+  await assertFails(nacerG(UID_COMERCIO, payloadComercioG({ tipoCliente: 'credito' })))
+  await assertFails(nacerG(UID_COMERCIO, payloadComercioG({ tipoCliente: 'credito', pagoDelivery: PAGO_CONTADO })))
+})
+
+test('CREDIT-R3 · gestor y admin crean una orden de crédito para un comercio con perfil credito ⇒ ALLOW', async () => {
+  await perfilComercio('credito')
+  await assertSucceeds(nacerG(UID_GESTOR, payloadStaffG(UID_GESTOR, CREDITO_COMPLETO)))
+  await assertSucceeds(nacerG(UID_ADMIN, payloadStaffG(UID_ADMIN, CREDITO_COMPLETO)))
+})
+
+test('CREDIT-R4 · gestor NO fuerza crédito sobre un comercio contado, ni por tipoCliente ni por pagoDelivery ⇒ DENY (primero hay que cambiar el perfil del comercio)', async () => {
+  await perfilComercio('contado')
+  for (const extra of [CREDITO_COMPLETO, { tipoCliente: 'credito' }, { pagoDelivery: PAGO_CREDITO }]) {
+    await assertFails(nacerG(UID_GESTOR, payloadStaffG(UID_GESTOR, extra)))
+  }
+})
+
+test('CREDIT-R5 · admin tampoco fuerza crédito sobre un comercio contado ⇒ DENY', async () => {
+  await perfilComercio('contado')
+  for (const extra of [CREDITO_COMPLETO, { tipoCliente: 'credito' }, { pagoDelivery: PAGO_CREDITO }]) {
+    await assertFails(nacerG(UID_ADMIN, payloadStaffG(UID_ADMIN, extra)))
+  }
+})
+
+test('CREDIT-R6 · cliente individual: cualquier señal de crédito ⇒ DENY (sin fuente de elegibilidad), aunque exista un comercio de crédito', async () => {
+  await perfilComercio('credito')
+  for (const extra of [CREDITO_COMPLETO, { tipoCliente: 'credito' }, { pagoDelivery: PAGO_CREDITO }, { tipoCliente: 'contado', pagoDelivery: PAGO_CREDITO }]) {
+    await assertFails(nacerG(UID_CLIENTE, payloadClienteG(extra)))
+  }
+})
+
+test('CREDIT-R7 · cliente individual: orden de contado legítima ⇒ ALLOW (contrato actual preservado)', async () => {
+  await assertSucceeds(nacerG(UID_CLIENTE, payloadClienteG()))
+  await assertSucceeds(nacerG(UID_CLIENTE, payloadClienteG({ tipoCliente: 'contado', pagoDelivery: PAGO_CONTADO })))
+})
+
+test('CREDIT-R8 · tipoCliente=contado + quienPaga=credito_semanal (o tipo=credito_semanal) en un comercio contado ⇒ DENY para los 3 creadores', async () => {
+  await perfilComercio('contado')
+  for (const [, uid, mk] of CREADORES_CREDITO) {
+    await assertFails(nacerG(uid, mk({ tipoCliente: 'contado', pagoDelivery: PAGO_CREDITO })))
+    await assertFails(nacerG(uid, mk({ tipoCliente: 'contado', pagoDelivery: { ...PAGO_CONTADO, quienPaga: 'credito_semanal' } })))
+    await assertFails(nacerG(uid, mk({ tipoCliente: 'contado', pagoDelivery: { ...PAGO_CONTADO, tipo: 'credito_semanal' } })))
+  }
+})
+
+test('CREDIT-R8b · en un comercio de crédito, las combinaciones mixtas (tipoCliente=credito con quienPaga normal, o al revés) se permiten: ya son crédito para el servidor, que es lo que se autorizó', async () => {
+  await perfilComercio('credito')
+  for (const [, uid, mk] of CREADORES_CREDITO) {
+    await assertSucceeds(nacerG(uid, mk({ tipoCliente: 'credito', pagoDelivery: PAGO_CONTADO })))
+    await assertSucceeds(nacerG(uid, mk({ tipoCliente: 'contado', pagoDelivery: PAGO_CREDITO })))
+  }
+})
+
+test('CREDIT-R9 · tipoCliente ausente pero pagoDelivery de crédito ⇒ DENY si el comercio no es elegible; ALLOW si lo es', async () => {
+  const sinTipo = (mk: (e?: Record<string, unknown>) => Record<string, unknown>) => {
+    const d = mk({ pagoDelivery: PAGO_CREDITO }); delete d.tipoCliente; return d
+  }
+  await perfilComercio('contado')
+  for (const [, uid, mk] of CREADORES_CREDITO) await assertFails(nacerG(uid, sinTipo(mk)))
+  await perfilComercio('credito')
+  for (const [, uid, mk] of CREADORES_CREDITO) await assertSucceeds(nacerG(uid, sinTipo(mk)))
+})
+
+test('CREDIT-R10 · comercio sin tipoCliente en el perfil se trata como contado: el crédito se deniega a los 3 creadores y el contado sigue ⇒ ALLOW', async () => {
+  await perfilComercio(undefined)
+  for (const [, uid, mk] of CREADORES_CREDITO) {
+    await assertFails(nacerG(uid, mk(CREDITO_COMPLETO)))
+    await assertFails(nacerG(uid, mk({ pagoDelivery: PAGO_CREDITO })))
+    await assertSucceeds(nacerG(uid, mk({ pagoDelivery: PAGO_CONTADO })))
+    await assertSucceeds(nacerG(uid, mk()))
+  }
+})
+
+test('CREDIT-R11 · contado en un comercio de crédito sigue ⇒ ALLOW; pagoDelivery null ⇒ DENY (ya era así: la allowlist anidada no admite null); crédito con comercioId ajeno/inexistente ⇒ DENY', async () => {
+  await perfilComercio('credito')
+  for (const [, uid, mk] of CREADORES_CREDITO) {
+    await assertSucceeds(nacerG(uid, mk({ tipoCliente: 'contado', pagoDelivery: PAGO_CONTADO })))
+    await assertFails(nacerG(uid, mk({ pagoDelivery: null })))
+  }
+  // Un comercio inexistente no tiene perfil que lo autorice (y ordenDeComercio ya lo exige).
+  const fantasma = payloadStaffG(UID_GESTOR, { ...CREDITO_COMPLETO, comercioId: 'no_existe', userId: 'no_existe', comercioUid: 'no_existe', ownerSnapshot: { uid: 'no_existe', companyName: 'X', nombre: 'X' } })
+  await assertFails(nacerG(UID_GESTOR, fantasma))
+})
+
+test('CREDIT-R12 · el comercio no puede habilitarse el crédito editando su propio perfil (la fuente de verdad sigue siendo solo del staff) ⇒ DENY; el gestor sí ⇒ ALLOW', async () => {
+  await assertFails(updateDoc(doc(como(UID_COMERCIO), 'comercios', COMERCIO_ID), { tipoCliente: 'credito', updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'comercios', COMERCIO_ID), { tipoCliente: 'credito', updatedAt: serverTimestamp() }))
+  await assertSucceeds(nacerG(UID_COMERCIO, payloadComercioG(CREDITO_COMPLETO)))
 })
