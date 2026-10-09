@@ -61,34 +61,6 @@ export function efectivoAStorkhubOrden(o: DocumentData): number {
   return aCentavos(calcularDeposito(o).totalAStorkhub);
 }
 
-// ── Depósitos ────────────────────────────────────────────────────────────────
-
-const ESTADOS_DEPOSITO_SUMAN = ['confirmado', 'convertido_en_deuda'];
-const ESTADOS_DEPOSITO_IGNORADOS = ['anulado', 'rechazado'];
-
-export interface ClasificacionDepositos {
-  /** Depósitos de StorkHub de la semana que SUMAN (confirmado / convertido_en_deuda). */
-  suman: DocConId[];
-  /** Depósitos de StorkHub de la semana en un estado NO terminal (o desconocido: falla cerrado). */
-  pendientes: DocConId[];
-}
-
-/** Depósito de StorkHub del motorizado, creado dentro de la semana (el criterio temporal de siempre: `creadoAt`). */
-export function clasificarDepositos(depositos: DocConId[], ini: number, fin: number): ClasificacionDepositos {
-  const suman: DocConId[] = [];
-  const pendientes: DocConId[] = [];
-  for (const d of depositos) {
-    const tipo = d.data.tipo;
-    if (tipo !== undefined && tipo !== null && tipo !== '' && tipo !== TIPO_DEPOSITO_STORKHUB_LIQ) continue;
-    if (!dentro(milis(d.data.creadoAt), ini, fin)) continue;
-    const estado = String(d.data.estado ?? '');
-    if (ESTADOS_DEPOSITO_IGNORADOS.includes(estado)) continue;
-    if (ESTADOS_DEPOSITO_SUMAN.includes(estado)) suman.push(d);
-    else pendientes.push(d);
-  }
-  return { suman, pendientes };
-}
-
 // ── Gastos ───────────────────────────────────────────────────────────────────
 
 /** ¿El gasto tiene dueño económico ya? consumido por un depósito, o capturado por una liquidación. */
@@ -108,26 +80,34 @@ export function gastosCandidatos(gastos: DocConId[], motorizadoId: string, ini: 
 
 // ── Adelantos ────────────────────────────────────────────────────────────────
 
+export interface ResultadoAdelantos {
+  incluidos: DocConId[];
+  /** Adelantos activos que NO se pueden ubicar en una semana: el llamador los concilia (no se excluyen en silencio). */
+  ambiguos: DocConId[];
+}
+
 /**
- * Semana de un adelanto: su `semanaKey` declarada. Un adelanto anterior a FIN-1C-B pudo no traerla: entonces la semana de su `at`
- * (resuelta por el llamador, que es quien conoce la zona horaria).
+ * Semana de un adelanto: su `semanaKey` declarada. Un adelanto anterior a FIN-1C-B pudo no traerla: entonces la semana de su `at` (resuelta por el
+ * llamador, que es quien conoce la zona horaria). Sin `semanaKey` ni `at` legible —o con un monto inválido— no se puede saber si se descuenta: es ambiguo.
  */
 export function adelantosDeSemana(
   movimientos: DocConId[],
   motorizadoId: string,
   semanaKey: string,
   semanaDeInstante: (ms: number) => string,
-): DocConId[] {
-  return movimientos
-    .filter((m) => {
-      if (m.data.tipo !== 'adelanto_motorizado' || m.data.motorizadoId !== motorizadoId || m.data.estado !== 'activo') return false;
-      if (!esNumeroFinito(m.data.monto) || m.data.monto <= 0) return false;
-      const declarada = typeof m.data.semanaKey === 'string' && m.data.semanaKey ? m.data.semanaKey : null;
-      if (declarada) return declarada === semanaKey;
-      const at = milis(m.data.at);
-      return at !== null && semanaDeInstante(at) === semanaKey;
-    })
-    .sort((a, b) => a.id.localeCompare(b.id));
+): ResultadoAdelantos {
+  const incluidos: DocConId[] = [];
+  const ambiguos: DocConId[] = [];
+  for (const m of [...movimientos].sort((x, y) => x.id.localeCompare(y.id))) {
+    if (m.data.tipo !== 'adelanto_motorizado' || m.data.motorizadoId !== motorizadoId || m.data.estado !== 'activo') continue;
+    if (!esNumeroFinito(m.data.monto) || m.data.monto <= 0) { ambiguos.push(m); continue; }
+    const declarada = typeof m.data.semanaKey === 'string' && m.data.semanaKey ? m.data.semanaKey : null;
+    if (declarada) { if (declarada === semanaKey) incluidos.push(m); continue; }
+    const at = milis(m.data.at);
+    if (at === null) { ambiguos.push(m); continue; }
+    if (semanaDeInstante(at) === semanaKey) incluidos.push(m);
+  }
+  return { incluidos, ambiguos };
 }
 
 // ── La fórmula ───────────────────────────────────────────────────────────────

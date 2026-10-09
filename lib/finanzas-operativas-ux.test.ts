@@ -222,3 +222,19 @@ test('FIN1D-K3 · financial-writes ya no tiene crearSaldoCargo (el saldo de una 
   assert.ok(!/export async function crearSaldoCargo\b/.test(fw))
   assert.ok(!/['"]saldos_cargo_motorizado['"]/.test(fw), 'financial-writes no toca saldos_cargo_motorizado')
 })
+
+test('FIN1D-K4 · con la liquidación ya creada, la tarjeta del neto muestra las cifras DEFINITIVAS del servidor y no la fórmula local; la vista previa nunca va al servidor', () => {
+  const src = leer('app', 'panel', 'gestor', 'liquidaciones', 'page.tsx')
+  const p = sinComentarios(src)
+  const memo = bloque(p, 'const vista = useMemo(', '[liquidacionExistente, calculo])')
+  assert.ok(memo.includes('definitiva: true') && memo.includes('liquidacionExistente.netoAPagar') && memo.includes('liquidacionExistente.comision'), 'con liquidación: las cifras del documento')
+  assert.ok(memo.includes('definitiva: false') && memo.includes('calculo.netoAPagar'), 'sin liquidación: la vista previa')
+  const tarjeta = bloque(src, '<p className="text-[11px] text-gray-400 px-1">', '{/* Desglose de órdenes colapsable */}')
+  assert.ok(tarjeta.includes('vista.definitiva') && tarjeta.includes('vista.netoAPagar') && tarjeta.includes('Vista previa'), 'etiqueta Vista previa solo cuando no hay documento')
+  assert.ok(!tarjeta.includes('calculo.'), 'la tarjeta no lee la fórmula local directamente')
+  // La fórmula local no entra en ningún payload: crear y pagar no la reciben.
+  const crear = bloque(p, 'async function crearLiquidacion()', 'async function marcarPagada(')
+  assert.ok(!crear.includes('calculo.') && !crear.includes('vista.'), 'crear no usa cifras de la pantalla')
+  const pagar = bloque(p, 'async function marcarPagada(', 'async function handleAdelanto()')
+  assert.ok(pagar.includes('marcarLiquidacionPagadaServidor(liq.id, intentoPagoRef.current.operacionId)') && !pagar.slice(0, pagar.indexOf('// PDF') > 0 ? pagar.indexOf('PDF') : pagar.length).includes('calculo.'), 'pagar no manda ni recalcula montos')
+})

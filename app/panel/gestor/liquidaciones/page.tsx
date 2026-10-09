@@ -682,6 +682,28 @@ function LiquidacionesPageContent() {
     [liquidaciones, selectedSemana]
   )
 
+  // FIN-1D — las cifras que se muestran en la tarjeta del neto: con la liquidación YA creada son las DEFINITIVAS del documento (las calculó el
+  // servidor); la fórmula local solo es una vista previa mientras no exista. Nunca se manda al servidor.
+  const vista = useMemo(() => (liquidacionExistente
+    ? {
+      definitiva: true,
+      netoAPagar: liquidacionExistente.netoAPagar,
+      comision: liquidacionExistente.comision,
+      adelantos: liquidacionExistente.adelantos,
+      faltantesDeposito: liquidacionExistente.faltantesDeposito,
+      deudasAplicar: liquidacionExistente.deudasAplicadas ?? 0,
+      gastosAsumidosStorkhub: liquidacionExistente.gastosAsumidosStorkhub ?? 0,
+    }
+    : {
+      definitiva: false,
+      netoAPagar: calculo.netoAPagar,
+      comision: calculo.comision,
+      adelantos: calculo.adelantos,
+      faltantesDeposito: calculo.faltantesDeposito,
+      deudasAplicar: calculo.deudasAplicar,
+      gastosAsumidosStorkhub: calculo.gastosAsumidosStorkhub,
+    }), [liquidacionExistente, calculo])
+
   // ── Crear liquidación ─────────────────────────────────────────────────────
   //
   // FIN-1D — la liquidación la crea el SERVIDOR (crearLiquidacionMotorizado, functions/src/crear-liquidacion.ts) en una transacción: lee las órdenes, los
@@ -1088,26 +1110,28 @@ function LiquidacionesPageContent() {
               )}
 
               <p className="text-[11px] text-gray-400 px-1">
-                Vista previa. Al crear la liquidación el servidor recalcula todo con los datos reales y esa es la cifra definitiva.
+                {vista.definitiva
+                  ? 'Cifras definitivas de la liquidación creada: las calculó el servidor con los datos reales.'
+                  : 'Vista previa. Al crear la liquidación el servidor recalcula todo con los datos reales y esa es la cifra definitiva.'}
               </p>
 
               {/* Neto a pagar */}
-              <div className={`rounded-xl px-4 py-4 flex items-center justify-between ${calculo.netoAPagar < 0 ? 'bg-red-600' : 'bg-[#004aad]'} text-white`}>
+              <div className={`rounded-xl px-4 py-4 flex items-center justify-between ${vista.netoAPagar < 0 ? 'bg-red-600' : 'bg-[#004aad]'} text-white`}>
                 <div>
                   <p className="text-xs font-semibold opacity-70">
-                    {calculo.netoAPagar < 0 ? 'SALDO A CARGO DEL MOTORIZADO' : 'NETO A PAGAR'}
+                    {vista.netoAPagar < 0 ? 'SALDO A CARGO DEL MOTORIZADO' : 'NETO A PAGAR'}
                   </p>
-                  <p className="text-2xl font-black mt-0.5">{fmt(Math.abs(calculo.netoAPagar))}</p>
-                  {calculo.netoAPagar < 0 && (
+                  <p className="text-2xl font-black mt-0.5">{fmt(Math.abs(vista.netoAPagar))}</p>
+                  {vista.netoAPagar < 0 && (
                     <p className="text-xs opacity-80 mt-0.5">El motorizado debe depositar este monto adicional</p>
                   )}
                 </div>
                 <div className="text-right text-xs opacity-70 space-y-0.5">
-                  <p>Ganancia {fmt(calculo.comision)}</p>
-                  {calculo.adelantos > 0 && <p>− Adelantos {fmt(calculo.adelantos)}</p>}
-                  {calculo.faltantesDeposito > 0 && <p>− Faltante depósito {fmt(calculo.faltantesDeposito)}</p>}
-                  {calculo.deudasAplicar > 0 && <p>− Deudas aplicadas {fmt(calculo.deudasAplicar)}</p>}
-                  {calculo.gastosAsumidosStorkhub > 0 && <p>+ Gastos asumidos Storkhub {fmt(calculo.gastosAsumidosStorkhub)}</p>}
+                  <p>Ganancia {fmt(vista.comision)}</p>
+                  {vista.adelantos > 0 && <p>− Adelantos {fmt(vista.adelantos)}</p>}
+                  {vista.faltantesDeposito > 0 && <p>− Faltante depósito {fmt(vista.faltantesDeposito)}</p>}
+                  {vista.deudasAplicar > 0 && <p>− Deudas aplicadas {fmt(vista.deudasAplicar)}</p>}
+                  {vista.gastosAsumidosStorkhub > 0 && <p>+ Gastos asumidos Storkhub {fmt(vista.gastosAsumidosStorkhub)}</p>}
                 </div>
               </div>
 

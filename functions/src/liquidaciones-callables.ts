@@ -33,6 +33,9 @@ export function depsRealesCrearLiquidacion(db: FirebaseFirestore.Firestore = adm
         getAdelantosDelMotorizado: (mid) => consultar('movimientos_financieros', [['tipo', 'adelanto_motorizado'], ['motorizadoId', mid]]),
         getDepositosConGasto: (id) => contiene('ordenes_deposito', 'gastosIds', id),
         getGasto: (id) => leer('gastos_motorizado', id),
+        getOrden: (id) => leer('solicitudes_envio', id),
+        // Vínculo de un depósito sin solicitudIds: el puntero que dejó en sus órdenes (igualdad sobre un solo campo: no requiere índice compuesto).
+        getOrdenesPorPunteroDeposito: (depositoId) => consultar('solicitudes_envio', [['registro.deposito.storkhubDepositoId', depositoId]]),
         getSaldo: (id) => leer('saldos_cargo_motorizado', id),
         // create(): la liquidación, el saldo, los movimientos y el marcador de una operación no pueden existir ya.
         crearLiquidacion: (id, campos) => { tx.create(col(db, 'liquidaciones_motorizado', id), campos); },

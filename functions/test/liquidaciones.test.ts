@@ -98,6 +98,9 @@ function mundo() {
           async getDepositosDelMotorizado(uid: string) { return filtrar('ordenes_deposito/', (d) => d.motorizadoUid === uid); },
           async getGastosAprobadosDelMotorizado(mid: string) { return filtrar('gastos_motorizado/', (d) => d.motorizadoId === mid && d.estado === 'aprobado'); },
           async getAdelantosDelMotorizado(mid: string) { return filtrar('movimientos_financieros/', (d) => d.tipo === 'adelanto_motorizado' && d.motorizadoId === mid); },
+          async getOrdenesPorPunteroDeposito(depId: string) {
+            return filtrar('solicitudes_envio/', (d) => ((d.registro as { deposito?: { storkhubDepositoId?: string } } | undefined)?.deposito?.storkhubDepositoId) === depId);
+          },
           async getDepositosConGasto(id: string) { return filtrar('ordenes_deposito/', (d) => Array.isArray(d.gastosIds) && (d.gastosIds as string[]).includes(id)); },
           crearLiquidacion(id: string, c: Doc) { q('create', `liquidaciones_motorizado/${id}`, c); },
           crearOperacion(id: string, c: Doc) { q('create', `${opCol}/${id}`, c); },
@@ -162,7 +165,7 @@ const orden = (ms: number, extra: Doc = {}): Doc => ({
   confirmacion: { precioFinalCordobas: 100 }, precioDesglose: { deliveryBase: 100 }, pagoDelivery: { quienPaga: 'efectivo' }, ...extra,
 });
 const deposito = (monto: number, estado = 'confirmado', extra: Doc = {}): Doc => ({
-  motorizadoUid: 'u1', tipo: 'recaudacion_motorizado_storkhub', estado, montoTotal: monto, creadoAt: TS(MID), ...extra,
+  motorizadoUid: 'u1', tipo: 'recaudacion_motorizado_storkhub', estado, montoTotal: monto, solicitudIds: ['o1', 'o2'], creadoAt: TS(MID), ...extra,
 });
 const gasto = (monto: number, extra: Doc = {}): Doc => ({ motorizadoId: 'm1', estado: 'aprobado', monto, tipo: 'otro_gasto_operativo', fecha: TS(MID), ...extra });
 const adelanto = (monto: number, extra: Doc = {}): Doc => ({
@@ -348,7 +351,7 @@ test('L14 · las órdenes de la semana se derivan en horario de Managua, de ESTE
   w.put('solicitudes_envio/no_entregada', orden(MID, { estado: 'en_camino' }));
   w.put('solicitudes_envio/sin_fecha', orden(MID, { entregadoAt: undefined }));
   w.put('solicitudes_envio/respaldo', { ...orden(MID), entregadoAt: undefined, historial: { entregadoAt: TS(MID) } });
-  w.put('ordenes_deposito/d1', deposito(400));
+  w.put('ordenes_deposito/d1', deposito(300, 'confirmado', { solicitudIds: ['dentro_fin', 'dentro_ini', 'respaldo'] }));
   await crear(w);
   assert.deepEqual(w.raw(`liquidaciones_motorizado/${LIQ}`).ordenesIds, ['dentro_fin', 'dentro_ini', 'respaldo']);
 });
@@ -405,7 +408,7 @@ test('L19 · fuera de Managua usa el monto sugerido del delivery', async () => {
   assert.equal(w.raw(`liquidaciones_motorizado/${LIQ}`).efectivoEsperado, 150);
 });
 
-test('L20 · un depósito NO terminal de la semana bloquea la liquidación; anulado/rechazado/otra semana/comercio no', async () => {
+test('L20 · un depósito relevante NO terminal bloquea la liquidación; anulado, rechazado, sin órdenes de la semana y de comercio no', async () => {
   for (const estado of ['pendiente_boucher', 'en_revision', 'devuelto', 'estado_desconocido']) {
     const w = mundo(); semanaNormal(w); w.put('ordenes_deposito/dp', deposito(200, estado));
     const antes = w.snapshot();
@@ -415,7 +418,7 @@ test('L20 · un depósito NO terminal de la semana bloquea la liquidación; anul
   const w = mundo(); semanaNormal(w);
   w.put('ordenes_deposito/anulado', deposito(999, 'anulado'));
   w.put('ordenes_deposito/rechazado', deposito(999, 'rechazado'));
-  w.put('ordenes_deposito/otra_semana', deposito(999, 'en_revision', { creadoAt: TS(INI - 86400_000) }));
+  w.put('ordenes_deposito/sin_ordenes_de_la_semana', deposito(999, 'en_revision', { solicitudIds: ['otra1', 'otra2'] })); // creado en la semana, pero de OTRAS órdenes
   w.put('ordenes_deposito/comercio', deposito(999, 'en_revision', { tipo: 'recaudacion_motorizado_comercio' }));
   w.put('ordenes_deposito/ajeno', deposito(999, 'en_revision', { motorizadoUid: 'u2' }));
   w.put('ordenes_deposito/ok', deposito(200));
@@ -431,12 +434,166 @@ test('L20b · un depósito convertido en deuda SUMA (su faltante ya es un saldo)
   assert.equal(r.netoAPagar, 160);
 });
 
+// ── D · depósitos: la semana económica la dan sus órdenes, no su creadoAt ──────
+
+const DOMINGO = FIN - 3600_000; // domingo 22:59 (Managua): órdenes de la semana
+const LUNES_ORDEN = FIN + 3 * 3600_000; // lunes siguiente: orden de OTRA semana
+const LUNES_DEPOSITO = FIN + 2 * 3600_000; // el depósito se crea el lunes
+
+/** Semana con una orden del domingo y otra de mitad de semana; una orden del lunes siguiente (otra semana) existe aparte. */
+function semanaConDomingo(w: Mundo) {
+  base(w);
+  w.put('solicitudes_envio/o1', orden(MID));
+  w.put('solicitudes_envio/oDom', orden(DOMINGO));
+  w.put('solicitudes_envio/oLun', orden(LUNES_ORDEN));
+}
+
+test('D1 · el efectivo del domingo depositado el lunes se reconoce en la semana ANTERIOR (no en la del creadoAt)', async () => {
+  const w = mundo(); semanaConDomingo(w);
+  w.put('ordenes_deposito/dLun', deposito(200, 'confirmado', { solicitudIds: ['o1', 'oDom'], creadoAt: TS(LUNES_DEPOSITO) }));
+  const r = await crear(w);
+  const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
+  assert.deepEqual(l.depositosIds, ['dLun']); assert.equal(l.totalDepositado, 200); assert.equal(l.faltantesDeposito, 0); assert.equal(r.netoAPagar, 160);
+  assert.equal(r.saldoGeneradoId, null);
+});
+
+test('D2 · el mismo depósito del lunes EN REVISIÓN (o pendiente de boucher) bloquea la semana anterior: createdAt del lunes no permite ignorarlo', async () => {
+  for (const estado of ['en_revision', 'pendiente_boucher', 'devuelto']) {
+    const w = mundo(); semanaConDomingo(w);
+    w.put('ordenes_deposito/dLun', deposito(200, estado, { solicitudIds: ['o1', 'oDom'], creadoAt: TS(LUNES_DEPOSITO) }));
+    const antes = w.snapshot();
+    await assert.rejects(crear(w), codigo('failed-precondition', 'deposito_pendiente_conciliacion'), estado);
+    assert.equal(w.snapshot(), antes, estado);
+  }
+});
+
+test('D3 · un depósito del lunes SIN órdenes de la semana anterior no la afecta (ni suma ni bloquea), aunque esté pendiente', async () => {
+  const w = mundo(); semanaConDomingo(w);
+  w.put('ordenes_deposito/dLun', deposito(100, 'en_revision', { solicitudIds: ['oLun'], creadoAt: TS(LUNES_DEPOSITO) }));
+  w.put('ordenes_deposito/dSem', deposito(200, 'confirmado', { solicitudIds: ['o1', 'oDom'], creadoAt: TS(MID) }));
+  await crear(w);
+  assert.deepEqual(w.raw(`liquidaciones_motorizado/${LIQ}`).depositosIds, ['dSem']);
+});
+
+test('D4/D5 · un depósito anulado o rechazado con órdenes de la semana no suma ni bloquea', async () => {
+  for (const estado of ['anulado', 'rechazado']) {
+    const w = mundo(); semanaConDomingo(w);
+    w.put('ordenes_deposito/dX', deposito(200, estado, { solicitudIds: ['o1', 'oDom'], creadoAt: TS(LUNES_DEPOSITO) }));
+    const r = await crear(w);
+    const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
+    assert.deepEqual(l.depositosIds, [], estado); assert.equal(l.totalDepositado, 0, estado); assert.equal(l.faltantesDeposito, 200, estado); assert.equal(r.netoAPagar, -40, estado);
+  }
+});
+
+test('D6 · un depósito que mezcla semanas aporta SOLO el efectivo de las órdenes de esta semana (sin prorrata ni todo el monto)', async () => {
+  const w = mundo(); semanaConDomingo(w);
+  // dMix: oDom (esta semana, 100) + oLun (la siguiente, 100) = 200 en total; la semana anterior solo reconoce la del domingo.
+  w.put('ordenes_deposito/dMix', deposito(200, 'confirmado', { solicitudIds: ['oDom', 'oLun'], creadoAt: TS(LUNES_DEPOSITO) }));
+  const r = await crear(w);
+  const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
+  assert.deepEqual(l.depositosIds, ['dMix']); assert.equal(l.totalDepositado, 100); // NO 200
+  assert.equal(l.efectivoEsperado, 200); assert.equal(l.faltantesDeposito, 100); assert.equal(r.netoAPagar, 160 - 100);
+  const detalle = (l.depositosDetalle as Doc[])[0];
+  assert.equal(detalle.completo, false); assert.equal(detalle.contribucion, 100); assert.deepEqual(detalle.ordenes, ['oDom']);
+});
+
+test('D6b · mezcla de semanas con un gasto LIGADO (ordenId) a una orden de esta semana: la contribución es neta de ese gasto', async () => {
+  const w = mundo(); semanaConDomingo(w);
+  w.put('gastos_motorizado/gx', gasto(20, { consumidoEnDepositoId: 'dMix', ordenId: 'oDom' }));
+  w.put('ordenes_deposito/dMix', deposito(180, 'confirmado', { solicitudIds: ['oDom', 'oLun'], gastosIds: ['gx'], gastosDescontados: 20, creadoAt: TS(LUNES_DEPOSITO) }));
+  await crear(w);
+  const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
+  assert.equal(l.totalDepositado, 80); assert.equal(l.gastosEnDepositos, 20); // 100 − 20
+  assert.equal(l.efectivoEsperado, 200); assert.equal(l.faltantesDeposito, 200 - 20 - 80);
+});
+
+test('D6c · un depósito con un gasto ligado a una orden de OTRA semana no le resta nada a esta', async () => {
+  const w = mundo(); semanaConDomingo(w);
+  w.put('gastos_motorizado/gx', gasto(20, { consumidoEnDepositoId: 'dMix', ordenId: 'oLun' }));
+  w.put('ordenes_deposito/dMix', deposito(180, 'confirmado', { solicitudIds: ['oDom', 'oLun'], gastosIds: ['gx'], gastosDescontados: 20, creadoAt: TS(LUNES_DEPOSITO) }));
+  await crear(w);
+  const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
+  assert.equal(l.totalDepositado, 100); assert.equal(l.gastosEnDepositos, 0);
+});
+
+test('D7 · mezcla de semanas SIN atribución exacta (gasto no ligado a una orden, o gastos que recortan el monto) ⇒ conciliacion_requerida, 0 escrituras', async () => {
+  const w = mundo(); semanaConDomingo(w);
+  w.put('gastos_motorizado/gx', gasto(20, { consumidoEnDepositoId: 'dMix' })); // sin ordenId
+  w.put('ordenes_deposito/dMix', deposito(180, 'confirmado', { solicitudIds: ['oDom', 'oLun'], gastosIds: ['gx'], gastosDescontados: 20, creadoAt: TS(LUNES_DEPOSITO) }));
+  const antes = w.snapshot();
+  await assert.rejects(crear(w), codigo('failed-precondition', 'conciliacion_requerida'));
+  assert.equal(w.snapshot(), antes);
+  // el gasto está ligado a una orden que NO es del depósito
+  const w2 = mundo(); semanaConDomingo(w2);
+  w2.put('gastos_motorizado/gx', gasto(20, { consumidoEnDepositoId: 'dMix', ordenId: 'o1' }));
+  w2.put('ordenes_deposito/dMix', deposito(180, 'confirmado', { solicitudIds: ['oDom', 'oLun'], gastosIds: ['gx'], gastosDescontados: 20, creadoAt: TS(LUNES_DEPOSITO) }));
+  await assert.rejects(crear(w2), codigo('failed-precondition', 'conciliacion_requerida'));
+  // gastos mayores que el efectivo del depósito (el recorte a 0 pierde la parte de cada semana)
+  const w3 = mundo(); semanaConDomingo(w3);
+  w3.put('gastos_motorizado/gx', gasto(500, { consumidoEnDepositoId: 'dMix', ordenId: 'oDom' }));
+  w3.put('ordenes_deposito/dMix', deposito(0, 'confirmado', { solicitudIds: ['oDom', 'oLun'], gastosIds: ['gx'], gastosDescontados: 500, creadoAt: TS(LUNES_DEPOSITO) }));
+  await assert.rejects(crear(w3), codigo('failed-precondition', 'conciliacion_requerida'));
+  assert.equal(w3.liquidaciones().length, 0);
+});
+
+test('D8 · una orden de la semana en dos depósitos vivos ⇒ conciliacion_requerida (cobertura duplicada), 0 escrituras', async () => {
+  const w = mundo(); semanaNormal(w);
+  w.put('ordenes_deposito/d1', deposito(200));
+  w.put('ordenes_deposito/d2', deposito(100, 'confirmado', { solicitudIds: ['o1'] }));
+  const antes = w.snapshot();
+  await assert.rejects(crear(w), codigo('failed-precondition', 'conciliacion_requerida'));
+  assert.equal(w.snapshot(), antes);
+});
+
+test('D9 · depósito anterior a solicitudIds, demostrable por el PUNTERO coherente de sus órdenes: se reconoce', async () => {
+  const w = mundo(); base(w);
+  const punt = { registro: { deposito: { storkhubDepositoId: 'dViejo' } } };
+  w.put('solicitudes_envio/o1', orden(MID, punt)); w.put('solicitudes_envio/o2', orden(MID + 3600_000, punt));
+  w.put('ordenes_deposito/dViejo', deposito(200, 'confirmado', { solicitudIds: undefined, creadoAt: TS(LUNES_DEPOSITO) }));
+  const r = await crear(w);
+  assert.deepEqual(w.raw(`liquidaciones_motorizado/${LIQ}`).depositosIds, ['dViejo']); assert.equal(r.netoAPagar, 160);
+  // …y si su monto no cuadra con lo que el puntero demuestra, se concilia
+  const w2 = mundo(); base(w2);
+  w2.put('solicitudes_envio/o1', orden(MID, punt)); w2.put('solicitudes_envio/o2', orden(MID + 3600_000, punt));
+  w2.put('ordenes_deposito/dViejo', deposito(150, 'confirmado', { solicitudIds: undefined }));
+  await assert.rejects(crear(w2), codigo('failed-precondition', 'conciliacion_requerida'));
+});
+
+test('D10 · depósito sin solicitudIds y SIN punteros: no se demuestra a qué semana pertenece ⇒ conciliacion_requerida (nunca por fecha)', async () => {
+  const w = mundo(); semanaNormal(w);
+  w.put('ordenes_deposito/dHuerfano', deposito(200, 'confirmado', { solicitudIds: undefined, creadoAt: TS(MID) })); // creado EN la semana: igual no se adivina
+  const antes = w.snapshot();
+  await assert.rejects(crear(w), codigo('failed-precondition', 'conciliacion_requerida'));
+  assert.equal(w.snapshot(), antes);
+  // sus punteros señalan solo órdenes de OTRA semana: demostrablemente irrelevante
+  const w2 = mundo(); semanaNormal(w2); w2.put('ordenes_deposito/dMio', deposito(200));
+  w2.put('solicitudes_envio/oOtra', orden(INI - 5 * 86400_000, { registro: { deposito: { storkhubDepositoId: 'dViejo' } } }));
+  w2.put('ordenes_deposito/dViejo', deposito(100, 'confirmado', { solicitudIds: undefined }));
+  await crear(w2);
+  assert.deepEqual(w2.raw(`liquidaciones_motorizado/${LIQ}`).depositosIds, ['dMio']);
+  // un depósito anulado sin vínculo se ignora (no hay nada que demostrar)
+  const w3 = mundo(); semanaNormal(w3); w3.put('ordenes_deposito/dMio', deposito(200));
+  w3.put('ordenes_deposito/dAnulado', deposito(5, 'anulado', { solicitudIds: undefined }));
+  await crear(w3);
+});
+
+test('D11/D12 · un depósito cuyo monto no cuadra con sus órdenes, o cuya orden apunta a OTRO depósito, no se acepta: conciliacion_requerida', async () => {
+  const w = mundo(); semanaNormal(w);
+  w.put('ordenes_deposito/d1', deposito(170)); // sus órdenes suman 200
+  await assert.rejects(crear(w), codigo('failed-precondition', 'conciliacion_requerida'));
+  const w2 = mundo(); base(w2);
+  w2.put('solicitudes_envio/o1', orden(MID, { registro: { deposito: { storkhubDepositoId: 'otroDeposito' } } })); w2.put('solicitudes_envio/o2', orden(MID));
+  w2.put('ordenes_deposito/d1', deposito(200));
+  await assert.rejects(crear(w2), codigo('failed-precondition', 'conciliacion_requerida'));
+  assert.equal(w2.liquidaciones().length, 0);
+});
+
 // ── G · gastos ───────────────────────────────────────────────────────────────
 
 test('G1/G4 · un gasto libre de la semana entra, se captura y queda marcado con liquidacionId (sin tocar consumidoEnDepositoId)', async () => {
   const w = mundo(); semanaNormal(w);
   w.put('gastos_motorizado/g1', gasto(30));
-  w.put('ordenes_deposito/d1', deposito(170)); // 200 − 30
+  w.put('ordenes_deposito/d1', deposito(200)); // el depósito no consumió el gasto: su monto es el bruto de sus órdenes
   await crear(w);
   const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
   assert.deepEqual(l.gastosIds, ['g1']); assert.equal(l.gastosAprobados, 30); assert.equal(l.faltantesDeposito, 0); assert.equal(l.gastosAsumidosStorkhub, 0);
@@ -444,31 +601,37 @@ test('G1/G4 · un gasto libre de la semana entra, se captura y queda marcado con
   assert.equal(g.liquidacionId, LIQ); assert.equal(g.consumidoEnDepositoId, undefined); assert.equal(g.monto, 30); assert.equal(g.estado, 'aprobado');
 });
 
-test('G2 · un gasto consumido por un depósito NO entra (ni uno que un depósito vivo lista sin marca); su monto ya va neto en el depósito', async () => {
+test('G2 · un gasto consumido por un depósito NO entra (ni uno que otro depósito vivo lista sin marca); su monto ya va neto en el depósito', async () => {
   const w = mundo(); semanaNormal(w);
   w.put('gastos_motorizado/consumido', gasto(30, { consumidoEnDepositoId: 'd1' }));
-  w.put('gastos_motorizado/sin_marca', gasto(20));
-  w.put('ordenes_deposito/d1', deposito(150, 'confirmado', { gastosIds: ['consumido', 'sin_marca'], gastosDescontados: 50 })); // 200 − 50
+  w.put('ordenes_deposito/d1', deposito(170, 'confirmado', { gastosIds: ['consumido'], gastosDescontados: 30 })); // 200 − 30
   await crear(w);
   const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
   assert.deepEqual(l.gastosIds, []);
-  assert.equal(l.gastosEnDepositos, 50); assert.equal(l.faltantesDeposito, 0);
+  assert.equal(l.gastosEnDepositos, 30); assert.equal(l.faltantesDeposito, 0); assert.equal(l.totalDepositado, 170);
   assert.equal(w.raw('gastos_motorizado/consumido').liquidacionId, undefined);
-  assert.equal(w.raw('gastos_motorizado/sin_marca').liquidacionId, undefined);
+  // un depósito vivo (de OTRAS órdenes) que lista el gasto sin marca de consumo: tampoco se descuenta dos veces
+  const w1 = mundo(); semanaNormal(w1);
+  w1.put('gastos_motorizado/sin_marca', gasto(20));
+  w1.put('ordenes_deposito/dy', deposito(0, 'confirmado', { solicitudIds: ['x1'], gastosIds: ['sin_marca'] }));
+  w1.put('ordenes_deposito/d1', deposito(200));
+  await crear(w1);
+  assert.deepEqual(w1.raw(`liquidaciones_motorizado/${LIQ}`).gastosIds, []);
+  assert.equal(w1.raw('gastos_motorizado/sin_marca').liquidacionId, undefined);
   // un depósito anulado que lo listaba ya no es dueño del gasto
   const w2 = mundo(); semanaNormal(w2);
-  w2.put('gastos_motorizado/g1', gasto(20)); w2.put('ordenes_deposito/dx', deposito(0, 'anulado', { gastosIds: ['g1'] })); w2.put('ordenes_deposito/d1', deposito(180));
+  w2.put('gastos_motorizado/g1', gasto(20)); w2.put('ordenes_deposito/dx', deposito(0, 'anulado', { gastosIds: ['g1'] })); w2.put('ordenes_deposito/d1', deposito(200));
   await crear(w2);
   assert.deepEqual(w2.raw(`liquidaciones_motorizado/${LIQ}`).gastosIds, ['g1']);
 });
 
-test('G2b · el gasto de un depósito anterior a FIN-2 (sin gastosDescontados) se resuelve por sus gastosIds', async () => {
+test('G2b · un depósito anterior a FIN-2 (con gastos pero sin gastosDescontados) no se puede demostrar: conciliacion_requerida, 0 escrituras', async () => {
   const w = mundo(); semanaNormal(w);
   w.put('gastos_motorizado/viejo', gasto(40, { consumidoEnDepositoId: 'd1' }));
   w.put('ordenes_deposito/d1', deposito(160, 'confirmado', { gastosIds: ['viejo'] }));
-  await crear(w);
-  const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
-  assert.equal(l.gastosEnDepositos, 40); assert.equal(l.faltantesDeposito, 0);
+  const antes = w.snapshot();
+  await assert.rejects(crear(w), codigo('failed-precondition', 'conciliacion_requerida'));
+  assert.equal(w.snapshot(), antes);
 });
 
 test('G3 · un gasto ya capturado por otra liquidación (liquidacionId) no entra; tampoco los anulados, de otro motorizado ni de otra semana', async () => {
@@ -478,7 +641,7 @@ test('G3 · un gasto ya capturado por otra liquidación (liquidacionId) no entra
   w.put('gastos_motorizado/ajeno', gasto(30, { motorizadoId: 'm2' }));
   w.put('gastos_motorizado/otra_semana', gasto(30, { fecha: TS(FIN + 86400_000) }));
   w.put('gastos_motorizado/valido', gasto(10));
-  w.put('ordenes_deposito/d1', deposito(190));
+  w.put('ordenes_deposito/d1', deposito(200));
   await crear(w);
   assert.deepEqual(w.raw(`liquidaciones_motorizado/${LIQ}`).gastosIds, ['valido']);
   assert.equal(w.raw('gastos_motorizado/liquidado').liquidacionId, 'm1_2026-W19');
@@ -538,7 +701,7 @@ test('G7 · carrera: el depósito gana (consume el gasto mientras se liquida) �
 
 test('G8 · carrera: la liquidación gana → el gasto queda con liquidacionId y ya no es elegible (el depósito lo ve y no lo consume)', async () => {
   const w = mundo(); semanaNormal(w);
-  w.put('gastos_motorizado/g1', gasto(30)); w.put('ordenes_deposito/d1', deposito(170));
+  w.put('gastos_motorizado/g1', gasto(30)); w.put('ordenes_deposito/d1', deposito(200));
   await crear(w);
   const g = w.raw('gastos_motorizado/g1');
   assert.equal(g.liquidacionId, LIQ);
@@ -561,6 +724,26 @@ test('A1/A2/A3/A4/A5 · adelantos: por semanaKey, activos, ids exactos', async (
   const l = w.raw(`liquidaciones_motorizado/${LIQ}`);
   assert.deepEqual(l.adelantosIds, ['ad_a', 'ad_d', 'ad_legacy']);
   assert.equal(l.adelantos, 55); assert.equal(l.netoAPagar, 160 - 55);
+});
+
+test('A8 · un adelanto activo sin semanaKey NI fecha legible (o con monto inválido) no se excluye en silencio: conciliacion_requerida, 0 liquidación', async () => {
+  for (const [nombre, mov] of [
+    ['sin semanaKey ni at', { tipo: 'adelanto_motorizado', estado: 'activo', motorizadoId: 'm1', monto: 30 }],
+    ['sin semanaKey y at ilegible', { tipo: 'adelanto_motorizado', estado: 'activo', motorizadoId: 'm1', monto: 30, at: 'ayer' }],
+    ['monto inválido', { tipo: 'adelanto_motorizado', estado: 'activo', motorizadoId: 'm1', monto: 'mucho', semanaKey: SEM }],
+  ] as Array<[string, Doc]>) {
+    const w = mundo(); semanaNormal(w); w.put('ordenes_deposito/d1', deposito(200)); w.put('movimientos_financieros/ad_raro', mov);
+    const antes = w.snapshot();
+    await assert.rejects(crear(w), codigo('failed-precondition', 'conciliacion_requerida'), nombre);
+    assert.equal(w.snapshot(), antes, nombre); assert.equal(w.liquidaciones().length, 0, nombre);
+  }
+  // un adelanto anulado, o de otro motorizado, o de otra semana NO es ambiguo aunque esté incompleto
+  const w = mundo(); semanaNormal(w); w.put('ordenes_deposito/d1', deposito(200));
+  w.put('movimientos_financieros/a1', { tipo: 'adelanto_motorizado', estado: 'anulado', motorizadoId: 'm1', monto: 30 });
+  w.put('movimientos_financieros/a2', { tipo: 'adelanto_motorizado', estado: 'activo', motorizadoId: 'm2', monto: 30 });
+  w.put('movimientos_financieros/a3', adelanto(10, { semanaKey: '2026-W10' }));
+  await crear(w);
+  assert.deepEqual(w.raw(`liquidaciones_motorizado/${LIQ}`).adelantosIds, []);
 });
 
 test('A6 · carrera: la liquidación gana → registrar un adelanto de esa semana se rechaza (semana_liquidada)', async () => {

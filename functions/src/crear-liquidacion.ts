@@ -27,8 +27,9 @@ import {
   exigirStaffFinanzas, huellaPayload, montoValido, nombreMotorizado, objetoPlano, operacionIdValido, idValido, rechazoOp, semanaValida, soloClaves,
 } from './finanzas-operativas-comun';
 import { analizarSaldo } from './saldo-acciones-comun';
+import { atribuirDepositos } from './liquidacion-depositos';
 import {
-  aCentavos, aMonto, adelantosDeSemana, baseComisionOrden, clasificarDepositos, COMISION_PCT, efectivoAStorkhubOrden, formulaLiquidacion,
+  aCentavos, aMonto, adelantosDeSemana, baseComisionOrden, COMISION_PCT, efectivoAStorkhubOrden, formulaLiquidacion,
   gastosCandidatos, ordenesElegibles, type DocConId,
 } from './liquidacion-calculo';
 import type { LecturasLiquidacion } from './adelantos';
@@ -101,6 +102,8 @@ export interface TxCrearLiquidacion extends LecturasLiquidacion {
   getAdelantosDelMotorizado(motorizadoId: string): Promise<DocConId[]>;
   getDepositosConGasto(gastoId: string): Promise<DocConId[]>;
   getGasto(id: string): Promise<DocumentData | null>;
+  getOrden(id: string): Promise<DocumentData | null>;
+  getOrdenesPorPunteroDeposito(depositoId: string): Promise<DocConId[]>;
   getSaldo(id: string): Promise<DocumentData | null>;
   crearLiquidacion(id: string, campos: DocumentData): void;
   crearOperacion(id: string, campos: DocumentData): void;
@@ -172,13 +175,19 @@ export async function crearLiquidacionMotorizadoCore(deps: DepsCrearLiquidacion,
     const ordenes = ordenesElegibles(await tx.getOrdenesEntregadasDelMotorizado(p.motorizadoId), p.motorizadoId, ini, fn);
     if (ordenes.length === 0) throw rechazoOp('sin_viajes', 'No hay viajes entregados en esa semana: no hay nada que liquidar.', { semanaKey: p.semanaKey });
 
-    // Depósitos: uno NO terminal de la semana bloquea toda la liquidación (no se calcula un faltante que todavía puede cambiar).
-    const { suman, pendientes } = clasificarDepositos(await tx.getDepositosDelMotorizado(uidMoto), ini, fn);
-    if (pendientes.length > 0) {
-      throw rechazoOp('deposito_pendiente_conciliacion', 'Hay un depósito de esa semana todavía sin resolver (pendiente de boucher, en revisión o devuelto): resolvelo antes de liquidar.', {
-        depositosIds: pendientes.map((d) => d.id).slice(0, 10),
-      });
-    }
+    // Depósitos: la semana económica de un depósito la dan SUS ÓRDENES, no su creadoAt (el del lunes por el efectivo del domingo es de la semana anterior).
+    // Uno relevante NO terminal bloquea la liquidación; la contribución de cada uno a esta semana es exacta o es conciliacion_requerida
+    // (liquidacion-depositos.ts, con la misma demostración que usan la confirmación y la conversión).
+    const atribuidos = await atribuirDepositos(
+      {
+        getMotorizadoDocId: async () => p.motorizadoId,
+        getSolicitud: (id) => tx.getOrden(id),
+        getGasto: (id) => tx.getGasto(id),
+        getOrdenesPorPunteroDeposito: (id) => tx.getOrdenesPorPunteroDeposito(id),
+      },
+      await tx.getDepositosDelMotorizado(uidMoto),
+      ordenes,
+    );
 
     // Gastos elegibles: sin marca de depósito ni de liquidación Y que ningún depósito vivo liste (depósitos anteriores a FIN-2 no tienen marca).
     const candidatos = gastosCandidatos(await tx.getGastosAprobadosDelMotorizado(p.motorizadoId), p.motorizadoId, ini, fn);
@@ -192,20 +201,18 @@ export async function crearLiquidacionMotorizadoCore(deps: DepsCrearLiquidacion,
       throw rechazoOp('demasiados_registros', `La semana tiene más de ${MAX_GASTOS_POR_LIQUIDACION} gastos para capturar.`, { cantidad: gastos.length });
     }
 
-    // Gastos que los depósitos de la semana ya descontaron (su monto va neto de ellos): el guardado, o la suma de sus gastos si es anterior a FIN-2.
-    let centavosGastosEnDepositos = 0;
-    for (const d of suman) {
-      if (typeof d.data.gastosDescontados === 'number') { centavosGastosEnDepositos += aCentavos(d.data.gastosDescontados); continue; }
-      const ids: string[] = Array.isArray(d.data.gastosIds) ? (d.data.gastosIds as unknown[]).filter((x): x is string => typeof x === 'string') : [];
-      for (const gid of ids) {
-        const g = await tx.getGasto(gid);
-        if (g && g.estado === 'aprobado') centavosGastosEnDepositos += aCentavos(g.monto);
-      }
-    }
+    // Gastos que los depósitos ya descontaron PARA ESTAS ÓRDENES (su monto va neto de ellos): lo demostró la atribución.
+    const centavosGastosEnDepositos = atribuidos.reduce((s, d) => s + d.gastos, 0);
 
-    const adelantos = adelantosDeSemana(
+    // Adelantos: por semanaKey. Uno activo que no se puede ubicar en una semana (sin semanaKey ni fecha legible) NO se excluye en silencio: se concilia.
+    const { incluidos: adelantos, ambiguos } = adelantosDeSemana(
       await tx.getAdelantosDelMotorizado(p.motorizadoId), p.motorizadoId, p.semanaKey, (ms) => semanaKeyDeFecha(new Date(ms)),
     );
+    if (ambiguos.length > 0) {
+      throw rechazoOp('conciliacion_requerida', 'Hay un adelanto activo que no se puede ubicar en una semana (sin semanaKey ni fecha legible, o con un monto inválido). Hay que conciliarlo: no se liquida sin saber si se descuenta.', {
+        adelantosIds: ambiguos.map((a) => a.id).slice(0, 10),
+      });
+    }
 
     // Saldos elegidos: se RELEEN. Cualquier irregularidad aborta toda la liquidación (nada parcial).
     const aplicaciones: Array<{ saldoId: string; saldo: DocumentData; aplicado: number; nuevoPendiente: number; nuevoEstado: 'pagado' | 'abonado_parcial' }> = [];
@@ -230,7 +237,7 @@ export async function crearLiquidacionMotorizadoCore(deps: DepsCrearLiquidacion,
     const centavosBase = ordenes.reduce((s, o) => s + baseComisionOrden(o.data), 0);
     const centavosEfectivo = ordenes.reduce((s, o) => s + efectivoAStorkhubOrden(o.data), 0);
     const centavosGastosLiq = gastos.reduce((s, g) => s + aCentavos(g.data.monto), 0);
-    const centavosDepositado = suman.reduce((s, d) => s + aCentavos(d.data.montoTotal), 0);
+    const centavosDepositado = atribuidos.reduce((s, d) => s + d.contribucion, 0);
     const centavosAdelantos = adelantos.reduce((s, a) => s + aCentavos(a.data.monto), 0);
     const centavosDeudas = aplicaciones.reduce((s, a) => s + a.aplicado, 0);
     const r = formulaLiquidacion({
@@ -294,7 +301,8 @@ export async function crearLiquidacionMotorizadoCore(deps: DepsCrearLiquidacion,
       faltantesDeposito: aMonto(r.faltantesDeposito), otrosDescuentos: 0,
       deudasAplicadas: aMonto(r.deudasAplicadas), deudasAplicadasIds: aplicaciones.map((a) => a.saldoId),
       gastosAprobados: aMonto(centavosGastosLiq), gastosEnDepositos: aMonto(centavosGastosEnDepositos), gastosAsumidosStorkhub: aMonto(r.gastosAsumidosStorkhub),
-      gastosIds: gastos.map((g) => g.id), netoAPagar, ordenesIds: ordenes.map((o) => o.id), depositosIds: suman.map((d) => d.id),
+      gastosIds: gastos.map((g) => g.id), netoAPagar, ordenesIds: ordenes.map((o) => o.id), depositosIds: atribuidos.map((d) => d.id),
+      depositosDetalle: atribuidos.map((d) => ({ depositoId: d.id, contribucion: aMonto(d.contribucion), gastos: aMonto(d.gastos), completo: d.completo, ordenes: d.ordenes })),
       ...(saldoGeneradoId ? { saldoGeneradoId } : {}),
       estado: 'pendiente', creadoAt: ts, creadoPor: uid, creadoPorUid: uid, creadoPorRol: rol, operacionId: p.operacionId,
     });
@@ -309,4 +317,3 @@ export async function crearLiquidacionMotorizadoCore(deps: DepsCrearLiquidacion,
     };
   });
 }
-
