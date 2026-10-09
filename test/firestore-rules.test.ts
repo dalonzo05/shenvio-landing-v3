@@ -3174,9 +3174,9 @@ test('CR6b · una solicitud creada sin estado ⇒ DENY (el estado de nacimiento 
   }
 })
 
-test('CR7 · crear con asignacion explícitamente null ⇒ ALLOW', async () => {
+test('CR7 · crear con la clave asignacion presente, aunque sea null ⇒ DENY (CREATE-AUTHORITY-ORDEN-1: el CREATE es una allowlist y ningún creador real envía asignacion; ausente sigue ⇒ ALLOW, CR8)', async () => {
   for (const [rol, uid] of CREADORES) {
-    await assertSucceeds(nacer(uid, `cr7_${rol}`, ordenBase({ asignacion: null })))
+    await assertFails(nacer(uid, `cr7_${rol}`, ordenBase({ asignacion: null })))
   }
 })
 
@@ -4869,7 +4869,8 @@ const ordenPersonalPrecio = (extra: Record<string, unknown> = {}) => ({
 test('FIN1F-R1 · crear una orden normal con su preview (precioDesglose, cotizacion, montoSugerido) y un historial sin fecha de entrega ⇒ ALLOW (comercio, cliente, gestor, admin)', async () => {
   for (const [rol, uid] of CREADORES_PRECIO) {
     await assertSucceeds(nacer(uid, `p1_${rol}`, ordenBase({ ...previewValido() })))
-    await assertSucceeds(nacer(uid, `p1h_${rol}`, ordenBase({ ...previewValido(), historial: { creadaAt: serverTimestamp() } })))
+    // CREATE-AUTHORITY-ORDEN-1: ningún creador real envía historial; ya no es un input del create.
+    await assertFails(nacer(uid, `p1h_${rol}`, ordenBase({ ...previewValido(), historial: { creadaAt: serverTimestamp() } })))
   }
   await assertSucceeds(nacer(UID_CLIENTE, 'p1_cliente', ordenPersonalPrecio()))
 })
@@ -4895,13 +4896,14 @@ test('FIN1F-R3 · crear con `entregadoAt` plantado ⇒ DENY para todo rol', asyn
   await assertFails(nacer(UID_CLIENTE, 'p3_cliente', ordenPersonalPrecio({ entregadoAt: Timestamp.fromDate(new Date('2026-09-01T10:00:00Z')) })))
 })
 
-test('FIN1F-R4 · crear con `historial.entregadoAt` plantado ⇒ DENY para todo rol; el resto del historial sí se escribe', async () => {
+test('FIN1F-R4 · crear con `historial.entregadoAt` plantado ⇒ DENY para todo rol; ya tampoco el resto del historial (CREATE-AUTHORITY-ORDEN-1)', async () => {
   for (const [rol, uid] of CREADORES_PRECIO) {
     await assertFails(nacer(uid, `p4_${rol}`, ordenBase({ historial: { entregadoAt: serverTimestamp() } })))
     await assertFails(nacer(uid, `p4b_${rol}`, ordenBase({ historial: { creadaAt: serverTimestamp(), entregadoAt: null } })))
   }
   await assertFails(nacer(UID_CLIENTE, 'p4_cliente', ordenPersonalPrecio({ historial: { entregadoAt: serverTimestamp() } })))
-  await assertSucceeds(nacer(UID_COMERCIO, 'p4_ok', ordenBase({ historial: { creadaAt: serverTimestamp(), nota: 'x' } })))
+  // CREATE-AUTHORITY-ORDEN-1: el historial entero dejó de ser input del create (antes el resto del historial sí se escribía).
+  await assertFails(nacer(UID_COMERCIO, 'p4_ok', ordenBase({ historial: { creadaAt: serverTimestamp(), nota: 'x' } })))
 })
 
 test('FIN1F-R5 · después de crear, el precio sigue protegido: staff no escribe confirmacion, precioDesglose ni el estado de asignación ⇒ DENY; el preview no cambia', async () => {
@@ -4925,4 +4927,212 @@ test('FIN1F-R6 · asignar NO es del cliente: pasar a asignada con una asignació
   assert.equal((await leerDoc('solicitudes_envio', sin))?.estado, 'confirmada')
   // control: lo que NO toca el precio sigue siendo del staff (FIN-1E no quedó inmutable)
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', sin), { notaInterna: 'llamar antes', updatedAt: serverTimestamp() }))
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CREATE-AUTHORITY-ORDEN-1 — el CREATE de solicitudes_envio es una ALLOWLIST
+//
+// Antes cualquier clave no prohibida pasaba: un cliente modificado plantaba al crear cobrosMotorizado, cobroDelivery, cobroPendiente, registro.deposito,
+// evidencias, historial… y el servidor los trataba como hechos (con cobrosMotorizado.delivery.recibio=false confirmarTransicionConCobro no pedía confirmación
+// y calcularDeposito dejaba el efectivo de StorkHub en 0). Ahora solo entra lo que realmente envían los dos creadores —comercio/solicitar e ingresar-orden— y
+// los mapas anidados llevan su propia lista. lib/create-orden-contrato.test.ts compara esas listas con los payloads reales del código.
+// ═════════════════════════════════════════════════════════════════════════════
+
+const COORD_G = { lat: 12.15, lng: -86.17 }
+const subOrden = (nota: string | null) => ({ favoritoKey: 'fav1', nombreApellido: 'Ramón', celular: '89899999', direccionEscrita: 'Metrocentro', coord: COORD_G, geocodeGoogle: null, puntoGoogleTipo: 'direccion', notaMotorizado: nota })
+// la entrega NO lleva favoritoKey (solo la recolección: es el favorito de retiro)
+const subEntregaG = (nota: string | null) => { const { favoritoKey: _fav, ...resto } = subOrden(nota); void _fav; return resto }
+/** El payload REAL del comercio (comercio/solicitar/_page.tsx): todas las claves que envía, con valores de forma realista. */
+const payloadComercioG = (extra: Record<string, unknown> = {}) => ({
+  comercioId: COMERCIO_ID, userId: COMERCIO_ID, comercioUid: COMERCIO_ID,
+  ownerSnapshot: { uid: COMERCIO_ID, companyName: 'Mariposita' },
+  tipoCliente: 'contado', tieneCotizacion: true,
+  cotizacion: { origenCoord: COORD_G, destinoCoord: COORD_G, distanciaKm: 13.859, precioSugerido: 150, origenTextoGoogle: null, destinoTextoGoogle: null },
+  recoleccion: subOrden(null), entrega: subEntregaG('timbre'),
+  cobroContraEntrega: { aplica: true, monto: 500 },
+  pagoDelivery: { tipo: 'contado', quienPaga: 'entrega', montoSugerido: 150, deducirDelCobroContraEntrega: false },
+  paquete: { fragil: true, grande: false, notaPaquete: null }, detalle: 'Documentos', numeroOrden: null, programado: null,
+  estado: 'pendiente_confirmacion', requiereBolso: false,
+  zonaRetiroId: 'z1', zonaRetiroNombre: 'Metrocentro', zonaEntregaId: 'z2', zonaEntregaNombre: 'UAM', macroZonaRetiroId: 'm1', macroZonaRetiroNombre: 'Zona Centro', macroZonaEntregaId: 'm2', macroZonaEntregaNombre: 'Zona Sur',
+  recargoZona: { aplica: true, monto: 50, zona: 'UAM', tipo: 'zona_especial' }, tipoServicio: 'normal',
+  precioDesglose: { deliveryBase: 150, recargoZona: 50, recargoServicio: 0, totalCobrado: 200 },
+  gastosEspeciales: [], createdAt: serverTimestamp(), ...extra,
+})
+/** El del gestor/admin (ingresar-orden): igual, más ownerSnapshot.nombre y su metadata propia. */
+const payloadStaffG = (uid: string, extra: Record<string, unknown> = {}) => payloadComercioG({
+  ownerSnapshot: { uid: COMERCIO_ID, companyName: 'Mariposita', nombre: 'Mariposita' }, creadoInternamente: true, creadoPorGestorUid: uid, ...extra,
+})
+const payloadClienteG = (extra: Record<string, unknown> = {}) => {
+  const d = payloadComercioG({ ownerSnapshot: { uid: UID_CLIENTE, companyName: 'Cliente', nombre: 'Cliente' }, ...extra }) as Record<string, unknown>
+  delete d.comercioId; d.userId = UID_CLIENTE; d.comercioUid = UID_CLIENTE
+  return d
+}
+const ROLES_G: Array<[string, string, (e?: Record<string, unknown>) => Record<string, unknown>]> = [
+  ['comercio', UID_COMERCIO, payloadComercioG],
+  ['cliente', UID_CLIENTE, payloadClienteG],
+  ['gestor', UID_GESTOR, (e = {}) => payloadStaffG(UID_GESTOR, e)],
+  ['admin', UID_ADMIN, (e = {}) => payloadStaffG(UID_ADMIN, e)],
+]
+let seqG = 0
+const nacerG = (uid: string, payload: Record<string, unknown>) => setDoc(doc(como(uid), 'solicitudes_envio', 'g_' + ++seqG), payload)
+/** Un create con extra plantado ⇒ DENY para los 4 roles. */
+async function plantadoDenyG(extra: Record<string, unknown>, etiqueta: string) {
+  for (const [rol, uid, mk] of ROLES_G) {
+    await assertFails(nacerG(uid, mk(extra)))
+    void etiqueta; void rol
+  }
+}
+
+test('FIN1G-C1 · los payloads REALES de las dos pantallas siguen creando ⇒ ALLOW (comercio, cliente, gestor, admin), incluidas las variantes programada, crédito y fuera de Managua', async () => {
+  const variantes: Array<[string, Record<string, unknown>]> = [
+    ['normal con cotización', {}],
+    ['sin cotización (viaje anterior)', { tieneCotizacion: false, cotizacion: { origenTextoGoogle: null, destinoTextoGoogle: null, origenCoord: null, destinoCoord: null, distanciaKm: null, precioSugerido: null, fuentePrecio: 'viaje_anterior' }, precioDesglose: null }],
+    ['programada', { estado: 'programada', programado: { tipo: 'ambos', retiro: { fecha: '2026-10-20', hora: '09:00', fechaHoraISO: '2026-10-20T09:00' }, entrega: { fecha: '2026-10-20', hora: null, fechaHoraISO: '2026-10-20' } } }],
+    ['crédito semanal', { tipoCliente: 'credito', pagoDelivery: { tipo: 'credito_semanal', quienPaga: 'credito_semanal', montoSugerido: 150 } }],
+    ['sin paquete ni recargo', { paquete: null, recargoZona: { aplica: false } }],
+    ['fuera de Managua, bus/terminal', { tipoServicio: 'fuera_managua', fueraManagua: { metodoEnvio: 'bus_terminal', destinoFinal: 'León', puntoLogisticoId: 'p1', puntoLogisticoNombre: 'Terminal', puntoLogisticoTipo: 'terminal', coordsPuntoLogistico: COORD_G, direccionPuntoLogistico: 'x', horarioApertura: '06:00', horarioCierre: '18:00', notaPuntoLogistico: null, terminalSugerida: 'Terminal', transporteNombre: 'Bus', transporteCelular: '8', transporteHoraSalida: '10:00', transporteNota: null } }],
+    ['fuera de Managua, cargotrans', { tipoServicio: 'fuera_managua', fueraManagua: { metodoEnvio: 'cargotrans', destinoFinal: null, puntoLogisticoId: null, puntoLogisticoNombre: null, puntoLogisticoTipo: null, coordsPuntoLogistico: null, direccionPuntoLogistico: null, horarioApertura: null, horarioCierre: null, notaPuntoLogistico: null, cantidadPaquetes: 2, notaCargotrans: null, pagoCargotrans: 'efectivo_motorizado' } }],
+  ]
+  for (const [rol, uid, mk] of ROLES_G) {
+    for (const [nombre, extra] of variantes) await assertSucceeds(nacerG(uid, mk(extra)).then(() => undefined, (e) => { throw new Error(`${rol} · ${nombre}: ${e.message}`) }))
+  }
+})
+
+test('FIN1G-C2 · cobroDelivery plantado (estado pagado, monto, pagadoAt, pagadoPor, formaPago, o vacío) ⇒ DENY en los 4 roles; ningún subcampo es input del create', async () => {
+  for (const cobroDelivery of [
+    { estado: 'pagado', monto: 1 }, { estado: 'pagado', monto: 1, pagadoAt: Timestamp.now(), pagadoPor: 'x', formaPago: 'transferencia' },
+    { estado: 'no_cobrar' }, { formaPago: 'efectivo' }, { monto: 150 }, {}, null,
+  ]) await plantadoDenyG({ cobroDelivery }, 'cobroDelivery')
+})
+
+test('FIN1G-C3 · registro.deposito.confirmadoStorkhub / confirmadoComercio (y sus At) plantados ⇒ DENY en los 4 roles', async () => {
+  for (const deposito of [
+    { confirmadoStorkhub: true }, { confirmadoStorkhub: true, confirmadoStorkhubAt: Timestamp.now() },
+    { confirmadoComercio: true }, { confirmadoComercio: true, confirmadoComercioAt: Timestamp.now() },
+  ]) await plantadoDenyG({ registro: { deposito } }, 'registro.deposito')
+})
+
+test('FIN1G-C4 · punteros de depósito plantados (storkhubDepositoId / comercioDepositoId, dentro de registro o sueltos) ⇒ DENY en los 4 roles', async () => {
+  await plantadoDenyG({ registro: { deposito: { storkhubDepositoId: 'DEP_FICTICIO' } } }, 'registro.storkhub')
+  await plantadoDenyG({ registro: { deposito: { comercioDepositoId: 'DEP_FICTICIO' } } }, 'registro.comercio')
+  await plantadoDenyG({ storkhubDepositoId: 'DEP_FICTICIO' }, 'storkhubDepositoId suelto')
+  await plantadoDenyG({ comercioDepositoId: 'DEP_FICTICIO' }, 'comercioDepositoId suelto')
+  await plantadoDenyG({ registro: {} }, 'registro vacío')
+})
+
+test('FIN1G-C5 · cobrosMotorizado plantado (el P1: delivery.recibio=false evita la confirmación del cobro) ⇒ DENY en los 4 roles, con cualquier parte del mapa', async () => {
+  for (const cobrosMotorizado of [
+    { delivery: { recibio: false } }, { delivery: { recibio: true } }, { delivery: { recibio: false, justificacion: 'x', monto: 150, at: Timestamp.now() } },
+    { producto: { recibio: false } }, { producto: { recibio: true, monto: 500 } }, { delivery: { recibio: false }, producto: { recibio: false } }, {}, null,
+  ]) await plantadoDenyG({ cobrosMotorizado }, 'cobrosMotorizado')
+})
+
+test('FIN1G-C6 · cobroPendiente plantado (true, false, mapa) ⇒ DENY en los 4 roles', async () => {
+  for (const cobroPendiente of [true, false, {}, { delivery: true }, null]) await plantadoDenyG({ cobroPendiente }, 'cobroPendiente')
+})
+
+test('FIN1G-C7 · acumulacionCobroSemanal plantada ⇒ DENY en los 4 roles', async () => {
+  for (const acumulacionCobroSemanal of [{ estado: 'acumulado', cobroSemanalId: 'X_2026-W40' }, { estado: 'pendiente' }, {}, null]) await plantadoDenyG({ acumulacionCobroSemanal }, 'acumulacion')
+})
+
+test('FIN1G-C8 · varios campos de servidor plantados a la vez ⇒ DENY en los 4 roles (falla por la allowlist, no por uno solo)', async () => {
+  await plantadoDenyG({
+    cobroDelivery: { estado: 'pagado', monto: 1 }, registro: { deposito: { confirmadoStorkhub: true, storkhubDepositoId: 'X' } },
+    cobrosMotorizado: { delivery: { recibio: false } }, cobroPendiente: false, acumulacionCobroSemanal: { estado: 'acumulado' },
+  }, 'combinado')
+})
+
+test('FIN1G-C9 · evidencias plantadas (entrega, retiro, terminal, cargotrans) ⇒ DENY en los 4 roles: las evidencias se generan después', async () => {
+  await plantadoDenyG({ evidencias: { entrega: 'https://example.test/e.jpg' } }, 'evidencias.entrega')
+  await plantadoDenyG({ evidencias: { retiro: 'https://example.test/r.jpg' } }, 'evidencias.retiro')
+  await plantadoDenyG({ evidenciasTerminal: { fotoPaquete: 'https://example.test/t.jpg' } }, 'terminal')
+  await plantadoDenyG({ evidenciasCargotrans: { fotos: ['https://example.test/c.jpg'] } }, 'cargotrans')
+})
+
+test('FIN1G-C10 · historial (cualquiera), ultimoRechazoMotorizado, confirmacion y entregadoAt plantados ⇒ DENY en los 4 roles (la protección de A2 sigue)', async () => {
+  await plantadoDenyG({ historial: { creadaAt: serverTimestamp() } }, 'historial.creadaAt')
+  await plantadoDenyG({ historial: { retiradoAt: Timestamp.now(), en_camino_entregaAt: Timestamp.now() } }, 'historial.etapas')
+  await plantadoDenyG({ historial: { entregadoAt: serverTimestamp() } }, 'historial.entregadoAt')
+  await plantadoDenyG({ historial: {} }, 'historial vacío')
+  await plantadoDenyG({ ultimoRechazoMotorizado: { motorizadoId: 'm1' } }, 'ultimoRechazo')
+  await plantadoDenyG({ confirmacion: { precioFinalCordobas: 1 } }, 'confirmacion')
+  await plantadoDenyG({ confirmacion: { precioFinalCordobas: 1, comisionBaseCordobas: 99999, comisionBaseOrigen: 'manual_gestor' } }, 'confirmacion completa')
+  await plantadoDenyG({ entregadoAt: serverTimestamp() }, 'entregadoAt')
+  await plantadoDenyG({ asignacion: { motorizadoId: 'm1' } }, 'asignacion')
+  await plantadoDenyG({ asignacion: null }, 'asignacion null')
+  await plantadoDenyG({ codigo: 'SH-0001', secuencia: 1 }, 'codigo')
+})
+
+test('FIN1G-C11 · claves DESCONOCIDAS ⇒ DENY en los 4 roles (la allowlist cierra por defecto los campos futuros)', async () => {
+  await plantadoDenyG({ foo: 'bar' }, 'foo')
+  await plantadoDenyG({ serverHack: {} }, 'serverHack')
+  await plantadoDenyG({ zzz_inventado: { a: 1 } }, 'zzz')
+  await plantadoDenyG({ saldoId: 'S1', deudaId: 'D1', liquidacionId: 'L1', movimientoPagoId: 'M1', pagado: true, pagadoAt: Timestamp.now(), operacionId: 'op', acumulada: true, liquidada: true, gastosIds: ['g'] }, 'financieros sueltos')
+  await plantadoDenyG({ confirmadoPorUid: 'x', creadoPorRol: 'admin', updatedAt: Timestamp.now() }, 'actor/fecha')
+})
+
+test('FIN1G-C12 · MAPAS ANIDADOS: una clave extra dentro de un mapa permitido ⇒ DENY (ningún mapa sirve de bolsillo) en los 4 roles', async () => {
+  const base = payloadComercioG() as unknown as Record<string, Record<string, unknown>>
+  const mapas: Array<[string, Record<string, unknown>]> = [
+    ['ownerSnapshot', base.ownerSnapshot], ['cotizacion', base.cotizacion], ['recoleccion', base.recoleccion], ['entrega', base.entrega], ['cobroContraEntrega', base.cobroContraEntrega],
+    ['pagoDelivery', base.pagoDelivery], ['paquete', base.paquete], ['recargoZona', base.recargoZona], ['precioDesglose', base.precioDesglose],
+  ]
+  for (const [nombre, mapa] of mapas) await plantadoDenyG({ [nombre]: { ...mapa, serverOwnedExtra: 1 } }, nombre)
+  // lo que sería "estado financiero" dentro de los mapas de dinero
+  await plantadoDenyG({ pagoDelivery: { ...base.pagoDelivery, estado: 'pagado', confirmadoPor: 'x', pagadoAt: Timestamp.now(), formaPago: 'efectivo' } }, 'pagoDelivery.estado')
+  await plantadoDenyG({ cobroContraEntrega: { ...base.cobroContraEntrega, recibio: true, confirmadoAt: Timestamp.now() } }, 'cobroContraEntrega.recibio')
+  await plantadoDenyG({ precioDesglose: { ...base.precioDesglose, comisionBaseCordobas: 99999 } }, 'precioDesglose.comisionBase')
+  await plantadoDenyG({ cotizacion: { ...base.cotizacion, precioFinalCordobas: 1 } }, 'cotizacion.precioFinal')
+  // fueraManagua: efectivoRecibidoMotorizado lo escribe el servidor, no es input del create
+  const fm = { metodoEnvio: 'cargotrans', cantidadPaquetes: 1 }
+  await plantadoDenyG({ tipoServicio: 'fuera_managua', fueraManagua: { ...fm, efectivoRecibidoMotorizado: 999 } }, 'fueraManagua.efectivoRecibidoMotorizado')
+  await plantadoDenyG({ tipoServicio: 'fuera_managua', fueraManagua: { ...fm, serverOwnedExtra: 1 } }, 'fueraManagua.extra')
+  // programado y sus submapas
+  await plantadoDenyG({ programado: { tipo: 'retiro', retiro: { fecha: 'x', hora: null, fechaHoraISO: 'x' }, serverOwnedExtra: 1 } }, 'programado.extra')
+  await plantadoDenyG({ programado: { tipo: 'retiro', retiro: { fecha: 'x', hora: null, fechaHoraISO: 'x', confirmado: true } } }, 'programado.retiro.extra')
+  await plantadoDenyG({ programado: { tipo: 'entrega', entrega: { fecha: 'x', hora: null, fechaHoraISO: 'x', confirmado: true } } }, 'programado.entrega.extra')
+  // un mapa permitido tiene que SER un mapa (o null): un texto no pasa
+  await plantadoDenyG({ pagoDelivery: 'efectivo' }, 'pagoDelivery texto')
+  await plantadoDenyG({ cobroContraEntrega: 5 }, 'cobroContraEntrega número')
+  // la lista de gastos especiales nace vacía
+  await plantadoDenyG({ gastosEspeciales: [{ monto: 100, concepto: 'x' }] }, 'gastosEspeciales con items')
+  await plantadoDenyG({ gastosEspeciales: { a: 1 } }, 'gastosEspeciales mapa')
+  // null / ausente sigue siendo válido donde la pantalla lo manda
+  for (const [rol, uid, mk] of ROLES_G) await assertSucceeds(nacerG(uid, mk({ paquete: null, programado: null, precioDesglose: null })).then(() => undefined, (e) => { throw new Error(`${rol}: ${e.message}`) }))
+})
+
+test('FIN1G-C13 · creadoInternamente / creadoPorGestorUid: solo gestor/admin, de sí mismo, y juntos ⇒ comercio y cliente DENY; gestor/admin con otro uid o a medias DENY', async () => {
+  for (const [uid, mk] of [[UID_COMERCIO, payloadComercioG], [UID_CLIENTE, payloadClienteG]] as const) {
+    await assertFails(nacerG(uid, mk({ creadoInternamente: true, creadoPorGestorUid: UID_GESTOR })))
+    await assertFails(nacerG(uid, mk({ creadoInternamente: true })))
+    await assertFails(nacerG(uid, mk({ creadoPorGestorUid: uid })))
+  }
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await assertSucceeds(nacerG(uid, payloadStaffG(uid)))
+    await assertFails(nacerG(uid, payloadStaffG(uid, { creadoPorGestorUid: 'otro_uid' })))        // atribuir la orden a otro
+    await assertFails(nacerG(uid, payloadStaffG(uid, { creadoInternamente: false })))
+    await assertFails(nacerG(uid, payloadStaffG(uid, { creadoInternamente: 'true' })))
+    const a_medias = payloadStaffG(uid) as Record<string, unknown>; delete a_medias.creadoPorGestorUid
+    await assertFails(nacerG(uid, a_medias))
+  }
+})
+
+test('FIN1G-C14 · createdAt: la hora del servidor o ausente ⇒ ALLOW; una fecha inventada o un tipo absurdo ⇒ DENY', async () => {
+  for (const [rol, uid, mk] of ROLES_G) {
+    await assertFails(nacerG(uid, mk({ createdAt: Timestamp.fromDate(new Date('2020-01-01T00:00:00Z')) })))
+    await assertFails(nacerG(uid, mk({ createdAt: '2026-10-09' })))
+    await assertFails(nacerG(uid, mk({ createdAt: 12345 })))
+    const sin = mk() as Record<string, unknown>; delete sin.createdAt
+    await assertSucceeds(nacerG(uid, sin).then(() => undefined, (e) => { throw new Error(`${rol} sin createdAt: ${e.message}`) }))
+  }
+})
+
+test('FIN1G-C15 · estado inicial: solo pendiente_confirmacion o programada ⇒ los posteriores DENY (los 4 roles)', async () => {
+  for (const estado of ['confirmada', 'asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado', 'cancelada', 'rechazada']) await plantadoDenyG({ estado }, estado)
+})
+
+test('FIN1G-C16 · una orden creada de forma legítima sigue pudiendo crecer: el gestor la edita y el motorizado sube evidencias después (la allowlist es solo del CREATE)', async () => {
+  const id = 'g_post'
+  await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), payloadStaffG(UID_GESTOR)))
+  await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), { notaInterna: 'llamar antes', updatedAt: serverTimestamp() }))
 })

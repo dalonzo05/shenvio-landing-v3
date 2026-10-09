@@ -691,26 +691,103 @@ service cloud.firestore {
           && !(h is map && 'entregadoAt' in h);
       }
 
+      // CREATE-AUTHORITY-ORDEN-1 — el CREATE es una ALLOWLIST, no una blocklist. Antes cualquier clave no prohibida pasaba: un cliente modificado podía plantar al
+      // crear campos que son del servidor o de etapas posteriores (cobrosMotorizado, cobroDelivery, cobroPendiente, registro.deposito, evidencias, historial,
+      // acumulacionCobroSemanal…) y el servidor los trataba como hechos. El caso más grave: `cobrosMotorizado.delivery.recibio = false` hacía que
+      // confirmarTransicionConCobro no pidiera la confirmación del cobro ni abriera incidencia, y calcularDeposito dejara el efectivo esperado de StorkHub en 0.
+      //
+      // El contrato sale de los DOS creadores reales —comercio/solicitar/_page.tsx e ingresar-orden/page.tsx—; lib/create-orden-contrato.test.ts compara sus
+      // payloads con estas listas y falla si alguien agrega una clave sin decidir aquí si pertenece al CREATE. Los mapas anidados llevan su propia allowlist para
+      // que un mapa permitido no sirva de bolsillo. Lo que NO está aquí lo escribe después una Function (Admin SDK) o un flujo con su propia regla de update.
+      function creacionSoloClavesPermitidas() {
+        return request.resource.data.keys().hasOnly([
+          // identidad del dueño
+          'comercioId', 'userId', 'comercioUid', 'ownerSnapshot',
+          // inputs del usuario
+          'tipoCliente', 'recoleccion', 'entrega', 'cobroContraEntrega', 'pagoDelivery', 'paquete', 'detalle', 'numeroOrden', 'programado', 'requiereBolso',
+          'gastosEspeciales',
+          // zonas
+          'zonaRetiroId', 'zonaRetiroNombre', 'zonaEntregaId', 'zonaEntregaNombre', 'macroZonaRetiroId', 'macroZonaRetiroNombre', 'macroZonaEntregaId', 'macroZonaEntregaNombre',
+          // preview / servicio (ninguno es autoridad financiera: ver A2)
+          'tieneCotizacion', 'cotizacion', 'precioDesglose', 'recargoZona', 'tipoServicio', 'fueraManagua',
+          // metadata inicial
+          'estado', 'createdAt',
+          // solo gestor/admin (ver creacionMetadataDeStaff)
+          'creadoInternamente', 'creadoPorGestorUid'
+        ]);
+      }
+
+      // Los mapas que el CREATE admite llevan su propia allowlist (ninguno sirve de bolsillo para un campo de servidor). Se escriben SIN función auxiliar y con
+      // `let`: el motor tiene un presupuesto de 1000 expresiones por petición y un create completo del gestor ya gasta cerca de la mitad en las comprobaciones de
+      // dueño. Un valor que no sea mapa hace fallar `keys()` y el create se deniega (un error de evaluación nunca permite). Los mapas que la pantalla manda como
+      // null (paquete, programado, precioDesglose) se aceptan null.
+      function creacionMapasSoloClavesPermitidas() {
+        let d = request.resource.data;
+        let paq = d.get('paquete', {});
+        let prog = d.get('programado', {});
+        let desg = d.get('precioDesglose', {});
+        return d.get('ownerSnapshot', {}).keys().hasOnly(['uid', 'companyName', 'nombre'])
+          && d.get('cotizacion', {}).keys().hasOnly(['origenCoord', 'destinoCoord', 'distanciaKm', 'precioSugerido', 'origenTextoGoogle', 'destinoTextoGoogle', 'fuentePrecio'])
+          && d.get('recoleccion', {}).keys().hasOnly(['favoritoKey', 'nombreApellido', 'celular', 'direccionEscrita', 'coord', 'geocodeGoogle', 'puntoGoogleTipo', 'notaMotorizado'])
+          && d.get('entrega', {}).keys().hasOnly(['nombreApellido', 'celular', 'direccionEscrita', 'coord', 'geocodeGoogle', 'puntoGoogleTipo', 'notaMotorizado'])
+          && d.get('cobroContraEntrega', {}).keys().hasOnly(['aplica', 'monto'])
+          && d.get('pagoDelivery', {}).keys().hasOnly(['tipo', 'quienPaga', 'montoSugerido', 'deducirDelCobroContraEntrega'])
+          && d.get('recargoZona', {}).keys().hasOnly(['aplica', 'monto', 'zona', 'tipo'])
+          && d.get('fueraManagua', {}).keys().hasOnly([
+               'metodoEnvio', 'destinoFinal', 'puntoLogisticoId', 'puntoLogisticoNombre', 'puntoLogisticoTipo', 'coordsPuntoLogistico', 'direccionPuntoLogistico',
+               'horarioApertura', 'horarioCierre', 'notaPuntoLogistico', 'terminalSugerida', 'transporteNombre', 'transporteCelular', 'transporteHoraSalida',
+               'transporteNota', 'cantidadPaquetes', 'notaCargotrans', 'pagoCargotrans'
+             ])
+          && (paq == null || paq.keys().hasOnly(['fragil', 'grande', 'notaPaquete']))
+          && (desg == null || desg.keys().hasOnly(['deliveryBase', 'recargoZona', 'recargoServicio', 'totalCobrado']))
+          // programado y sus dos submapas (retiro / entrega)
+          && (prog == null
+              || (prog.keys().hasOnly(['tipo', 'retiro', 'entrega'])
+                  && (prog.get('retiro', null) == null || prog.retiro.keys().hasOnly(['fecha', 'hora', 'fechaHoraISO']))
+                  && (prog.get('entrega', null) == null || prog.entrega.keys().hasOnly(['fecha', 'hora', 'fechaHoraISO']))))
+          // la lista de gastos especiales nace vacía: los agrega el gestor después
+          && (!('gastosEspeciales' in d) || (d.gastosEspeciales is list && d.gastosEspeciales.size() == 0));
+      }
+
+      // creadoInternamente / creadoPorGestorUid dicen "esta orden la ingresó el gestor": solo puede escribirlos un admin o gestor activo, y de sí mismo. Un comercio o
+      // un cliente que los plantara le atribuiría la orden al gestor en la línea de tiempo. (El rol se lee directo: isAdminOrGestor() repite la comprobación de
+      // actividad que isActiveUser() ya hizo al principio del allow.)
+      function creacionMetadataDeStaff() {
+        let d = request.resource.data;
+        return (!('creadoInternamente' in d) && !('creadoPorGestorUid' in d))
+          || (userDoc().data.get('rol', '') in ['admin', 'gestor'] && d.get('creadoInternamente', null) == true && d.get('creadoPorGestorUid', null) == request.auth.uid);
+      }
+
+      // Regla de dueño del CREATE (sin cambio de lógica; antes eran dos bloques en el allow). Un comercio solo puede crear órdenes a su propio nombre: el comercioId del
+      // payload tiene que ser el de su perfil, no uno elegido; para gestor y admin esa condición no aplica —crean para el comercio que seleccionan— y por eso va cerrada con
+      // !esComercio. En la rama personal, !esComercio cierra el desvío: un comercio no puede omitir comercioId para escaparse de la comprobación de pertenencia. Y quien
+      // firma userId es el propio creador (o, si es un comercio, su comercioId), salvo gestor/admin.
+      // El rol y el comercioId del creador se leen UNA vez en vez de en cada isComercioRole()/isAdminOrGestor() (isActiveUser() ya se evaluó como primera condición del
+      // allow): es presupuesto de expresiones — el create completo del gestor gastaba más de la mitad de las 1000 solo en esto.
+      function creacionDuenoValido() {
+        let rol = userDoc().data.get('rol', '');
+        let esComercio = rol == 'Comercio';
+        return (
+          ordenDeComercio()
+            ? (!esComercio || comercioIdEntrante() == userDoc().data.get('comercioId', null))
+            : (ordenPersonal() && !esComercio)
+        )
+        && (
+          (esComercio
+            ? request.resource.data.userId == userDoc().data.get('comercioId', null)
+            : request.resource.data.userId == request.auth.uid)
+          || rol in ['admin', 'gestor']
+        );
+      }
+
       allow create: if isActiveUser()
+        && creacionSoloClavesPermitidas()
         && nacimientoSinAsignacion()
         && creacionSinAutoridadDeServidor()
-        && (
-          ordenDeComercio()
-            // Un comercio solo puede crear órdenes a su propio nombre: el
-            // comercioId del payload tiene que ser el de su perfil, no uno
-            // elegido. Para gestor y admin la condición no aplica — crean para
-            // el comercio que seleccionan — y por eso va cerrada con
-            // !isComercioRole().
-            ? (!isComercioRole() || comercioIdEntrante() == comercioIdDelUsuario())
-            // Rama personal. !isComercioRole() cierra el desvío: un comercio no
-            // puede omitir comercioId para escaparse de la comprobación de
-            // pertenencia de arriba.
-            : (ordenPersonal() && !isComercioRole())
-        )
-        && (
-          esCreadorDeSolicitud(request.resource.data.userId)
-          || isAdminOrGestor()
-        )
+        && creacionMapasSoloClavesPermitidas()
+        && creacionMetadataDeStaff()
+        && (!('createdAt' in request.resource.data) || request.resource.data.createdAt == request.time)
+        && creacionDuenoValido()
         // IDENTIDAD-HUMANA-1: el codigo lo pone el trigger, nunca quien crea.
         && sinCodigoEntrante();
 
