@@ -1,6 +1,6 @@
 import { HttpsError } from 'firebase-functions/v2/https';
 import type { DocumentData } from 'firebase-admin/firestore';
-import { derivarBaseComision, type MotivoBaseNoDemostrable } from './precio-orden';
+import { baseComisionAprobada, resolverBaseConfirmacion, type MotivoBaseNoDemostrable } from './precio-orden';
 
 type Documento = DocumentData;
 export const MSG_NO_ELEGIBLE = 'El motorizado ya no está disponible para nuevas asignaciones.';
@@ -19,6 +19,8 @@ export interface PeticionAsignacion {
   updatedAtEsperado: number | null;
   precioEditado: boolean;
   precioFinal?: number;
+  /** Solo en 'confirmar', y solo cuando el servidor no puede derivar la base: la base de la comisión SIN recargos que declara el gestor. */
+  comisionBaseManualCordobas?: number;
 }
 
 const estadosAbiertos = ['pendiente_confirmacion', 'confirmada', 'asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega'];
@@ -51,13 +53,17 @@ const MSG_BASE_NO_DEMOSTRABLE: Record<MotivoBaseNoDemostrable, string> = {
   sin_precio_confirmado: 'Ingresá un precio final válido.',
   cotizacion_inconsistente: 'La cotización de la orden no coincide con la tarifa de su distancia. Revisala antes de confirmar el precio.',
   cotizacion_incompleta: 'La orden trae una cotización sin distancia que se pueda verificar. Revisala antes de confirmar el precio.',
+  precio_incoherente: 'La base de la comisión no puede superar el precio final. Revisá el precio o la cotización.',
+  base_comision_requerida: 'Ingresá la base de comisión (sin recargos) antes de confirmar.',
+  base_manual_no_aplica: 'La base de comisión de esta orden la calcula el sistema: no se ingresa a mano.',
 };
+const falla = (motivo: MotivoBaseNoDemostrable) => new HttpsError('failed-precondition', MSG_BASE_NO_DEMOSTRABLE[motivo], { motivo });
 const idValido = (v: unknown): v is string => typeof v === 'string' && v.trim() === v && v.length > 0 && v.length <= 200 && !v.includes('/');
 
 export function leerPeticionAsignacion(data: unknown): PeticionAsignacion {
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new HttpsError('invalid-argument', 'Petición inválida.');
   const p = data as Record<string, unknown>;
-  const claves = ['solicitudId', 'motorizadoId', 'operacion', 'superficie', 'estadoEsperado', 'updatedAtEsperado', 'precioEditado', 'precioFinal'];
+  const claves = ['solicitudId', 'motorizadoId', 'operacion', 'superficie', 'estadoEsperado', 'updatedAtEsperado', 'precioEditado', 'precioFinal', 'comisionBaseManualCordobas'];
   if (Object.keys(p).some((k) => !claves.includes(k)) ||
       !idValido(p.solicitudId) || !(p.motorizadoId === null || idValido(p.motorizadoId)) ||
       !['sugerido', 'confirmar', 'reasignar'].includes(p.operacion as string) ||
@@ -66,6 +72,8 @@ export function leerPeticionAsignacion(data: unknown): PeticionAsignacion {
       !(p.updatedAtEsperado === null || (typeof p.updatedAtEsperado === 'number' && Number.isFinite(p.updatedAtEsperado))) ||
       typeof p.precioEditado !== 'boolean' ||
       ('precioFinal' in p && !precioValido(p.precioFinal)) ||
+      // la base manual solo la declara quien CONFIRMA, y es un número finito > 0 (el resto de validaciones —<= precio final, si aplica— las hace el servidor con la orden)
+      ('comisionBaseManualCordobas' in p && (p.operacion !== 'confirmar' || !precioValido(p.comisionBaseManualCordobas))) ||
       (p.operacion !== 'confirmar' && (p.motorizadoId === null || p.precioEditado || 'precioFinal' in p)) ||
       (p.precioEditado && !('precioFinal' in p))) {
     throw new HttpsError('invalid-argument', 'Petición de asignación inválida.');
@@ -115,8 +123,13 @@ export async function asignarMotorizadoCore(deps: DepsAsignacion, uid: string | 
     }
     // Una orden solo queda ASIGNADA con el precio financieramente cerrado. 'sugerido' y 'reasignar' no fijan ni cambian el precio (el payload ni lo admite), así
     // que exigen que ya esté confirmado: antes un gestor podía pasar la orden a 'confirmada' sin precio y asignarla 'sugerido' (E2).
-    if (p.operacion !== 'confirmar' && !precioValido(s.confirmacion?.precioFinalCordobas)) {
-      throw new HttpsError('failed-precondition', 'Primero confirmá el precio final de la orden.', { motivo: 'precio_sin_confirmar' });
+    if (p.operacion !== 'confirmar') {
+      if (!precioValido(s.confirmacion?.precioFinalCordobas)) {
+        throw new HttpsError('failed-precondition', 'Primero confirmá el precio final de la orden.', { motivo: 'precio_sin_confirmar' });
+      }
+      // ...y con su base de comisión cerrada (snapshot, o derivable): ni 'sugerido' ni 'reasignar' inventan una base; se confirma desde 'confirmar'.
+      const cerrada = baseComisionAprobada(s);
+      if (!cerrada.ok) throw falla(cerrada.motivo);
     }
     const m = p.motorizadoId === null ? null : await tx.getMotorizado(p.motorizadoId);
     if (p.motorizadoId !== null && !esElegibleParaNuevaAsignacion(m)) {
@@ -128,13 +141,27 @@ export async function asignarMotorizadoCore(deps: DepsAsignacion, uid: string | 
       const debeConfirmar = s.estado === 'pendiente_confirmacion' || !precioValido(s.confirmacion?.precioFinalCordobas) || p.precioEditado;
       if (debeConfirmar) {
         if (!precioValido(p.precioFinal)) throw new HttpsError('invalid-argument', 'Ingresá un precio final válido.');
-        // El servidor deja, junto al precio final, la BASE de la comisión derivada con la tarifa canónica (snapshot). El precio final puede incluir recargos;
-        // la base no. Una cotización que no cuadra con la tarifa no se confirma: el desglose que escribió el cliente no es autoridad.
-        const base = derivarBaseComision({ ...s, confirmacion: { precioFinalCordobas: p.precioFinal } });
-        if (!base.ok) throw new HttpsError('failed-precondition', MSG_BASE_NO_DEMOSTRABLE[base.motivo], { motivo: base.motivo });
+        // El servidor deja, junto al precio final, la BASE de la comisión (snapshot): derivada con la tarifa canónica, o la que declara el gestor (sin recargos)
+        // cuando el servidor no puede derivarla. El precio final puede incluir recargos; la base no. Una cotización que no cuadra con la tarifa no se confirma, y la
+        // base nunca supera el precio final: el desglose que escribió el cliente no es autoridad.
+        const base = resolverBaseConfirmacion(s, p.precioFinal, p.comisionBaseManualCordobas);
+        if (!base.ok) throw falla(base.motivo);
         patch.confirmacion = { precioFinalCordobas: p.precioFinal, comisionBaseCordobas: base.base, comisionBaseOrigen: base.origen, confirmadoPorUid: uid, confirmadoAt: ahora };
       } else if (p.precioFinal !== undefined) {
         throw new HttpsError('invalid-argument', 'Modificar el precio requiere edición explícita.');
+      } else {
+        // Precio ya confirmado y sin editar. Si la orden es anterior al snapshot y su base no es derivable, aquí se completa (conserva el resto de la confirmación);
+        // si ya tiene snapshot o la base es derivable, no se toca y una base manual no aplica.
+        const previa = baseComisionAprobada(s);
+        const tieneSnapshot = s.confirmacion?.comisionBaseCordobas !== undefined && s.confirmacion?.comisionBaseCordobas !== null;
+        if (p.comisionBaseManualCordobas !== undefined) {
+          if (tieneSnapshot) throw falla('base_manual_no_aplica');
+          const base = resolverBaseConfirmacion(s, s.confirmacion?.precioFinalCordobas, p.comisionBaseManualCordobas);
+          if (!base.ok) throw falla(base.motivo);
+          patch.confirmacion = { ...s.confirmacion, comisionBaseCordobas: base.base, comisionBaseOrigen: base.origen, comisionBaseActorUid: uid, comisionBaseAt: ahora };
+        } else if (!previa.ok) {
+          throw falla(previa.motivo);
+        }
       }
     }
     patch.asignacion = m ? {

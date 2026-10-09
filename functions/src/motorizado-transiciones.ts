@@ -259,9 +259,9 @@ interface DepositoInfo {
 function calcDeposito(orden: FirebaseFirestore.DocumentData): DepositoInfo {
   const ceAplica = orden.cobroContraEntrega?.aplica === true;
   const montoProducto = ceAplica ? (orden.cobroContraEntrega?.monto || 0) : 0;
-  const precioDelivery =
-    orden.confirmacion?.precioFinalCordobas ||
-    (orden.tipoServicio === 'fuera_managua' ? (orden.pagoDelivery?.montoSugerido || 0) : 0);
+  // PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1 — misma regla que calcularDeposito: solo el precio CONFIRMADO. Antes, en fuera_managua sin precio confirmado, aquí el delivery
+  // salía de pagoDelivery.montoSugerido (un valor del cliente) y decidía qué confirmación de cobro se le pide al motorizado.
+  const precioDelivery = orden.confirmacion?.precioFinalCordobas || 0;
   const quienPaga = orden.pagoDelivery?.quienPaga || '';
   const esPorTransferencia = quienPaga === 'transferencia';
   const esCredito = orden.tipoCliente === 'credito' || quienPaga === 'credito_semanal';

@@ -153,7 +153,8 @@ test('LU12 · cada fila muestra un indicador visual (ícono) además del color d
 test('LU13 · reasignarSolo/confirmarYAsignar siguen leyendo motorizadoSel sin cambios', () => {
   const src = fuente(...LISTADO)
   assert.ok(src.includes("await guardarAsignacion(solicitud, motorizadoSel, 'reasignar', 'solicitudes')"))
-  assert.ok(src.includes("await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'solicitudes', precioFinal, precioEditado)"))
+  // A2: el submit sigue leyendo el mismo motorizadoSel; se le suma, SOLO cuando el servidor no puede derivar la base, la base de comisión manual.
+  assert.ok(src.includes("await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'solicitudes', precioFinal, precioEditado, pideBase ? parseBaseManual(baseManual) : undefined)"))
   assert.ok(src.includes('disabled={guardandoAsignacion || !motorizadoSel}'))
 })
 

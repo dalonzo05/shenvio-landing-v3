@@ -9,6 +9,8 @@ export async function guardarAsignacion(
   superficie: 'solicitudes' | 'drawer' | 'detalle' | 'baseDatos',
   precio: number | '' = '',
   precioEditado = false,
+  /** Base de comisión (sin recargos) que declara el gestor cuando el servidor no puede derivarla. Solo viaja en 'confirmar'. */
+  comisionBaseManual?: number,
 ) {
   const precioPayload = operacion === 'confirmar' ? precioParaConfirmar(solicitud, precio, precioEditado) : { precioEditado: false }
   const payload = {
@@ -16,6 +18,7 @@ export async function guardarAsignacion(
     estadoEsperado: solicitud.estado ?? '',
     updatedAtEsperado: solicitud.updatedAt?.toMillis?.() ?? null,
     ...precioPayload,
+    ...(operacion === 'confirmar' && comisionBaseManual !== undefined ? { comisionBaseManualCordobas: comisionBaseManual } : {}),
   }
   return httpsCallable(functions, 'asignarMotorizado')(payload)
 }

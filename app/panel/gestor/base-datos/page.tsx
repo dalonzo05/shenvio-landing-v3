@@ -2,6 +2,8 @@
 
 import { guardarAsignacion, errorAsignacion } from '@/lib/asignacion-cliente'
 import { precioInicialAsignacion } from '@/lib/asignacion-precio'
+import { necesitaBaseManual, errorBaseManual, parseBaseManual } from '@/lib/base-comision-ui'
+import { BaseComisionManual } from '../_components/BaseComisionManual'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
@@ -388,6 +390,7 @@ function SolicitudDrawer({
   const { motorizados, cargando: cargandoMotorizados } = useMotorizadosCandidatos()
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
   const [precioEditado, setPrecioEditado] = useState(false)
+  const [baseManual, setBaseManual] = useState('')
   const [guardandoAsignacion, setGuardandoAsignacion] = useState(false)
   const asignacionEnCurso = useRef(false)
   const [motorizadoSel, setMotorizadoSel] = useState('')
@@ -417,6 +420,7 @@ function SolicitudDrawer({
         setSolicitud(data)
         setPrecioFinal(precioInicialAsignacion(data, data.confirmacion?.precioFinalCordobas))
         setPrecioEditado(false)
+        setBaseManual('')
         setMotorizadoSel(data.asignacion?.motorizadoId || '')
         setLoading(false)
       },
@@ -452,10 +456,13 @@ function SolicitudDrawer({
     if (!solicitud || asignacionEnCurso.current) return
     if (!puedeGestionarAsignacion(solicitud.estado)) return setErr(MSG_ORDEN_NO_REASIGNABLE)
     const reasignando = puedeReasignarMotorizado(solicitud.estado) && !puedeAsignarInicial(solicitud.estado)
+    let pideBase = false
     if (reasignando) {
       if (!motorizadoSel) return setErr('Elegí un motorizado para reasignar.')
     } else {
       if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio final válido.')
+      pideBase = necesitaBaseManual(solicitud, precioEditado)
+      if (pideBase) { const eBase = errorBaseManual(baseManual, precioFinal); if (eBase) return setErr(eBase) }
     }
     asignacionEnCurso.current = true
     setGuardandoAsignacion(true)
@@ -464,8 +471,9 @@ function SolicitudDrawer({
       if (reasignando) {
         await guardarAsignacion(solicitud, motorizadoSel, 'reasignar', 'baseDatos')
       } else {
-        await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'baseDatos', precioFinal, precioEditado)
+        await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'baseDatos', precioFinal, precioEditado, pideBase ? parseBaseManual(baseManual) : undefined)
         setPrecioEditado(false)
+        setBaseManual('')
       }
     } catch (e) {
       const error = errorAsignacion(e)
@@ -744,6 +752,7 @@ function SolicitudDrawer({
                       placeholder="Ej: 130"
                     />
                     <div className="text-xs text-gray-400 mt-1">Se redondea a múltiplos de 10.</div>
+<BaseComisionManual solicitud={solicitud} precioEditado={precioEditado} precioFinal={precioFinal} valor={baseManual} onChange={setBaseManual} />
                   </div>
                   )}
 

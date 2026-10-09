@@ -2,6 +2,8 @@
 
 import { guardarAsignacion, errorAsignacion } from '@/lib/asignacion-cliente'
 import { precioInicialAsignacion } from '@/lib/asignacion-precio'
+import { necesitaBaseManual, errorBaseManual, parseBaseManual } from '@/lib/base-comision-ui'
+import { BaseComisionManual } from '../../_components/BaseComisionManual'
 import { seleccionSigueValida, diaOperativoParaRecomputo } from '@/lib/motorizado-candidatos'
 import { useMotorizadosCandidatos } from '../../_hooks/useMotorizadosCandidatos'
 import { useOrdenesActivasCandidatas } from '../../_hooks/useOrdenesActivasCandidatas'
@@ -662,6 +664,7 @@ function GestorSolicitudDetallePageContent() {
   const { motorizados, cargando: cargandoMotorizados } = useMotorizadosCandidatos()
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
   const [precioEditado, setPrecioEditado] = useState(false)
+  const [baseManual, setBaseManual] = useState('')
   const [guardandoAsignacion, setGuardandoAsignacion] = useState(false)
   const asignacionEnCurso = useRef(false)
   const [motorizadoSel, setMotorizadoSel] = useState('')
@@ -718,6 +721,7 @@ function GestorSolicitudDetallePageContent() {
         setSolicitud(data)
         setPrecioFinal(precioInicialAsignacion(data, data.confirmacion?.precioFinalCordobas))
         setPrecioEditado(false)
+        setBaseManual('')
         setMotorizadoSel(data.asignacion?.motorizadoId || '')
         setErr(null)
         setLoading(false)
@@ -979,10 +983,13 @@ function GestorSolicitudDetallePageContent() {
     if (!solicitud || asignacionEnCurso.current) return
     if (!puedeGestionarAsignacion(solicitud.estado)) return setErr(MSG_ORDEN_NO_REASIGNABLE)
     const reasignando = puedeReasignarMotorizado(solicitud.estado) && !puedeAsignarInicial(solicitud.estado)
+    let pideBase = false
     if (reasignando) {
       if (!motorizadoSel) return setErr('Elegí un motorizado para reasignar.')
     } else {
       if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio final válido.')
+      pideBase = necesitaBaseManual(solicitud, precioEditado)
+      if (pideBase) { const eBase = errorBaseManual(baseManual, precioFinal); if (eBase) return setErr(eBase) }
     }
     asignacionEnCurso.current = true
     setGuardandoAsignacion(true)
@@ -991,8 +998,9 @@ function GestorSolicitudDetallePageContent() {
       if (reasignando) {
         await guardarAsignacion(solicitud, motorizadoSel, 'reasignar', 'detalle')
       } else {
-        await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'detalle', precioFinal, precioEditado)
+        await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'detalle', precioFinal, precioEditado, pideBase ? parseBaseManual(baseManual) : undefined)
         setPrecioEditado(false)
+        setBaseManual('')
       }
     } catch (e) {
       const error = errorAsignacion(e)
@@ -1625,6 +1633,7 @@ function GestorSolicitudDetallePageContent() {
                   placeholder="Ej: 130"
                 />
                 <div className="text-[10px] text-gray-400 mt-1">Se redondea a múltiplos de 10</div>
+<BaseComisionManual solicitud={solicitud} precioEditado={precioEditado} precioFinal={precioFinal} valor={baseManual} onChange={setBaseManual} />
               </div>
               )}
 

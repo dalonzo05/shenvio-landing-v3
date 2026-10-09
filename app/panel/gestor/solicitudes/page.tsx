@@ -2,6 +2,8 @@
 
 import { guardarAsignacion, errorAsignacion } from '@/lib/asignacion-cliente'
 import { precioInicialAsignacion } from '@/lib/asignacion-precio'
+import { necesitaBaseManual, errorBaseManual, parseBaseManual } from '@/lib/base-comision-ui'
+import { BaseComisionManual } from '../_components/BaseComisionManual'
 import { seleccionSigueValida, diaOperativoParaRecomputo } from '@/lib/motorizado-candidatos'
 import { useMotorizadosCandidatos } from '../_hooks/useMotorizadosCandidatos'
 import { useOrdenesActivasCandidatas } from '../_hooks/useOrdenesActivasCandidatas'
@@ -590,6 +592,7 @@ function GestorSolicitudesPageContent() {
   const [modalMode, setModalMode] = useState<ModalMode>('confirmar')
   const [precioFinal, setPrecioFinal] = useState<number | ''>('')
   const [precioEditado, setPrecioEditado] = useState(false)
+  const [baseManual, setBaseManual] = useState('')
   const [guardandoAsignacion, setGuardandoAsignacion] = useState(false)
   const asignacionEnCurso = useRef(false)
   const solicitudModalRef = useRef<Solicitud | null>(null)
@@ -1106,6 +1109,7 @@ function GestorSolicitudesPageContent() {
     setOpenId(s.id)
     setPrecioFinal(precioInicialAsignacion(s, s.cotizacion?.precioSugerido ?? s.pagoDelivery?.montoSugerido))
     setPrecioEditado(false)
+    setBaseManual('')
     setMotorizadoSel(s.asignacion?.motorizadoId || '')
     setBusquedaMotorizado('')
   }
@@ -1116,6 +1120,7 @@ function GestorSolicitudesPageContent() {
     setOpenId(s.id)
     setPrecioFinal(s.confirmacion?.precioFinalCordobas ?? '')
     setPrecioEditado(false)
+    setBaseManual('')
     setMotorizadoSel(s.asignacion?.motorizadoId || '')
     setBusquedaMotorizado('')
   }
@@ -1124,6 +1129,7 @@ function GestorSolicitudesPageContent() {
     solicitudModalRef.current = null
     setOpenId(null)
     setPrecioFinal('')
+    setBaseManual('')
     setMotorizadoSel('')
     setBusquedaMotorizado('')
     setModalMode('confirmar')
@@ -1134,11 +1140,13 @@ function GestorSolicitudesPageContent() {
     if (!solicitud || solicitud.id !== id || asignacionEnCurso.current) return
     if (esEstadoCerrado(solicitud.estado)) return setErr(MSG_ORDEN_CERRADA)
     if (precioFinal === '' || Number(precioFinal) <= 0) return setErr('Ingresá un precio final válido.')
+    const pideBase = necesitaBaseManual(solicitud, precioEditado)
+    if (pideBase) { const eBase = errorBaseManual(baseManual, precioFinal); if (eBase) return setErr(eBase) }
     asignacionEnCurso.current = true
     setGuardandoAsignacion(true)
     setErr(null)
     try {
-      await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'solicitudes', precioFinal, precioEditado)
+      await guardarAsignacion(solicitud, motorizadoSel || null, 'confirmar', 'solicitudes', precioFinal, precioEditado, pideBase ? parseBaseManual(baseManual) : undefined)
       cerrarModal()
       setToast({ type: 'success', message: motorizadoSel ? 'Orden confirmada y asignada' : 'Orden confirmada' })
     } catch (e) {
@@ -2459,6 +2467,9 @@ function GestorSolicitudesPageContent() {
                 placeholder="Ej: 130"
               />
               <div className="text-xs text-gray-500 mt-1">Se redondea automáticamente a múltiplos de 10.</div>
+              {modalMode === 'confirmar' && (
+                <BaseComisionManual solicitud={solicitudModalRef.current} precioEditado={precioEditado} precioFinal={precioFinal} valor={baseManual} onChange={setBaseManual} />
+              )}
             </div>
 
             {/* Motorizado sugerido */}

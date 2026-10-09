@@ -7,13 +7,16 @@ const stamp = (ms: number) => ({ toMillis: () => ms });
 const ahora = 1_800_000_000_000;
 const moto = { activo: true, estado: 'disponible', nombre: 'Dickson', telefono: '123', authUid: ' uid-moto ', fotoUrl: 'foto' };
 const peticion: PeticionAsignacion = { solicitudId: 's1', motorizadoId: 'm1', operacion: 'sugerido', superficie: 'solicitudes', estadoEsperado: 'confirmada', updatedAtEsperado: 1, precioEditado: false };
+// PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1 — una orden con el precio cerrado trae su snapshot (base 70 = tarifa de 1 km) y una cotización que la demuestra.
+const COT = { cotizacion: { distanciaKm: 1 } };
+const CONF130 = { precioFinalCordobas: 130, comisionBaseCordobas: 70, comisionBaseOrigen: 'tarifa_distancia' };
 const codigo = (code: string) => (e: unknown) => (e as { code?: string }).code === code;
 
 // Simula el control optimista de Firestore: conflictos invalidan el intento y
 // vuelven a ejecutar TODAS las lecturas. Nunca se publica un patch fallido.
 function escenario() {
   let usuario: DocumentData | null = { rol: 'gestor', activo: true };
-  let solicitud: DocumentData | null = { estado: 'confirmada', updatedAt: stamp(1), confirmacion: { precioFinalCordobas: 130, confirmadoPorUid: 'original', confirmadoAt: stamp(0) } };
+  let solicitud: DocumentData | null = { estado: 'confirmada', updatedAt: stamp(1), ...COT, confirmacion: { ...CONF130, confirmadoPorUid: 'original', confirmadoAt: stamp(0) } };
   let rider: DocumentData | null = { ...moto };
   let revision = 0;
   let antesCommit: (() => void) | undefined;
@@ -136,13 +139,13 @@ test('Payloads drawer/detalle/base preservan foto y normalización histórica de
 });
 test('Fallback teléfono/foto vacíos', async () => { const e = escenario(); e.rider({ activo: true, estado: 'disponible', nombre: 'M' }); await e.run({ operacion: 'confirmar', superficie: 'drawer' }); assert.equal(e.writes[0].asignacion.motorizadoTelefono, ''); assert.equal(e.writes[0].asignacion.motorizadoFotoUrl, null); });
 test('Confirmar precio y asignar es un patch; fallo rider no confirma precio', async () => {
-  const e = escenario(); e.orden({ estado: 'pendiente_confirmacion', updatedAt: stamp(1) }); e.rider({ ...moto, estado: 'inactivo' });
+  const e = escenario(); e.orden({ estado: 'pendiente_confirmacion', updatedAt: stamp(1), ...COT }); e.rider({ ...moto, estado: 'inactivo' });
   const p = { operacion: 'confirmar', estadoEsperado: 'pendiente_confirmacion', precioFinal: 90 } as const;
   await assert.rejects(e.run(p), codigo('failed-precondition')); assert.equal(e.writes.length, 0);
   e.rider(moto); await e.run(p); assert.equal(e.writes.length, 1); assert.equal(e.writes[0].confirmacion.precioFinalCordobas, 90); assert.equal(e.writes[0].estado, 'asignada');
 });
 test('No asignar todavía confirma precio sin leer rider', async () => {
-  const e = escenario(); e.orden({ estado: 'pendiente_confirmacion', updatedAt: stamp(1) }); await e.run({ operacion: 'confirmar', motorizadoId: null, estadoEsperado: 'pendiente_confirmacion', precioFinal: 90 }); assert.equal(e.actual().estado, 'confirmada'); assert.equal(e.actual().asignacion, null); assert.equal(e.lecturas.some((x) => x.startsWith('motorizado:')), false);
+  const e = escenario(); e.orden({ estado: 'pendiente_confirmacion', updatedAt: stamp(1), ...COT }); await e.run({ operacion: 'confirmar', motorizadoId: null, estadoEsperado: 'pendiente_confirmacion', precioFinal: 90 }); assert.equal(e.actual().estado, 'confirmada'); assert.equal(e.actual().asignacion, null); assert.equal(e.lecturas.some((x) => x.startsWith('motorizado:')), false);
 });
 test('P3 sin editar conserva C$130 y metadata de confirmación idéntica', async () => { const e = escenario(); const original = e.actual().confirmacion; await e.run({ operacion: 'confirmar' }); assert.equal(e.actual().confirmacion, original); assert.equal(e.writes[0].confirmacion, undefined); });
 test('P4 edición explícita confirma C$140', async () => { const e = escenario(); await e.run({ operacion: 'confirmar', precioEditado: true, precioFinal: 140 }); assert.equal(e.actual().confirmacion.precioFinalCordobas, 140); assert.equal(e.actual().confirmacion.confirmadoPorUid, 'gestor'); });
@@ -178,7 +181,7 @@ for (const [name, estado, permitido] of [
   test(name, async () => {
     const e = escenario();
     const anterior = { motorizadoId: 'anterior', motorizadoAuthUid: 'uid-anterior' };
-    e.orden({ estado, updatedAt: stamp(1), asignacion: anterior, confirmacion: { precioFinalCordobas: 130 } });
+    e.orden({ estado, updatedAt: stamp(1), asignacion: anterior, confirmacion: CONF130 });
     if (permitido) {
       await e.run({ operacion: 'reasignar', estadoEsperado: estado });
       assert.equal(e.writes.length, 1);
@@ -281,7 +284,7 @@ test('RG15 confirmar también queda bloqueado sobre una solicitud ya asignada (a
 
 test('RG15b reasignar en en_camino_retiro vuelve a estado asignada (semántica ya existente de nueva asignación)', async () => {
   const e = escenario();
-  e.orden({ estado: 'en_camino_retiro', updatedAt: stamp(1), asignacion: { motorizadoId: 'anterior' }, confirmacion: { precioFinalCordobas: 130 } });
+  e.orden({ estado: 'en_camino_retiro', updatedAt: stamp(1), asignacion: { motorizadoId: 'anterior' }, confirmacion: CONF130 });
   await e.run({ operacion: 'reasignar', estadoEsperado: 'en_camino_retiro' });
   assert.equal(e.actual().estado, 'asignada');
   assert.equal(e.actual().asignacion.motorizadoId, 'm1');
@@ -290,7 +293,7 @@ test('RG15b reasignar en en_camino_retiro vuelve a estado asignada (semántica y
 test('confirmar sigue funcionando para asignación inicial desde pendiente_confirmacion y confirmada (sin regresión)', async () => {
   for (const estado of ['pendiente_confirmacion', 'confirmada'] as const) {
     const e = escenario();
-    e.orden({ estado, updatedAt: stamp(1) });
+    e.orden({ estado, updatedAt: stamp(1), ...COT });
     await e.run({ operacion: 'confirmar', estadoEsperado: estado, precioFinal: 130 });
     assert.equal(e.writes.length, 1);
     assert.equal(e.actual().estado, 'asignada');
@@ -364,17 +367,111 @@ test('FIN1F-E1b desglose sin distancia verificable → cotizacion_incompleta; di
   await assert.rejects(e2.run({ ...confirmarP, precioFinal: 150 }), motivoDe('cotizacion_inconsistente')); assert.equal(e2.writes.length, 0);
 });
 
-test('FIN1F-BASE sin desglose ni cotización, o con distancia fuera del tarifario y sin desglose (cotización manual): la base es el precio final que fijó el gestor', async () => {
-  const e = escenario(); e.orden(pendiente());
-  await e.run({ ...confirmarP, precioFinal: 90 });
-  assert.equal(e.actual().confirmacion.comisionBaseCordobas, 90); assert.equal(e.actual().confirmacion.comisionBaseOrigen, 'precio_final_sin_desglose');
-  const e2 = escenario(); e2.orden(pendiente({ cotizacion: { distanciaKm: 80 } }));
-  await e2.run({ ...confirmarP, precioFinal: 700 });
-  assert.equal(e2.actual().confirmacion.comisionBaseCordobas, 700); assert.equal(e2.actual().confirmacion.comisionBaseOrigen, 'precio_final_sin_desglose');
-});
-
 test('FIN1F-EDIT editar el precio de una orden ya confirmada recalcula la base con la misma fórmula', async () => {
   const e = escenario(); e.orden({ estado: 'confirmada', updatedAt: stamp(1), cotizacion: { distanciaKm: 21.759 }, precioDesglose: { deliveryBase: 210 }, confirmacion: { precioFinalCordobas: 210, comisionBaseCordobas: 210 } });
   await e.run({ operacion: 'confirmar', precioEditado: true, precioFinal: 260 });
   assert.equal(e.actual().confirmacion.precioFinalCordobas, 260); assert.equal(e.actual().confirmacion.comisionBaseCordobas, 210);
+});
+
+// ═══ A2 · la base de comisión: AUTOMÁTICA (tarifa de la distancia) o MANUAL (la declara el gestor, sin recargos) — y nunca mayor que el precio final ═══
+
+const manualP = (extra: Record<string, unknown> = {}) => ({ ...confirmarP, ...extra }) as const;
+const sinDistancia = { cotizacion: { distanciaKm: null, fuentePrecio: 'viaje_anterior' } };
+
+test('FIN1F-F11 automático 420/150 (cliente declara 49.5 km; gestor confirma 150) → precio_incoherente, sin snapshot ni asignación', async () => {
+  const e = escenario(); e.orden(pendiente({ cotizacion: { distanciaKm: 49.5 }, precioDesglose: { deliveryBase: 420, totalCobrado: 420 } }));
+  await assert.rejects(e.run({ ...confirmarP, precioFinal: 150 }), (err: unknown) => codigo('failed-precondition')(err) && motivoDe('precio_incoherente')(err));
+  assert.equal(e.writes.length, 0); assert.equal(e.actual().estado, 'pendiente_confirmacion'); assert.equal(e.actual().confirmacion, undefined); assert.equal(e.actual().asignacion, undefined);
+});
+
+test('FIN1F-F12 automático 440/70 (53.9 km) → precio_incoherente', async () => {
+  const e = escenario(); e.orden(pendiente({ cotizacion: { distanciaKm: 53.9 } }));
+  await assert.rejects(e.run({ ...confirmarP, precioFinal: 70 }), motivoDe('precio_incoherente')); assert.equal(e.writes.length, 0);
+});
+
+test('FIN1F-F13 automático 210/260 (recargo 50) → PASS con base 210; y 70/150 automático (distancia menor) también pasa porque base <= final', async () => {
+  const e = escenario(); e.orden(pendiente({ cotizacion: { distanciaKm: 21.759 }, precioDesglose: { deliveryBase: 210, recargoZona: 50, totalCobrado: 260 } }));
+  await e.run({ ...confirmarP, precioFinal: 260 });
+  assert.equal(e.actual().confirmacion.comisionBaseCordobas, 210); assert.equal(e.actual().confirmacion.comisionBaseOrigen, 'tarifa_distancia');
+  const e2 = escenario(); e2.orden(pendiente({ cotizacion: { distanciaKm: 1 } }));
+  await e2.run({ ...confirmarP, precioFinal: 150 });
+  assert.equal(e2.actual().confirmacion.comisionBaseCordobas, 70);
+});
+
+test('FIN1F-F14 manual: viaje anterior / fuera del tarifario sin base manual → base_comision_requerida (NO cae al precio final), 0 escrituras', async () => {
+  for (const extra of [sinDistancia, { cotizacion: { distanciaKm: 80 } }, {}, { cotizacion: null, precioDesglose: null }]) {
+    const e = escenario(); e.orden(pendiente(extra));
+    await assert.rejects(e.run({ ...confirmarP, precioFinal: 260 }), (err: unknown) => codigo('failed-precondition')(err) && motivoDe('base_comision_requerida')(err), JSON.stringify(extra));
+    assert.equal(e.writes.length, 0); assert.equal(e.actual().confirmacion, undefined);
+  }
+});
+
+test('FIN1F-F15 manual 210/260: el gestor declara la base SIN recargos → snapshot manual_gestor 210, actor y fecha del servidor', async () => {
+  for (const extra of [sinDistancia, { cotizacion: { distanciaKm: 80 } }]) {
+    const e = escenario(); e.orden(pendiente(extra));
+    await e.run(manualP({ precioFinal: 260, comisionBaseManualCordobas: 210 }));
+    const c = e.actual().confirmacion;
+    assert.equal(c.precioFinalCordobas, 260); assert.equal(c.comisionBaseCordobas, 210); assert.equal(c.comisionBaseOrigen, 'manual_gestor');
+    assert.equal(c.confirmadoPorUid, 'gestor'); assert.equal(c.confirmadoAt.toMillis(), ahora); assert.equal(e.actual().estado, 'asignada');
+  }
+});
+
+test('FIN1F-F16 manual 420/150 y 440/70 → precio_incoherente; la base manual inválida (0, negativa, texto, NaN, Infinity) se rechaza en el payload', async () => {
+  for (const [base, final] of [[420, 150], [440, 70]] as const) {
+    const e = escenario(); e.orden(pendiente(sinDistancia));
+    await assert.rejects(e.run(manualP({ precioFinal: final, comisionBaseManualCordobas: base })), motivoDe('precio_incoherente')); assert.equal(e.writes.length, 0);
+  }
+  for (const m of [0, -1, '210', NaN, Infinity, null, {}]) {
+    const e = escenario(); e.orden(pendiente(sinDistancia));
+    await assert.rejects(e.run(manualP({ precioFinal: 260, comisionBaseManualCordobas: m as never })), codigo('invalid-argument'), String(m)); assert.equal(e.writes.length, 0);
+  }
+});
+
+test('FIN1F-F17 manual 70/150 → permitido (base <= final): snapshot manual_gestor 70', async () => {
+  const e = escenario(); e.orden(pendiente(sinDistancia));
+  await e.run(manualP({ precioFinal: 150, comisionBaseManualCordobas: 70 }));
+  assert.equal(e.actual().confirmacion.comisionBaseCordobas, 70); assert.equal(e.actual().confirmacion.comisionBaseOrigen, 'manual_gestor');
+  // y 260/260 es válido por la desigualdad: el gestor declara explícitamente que todo el precio es comisionable
+  const e2 = escenario(); e2.orden(pendiente(sinDistancia));
+  await e2.run(manualP({ precioFinal: 260, comisionBaseManualCordobas: 260 }));
+  assert.equal(e2.actual().confirmacion.comisionBaseCordobas, 260); assert.equal(e2.actual().confirmacion.comisionBaseOrigen, 'manual_gestor');
+});
+
+test('FIN1F-F18 reasignar conserva el snapshot manual intacto (precio, base, origen); una base manual NO viaja en reasignar', async () => {
+  const conf = { precioFinalCordobas: 260, comisionBaseCordobas: 210, comisionBaseOrigen: 'manual_gestor', confirmadoPorUid: 'g0' };
+  const e = escenario(); e.orden({ estado: 'asignada', updatedAt: stamp(1), asignacion: { motorizadoId: 'anterior' }, ...sinDistancia, confirmacion: conf });
+  await e.run({ operacion: 'reasignar', estadoEsperado: 'asignada' });
+  assert.deepEqual(e.actual().confirmacion, conf);
+  const e2 = escenario(); e2.orden({ estado: 'asignada', updatedAt: stamp(1), asignacion: { motorizadoId: 'anterior' }, ...sinDistancia, confirmacion: conf });
+  await assert.rejects(e2.run({ operacion: 'reasignar', estadoEsperado: 'asignada', comisionBaseManualCordobas: 100 } as never), codigo('invalid-argument')); assert.equal(e2.writes.length, 0);
+});
+
+test('FIN1F-F19 sugerido NO acepta una base manual para saltarse la confirmación (ni con precio ni sin él)', async () => {
+  for (const orden of [{ estado: 'confirmada', updatedAt: stamp(1), ...sinDistancia }, { estado: 'confirmada', updatedAt: stamp(1), ...sinDistancia, confirmacion: { precioFinalCordobas: 260 } }]) {
+    const e = escenario(); e.orden(orden);
+    await assert.rejects(e.run({ operacion: 'sugerido', estadoEsperado: 'confirmada', comisionBaseManualCordobas: 210 } as never), codigo('invalid-argument'));
+    assert.equal(e.writes.length, 0); assert.equal(e.actual().estado, 'confirmada');
+  }
+  // sugerido sobre una orden con precio pero SIN base demostrable (anterior al snapshot): no la inventa, pide confirmar
+  const e = escenario(); e.orden({ estado: 'confirmada', updatedAt: stamp(1), ...sinDistancia, confirmacion: { precioFinalCordobas: 260 } });
+  await assert.rejects(e.run({ operacion: 'sugerido', estadoEsperado: 'confirmada' }), motivoDe('base_comision_requerida')); assert.equal(e.writes.length, 0);
+});
+
+test('FIN1F-F19b base manual enviada en una orden AUTOMÁTICA → base_manual_no_aplica (el sistema ya demuestra la base); sin cotización coherente no se rescata', async () => {
+  const e = escenario(); e.orden(pendiente({ cotizacion: { distanciaKm: 13.859 } }));
+  await assert.rejects(e.run(manualP({ precioFinal: 150, comisionBaseManualCordobas: 100 })), motivoDe('base_manual_no_aplica')); assert.equal(e.writes.length, 0);
+  const e2 = escenario(); e2.orden(pendiente({ cotizacion: { distanciaKm: 13.859 }, precioDesglose: { deliveryBase: 5000 } }));
+  await assert.rejects(e2.run(manualP({ precioFinal: 150, comisionBaseManualCordobas: 100 })), motivoDe('cotizacion_inconsistente')); assert.equal(e2.writes.length, 0);
+});
+
+test('FIN1F-F20 confirmar sobre una orden anterior (precio sí, snapshot no): derivable → no toca nada; no derivable → exige la base; con la base la COMPLETA conservando el resto', async () => {
+  const conf = { precioFinalCordobas: 260, confirmadoPorUid: 'g0', confirmadoAt: stamp(0) };
+  const e = escenario(); e.orden({ estado: 'confirmada', updatedAt: stamp(1), cotizacion: { distanciaKm: 21.759 }, confirmacion: conf });
+  await e.run({ operacion: 'confirmar' }); assert.deepEqual(e.actual().confirmacion, conf);
+  const e2 = escenario(); e2.orden({ estado: 'confirmada', updatedAt: stamp(1), ...sinDistancia, confirmacion: conf });
+  await assert.rejects(e2.run({ operacion: 'confirmar' }), motivoDe('base_comision_requerida')); assert.equal(e2.writes.length, 0);
+  const e3 = escenario(); e3.orden({ estado: 'confirmada', updatedAt: stamp(1), ...sinDistancia, confirmacion: conf });
+  await e3.run(manualP({ estadoEsperado: 'confirmada', comisionBaseManualCordobas: 210 } as never));
+  const c = e3.actual().confirmacion;
+  assert.equal(c.precioFinalCordobas, 260); assert.equal(c.confirmadoPorUid, 'g0'); assert.equal(c.comisionBaseCordobas, 210); assert.equal(c.comisionBaseOrigen, 'manual_gestor'); assert.equal(c.comisionBaseActorUid, 'gestor');
 });

@@ -104,7 +104,7 @@ type Solicitud = {
   entrega?: { nombreApellido?: string; celular?: string; direccionEscrita?: string; nota?: string | null; notaMotorizado?: string | null; coord?: { lat: number; lng: number } | null; puntoGoogleLink?: string | null; puntoGoogleTexto?: string | null };
   paquete?: { fragil?: boolean; grande?: boolean; notaPaquete?: string | null } | null;
   cotizacion?: { origenCoord?: { lat: number; lng: number } | null; destinoCoord?: { lat: number; lng: number } | null };
-  confirmacion?: { precioFinalCordobas?: number };
+  confirmacion?: { precioFinalCordobas?: number; comisionBaseCordobas?: number };
   cobroContraEntrega?: { aplica?: boolean; monto?: number };
   pagoDelivery?: {
     tipo?: string;
@@ -1690,9 +1690,9 @@ export default function PanelMotorizadoPage() {
                     <p style={{ fontSize: 13, color: '#16a34a', margin: '4px 0 0' }}>
                       Total delivery: {fmt(historialFiltrado.reduce((s, o) => s + (o.confirmacion?.precioFinalCordobas || 0), 0))}
                     </p>
-                    {historialFiltrado.some(o => o.precioDesglose?.deliveryBase != null) && (
+                    {historialFiltrado.some(o => baseGanancia(o) != null) && (
                       <p style={{ fontSize: 13, fontWeight: 700, color: '#15803d', margin: '2px 0 0' }}>
-                        💰 Tu ganancia: {fmt(historialFiltrado.reduce((s, o) => s + (o.precioDesglose?.deliveryBase ?? o.confirmacion?.precioFinalCordobas ?? 0) * 0.8, 0))}
+                        💰 Tu ganancia{historialFiltrado.some(gananciaEsEstimada) ? ' (estimada)' : ''}: {fmt(historialFiltrado.reduce((s, o) => s + (baseGanancia(o) ?? 0) * 0.8, 0))}
                       </p>
                     )}
                   </div>
@@ -1729,8 +1729,8 @@ export default function PanelMotorizadoPage() {
                             <div style={{ textAlign: 'right' as const, flexShrink: 0, marginLeft: 12 }}>
                               <p style={{ fontSize: 10, color: '#9ca3af', margin: 0, textTransform: 'uppercase' as const, fontWeight: 600 }}>Delivery</p>
                               <p style={{ fontSize: 15, fontWeight: 800, color: '#16a34a', margin: '0 0 2px' }}>{fmt(viaje.delivery ?? undefined)}</p>
-                              {o.precioDesglose?.deliveryBase != null && (
-                                <p style={{ fontSize: 11, fontWeight: 700, color: '#15803d', margin: '0 0 2px' }}>💰 {fmt(o.precioDesglose.deliveryBase * 0.8)}</p>
+                              {baseGanancia(o) != null && (
+                                <p style={{ fontSize: 11, fontWeight: 700, color: '#15803d', margin: '0 0 2px' }}>💰 {gananciaEsEstimada(o) ? '~' : ''}{fmt((baseGanancia(o) ?? 0) * 0.8)}</p>
                               )}
                               {dep.tieneProducto && <p style={{ fontSize: 12, color: '#7c3aed', margin: 0, fontWeight: 700 }}>+{fmt(dep.montoProducto)}</p>}
                             </div>
@@ -2632,9 +2632,14 @@ function RoutePoint({ type, point, fallbackName, retiroCoord, entregaCoord, head
   );
 }
 
+// PRECIO-CONFIRMADO-ANTES-DE-OPERAR-1 — la ganancia sale de la base que el servidor aprobó al confirmar el precio (confirmacion.comisionBaseCordobas). Mientras la orden no
+// la tiene, lo que se muestra es solo una ESTIMACIÓN sobre la cotización del cliente: no es la cifra que se liquida.
+const baseGanancia = (o: Solicitud): number | null => o.confirmacion?.comisionBaseCordobas ?? o.precioDesglose?.deliveryBase ?? null;
+const gananciaEsEstimada = (o: Solicitud): boolean => o.confirmacion?.comisionBaseCordobas == null;
+
 function CobroBox({ o, dep }: { o: Solicitud; dep: DepositoInfo }) {
   const delivery = o.confirmacion?.precioFinalCordobas ?? 0;
-  const deliveryBase = o.precioDesglose?.deliveryBase ?? null;
+  const deliveryBase = baseGanancia(o);
   const ganancia = deliveryBase !== null ? deliveryBase * 0.8 : null;
   const deducir = !!o.pagoDelivery?.deducirDelCobroContraEntrega;
   // PAGO-TRANSFERENCIA-UX-1 — el motorizado NO cobra un delivery que el

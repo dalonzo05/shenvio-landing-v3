@@ -500,13 +500,12 @@ test('FIN1F-LEG · sin snapshot, una cotización que NO se demuestra con la tari
   }
 });
 
-test('FIN1F-LEG2 · sin desglose ni cotización (orden anterior): la base es el precio final que el gestor fijó (la regla que ya existía)', async () => {
+test('FIN1F-LEG2 · una orden anterior SIN desglose ni cotización ya NO toma el precio final como base (podría traer recargos): conciliacion_requerida / base_comision_requerida, 0 escrituras', async () => {
   const w = mundo(); base(w);
   w.put('solicitudes_envio/o1', orden(MID, { confirmacion: { precioFinalCordobas: 50 }, precioDesglose: undefined }));
-  delete (w.raw('solicitudes_envio/o1') as Doc).precioDesglose;
-  w.put('ordenes_deposito/d1', deposito(50, 'confirmado', { solicitudIds: ['o1'] }));
-  await crear(w);
-  assert.equal(w.raw(`liquidaciones_motorizado/${LIQ}`).comision, 40);
+  const antes = w.snapshot(); const esc = w.escrituras;
+  await assert.rejects(crear(w), (e: unknown) => codigo('failed-precondition', 'conciliacion_requerida')(e) && (e as { details?: { motivoPrecio?: string } }).details?.motivoPrecio === 'base_comision_requerida');
+  assert.equal(w.snapshot(), antes); assert.equal(w.escrituras, esc);
 });
 
 test('L20 · un depósito relevante NO terminal bloquea la liquidación; anulado, rechazado, sin órdenes de la semana y de comercio no', async () => {
@@ -959,9 +958,9 @@ test('la fórmula trabaja en centavos exactos y es la del diseño', () => {
   // comisión = round(1010×0.8)=808; a depositar = 1000; faltante = 100; neto = 808 − 100 − 100 + 0 − 33 = 575
   assert.equal(r.comision, 808); assert.equal(r.totalADepositar, 1000); assert.equal(r.faltantesDeposito, 100); assert.equal(r.netoAPagar, 575);
   // la base sale del snapshot del servidor; un deliveryBase del cliente sin respaldo NO se usa
-  assert.equal(baseComisionOrden({ precioDesglose: { deliveryBase: 80.1 }, confirmacion: { precioFinalCordobas: 999, comisionBaseCordobas: 80.1 } }), 8010);
+  assert.equal(baseComisionOrden({ precioDesglose: { deliveryBase: 80.1 }, confirmacion: { precioFinalCordobas: 999, comisionBaseCordobas: 80.1, comisionBaseOrigen: 'tarifa_distancia' } }), 8010);
   assert.equal(baseComisionOrden({ precioDesglose: { deliveryBase: 80.1 }, confirmacion: { precioFinalCordobas: 999 } }), null);
-  assert.equal(baseComisionOrden({ confirmacion: { precioFinalCordobas: 55.55 } }), 5555);
+  assert.equal(baseComisionOrden({ confirmacion: { precioFinalCordobas: 55.55 } }), null); // sin desglose ni cotización: la base NO es el precio final
   assert.equal(baseComisionOrden({ precioDesglose: { deliveryBase: 80 } }), null);
 });
 
@@ -1080,4 +1079,33 @@ test('P · atomicidad: si el movimiento no se puede crear, la liquidación sigue
   await assert.rejects(pagar(w), codigo('failed-precondition', 'conciliacion_requerida'));
   assert.equal(w.snapshot(), antes);
   assert.equal(w.raw(`liquidaciones_motorizado/${LIQ}`).estado, 'pendiente');
+});
+
+test('FIN1F-F14b / E1C · snapshot HISTÓRICO corrupto (base 420 > precio final 150, de cualquier origen) → conciliacion_requerida / precio_incoherente, 0 escrituras', async () => {
+  for (const origen of ['tarifa_distancia', 'manual_gestor']) {
+    const w = mundo(); base(w);
+    w.put('solicitudes_envio/o1', orden(MID, { confirmacion: { precioFinalCordobas: 150, comisionBaseCordobas: 420, comisionBaseOrigen: origen } }));
+    const antes = w.snapshot(); const esc = w.escrituras;
+    await assert.rejects(crear(w), (e: unknown) => codigo('failed-precondition', 'conciliacion_requerida')(e) && (e as { details?: { motivoPrecio?: string } }).details?.motivoPrecio === 'precio_incoherente', origen);
+    assert.equal(w.snapshot(), antes, origen); assert.equal(w.escrituras, esc, origen);
+  }
+});
+
+test('FIN1F-F16b · legacy A–E: snapshot válido PASS; derivación coherente PASS; snapshot base>final / sin base demostrable / deliveryBase incoherente → conciliacion_requerida', async () => {
+  const casos: Array<[string, Doc, string | null]> = [
+    ['A snapshot manual válido', { confirmacion: { precioFinalCordobas: 260, comisionBaseCordobas: 210, comisionBaseOrigen: 'manual_gestor' } }, null],
+    ['B derivación por tarifa (21.759 km)', { confirmacion: { precioFinalCordobas: 260 }, cotizacion: { distanciaKm: 21.759 }, precioDesglose: { deliveryBase: 210 } }, null],
+    ['C snapshot base>final', { confirmacion: { precioFinalCordobas: 150, comisionBaseCordobas: 420, comisionBaseOrigen: 'tarifa_distancia' } }, 'precio_incoherente'],
+    ['D sin base demostrable', { confirmacion: { precioFinalCordobas: 150 } }, 'base_comision_requerida'],
+    ['E deliveryBase incoherente', { confirmacion: { precioFinalCordobas: 150 }, cotizacion: { distanciaKm: 13.859 }, precioDesglose: { deliveryBase: 5000 } }, 'cotizacion_inconsistente'],
+    ['F origen heredado precio_final_sin_desglose no se acepta', { confirmacion: { precioFinalCordobas: 150, comisionBaseCordobas: 150, comisionBaseOrigen: 'precio_final_sin_desglose' } }, 'base_comision_requerida'],
+  ];
+  for (const [nombre, extra, motivo] of casos) {
+    const w = mundo(); base(w);
+    w.put('solicitudes_envio/o1', orden(MID, { precioDesglose: undefined, ...extra }));
+    if (motivo === null) { w.put('ordenes_deposito/d1', deposito(Number((extra.confirmacion as Doc).precioFinalCordobas), 'confirmado', { solicitudIds: ['o1'] })); await crear(w); continue; }
+    const antes = w.snapshot(); const esc = w.escrituras;
+    await assert.rejects(crear(w), (e: unknown) => codigo('failed-precondition', 'conciliacion_requerida')(e) && (e as { details?: { motivoPrecio?: string } }).details?.motivoPrecio === motivo, nombre);
+    assert.equal(w.snapshot(), antes, nombre); assert.equal(w.escrituras, esc, nombre);
+  }
 });
