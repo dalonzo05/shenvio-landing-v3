@@ -54,15 +54,54 @@ Pérdida de tests o aumento inesperado de errores = STOP.
 - Si un monto no puede demostrarse: `conciliacion_requerida`. Nunca inventar ni inferir dinero para hacer pasar un flujo.
 - Comisión actual: 80 % de la **base comisionable**, no necesariamente 80 % del precio final.
 - Los recargos no comisionables no deben entrar a la base por accidente.
+- Nunca inventar montos, prorratear ambigüedad ni confiar en previews del cliente.
 
 ## 7. Bloques cerrados (todos CLOSED IN STAGING)
 
-- **FIN-2, FIN-3, FIN-4A/4B/4C:** cierres financieros previos; el dinero lo ejecuta el servidor.
-- **FIN-1A:** ledger (saldos y movimientos) escrito solo por Functions con transacción e idempotencia.
-- **FIN-1B:** cobro y liquidación de saldos a cargo con operaciones idempotentes.
-- **FIN-1C-A / FIN-1C-B:** cobros y gastos del motorizado pasan por callables con validación server-side.
-- **FIN-1D:** adelantos y descuentos de liquidación respaldados por el ledger.
-- **FIN-1E:** ledger con blanket deny en Rules; campos de orden inmutables tras el create; punteros de depósito verificados con `getAfter`; guard de doble liquidación.
+- **FIN-2 — gastos / consumo:**
+  - Un gasto solo puede descontarse una vez, mediante `consumidoEnDepositoId`.
+  - Los gastos nuevos quedan protegidos contra doble consumo.
+  - Deuda abierta pre-producción: `FIN-GASTOS-CONSUMO-BACKFILL-1` para gastos históricos anteriores al marcador; jamás inferir consumo sin evidencia.
+- **FIN-3 — confirmación de depósito:**
+  - `confirmarDeposito` es autoridad server-side y transaccional.
+  - Actor, rol, monto y efectos financieros se demuestran en servidor; usa fórmula compartida e idempotencia.
+  - No se confía en confirmaciones financieras fabricadas por el cliente.
+- **FIN-4A — conversión de depósito en deuda:**
+  - `convertirDepositoEnDeuda` es callable server-authoritative y transaccional.
+  - Solo convierte depósitos StorkHub válidos y genera saldo y movimiento con identidad por ciclo.
+  - La conversión es idempotente y demostrable.
+- **FIN-4B — reversión de deuda:**
+  - `revertirConversionEnDeuda` solo revierte una deuda todavía virgen y demostrablemente reversible.
+  - Si existen abonos, consumos u otros efectos residuales, la reversión falla cerrado.
+  - No se reconstruyen ni se adivinan estados históricos.
+- **FIN-4C — abono directo:**
+  - El abono directo usa intención server-side y operación identificable e idempotente.
+  - Callables vigentes: `registrarAbonoDirecto`, `prepararAbonoDirecto`, `obtenerIntencionAbono`, `descartarIntencionAbono`.
+  - La intención y el saldo se vinculan mediante identificadores controlados por el servidor.
+- **FIN-1A — condonación / saldos:**
+  - `condonarDeudaMotorizado` y `anularSaldoCargo` son server-authoritative.
+  - Se eliminaron los writers cliente de estas operaciones.
+  - El ledger asociado no depende de montos inventados por el navegador.
+- **FIN-1B — rehacer / anular depósito:**
+  - `rehacerDeposito` y `anularDeposito` se ejecutan mediante callables server-side y transacción.
+  - Efectos financieros e idempotencia se resuelven en servidor.
+  - Las Rules cierran los writers residuales del cliente.
+- **FIN-1C-A — cobro delivery / cobro semanal:**
+  - `registrarCobroDelivery`, `revertirCobroDelivery` y `registrarPagoCobroSemanal` son autoridad server-side.
+  - Las Rules cierran los writers cliente sobre `cobros` y `cobros_semanales`.
+  - El precio o monto financiero no puede ser reescrito arbitrariamente por el cliente.
+- **FIN-1C-B — gastos / adelantos / incidencias:**
+  - Crear y anular gasto, y registrar y anular adelanto, son operaciones server-side.
+  - `resolverIncidenciaCobro` también es server-authoritative.
+  - Las Rules reservan al servidor los movimientos financieros de gasto y adelanto, y cierran campos residuales.
+- **FIN-1D — liquidaciones:**
+  - `crearLiquidacionMotorizado` y `marcarLiquidacionPagada` son autoridad server-side.
+  - La liquidación atribuye depósitos por órdenes vinculadas, no por fecha de creación; la ambigüedad da `conciliacion_requerida`.
+  - Ningún monto ambiguo se prorratea ni se inventa.
+- **FIN-1E — perímetro financiero:**
+  - `movimientos_financieros` es read-only para el cliente; create, update y delete están cerrados.
+  - Los campos financieros y operativos sensibles de las órdenes quedan inmutables tras el create.
+  - `crearLiquidacionMotorizado` impide que una misma orden forme parte de liquidaciones múltiples.
 - **OPS-MAXINSTANCES-1:** `maxInstances` 20 en las 36 Functions.
 - **PROD-RUNTIME-NODE-1:** runtime Node 24 en Functions.
 - **A2 precio confirmado:** ver sección 8.
