@@ -337,20 +337,27 @@ test('C5 · gestor y admin con el cobro pagado ⇒ DENY', soloNuevas, async () =
   await assertFails(subir(UID_ADMIN, PATH_GESTOR))
 })
 
-test('C6 · evidencia operativa de staff intacta: cargotrans/terminal no dependen del cobro ⇒ ALLOW', soloNuevas, async () => {
-  await ordenConCobro('pagado')
+test('C6 · el cobro pagado no condiciona la evidencia operativa; el SELLO sí (A4-02): cargotrans = primera escritura de gestor ALLOW, terminal sellado DENY', finalesYPuente, async () => {
+  await ordenConCobro('pagado') // estado 'entregado'
+  // Antes de A4-02 ambos eran ALLOW y reemplazables para siempre. Ahora la
+  // única creación posterior a la entrega es la de cargotrans_* (panel de
+  // gestor: "Disponible cuando la orden esté entregada"); terminal_* ya no.
   await assertSucceeds(subir(UID_GESTOR, `evidencias/${ORDEN}/cargotrans_factura.jpg`))
-  await assertSucceeds(subir(UID_GESTOR, `evidencias/${ORDEN}/terminal_bus.jpg`))
+  await assertFails(subir(UID_GESTOR, `evidencias/${ORDEN}/terminal_bus.jpg`))
 })
 
-test('C7 · evidencia operativa del motorizado intacta (fuera de F1): asignado, orden entregada ⇒ ALLOW', soloNuevas, async () => {
+test('C7 · evidencia operativa del motorizado: el cobro pagado no la condiciona; la orden entregada la sella (A4-02)', finalesYPuente, async () => {
   await env.withSecurityRulesDisabled(async (ctx) => {
     await setDoc(doc(ctx.firestore(), 'solicitudes_envio', ORDEN), {
-      comercioUid: COMERCIO_ID, estado: 'entregado', asignacion: { motorizadoAuthUid: UID_MOTO },
+      comercioUid: COMERCIO_ID, estado: 'en_camino_entrega', asignacion: { motorizadoAuthUid: UID_MOTO },
       cobroDelivery: { estado: 'pagado' },
     })
   })
   await assertSucceeds(subir(UID_MOTO, `evidencias/${ORDEN}/entrega.jpg`))
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'solicitudes_envio', ORDEN), { estado: 'entregado' })
+  })
+  await assertFails(subir(UID_MOTO, `evidencias/${ORDEN}/entrega.jpg`, jpeg(2048)))
 })
 
 // ─── Writer create-first: compatibilidad con reglas actuales y nuevas ─────────
@@ -1205,4 +1212,307 @@ test('P1h · la primera carga del digitador cruza el rollout en cualquier orden 
     estado: 'en_revision',
     updatedAt: serverTimestamp(),
   }, { merge: true }))
+})
+
+// ─── A4-02 · SELLADO de la evidencia operativa y financiera ───────────────────
+//
+// Un id por caso: clearStorage() no vacía el bucket entre tests (ver SV).
+
+let contadorA4 = 0
+const idA4 = (prefijo: string) => `${prefijo}A4${String(++contadorA4).padStart(4, '0')}`
+const META_PDF = { contentType: 'application/pdf' }
+
+/** Orden sembrada sin reglas, con el motorizado dado como asignado. */
+async function ordenA4(
+  estado: string,
+  extra: Record<string, unknown> = {},
+  motorizadoAuthUid = UID_MOTO,
+): Promise<string> {
+  const id = idA4('ord')
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', id), {
+      comercioUid: COMERCIO_ID,
+      estado,
+      asignacion: { motorizadoAuthUid, estadoAceptacion: 'aceptada' },
+      ...extra,
+    })
+  })
+  return id
+}
+
+/** Objeto ya existente, sin pasar por reglas (para probar overwrite/delete). */
+async function plantar(path: string, meta: { contentType: string } = META_JPEG) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await uploadBytes(ref(ctx.storage(), path), jpeg(), meta)
+  })
+}
+
+const pathEv = (orden: string, nombre: string) => `evidencias/${orden}/${nombre}`
+const NOMBRES_OPERATIVOS = [
+  'retiro.jpg', 'entrega.jpg',
+  'terminal_paquete.jpg', 'terminal_ticket.jpg', 'terminal_bus.jpg',
+  'cargotrans_factura.jpg', 'cargotrans_paquete_1.jpg', 'cargotrans_paquete_12.jpg',
+]
+const ESCRITORES_EVIDENCIA = [UID_MOTO, UID_GESTOR, UID_ADMIN]
+
+test('ST-SEAL-1 · el flujo normal crea la evidencia ANTES de cambiar de estado ⇒ ALLOW', finalesYPuente, async () => {
+  // retiro: se sube con la orden aún sin retirar (asignada / en_camino_retiro).
+  for (const estado of ['asignada', 'en_camino_retiro']) {
+    const o = await ordenA4(estado)
+    await assertSucceeds(subir(UID_MOTO, pathEv(o, 'retiro.jpg')))
+  }
+  // entrega, terminal y cargotrans: se suben con la orden aún en camino.
+  for (const estado of ['retirado', 'en_camino_entrega']) {
+    const o = await ordenA4(estado)
+    for (const nombre of NOMBRES_OPERATIVOS.filter((n) => n !== 'retiro.jpg')) {
+      await assertSucceeds(subir(UID_MOTO, pathEv(o, nombre)))
+    }
+  }
+  // Y el staff, antes del sello.
+  const o2 = await ordenA4('en_camino_entrega')
+  await assertSucceeds(subir(UID_GESTOR, pathEv(o2, 'entrega.jpg')))
+  await assertSucceeds(subir(UID_ADMIN, pathEv(o2, 'terminal_bus.jpg')))
+})
+
+test('ST-SEAL-2 · corregir antes del sello (reintento tras un upload cuyo batch falló) ⇒ ALLOW', finalesYPuente, async () => {
+  const o = await ordenA4('en_camino_retiro')
+  await plantar(pathEv(o, 'retiro.jpg'))
+  await assertSucceeds(subir(UID_MOTO, pathEv(o, 'retiro.jpg'), jpeg(2048)))
+  const o2 = await ordenA4('en_camino_entrega')
+  for (const nombre of ['entrega.jpg', 'terminal_paquete.jpg', 'cargotrans_paquete_1.jpg']) {
+    await plantar(pathEv(o2, nombre))
+    await assertSucceeds(subir(UID_MOTO, pathEv(o2, nombre), jpeg(2048)))
+  }
+  // retiro sigue editable hasta 'retirado', no hasta 'entregado'.
+  await plantar(pathEv(o2, 'retiro.jpg'))
+  await assertFails(subir(UID_MOTO, pathEv(o2, 'retiro.jpg'), jpeg(2048)))
+})
+
+test('ST-SEAL-3 · el motorizado asignado NO reemplaza la evidencia de una orden entregada ⇒ DENY', finalesYPuente, async () => {
+  const o = await ordenA4('entregado')
+  for (const nombre of NOMBRES_OPERATIVOS) {
+    await plantar(pathEv(o, nombre))
+    await assertFails(subir(UID_MOTO, pathEv(o, nombre), jpeg(2048)))
+  }
+})
+
+test('ST-SEAL-4 · el staff tampoco: gestor y admin sin bypass de sellado ⇒ DENY', finalesYPuente, async () => {
+  const o = await ordenA4('entregado')
+  for (const nombre of NOMBRES_OPERATIVOS) {
+    await plantar(pathEv(o, nombre))
+    for (const uid of [UID_GESTOR, UID_ADMIN]) {
+      await assertFails(subir(uid, pathEv(o, nombre), jpeg(2048)))
+    }
+  }
+})
+
+test('ST-SEAL-5 · borrar evidencia ⇒ DENY para todos, sellada o no', soloNuevas, async () => {
+  for (const estado of ['en_camino_entrega', 'entregado']) {
+    const o = await ordenA4(estado)
+    for (const nombre of ['entrega.jpg', 'retiro.jpg', 'terminal_bus.jpg', 'cargotrans_factura.jpg']) {
+      await plantar(pathEv(o, nombre))
+      for (const uid of ESCRITORES_EVIDENCIA) {
+        await assertFails(deleteObject(ref(storageDe(uid), pathEv(o, nombre))))
+      }
+    }
+  }
+})
+
+test('ST-SEAL-6 · retiro: sellado desde retirado (también en_camino_entrega y entregado) ⇒ DENY para todos', finalesYPuente, async () => {
+  for (const estado of ['retirado', 'en_camino_entrega', 'entregado']) {
+    const o = await ordenA4(estado)
+    await plantar(pathEv(o, 'retiro.jpg'))
+    for (const uid of ESCRITORES_EVIDENCIA) {
+      await assertFails(subir(uid, pathEv(o, 'retiro.jpg'), jpeg(2048)))
+    }
+  }
+  // Y la PRIMERA escritura de un retiro que no existe tampoco, ya retirada la orden.
+  const o2 = await ordenA4('retirado')
+  await assertFails(subir(UID_MOTO, pathEv(o2, 'retiro.jpg')))
+  await assertFails(subir(UID_GESTOR, pathEv(o2, 'retiro.jpg')))
+})
+
+test('ST-SEAL-7 · terminal_*: update post-entregado ⇒ DENY; primera escritura de staff post-entregado también ⇒ DENY', finalesYPuente, async () => {
+  const o = await ordenA4('entregado')
+  for (const nombre of ['terminal_paquete.jpg', 'terminal_ticket.jpg', 'terminal_bus.jpg']) {
+    await plantar(pathEv(o, nombre))
+    for (const uid of ESCRITORES_EVIDENCIA) {
+      await assertFails(subir(uid, pathEv(o, nombre), jpeg(2048)))
+    }
+  }
+  const o2 = await ordenA4('entregado')
+  await assertFails(subir(UID_GESTOR, pathEv(o2, 'terminal_bus.jpg')))
+  await assertFails(subir(UID_MOTO, pathEv(o2, 'terminal_bus.jpg')))
+})
+
+test('ST-SEAL-8 · cargotrans_*: update post-entregado ⇒ DENY; el gestor sí PUEDE crear la primera vez (flujo del panel) ⇒ ALLOW una sola vez', finalesYPuente, async () => {
+  const o = await ordenA4('entregado')
+  for (const nombre of ['cargotrans_factura.jpg', 'cargotrans_paquete_1.jpg', 'cargotrans_paquete_7.jpg']) {
+    await plantar(pathEv(o, nombre))
+    for (const uid of ESCRITORES_EVIDENCIA) {
+      await assertFails(subir(uid, pathEv(o, nombre), jpeg(2048)))
+    }
+  }
+  // SolicitudDrawer.handleCargotransUpload: orden entregada, aún sin fotos.
+  const o2 = await ordenA4('entregado')
+  await assertSucceeds(subir(UID_GESTOR, pathEv(o2, 'cargotrans_paquete_1.jpg')))
+  await assertSucceeds(subir(UID_ADMIN, pathEv(o2, 'cargotrans_factura.jpg')))
+  // ...y esa primera escritura ya quedó sellada: el reintento NO la pisa.
+  await assertFails(subir(UID_GESTOR, pathEv(o2, 'cargotrans_paquete_1.jpg'), jpeg(2048)))
+  // El motorizado, en cambio, no crea nada tras la entrega.
+  await assertFails(subir(UID_MOTO, pathEv(o2, 'cargotrans_paquete_2.jpg')))
+})
+
+test('ST-SEAL-9 · reasignación: un motorizado nuevo NO pisa evidencia sellada; mientras la orden está abierta sí reemplaza (A) y el anterior ya no escribe', finalesYPuente, async () => {
+  // Orden abierta (reasignable): el nuevo asignado reemplaza lo que dejó el anterior.
+  const abierta = await ordenA4('en_camino_retiro', {}, UID_MOTO_2)
+  await plantar(pathEv(abierta, 'retiro.jpg')) // lo subió UID_MOTO antes de la reasignación
+  await assertSucceeds(subir(UID_MOTO_2, pathEv(abierta, 'retiro.jpg'), jpeg(2048)))
+  await assertFails(subir(UID_MOTO, pathEv(abierta, 'retiro.jpg'), jpeg(2048))) // ya no es el asignado
+
+  // Orden entregada con otro motorizado asignado: sellado, para el nuevo también.
+  const cerrada = await ordenA4('entregado', {}, UID_MOTO_2)
+  for (const nombre of ['retiro.jpg', 'entrega.jpg', 'terminal_bus.jpg']) {
+    await plantar(pathEv(cerrada, nombre))
+    await assertFails(subir(UID_MOTO_2, pathEv(cerrada, nombre), jpeg(2048)))
+  }
+
+  // Estado retrocedido a mano (rebotar escribe 'confirmada'/'asignada'): el hito
+  // del servidor (historial.retiradoAt) mantiene el sello del retiro.
+  const rebotada = await ordenA4('asignada', { historial: { retiradoAt: new Date() } }, UID_MOTO_2)
+  await plantar(pathEv(rebotada, 'retiro.jpg'))
+  await assertFails(subir(UID_MOTO_2, pathEv(rebotada, 'retiro.jpg'), jpeg(2048)))
+  await assertFails(subir(UID_GESTOR, pathEv(rebotada, 'retiro.jpg'), jpeg(2048)))
+  // ...y el de la entrega, con historial.entregadoAt.
+  const rebotada2 = await ordenA4('asignada', { historial: { entregadoAt: new Date() } }, UID_MOTO_2)
+  await plantar(pathEv(rebotada2, 'entrega.jpg'))
+  await assertFails(subir(UID_MOTO_2, pathEv(rebotada2, 'entrega.jpg'), jpeg(2048)))
+})
+
+test('ST-SEAL-10 · fail-closed: orden inexistente y asignación ausente ⇒ DENY; el resto del contrato intacto', finalesYPuente, async () => {
+  const fantasma = idA4('fantasma')
+  await assertFails(subir(UID_GESTOR, pathEv(fantasma, 'entrega.jpg')))
+  await assertFails(subir(UID_MOTO, pathEv(fantasma, 'entrega.jpg')))
+  const sinAsignar = await ordenA4('en_camino_entrega', { asignacion: null })
+  await assertFails(subir(UID_MOTO, pathEv(sinAsignar, 'entrega.jpg')))
+  // Otro motorizado activo no asignado.
+  const ajena = await ordenA4('en_camino_entrega')
+  await assertFails(subir(UID_MOTO_2, pathEv(ajena, 'entrega.jpg')))
+  // Metadata/tamaño intactos.
+  await assertFails(subir(UID_MOTO, pathEv(ajena, 'entrega.jpg'), jpeg(1024), { contentType: 'application/pdf' }))
+  await assertFails(subir(UID_MOTO, pathEv(ajena, 'entrega.jpg'), jpeg(5 * MB + 1)))
+  await assertFails(subir(UID_MOTO, pathEv(ajena, 'peaje.jpg')))
+})
+
+test('ST-FIN-6 · delivery boucher: antes de pagado, contrato actual; después de pagado, overwrite ⇒ DENY', finalesYPuente, async () => {
+  // Abierto: el comercio reemplaza el suyo y el gestor el suyo.
+  const abierta = await ordenA4('entregado', { cobroDelivery: { estado: 'en_revision_deposito' } })
+  await plantar(pathEv(abierta, 'delivery_boucher_comercio.jpg'))
+  await plantar(pathEv(abierta, 'delivery_boucher_gestor.jpg'))
+  await assertSucceeds(subir(UID_COMERCIO, pathEv(abierta, 'delivery_boucher_comercio.jpg'), jpeg(2048)))
+  await assertSucceeds(subir(UID_GESTOR, pathEv(abierta, 'delivery_boucher_gestor.jpg'), jpeg(2048)))
+  await assertFails(subir(UID_COMERCIO, pathEv(abierta, 'delivery_boucher_gestor.jpg'), jpeg(2048)))
+  // Pagado: nadie.
+  const pagada = await ordenA4('entregado', { cobroDelivery: { estado: 'pagado' } })
+  await plantar(pathEv(pagada, 'delivery_boucher_comercio.jpg'))
+  await plantar(pathEv(pagada, 'delivery_boucher_gestor.jpg'))
+  await assertFails(subir(UID_COMERCIO, pathEv(pagada, 'delivery_boucher_comercio.jpg'), jpeg(2048)))
+  await assertFails(subir(UID_GESTOR, pathEv(pagada, 'delivery_boucher_gestor.jpg'), jpeg(2048)))
+  await assertFails(subir(UID_ADMIN, pathEv(pagada, 'delivery_boucher_gestor.jpg'), jpeg(2048)))
+})
+
+// ─── Financiero: saldos/abono_N y liquidaciones/comprobante.pdf ───────────────
+
+async function saldoA4(abonos: unknown[]): Promise<string> {
+  const id = idA4('saldo')
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'saldos_cargo_motorizado', id), { estado: 'pendiente', abonos })
+  })
+  return id
+}
+const pathAbono = (saldo: string, n: number) => `saldos/${saldo}/abono_${n}.jpg`
+
+test('ST-FIN-1 · abono: la primera escritura de staff ⇒ ALLOW; el resto de roles ⇒ DENY', finalesYPuente, async () => {
+  const s = await saldoA4([])
+  await assertSucceeds(subir(UID_GESTOR, pathAbono(s, 0)))
+  await assertSucceeds(subir(UID_ADMIN, pathAbono(s, 1)))
+  // Sin documento de saldo también: el objeto se sube ANTES de la callable.
+  await assertSucceeds(subir(UID_GESTOR, pathAbono(idA4('saldoSinDoc'), 0)))
+  for (const uid of [UID_MOTO, UID_COMERCIO, UID_DIGITADOR]) {
+    await assertFails(subir(uid, pathAbono(s, 5)))
+  }
+  await assertFails(subir(UID_GESTOR, `saldos/${s}/otro.jpg`))
+  await assertFails(subir(UID_GESTOR, pathAbono(s, 9), jpeg(1024), { contentType: 'application/pdf' }))
+})
+
+test('ST-FIN-1b · reintento legítimo: mientras el abono N no se registró, el staff reemplaza el MISMO abono_N ⇒ ALLOW', finalesYPuente, async () => {
+  const s = await saldoA4([{ operacionId: 'a0' }]) // abono 0 registrado; el próximo es el N=1
+  await plantar(pathAbono(s, 1))                    // subido, pero la callable falló
+  await assertSucceeds(subir(UID_GESTOR, pathAbono(s, 1), jpeg(2048)))
+  await assertSucceeds(subir(UID_ADMIN, pathAbono(s, 1), jpeg(4096)))
+})
+
+test('ST-FIN-2 · abono ya registrado (abonos[] llegó a N+1) ⇒ overwrite DENY para staff, admin incluido; delete DENY siempre', finalesYPuente, async () => {
+  const s = await saldoA4([{ operacionId: 'a0' }, { operacionId: 'a1' }])
+  await plantar(pathAbono(s, 0))
+  await plantar(pathAbono(s, 1))
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await assertFails(subir(uid, pathAbono(s, 0), jpeg(2048)))
+    await assertFails(subir(uid, pathAbono(s, 1), jpeg(2048)))
+  }
+  // El siguiente (N=2) sigue libre.
+  await assertSucceeds(subir(UID_GESTOR, pathAbono(s, 2)))
+  // Delete: nunca.
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await assertFails(deleteObject(ref(storageDe(uid), pathAbono(s, 0))))
+    await assertFails(deleteObject(ref(storageDe(uid), pathAbono(s, 2))))
+  }
+  // Saldo inexistente + objeto existente: fail-closed.
+  const huerfano = idA4('saldoHuerfano')
+  await plantar(pathAbono(huerfano, 0))
+  await assertFails(subir(UID_GESTOR, pathAbono(huerfano, 0), jpeg(2048)))
+})
+
+const pathLiq = (id: string) => `liquidaciones/${id}/comprobante.pdf`
+
+test('ST-FIN-3 · liquidación: crear el PDF ⇒ ALLOW para staff (la liquidación ya está pagada); otros roles ⇒ DENY', finalesYPuente, async () => {
+  const l = idA4('liq')
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'liquidaciones_motorizado', l), { estado: 'pagado' })
+  })
+  await assertSucceeds(subir(UID_GESTOR, pathLiq(l), jpeg(2048), META_PDF))
+  await assertSucceeds(subir(UID_ADMIN, pathLiq(idA4('liq')), jpeg(2048), META_PDF))
+  await assertFails(subir(UID_MOTO, pathLiq(idA4('liq')), jpeg(2048), META_PDF))
+  await assertFails(subir(UID_GESTOR, pathLiq(idA4('liq')), jpeg(2048), META_JPEG)) // MIME
+  await assertFails(subir(UID_GESTOR, `liquidaciones/${l}/otro.pdf`, jpeg(2048), META_PDF))
+})
+
+test('ST-FIN-4 · liquidación ya con PDF: overwrite ⇒ DENY para staff y admin; delete ⇒ DENY', finalesYPuente, async () => {
+  const l = idA4('liq')
+  await plantar(pathLiq(l), META_PDF)
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await assertFails(subir(uid, pathLiq(l), jpeg(4096), META_PDF))
+    await assertFails(deleteObject(ref(storageDe(uid), pathLiq(l))))
+  }
+})
+
+test('ST-FIN-5 · regresión del voucher de depósito: legacy mutable solo en pendiente_boucher; versionados create-only; sellados ⇒ DENY', soloNuevas, async () => {
+  // pendiente_boucher: primera carga y reintento (contrato actual).
+  await deposito('pendiente_boucher')
+  await assertSucceeds(subir(UID_MOTO, PATH_DEP))
+  await assertSucceeds(subir(UID_MOTO, PATH_DEP, jpeg(2048)))
+  // en_revision: el legacy ya no se reemplaza; la corrección es versionada y create-only.
+  await deposito('en_revision')
+  await assertFails(subir(UID_MOTO, PATH_DEP, jpeg(4096)))
+  const version = pathNuevaVersion()
+  await assertSucceeds(subir(UID_MOTO, version))
+  await assertFails(subir(UID_MOTO, version, jpeg(2048)))
+  await assertFails(subir(UID_GESTOR, version, jpeg(2048)))
+  // sellados: nadie.
+  for (const estado of ['confirmado', 'convertido_en_deuda', 'anulado']) {
+    await deposito(estado)
+    await assertFails(subir(UID_MOTO, PATH_DEP, jpeg(4096)))
+    await assertFails(subir(UID_GESTOR, PATH_DEP, jpeg(4096)))
+    await assertFails(subir(UID_ADMIN, pathNuevaVersion()))
+  }
 })

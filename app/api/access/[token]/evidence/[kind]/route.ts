@@ -76,7 +76,7 @@ export async function GET(
   const solicitudSnap = await adminDb.collection('solicitudes_envio').doc(acceso.solicitudId).get()
   if (!solicitudSnap.exists) return rechazar(404, 'solicitud_inexistente')
 
-  const evidencia = resolverEvidencia(solicitudSnap.data() ?? {}, kind)
+  const evidencia = resolverEvidencia(acceso.solicitudId, solicitudSnap.data() ?? {}, kind)
   if (!evidencia) return rechazar(404, 'evidencia_inexistente')
 
   try {

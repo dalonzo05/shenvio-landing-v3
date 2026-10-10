@@ -1282,6 +1282,63 @@ service cloud.firestore {
               && request.resource.data.get('estado', '') == 'en_camino_entrega');
       }
 
+      // ── A4-02 · P1-C: el pathStorage de una evidencia es de ESTA orden ──────
+      // El motorizado asignado puede escribir evidencias, evidenciasTerminal y
+      // evidenciasCargotrans, y hasta ahora NADA miraba el contenido: podía
+      // guardar como pathStorage un `depositos/…`, `saldos/…`,
+      // `liquidaciones/…` o `evidencias/{otraOrden}/…`. Storage Rules protege al
+      // SDK de cliente, pero quien resuelve ese puntero es el servidor con el
+      // Admin SDK (resolverEvidencia, storage-cleanup), que no pasa por ellas.
+      // Los dos consumidores validan el path server-side (lib/evidencia-path.ts);
+      // esto cierra la entrada en origen para el actor que la tiene abierta.
+      //
+      // Cada slot presente debe ser un mapa cuyo pathStorage, si existe, sea
+      // EXACTAMENTE evidencias/{id}/<su nombre>. Igualdad de strings, no
+      // startsWith: 'evidencias/' a secas dejaría pasar otra orden. La `url` NO
+      // se evalúa ni concede nada: un path inválido no se vuelve válido por traer
+      // una url bonita.
+      //
+      // evidenciasCargotrans.fotos[] NO se valida aquí: las Rules no iteran
+      // listas y la cantidad de paquetes no tiene tope. Esa lista queda cubierta
+      // únicamente por los consumidores server-side. Staff tampoco pasa por este
+      // helper (su rama es de confianza); lo protege el mismo cierre server-side.
+      //
+      // Un solo `let` por valor y solo se evalúa cada mapa si su clave cambió:
+      // el presupuesto de expresiones de esta rama ya está cerca del límite.
+      function slotEvidenciaDeEstaOrden(slot, nombre) {
+        return slot is map
+          && slot.get('pathStorage', 'evidencias/' + id + '/' + nombre) == 'evidencias/' + id + '/' + nombre;
+      }
+
+      function evidenciasDeMotorizadoValidas() {
+        return (request.resource.data.get('evidencias', {}) == resource.data.get('evidencias', {})
+            || evidenciasMapaValido(request.resource.data.get('evidencias', {})))
+          && (request.resource.data.get('evidenciasTerminal', {}) == resource.data.get('evidenciasTerminal', {})
+            || terminalMapaValido(request.resource.data.get('evidenciasTerminal', {})))
+          && (request.resource.data.get('evidenciasCargotrans', {}) == resource.data.get('evidenciasCargotrans', {})
+            || cargotransMapaValido(request.resource.data.get('evidenciasCargotrans', {})));
+      }
+
+      function evidenciasMapaValido(ev) {
+        return ev is map
+          && ev.keys().hasOnly(['retiro', 'entrega', 'deposito'])
+          && (!('retiro' in ev) || slotEvidenciaDeEstaOrden(ev.retiro, 'retiro.jpg'))
+          && (!('entrega' in ev) || slotEvidenciaDeEstaOrden(ev.entrega, 'entrega.jpg'))
+          && (!('deposito' in ev) || slotEvidenciaDeEstaOrden(ev.deposito, 'deposito.jpg'));
+      }
+
+      function terminalMapaValido(et) {
+        return et is map
+          && (!('fotoPaquete' in et) || slotEvidenciaDeEstaOrden(et.fotoPaquete, 'terminal_paquete.jpg'))
+          && (!('fotoTicket' in et) || slotEvidenciaDeEstaOrden(et.fotoTicket, 'terminal_ticket.jpg'))
+          && (!('fotoBus' in et) || slotEvidenciaDeEstaOrden(et.fotoBus, 'terminal_bus.jpg'));
+      }
+
+      function cargotransMapaValido(ec) {
+        return ec is map
+          && (!('factura' in ec) || slotEvidenciaDeEstaOrden(ec.factura, 'cargotrans_factura.jpg'));
+      }
+
       allow update: if isAssignedMotorizado()
         && transicionClienteMotorizadoValida()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -1296,6 +1353,7 @@ service cloud.firestore {
         ])
         && marcadorSoloPendiente()
         && registroDeMotorizadoValido()
+        && evidenciasDeMotorizadoValidas()
         // FIN-1E — su historial no toca la fecha de entrega, y el puntero que fija debe apuntar a SU depósito, que lista la orden.
         && historialEntregadoIntacto()
         && registroDepositoValido(true);

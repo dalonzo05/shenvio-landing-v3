@@ -26,9 +26,11 @@ service firebase.storage {
     //   documento del depósito todavía no existe cuando se sube el boucher.
     //
     // Gestor/admin conservan su modelo privilegiado (Decisión 2 del traspaso
-    // P1-S2): no se les exige pertenencia ni existencia de la orden — ya son
-    // actores de confianza y añadir lookups no reduce ningún riesgo real.
-    // Solo se les añade el allowlist de nombres de archivo por ruta.
+    // P1-S2): no se les exige pertenencia — ya son actores de confianza.
+    // Se les añade el allowlist de nombres de archivo por ruta y, desde A4-02,
+    // el SELLO de la evidencia (ver evidenciaOperativaSellada): privilegio no
+    // es licencia para reemplazar evidencia consumada, así que para la
+    // evidencia operativa también necesitan que la orden exista.
 
     function signedIn() {
       return request.auth != null;
@@ -128,6 +130,105 @@ service firebase.storage {
       return filename == nombreBoucherGestor() || nombreValidoEvidenciasMotorizado(filename);
     }
 
+    // ── A4-02: SELLADO de la evidencia operativa ──────────────────────────────
+    // Hasta este bloque el motorizado asignado y el staff podían REEMPLAZAR
+    // retiro.jpg, entrega.jpg, terminal_* y cargotrans_* en cualquier momento,
+    // con la orden ya entregada: la evidencia que respalda el cierre
+    // (y el cobro) seguía siendo reescribible.
+    //
+    // Estados reales de solicitudes_envio (lib/estados-solicitud.ts,
+    // TRANSICIONES_VALIDAS): pendiente_confirmacion, confirmada, asignada,
+    // en_camino_retiro, retirado, en_camino_entrega, entregado, y los cierres
+    // reactivables rechazada / cancelada.
+    //
+    // Cuándo se captura cada evidencia (app/panel/motorizado/page.tsx):
+    //   retiro.jpg       al pulsar "Paquete recogido": se sube y se escribe el
+    //                    puntero ANTES de que la callable pase a 'retirado'.
+    //   entrega.jpg      al pulsar "Entregado": se sube y se escribe el puntero
+    //                    ANTES de que la callable pase a 'entregado'.
+    //   terminal_* y     ídem, en los modales de entrega fuera de Managua,
+    //   cargotrans_*     ANTES de 'entregado'.
+    // El flujo es siempre "evidencia primero, estado después": exigir el estado
+    // final para CREAR sería un ciclo imposible. Por eso el sello no mira a quien
+    // escribe sino al estado de la ORDEN:
+    //
+    //   retiro.jpg                      sellado desde 'retirado' (también
+    //                                   en_camino_entrega y entregado)
+    //   entrega / deposito / terminal_* sellado desde 'entregado'
+    //   cargotrans_*
+    //
+    // Sellado ⇒ nadie sobrescribe: ni el motorizado asignado, ni uno REASIGNADO
+    // (la reasignación solo es posible antes del retiro, ESTADOS_REASIGNABLES, y
+    // desde ahí el sello ya aplica), ni gestor, ni admin. Antes del sello el
+    // motorizado asignado —el actual— y el staff pueden corregir: es el
+    // reintento tras un upload cuyo batch falló, y un reasignado puede
+    // reemplazar lo que dejó el anterior mientras la orden siga abierta (cambio
+    // mínimo, sin versionado).
+    //
+    // Además del estado se mira el hito que escribe el servidor al cerrar la
+    // transición (historial.retiradoAt / historial.entregadoAt): el estado puede
+    // retroceder a mano ("rebotar" desde el panel de gestor escribe 'confirmada'
+    // sin mirar de dónde viene) y desellaría la evidencia; el hito no retrocede.
+    // Un hito falsificado solo SELLA, nunca abre nada.
+    //
+    // Excepción única de creación: el panel de gestor sube las fotos de
+    // Cargotrans con la orden YA entregada (SolicitudDrawer: "Disponible cuando
+    // la orden esté entregada"). Es una PRIMERA escritura —no pisa nada— y solo
+    // la hace el staff, solo con nombres cargotrans_*. Para el resto, y para
+    // cualquier sobrescritura, el sello es total.
+    //
+    // Presupuesto: un solo firestore.get de la orden (el mismo documento que ya
+    // leen esMotorizadoAsignado y boucherDeliveryAbierto, cacheado por request);
+    // ningún documento distinto nuevo. El cortocircuito de || evita evaluarlo
+    // cuando la rama no aplica.
+    function evidenciaOperativaSellada(solicitudId, filename) {
+      let sol = firestore.get(/databases/(default)/documents/solicitudes_envio/$(solicitudId)).data;
+      let hist = sol.get('historial', {});
+      return filename == 'retiro.jpg'
+        ? (sol.get('estado', '') in ['retirado', 'en_camino_entrega', 'entregado']
+            || (hist is map && hist.get('retiradoAt', null) != null))
+        : (sol.get('estado', '') == 'entregado'
+            || (hist is map && hist.get('entregadoAt', null) != null));
+    }
+
+    function esNombreCargotrans(filename) {
+      return filename == 'cargotrans_factura.jpg' || filename.matches('cargotrans_paquete_[0-9]+\\.jpg');
+    }
+
+    // `primeraEscritura` es `resource == null` en create y false en update.
+    function evidenciaEscribible(solicitudId, filename, primeraEscritura) {
+      let uid = request.auth.uid;
+      return perfilActivo(uid)
+        && (
+          // Staff: allowlist de nombre. Su boucher de delivery se rige por
+          // boucherDeliveryAbierto (STORAGE-EVIDENCIA-INTEGRIDAD-1, intacto);
+          // la evidencia operativa por el sello, SIN bypass de rol.
+          (esStaff(uid)
+            && nombreValidoEvidenciasStaff(filename)
+            && (filename == nombreBoucherGestor()
+              ? boucherDeliveryAbierto(solicitudId)
+              : solicitudExiste(solicitudId)
+                && (!evidenciaOperativaSellada(solicitudId, filename)
+                  || (primeraEscritura && esNombreCargotrans(filename)))))
+          ||
+          // Comercio: solo su propia orden, y SOLO su propio objeto. No puede
+          // escribir el del gestor ni el nombre viejo compartido.
+          (rolDe(uid) == 'Comercio'
+            && solicitudExiste(solicitudId)
+            && esComercioPropietario(uid, solicitudId)
+            && filename == nombreBoucherComercio()
+            && boucherDeliveryAbierto(solicitudId))
+          ||
+          // Motorizado: solo la orden que tiene asignada, solo sus nombres, y
+          // solo mientras la evidencia no esté sellada.
+          (rolDe(uid) == 'motorizado'
+            && solicitudExiste(solicitudId)
+            && esMotorizadoAsignado(uid, solicitudId)
+            && nombreValidoEvidenciasMotorizado(filename)
+            && !evidenciaOperativaSellada(solicitudId, filename))
+        );
+    }
+
     // Evidencias fotográficas de órdenes
     match /evidencias/{solicitudId}/{filename} {
 
@@ -159,34 +260,27 @@ service firebase.storage {
       // conocido no implica permitir enumerar el namespace.
       allow list: if false;
 
-      allow create, update: if signedIn()
-        && perfilActivo(request.auth.uid)
-        && (
-          // Staff: modelo privilegiado, solo se le exige allowlist de nombre.
-          // STORAGE-EVIDENCIA-INTEGRIDAD-1: su boucher de delivery tampoco se
-          // sobrescribe una vez pagado el cobro (ver boucherDeliveryAbierto).
-          (esStaff(request.auth.uid)
-            && nombreValidoEvidenciasStaff(filename)
-            && (filename != nombreBoucherGestor() || boucherDeliveryAbierto(solicitudId)))
-          ||
-          // Comercio: solo su propia orden, y SOLO su propio objeto. No puede
-          // escribir el del gestor ni el nombre viejo compartido.
-          (rolDe(request.auth.uid) == 'Comercio'
-            && solicitudExiste(solicitudId)
-            && esComercioPropietario(request.auth.uid, solicitudId)
-            && filename == nombreBoucherComercio()
-            && boucherDeliveryAbierto(solicitudId))
-          ||
-          // Motorizado: solo la orden que tiene asignada, solo sus nombres.
-          (rolDe(request.auth.uid) == 'motorizado'
-            && solicitudExiste(solicitudId)
-            && esMotorizadoAsignado(request.auth.uid, solicitudId)
-            && nombreValidoEvidenciasMotorizado(filename))
-        )
+      // ── A4-02: SELLADO de la evidencia operativa ────────────────────────────
+      // `create` y `update` van SEPARADOS a propósito (nada de `allow create,
+      // update` para rutas selladas): el emulador de Storage clasifica una
+      // subida sobre un objeto existente como create, no como update (SV7), y
+      // si ambas compartieran cláusula, `resource == null` quedaría decidiendo
+      // por casualidad. El sellado vive en evidenciaEscribible(); ver la nota
+      // larga sobre evidenciaOperativaSellada() arriba.
+      allow create: if signedIn()
+        && evidenciaEscribible(solicitudId, filename, resource == null)
         && request.resource.contentType == 'image/jpeg'
         && request.resource.size > 0
         && request.resource.size <= 5 * 1024 * 1024;
 
+      allow update: if signedIn()
+        && evidenciaEscribible(solicitudId, filename, false)
+        && request.resource.contentType == 'image/jpeg'
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024;
+
+      // Delete DENY para todos, staff incluido. La limpieza a 45 días es del
+      // Admin SDK (lib/storage-cleanup.ts), que revalida orden y path.
       allow delete: if false;
     }
 
@@ -560,10 +654,46 @@ service firebase.storage {
       // P1-S3: solo staff — único lector real es gestor/saldos/page.tsx.
       allow get: if signedIn() && perfilActivo(request.auth.uid) && esStaff(request.auth.uid);
       allow list: if false;
-      allow create, update: if signedIn()
+      // ── A4-02: el comprobante de un abono se sella al registrarse ────────
+      // Antes el staff reemplazaba abono_N.jpg indefinidamente. El flujo real
+      // (gestor/saldos/page.tsx) usa N = saldo.abonos.length, sube el archivo
+      // y DESPUÉS llama a la callable que agrega el abono a abonos[]. Si esa
+      // llamada falla (error incierto), el reintento reusa el MISMO N: un
+      // create-only a secas rompería ese reintento legítimo. Por eso:
+      //
+      //   primera escritura        staff ⇒ ALLOW (el objeto no existe)
+      //   sobrescritura            solo mientras abonos[] aún no llegó a N+1,
+      //                            es decir, mientras el abono N no se registró
+      //   abono N ya registrado    DENY para todos, admin incluido
+      //   delete                   DENY
+      //
+      // Una vez registrado, el comprobante respalda dinero ya aplicado. La
+      // corrección excepcional será un flujo server/admin auditado, no una Rule.
+      // `create` y `update` separados: el emulador clasifica el overwrite como
+      // create (SV7); el lookup del saldo solo se evalúa cuando hay objeto.
+      function abonoYaRegistrado(saldoId, nombre) {
+        let n = int(nombre.replace('abono_', '').replace('.jpg', ''));
+        let abonos = firestore.get(/databases/(default)/documents/saldos_cargo_motorizado/$(saldoId)).data.get('abonos', []);
+        return abonos is list && abonos.size() > n;
+      }
+
+      allow create: if signedIn()
         && perfilActivo(request.auth.uid)
         && esStaff(request.auth.uid)
         && filename.matches('abono_[0-9]+\\.jpg')
+        && (resource == null
+          || (firestore.exists(/databases/(default)/documents/saldos_cargo_motorizado/$(saldoId))
+            && !abonoYaRegistrado(saldoId, filename)))
+        && request.resource.contentType == 'image/jpeg'
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024;
+
+      allow update: if signedIn()
+        && perfilActivo(request.auth.uid)
+        && esStaff(request.auth.uid)
+        && filename.matches('abono_[0-9]+\\.jpg')
+        && firestore.exists(/databases/(default)/documents/saldos_cargo_motorizado/$(saldoId))
+        && !abonoYaRegistrado(saldoId, filename)
         && request.resource.contentType == 'image/jpeg'
         && request.resource.size > 0
         && request.resource.size <= 5 * 1024 * 1024;
@@ -618,14 +748,25 @@ service firebase.storage {
       // P1-S3: solo staff — único lector real es gestor/liquidaciones/page.tsx.
       allow get: if signedIn() && perfilActivo(request.auth.uid) && esStaff(request.auth.uid);
       allow list: if false;
-      allow create, update: if signedIn()
+      // ── A4-02: el PDF de la liquidación es CREATE-ONLY ───────────────────
+      // El flujo real (gestor/liquidaciones/page.tsx) lo genera UNA vez, DESPUÉS
+      // de que marcarLiquidacionPagada dejó la liquidación 'pagado' (estado
+      // final), y solo entonces escribe pdfUrl/pdfPath. No existe regeneración
+      // previa al cierre: nada necesita sobrescribirlo. Antes el staff lo
+      // reemplazaba indefinidamente, sobre un comprobante de dinero ya pagado.
+      //
+      // `resource == null` en create y `update: false` aparte: el emulador
+      // clasifica el overwrite como create (SV7).
+      allow create: if signedIn()
         && perfilActivo(request.auth.uid)
         && esStaff(request.auth.uid)
+        && resource == null
         && filename == 'comprobante.pdf'
         && request.resource.contentType == 'application/pdf'
         && request.resource.size > 0
         && request.resource.size <= 10 * 1024 * 1024;
 
+      allow update: if false;
       allow delete: if false;
     }
 

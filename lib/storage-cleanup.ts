@@ -18,6 +18,11 @@
 
 import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb, adminBucket } from '@/fb/admin'
+import {
+  clasificarNombreEvidenciaOperativa,
+  esPathEvidenciaDeSolicitud,
+  extraerEvidenciaOperativaDeSolicitud,
+} from './evidencia-path'
 
 export const RETENTION_DAYS = 45
 export const MAX_CANDIDATES_PER_SCAN = 100
@@ -73,26 +78,10 @@ interface StorageCleanupScanDoc {
 // ── Allowlist ────────────────────────────────────────────────────────────
 // Mismos nombres que storage.rules::nombreValidoEvidenciasMotorizado(),
 // restringidos a evidencia operativa (sin 'deposito.jpg' — es el boucher
-// financiero del depósito, ver SolicitudDrawer label '🏦 Boucher').
-const CARGOTRANS_PAQUETE_RE = /^cargotrans_paquete_[0-9]+\.jpg$/
-
+// financiero del depósito, ver SolicitudDrawer label '🏦 Boucher'). La
+// definición vive en lib/evidencia-path.ts (pura, testeable sin firebase-admin).
 export function classifyFilename(filename: string): CandidateKind | null {
-  switch (filename) {
-    case 'retiro.jpg':
-      return 'retiro'
-    case 'entrega.jpg':
-      return 'entrega'
-    case 'terminal_paquete.jpg':
-      return 'terminal_paquete'
-    case 'terminal_ticket.jpg':
-      return 'terminal_ticket'
-    case 'terminal_bus.jpg':
-      return 'terminal_bus'
-    case 'cargotrans_factura.jpg':
-      return 'cargotrans_factura'
-    default:
-      return CARGOTRANS_PAQUETE_RE.test(filename) ? 'cargotrans_paquete' : null
-  }
+  return clasificarNombreEvidenciaOperativa(filename)
 }
 
 function basename(path: string): string {
@@ -132,29 +121,14 @@ interface ExtractedRef {
  * orden. Nunca lee evidencias.deposito, cobroDelivery.* ni ningún campo
  * financiero — el alcance está en los campos que se leen, no en un filtro
  * posterior.
+ *
+ * A4-02 · P1-C — y SOLO las que apuntan a un objeto de ESA orden
+ * (evidencias/{solicitudId}/<nombre del kind>). Una referencia con path ajeno
+ * (otra solicitud, depositos/, saldos/, traversal…) no se extrae: ni el scan
+ * la ofrece como candidata ni execute la revalida como vigente.
  */
-export function extractEvidenciaOperativa(data: FirebaseFirestore.DocumentData): ExtractedRef[] {
-  const out: ExtractedRef[] = []
-
-  const push = (kind: CandidateKind, pathStorage: unknown) => {
-    if (typeof pathStorage === 'string' && pathStorage.length > 0 && classifyFilename(basename(pathStorage)) === kind) {
-      out.push({ kind, pathStorage })
-    }
-  }
-
-  push('retiro', data.evidencias?.retiro?.pathStorage)
-  push('entrega', data.evidencias?.entrega?.pathStorage)
-  push('terminal_paquete', data.evidenciasTerminal?.fotoPaquete?.pathStorage)
-  push('terminal_ticket', data.evidenciasTerminal?.fotoTicket?.pathStorage)
-  push('terminal_bus', data.evidenciasTerminal?.fotoBus?.pathStorage)
-  push('cargotrans_factura', data.evidenciasCargotrans?.factura?.pathStorage)
-
-  const fotos = Array.isArray(data.evidenciasCargotrans?.fotos) ? data.evidenciasCargotrans.fotos : []
-  for (const f of fotos as Array<{ pathStorage?: unknown }>) {
-    push('cargotrans_paquete', f?.pathStorage)
-  }
-
-  return out
+export function extractEvidenciaOperativa(solicitudId: string, data: FirebaseFirestore.DocumentData): ExtractedRef[] {
+  return extraerEvidenciaOperativaDeSolicitud(solicitudId, data)
 }
 
 // ── Scan ─────────────────────────────────────────────────────────────────
@@ -213,7 +187,7 @@ export async function runScan(actorUid: string): Promise<RunScanResult> {
     const entregadoAtMillis = data.entregadoAt instanceof Timestamp ? data.entregadoAt.toMillis() : null
     const ageDays = entregadoAtMillis ? Math.floor((Date.now() - entregadoAtMillis) / 86_400_000) : null
 
-    const refs = extractEvidenciaOperativa(data)
+    const refs = extractEvidenciaOperativa(doc.id, data)
     const referencedPaths = new Set(refs.map((r) => r.pathStorage))
 
     for (const ref of refs) {
@@ -484,6 +458,10 @@ export async function executeCandidates(
         await skip('kind_no_allowlisted')
         continue
       }
+      if (!esPathEvidenciaDeSolicitud(stored.solicitudId, stored.kind, stored.pathStorage)) {
+        await skip('invalid_path')
+        continue
+      }
       const solicitudRefMcf = adminDb.collection(SOLICITUDES_COLLECTION).doc(stored.solicitudId)
       const solicitudSnapMcf = await solicitudRefMcf.get()
       if (!solicitudSnapMcf.exists) {
@@ -491,7 +469,7 @@ export async function executeCandidates(
         continue
       }
       const dataMcf = solicitudSnapMcf.data() ?? {}
-      const refsMcf = extractEvidenciaOperativa(dataMcf)
+      const refsMcf = extractEvidenciaOperativa(stored.solicitudId, dataMcf)
       const stillReferencedMcf = refsMcf.some(
         (r) => r.kind === stored.kind && r.pathStorage === stored.pathStorage,
       )
@@ -544,6 +522,15 @@ export async function executeCandidates(
       await skip('kind_no_allowlisted')
       continue
     }
+    // A4-02 · P1-C — el basename no basta: el path tiene que ser EXACTAMENTE
+    // evidencias/{solicitudId}/<nombre del kind> de ESTA orden. Sin esto un
+    // pathStorage de otra orden (o de depositos/, saldos/…) con basename
+    // válido se habría borrado con permisos de admin. No se corrige el
+    // documento: solo se omite y se reporta.
+    if (!esPathEvidenciaDeSolicitud(stored.solicitudId, stored.kind, stored.pathStorage)) {
+      await skip('invalid_path')
+      continue
+    }
 
     const solicitudRef = adminDb.collection(SOLICITUDES_COLLECTION).doc(stored.solicitudId)
     const solicitudSnap = await solicitudRef.get()
@@ -562,7 +549,7 @@ export async function executeCandidates(
       continue
     }
 
-    const currentRefs = extractEvidenciaOperativa(data)
+    const currentRefs = extractEvidenciaOperativa(stored.solicitudId, data)
     const stillReferenced = currentRefs.some(
       (r) => r.kind === stored.kind && r.pathStorage === stored.pathStorage,
     )

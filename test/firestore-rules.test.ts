@@ -106,6 +106,9 @@ beforeEach(async () => {
 })
 
 const como =(uid: string) => env.authenticatedContext(uid).firestore()
+/** A4-02 · slot de evidencia con la forma REAL que escribe la app (url + pathStorage de la propia orden). */
+const slotEv = (ordenId: string, nombre: string) =>
+  ({ url: `https://example.test/${nombre}`, pathStorage: `evidencias/${ordenId}/${nombre}`, motorizadoUid: 'uid_moto' })
 
 /** Orden mínima que las reglas aceptan como creación legítima de comercio. */
 function ordenBase(extra: Record<string, unknown> = {}) {
@@ -2464,7 +2467,7 @@ test('VR16 · el motorizado conserva sus escrituras que no mueven estado', async
   const id = await ordenEnViaje('vr16', 'en_camino_entrega')
   // Evidencias y marcador semanal: sin tocar estado, siguen pasando.
   await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
-    evidencias: { entrega: 'https://example.test/e.jpg' },
+    evidencias: { entrega: slotEv(id, 'entrega.jpg') },
     updatedAt: serverTimestamp(),
   }))
   await assertSucceeds(updateDoc(doc(como(UID_MOTO), 'solicitudes_envio', id), {
@@ -4208,7 +4211,7 @@ test('FIN1C-R11 · el motorizado ya NO escribe pagoDelivery.quienPaga (credito_s
   // Control: sus operaciones legítimas siguen (mismo recorrido de la misma regla).
   await sembrarMoto('qp3', 'retirado', { tipo: 'contado', quienPaga: 'entrega' })
   await assertSucceeds(updateDoc(moto('qp3'), { estado: 'en_camino_entrega', updatedAt: serverTimestamp() }))
-  await assertSucceeds(updateDoc(moto('qp3'), { evidencias: { entrega: 'https://example.test/e.jpg' }, updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(moto('qp3'), { evidencias: { entrega: slotEv('qp3', 'entrega.jpg') }, updatedAt: serverTimestamp() }))
   await assertSucceeds(updateDoc(moto('qp3'), { acumulacionCobroSemanal: { estado: 'pendiente', updatedAt: serverTimestamp() } }))
   // Escribir el MISMO pagoDelivery (sin cambiarlo) tampoco es un writer: no hay diff, el update pasa.
   await assertSucceeds(updateDoc(moto('qp3'), { 'pagoDelivery.quienPaga': 'entrega', updatedAt: serverTimestamp() }))
@@ -4772,7 +4775,7 @@ test('FIN1E-O7 · motorizado: entregadoAt y historial.entregadoAt ya no los escr
   await assertFails(updateDoc(ordenRef(UID_MOTO, id), { 'historial.entregadoAt': deleteField() }))
   await assertFails(updateDoc(ordenRef(UID_MOTO, sin), { 'historial.entregadoAt': serverTimestamp() }))
   await assertFails(updateDoc(ordenRef(UID_MOTO, id), { 'registro.deposito.confirmadoStorkhub': true }))
-  await assertSucceeds(updateDoc(ordenRef(UID_MOTO, id), { evidencias: { entrega: 'https://example.test/e.jpg' }, updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(ordenRef(UID_MOTO, id), { evidencias: { entrega: slotEv(id, 'entrega.jpg') }, updatedAt: serverTimestamp() }))
   assert.deepEqual((await leerDoc('solicitudes_envio', id))?.entregadoAt, TS_ENTREGA)
 })
 
@@ -4782,7 +4785,7 @@ test('FIN1E-O8 · CONTROL logístico: la orden NO quedó inmutable — notas, me
     await assertSucceeds(updateDoc(ordenRef(uid, id), { notaInterna: 'llamar antes de llegar ' + uid, updatedAt: serverTimestamp() }))
     await assertSucceeds(updateDoc(ordenRef(uid, id), { 'metadata.prioridad': 'alta', updatedAt: serverTimestamp() }))
   }
-  await assertSucceeds(updateDoc(ordenRef(UID_MOTO, id), { evidencias: { retiro: 'https://example.test/r.jpg' }, updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(ordenRef(UID_MOTO, id), { evidencias: { retiro: slotEv(id, 'retiro.jpg') }, updatedAt: serverTimestamp() }))
 })
 
 // ─── Punteros de depósito: solo hacia un depósito real que lista la orden ────
@@ -5269,4 +5272,109 @@ test('CREDIT-R12 · el comercio no puede habilitarse el crédito editando su pro
   await assertFails(updateDoc(doc(como(UID_COMERCIO), 'comercios', COMERCIO_ID), { tipoCliente: 'credito', updatedAt: serverTimestamp() }))
   await assertSucceeds(updateDoc(doc(como(UID_GESTOR), 'comercios', COMERCIO_ID), { tipoCliente: 'credito', updatedAt: serverTimestamp() }))
   await assertSucceeds(nacerG(UID_COMERCIO, payloadComercioG(CREDITO_COMPLETO)))
+})
+
+// ─── A4-02 · P1-C — el pathStorage de una evidencia es de ESTA orden ─────────
+//
+// El motorizado asignado escribe evidencias / evidenciasTerminal /
+// evidenciasCargotrans. Antes nada miraba el contenido: podía apuntar el
+// puntero a depositos/, saldos/, liquidaciones/ o a la evidencia de otra orden,
+// y el servidor (Admin SDK) lo resolvía o lo borraba sin pasar por Storage
+// Rules. Las escrituras se hacen como las hace la app: por dot-path.
+
+const motoDe = (id: string) => doc(como(UID_MOTO), 'solicitudes_envio', id)
+const ev = (path: string, url = 'https://example.test/x.jpg') => ({ url, pathStorage: path, motorizadoUid: UID_MOTO })
+
+test('FR-PATH-1 · el motorizado escribe el path correcto de SU orden (retiro, entrega, terminal, factura) ⇒ ALLOW', async () => {
+  const id = await ordenEnViaje('frp1', 'en_camino_retiro')
+  await assertSucceeds(updateDoc(motoDe(id), { 'evidencias.retiro': { ...ev(`evidencias/${id}/retiro.jpg`), uploadedAt: serverTimestamp() }, updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(motoDe(id), { 'evidencias.entrega': ev(`evidencias/${id}/entrega.jpg`), updatedAt: serverTimestamp() }))
+  await assertSucceeds(updateDoc(motoDe(id), {
+    evidenciasTerminal: {
+      fotoPaquete: ev(`evidencias/${id}/terminal_paquete.jpg`),
+      fotoTicket: ev(`evidencias/${id}/terminal_ticket.jpg`),
+      fotoBus: ev(`evidencias/${id}/terminal_bus.jpg`),
+      sinTicket: false, busNombre: null, costoFlete: null,
+    },
+    updatedAt: serverTimestamp(),
+  }))
+  await assertSucceeds(updateDoc(motoDe(id), {
+    evidenciasCargotrans: {
+      fotos: [ev(`evidencias/${id}/cargotrans_paquete_1.jpg`), ev(`evidencias/${id}/cargotrans_paquete_2.jpg`)],
+      factura: ev(`evidencias/${id}/cargotrans_factura.jpg`),
+      costoCargotrans: 120, subidasAt: serverTimestamp(), subidasPorUid: UID_MOTO,
+    },
+    updatedAt: serverTimestamp(),
+  }))
+  // Y un update que no toca evidencias sigue pasando aunque estas ya existan.
+  await assertSucceeds(updateDoc(motoDe(id), { updatedAt: serverTimestamp() }))
+})
+
+test('FR-PATH-2 · path de OTRA orden ⇒ DENY, en cada slot', async () => {
+  const id = await ordenEnViaje('frp2', 'en_camino_entrega')
+  const otra = 'otraOrdenAjena'
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.retiro': ev(`evidencias/${otra}/retiro.jpg`) }))
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.entrega': ev(`evidencias/${otra}/entrega.jpg`) }))
+  await assertFails(updateDoc(motoDe(id), { evidenciasTerminal: { fotoBus: ev(`evidencias/${otra}/terminal_bus.jpg`) } }))
+  await assertFails(updateDoc(motoDe(id), { evidenciasTerminal: { fotoPaquete: ev(`evidencias/${id}/terminal_paquete.jpg`), fotoTicket: ev(`evidencias/${otra}/terminal_ticket.jpg`) } }))
+  await assertFails(updateDoc(motoDe(id), { evidenciasCargotrans: { factura: ev(`evidencias/${otra}/cargotrans_factura.jpg`) } }))
+  // Prefijo parcial: el id de OTRA orden que empieza igual que el mío.
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.entrega': ev(`evidencias/${id}X/entrega.jpg`) }))
+  // Nada quedó escrito.
+  assert.equal(((await leerDoc('solicitudes_envio', id)) as { evidencias?: unknown }).evidencias, undefined)
+})
+
+test('FR-PATH-3 · depositos/ ⇒ DENY (voucher legacy y versionado)', async () => {
+  const id = await ordenEnViaje('frp3', 'en_camino_entrega')
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.entrega': ev(`depositos/${UID_MOTO}/depX/boucher.jpg`) }))
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.retiro': ev(`depositos/${UID_MOTO}/depX/bouchers/ver00000001AA.jpg`) }))
+  await assertFails(updateDoc(motoDe(id), { evidenciasTerminal: { fotoBus: ev(`depositos/${UID_MOTO}/depX/boucher.jpg`) } }))
+  await assertFails(updateDoc(motoDe(id), { evidenciasCargotrans: { factura: ev(`depositos/${UID_MOTO}/depX/boucher.jpg`) } }))
+})
+
+test('FR-PATH-4 · saldos/ y liquidaciones/ ⇒ DENY; también basename cruzado, subcarpeta, traversal y slots ajenos', async () => {
+  const id = await ordenEnViaje('frp4', 'en_camino_entrega')
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.entrega': ev('saldos/saldo1/abono_1.jpg') }))
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.entrega': ev('liquidaciones/liq1/comprobante.pdf') }))
+  await assertFails(updateDoc(motoDe(id), { evidenciasTerminal: { fotoPaquete: ev('saldos/saldo1/abono_1.jpg') } }))
+  await assertFails(updateDoc(motoDe(id), { evidenciasCargotrans: { factura: ev('liquidaciones/liq1/comprobante.pdf') } }))
+  // Basename de OTRO slot de la misma orden.
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.retiro': ev(`evidencias/${id}/entrega.jpg`) }))
+  await assertFails(updateDoc(motoDe(id), { evidenciasTerminal: { fotoBus: ev(`evidencias/${id}/terminal_paquete.jpg`) } }))
+  // Subcarpeta, traversal.
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.entrega': ev(`evidencias/${id}/sub/entrega.jpg`) }))
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.entrega': ev(`evidencias/${id}/../otra/entrega.jpg`) }))
+  // Slot que no es un mapa, pathStorage que no es string, slots no previstos.
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.entrega': 'evidencias/' + id + '/entrega.jpg' }))
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.entrega': { url: 'https://example.test/x.jpg', pathStorage: 12 } }))
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.peaje': ev(`evidencias/${id}/peaje.jpg`) }))
+  await assertFails(updateDoc(motoDe(id), { evidencias: 'x' }))
+})
+
+test('FR-PATH-5 · la URL no decide: un path inválido no se vuelve válido por traer una url "de la orden"; la url sola no concede nada', async () => {
+  const id = await ordenEnViaje('frp5', 'en_camino_entrega')
+  const urlBonita = `https://firebasestorage.googleapis.com/v0/b/b/o/evidencias%2F${id}%2Fentrega.jpg?alt=media&token=t`
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.entrega': ev(`depositos/${UID_MOTO}/depX/boucher.jpg`, urlBonita) }))
+  await assertFails(updateDoc(motoDe(id), { 'evidencias.entrega': ev('evidencias/otraOrdenAjena/entrega.jpg', urlBonita) }))
+  // Al revés: con el path correcto la url no se evalúa (url permanente = P2 restante).
+  await assertSucceeds(updateDoc(motoDe(id), { 'evidencias.entrega': ev(`evidencias/${id}/entrega.jpg`, 'https://arbitraria.example/x.jpg') }))
+})
+
+test('FR-PATH-6 · el staff conserva su rama: el panel de gestor sigue escribiendo evidenciasCargotrans (la lista fotos[] no es expresible en Rules)', async () => {
+  const id = await ordenEnViaje('frp6', 'entregado')
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    await assertSucceeds(updateDoc(doc(como(uid), 'solicitudes_envio', id), {
+      evidenciasCargotrans: { fotos: [ev(`evidencias/${id}/cargotrans_paquete_1.jpg`)], factura: ev(`evidencias/${id}/cargotrans_factura.jpg`), subidasAt: serverTimestamp(), subidasPorUid: uid },
+      updatedAt: serverTimestamp(),
+    }))
+  }
+})
+
+test('FR-PATH-7 · RESIDUAL documentado: evidenciasCargotrans.fotos[] no se valida en Rules (no iteran listas, sin tope de paquetes); lo cierran resolverEvidencia y storage-cleanup', async () => {
+  const id = await ordenEnViaje('frp7', 'en_camino_entrega')
+  await assertSucceeds(updateDoc(motoDe(id), {
+    evidenciasCargotrans: { fotos: [ev(`depositos/${UID_MOTO}/depX/boucher.jpg`)], costoCargotrans: 1 },
+    updatedAt: serverTimestamp(),
+  }))
+  // Si algún día las Rules pudieran validarlo, este test debe pasar a assertFails.
 })

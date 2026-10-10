@@ -17,6 +17,7 @@
 import { randomBytes, createHash } from 'crypto'
 import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/fb/admin'
+import { resolverPathEvidencia, type EvidenciaResuelta } from './evidencia-path'
 
 // ─── Constantes ─────────────────────────────────────────────────────────────
 
@@ -567,73 +568,32 @@ export function kindValido(kind: string): boolean {
   return KIND_SIMPLES.has(kind) || KIND_CARGOTRANS_PAQUETE.test(kind)
 }
 
-interface EvidenciaResuelta {
-  pathStorage: string
-  contentType: 'image/jpeg'
-}
-
 /** Resuelve el path REAL en Storage desde los campos ya existentes de la
  * orden — nunca desde un parámetro de ruta. Devuelve null si esa evidencia
- * no existe para esta orden (se traduce a 404 en el route handler). */
-export function resolverEvidencia(s: FirebaseFirestore.DocumentData, kind: string): EvidenciaResuelta | null {
-  switch (kind) {
-    case 'retiro':
-      return s.evidencias?.retiro?.pathStorage ? { pathStorage: s.evidencias.retiro.pathStorage, contentType: 'image/jpeg' } : null
-    case 'entrega':
-      return s.evidencias?.entrega?.pathStorage ? { pathStorage: s.evidencias.entrega.pathStorage, contentType: 'image/jpeg' } : null
-    case 'terminal-paquete':
-      return s.evidenciasTerminal?.fotoPaquete?.pathStorage ? { pathStorage: s.evidenciasTerminal.fotoPaquete.pathStorage, contentType: 'image/jpeg' } : null
-    case 'terminal-ticket':
-      return s.evidenciasTerminal?.fotoTicket?.pathStorage ? { pathStorage: s.evidenciasTerminal.fotoTicket.pathStorage, contentType: 'image/jpeg' } : null
-    case 'terminal-bus':
-      return s.evidenciasTerminal?.fotoBus?.pathStorage ? { pathStorage: s.evidenciasTerminal.fotoBus.pathStorage, contentType: 'image/jpeg' } : null
-    case 'cargotrans-factura':
-      return s.evidenciasCargotrans?.factura?.pathStorage ? { pathStorage: s.evidenciasCargotrans.factura.pathStorage, contentType: 'image/jpeg' } : null
-    case 'delivery-boucher': {
-      // Sección 17: el servidor decide cuál objeto según boucherVigente — el
-      // navegador nunca elige 'comercio' vs 'gestor' directamente.
-      const vigente = s.cobroDelivery?.boucherVigente
-      const obj = vigente === 'gestor' ? s.cobroDelivery?.boucherGestor
-        : vigente === 'comercio' ? s.cobroDelivery?.boucherComercio
-        : null
-      // Este objeto usa el campo 'path', no 'pathStorage' (naming distinto
-      // al resto de evidencias — confirmado en el tipo real, no asumido).
-      return obj?.path ? { pathStorage: obj.path, contentType: 'image/jpeg' } : null
-    }
-    case 'motorizado-foto': {
-      // Gate B: la orden solo guarda asignacion.motorizadoFotoUrl (una URL
-      // de Firebase), nunca un pathStorage — pero el path real es
-      // predecible: motorizados/{motorizadoId}/foto.jpg (ver
-      // uploadFotoMotorizado en fb/storage.ts y storage.rules). motorizadoId
-      // es el doc-id interno; se usa solo server-side para construir el
-      // path, nunca sale hacia el cliente.
-      const motorizadoId = s.asignacion?.motorizadoId
-      return typeof motorizadoId === 'string' && motorizadoId.length > 0
-        ? { pathStorage: `motorizados/${motorizadoId}/foto.jpg`, contentType: 'image/jpeg' }
-        : null
-    }
-    default: {
-      const m = kind.match(KIND_CARGOTRANS_PAQUETE)
-      if (!m) return null
-      const idx = Number(m[1])
-      const foto = s.evidenciasCargotrans?.fotos?.[idx - 1]
-      return foto?.pathStorage ? { pathStorage: foto.pathStorage, contentType: 'image/jpeg' } : null
-    }
-  }
+ * no existe para esta orden (se traduce a 404 en el route handler).
+ *
+ * A4-02 · P1-C — además del origen, el path tiene que PERTENECER a la orden:
+ * el pathStorage de Firestore lo pudo escribir el cliente, y quien lo descarga
+ * es el Admin SDK (sin Storage Rules). La validación vive en
+ * lib/evidencia-path.ts y es exacta; un path ajeno (otra solicitud,
+ * depositos/, saldos/, liquidaciones/, traversal…) devuelve null. */
+export function resolverEvidencia(solicitudId: string, s: FirebaseFirestore.DocumentData, kind: string): EvidenciaResuelta | null {
+  return resolverPathEvidencia(solicitudId, s, kind)
 }
 
 // 'motorizado-foto' se resuelve aparte (VistaComercioTemporal.motorizado.tieneFoto)
 // y se renderiza como avatar, no en la galería general de evidencias.
 const KINDS_GALERIA = [...KIND_SIMPLES].filter((k) => k !== 'motorizado-foto')
 
-function kindsDisponibles(s: FirebaseFirestore.DocumentData): string[] {
+function kindsDisponibles(solicitudId: string, s: FirebaseFirestore.DocumentData): string[] {
   const kinds: string[] = []
   for (const kind of KINDS_GALERIA) {
-    if (resolverEvidencia(s, kind)) kinds.push(kind)
+    if (resolverEvidencia(solicitudId, s, kind)) kinds.push(kind)
   }
   const fotos = Array.isArray(s.evidenciasCargotrans?.fotos) ? s.evidenciasCargotrans.fotos : []
-  fotos.forEach((f: { pathStorage?: string }, i: number) => {
-    if (f?.pathStorage) kinds.push(`cargotrans-paquete-${i + 1}`)
+  fotos.forEach((_f: unknown, i: number) => {
+    // Solo se anuncia lo que el servidor luego puede servir (path propio).
+    if (resolverEvidencia(solicitudId, s, `cargotrans-paquete-${i + 1}`)) kinds.push(`cargotrans-paquete-${i + 1}`)
   })
   return kinds
 }
@@ -667,7 +627,7 @@ export function construirVistaComercio(solicitudId: string, s: FirebaseFirestore
     rechazo: (s.estado === 'rechazada' && s.rechazo?.visibleParaComercio === true)
       ? { motivoTexto: s.rechazo.motivoTexto, detalle: s.rechazo.detalle ?? undefined }
       : undefined,
-    evidenciasDisponibles: kindsDisponibles(s),
+    evidenciasDisponibles: kindsDisponibles(solicitudId, s),
   }
 }
 
@@ -707,7 +667,7 @@ export function construirVistaDestinatario(solicitudId: string, s: FirebaseFires
     fueraManagua: construirFueraManagua(s),
     timeline: construirTimeline(s),
     motorizado: construirMotorizado(s),
-    evidenciaEntregaDisponible: !!resolverEvidencia(s, 'entrega'),
+    evidenciaEntregaDisponible: !!resolverEvidencia(solicitudId, s, 'entrega'),
   }
 }
 
