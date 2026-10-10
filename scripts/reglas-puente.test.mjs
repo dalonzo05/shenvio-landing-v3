@@ -31,9 +31,9 @@ const aCRLF = (s) => aLF(s).replace(/\n/g, '\r\n')
  * en el mismo commit que las cambia.
  */
 const HASH = {
-  finalFirestore: 'c3285ae7414163d77ad5ccac5f08742a194a8ffcb29e90c14ff7ec08501880d4',
+  finalFirestore: '714c8b6c933f24e5430c71939bd62a7324eb5235c9f85101b94384c324439e9b',
   finalStorage: '36b6db5792dec78ddc2e2cb2801224ed94afb551f021894f4e79480ce7239e41',
-  puenteFirestore: '6b9d1b9b2b2a93e1aa67b04aeb0bc7f0a65423910ed8774cdbcf1fe101f8add8',
+  puenteFirestore: '5ceb58c8c2ff489f535d94e39019c70533a57b7d89de553fe6a2c43b5e982cf0',
   puenteStorage: 'bc861893b69939c70eac9d4fd61dbe7d95f81af8dda145c790ea81ac2d786522',
 }
 
