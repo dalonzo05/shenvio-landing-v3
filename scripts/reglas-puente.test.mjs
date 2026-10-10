@@ -31,10 +31,10 @@ const aCRLF = (s) => aLF(s).replace(/\n/g, '\r\n')
  * en el mismo commit que las cambia.
  */
 const HASH = {
-  finalFirestore: '9cc515a26600e0b7f1635d27a3c7d71a1b3f361ebb20f4ec9470a1f8a01242c2',
-  finalStorage: 'f66904c97c0d335197fb758fe4b44760a00e98f70bcec1a8f06f516812173389',
-  puenteFirestore: '357e972aed5414233b22882979d3963a839f692ecc8d67993bcfb9ca3cd36f1b',
-  puenteStorage: '374cbec93a2769d194e76ab082dacc3a1c66861206f480426a44385dd034b876',
+  finalFirestore: 'c3285ae7414163d77ad5ccac5f08742a194a8ffcb29e90c14ff7ec08501880d4',
+  finalStorage: '36b6db5792dec78ddc2e2cb2801224ed94afb551f021894f4e79480ce7239e41',
+  puenteFirestore: '6b9d1b9b2b2a93e1aa67b04aeb0bc7f0a65423910ed8774cdbcf1fe101f8add8',
+  puenteStorage: 'bc861893b69939c70eac9d4fd61dbe7d95f81af8dda145c790ea81ac2d786522',
 }
 
 /** Las Rules finales tal como las guarda git (LF), sin depender del working tree. */
