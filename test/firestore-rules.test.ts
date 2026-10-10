@@ -286,6 +286,7 @@ test('J3 · el comercio sube su boucher, y no puede tocar el codigo', async () =
       ...ordenBase({ estado: 'entregado' }),
       codigo: 'SH-1002',
       secuencia: 1002,
+      pagoDelivery: { quienPaga: 'transferencia' },
       cobroDelivery: { estado: 'pendiente', monto: 80 },
     })
   })
@@ -4159,7 +4160,7 @@ test('FIN1C-R9 · lo legítimo del cliente sigue: subir, reemplazar y quitar el 
   }))
   // El comprobante del COMERCIO también sigue (su regla propia).
   await env.withSecurityRulesDisabled(async (ctx) => {
-    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordC9c'), { ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0105', secuencia: 105 })
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'ordC9c'), { ...ordenBase({ estado: 'entregado' }), codigo: 'SH-0105', secuencia: 105, pagoDelivery: { quienPaga: 'transferencia' } })
   })
   await assertSucceeds(updateDoc(ordenRef(UID_COMERCIO, 'ordC9c'), {
     'cobroDelivery.estado': 'en_revision_deposito',
@@ -5496,4 +5497,63 @@ test('RET-9 · estructura: el sello de retiro lo protege la MISMA función en la
   const f = reglas.slice(reglas.indexOf('function historialEntregadoIntacto()'))
   assert.match(f.slice(0, f.indexOf('\n      }\n')), /'retiradoAt', null\) == nh\.get\('retiradoAt', null\)/)
   assert.equal((reglas.match(/&& historialEntregadoIntacto\(\)/g) ?? []).length, 2)
+})
+
+// ─── A5-02 · RBP · el comercio solo sube boucher donde el contrato de la orden lo pide ─────────────────
+// El contrato sale de pagoDelivery.quienPaga / tipoCliente (que el comercio no puede editar después de crear la orden), NO de
+// cobroDelivery.quienPaga, que es informativo.
+async function sembrarOrdenBoucher(id: string, extra: Record<string, unknown> = {}) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', id), {
+      ...ordenBase({ estado: 'entregado' }), codigo: 'SH-' + id, secuencia: 700,
+      confirmacion: { precioFinalCordobas: 100, confirmadoPorUid: 'srv' },
+      pagoDelivery: { quienPaga: 'transferencia' },
+      ...extra,
+    })
+  })
+}
+const subirBoucherComercio = (id: string, path = `evidencias/${id}/delivery_boucher_comercio.jpg`) => updateDoc(doc(como(UID_COMERCIO), 'solicitudes_envio', id), {
+  'cobroDelivery.estado': 'en_revision_deposito',
+  'cobroDelivery.boucherComercio': { url: 'https://example.test/c.jpg', path, at: serverTimestamp() },
+  'cobroDelivery.boucherVigente': 'comercio',
+  updatedAt: serverTimestamp(),
+})
+
+test('RBP-1 · orden donde paga el comercio por transferencia ⇒ boucher ALLOW (antes de entregar y entregada)', async () => {
+  await sembrarOrdenBoucher('rbp1')
+  await assertSucceeds(subirBoucherComercio('rbp1'))
+  await sembrarOrdenBoucher('rbp1b', { estado: 'en_camino_entrega' })
+  await assertSucceeds(subirBoucherComercio('rbp1b'))
+})
+
+test('RBP-2 · orden donde paga el cliente (entrega / recoleccion) ⇒ boucher del comercio DENY, aunque cobroDelivery.quienPaga diga transferencia', async () => {
+  for (const quienPaga of ['entrega', 'recoleccion']) {
+    await sembrarOrdenBoucher('rbp2' + quienPaga, { pagoDelivery: { quienPaga }, cobroDelivery: { estado: 'pendiente', quienPaga: 'transferencia' } })
+    await assertFails(subirBoucherComercio('rbp2' + quienPaga))
+  }
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'solicitudes_envio', 'rbp2sin'), { ...ordenBase({ estado: 'entregado' }), codigo: 'SH-rbp2sin', secuencia: 701 })
+  })
+  await assertFails(subirBoucherComercio('rbp2sin'))
+})
+
+test('RBP-3 · orden de crédito semanal ⇒ boucher del comercio DENY (A2.5: el crédito se acumula por semana, no se cobra por orden)', async () => {
+  await sembrarOrdenBoucher('rbp3a', { tipoCliente: 'credito', pagoDelivery: { quienPaga: 'credito_semanal' } })
+  await assertFails(subirBoucherComercio('rbp3a'))
+  await sembrarOrdenBoucher('rbp3b', { pagoDelivery: { quienPaga: 'credito_semanal' } })
+  await assertFails(subirBoucherComercio('rbp3b'))
+  await sembrarOrdenBoucher('rbp3c', { tipoCliente: 'credito' })
+  await assertFails(subirBoucherComercio('rbp3c'))
+})
+
+test('RBP-4 · orden de otro comercio ⇒ DENY', async () => {
+  await sembrarOrdenBoucher('rbp4', { comercioId: 'otro', userId: 'otro', comercioUid: 'otro' })
+  await assertFails(subirBoucherComercio('rbp4'))
+})
+
+test('RBP-5 · path incorrecto (de otra orden o del gestor) ⇒ DENY', async () => {
+  await sembrarOrdenBoucher('rbp5')
+  await assertFails(subirBoucherComercio('rbp5', 'evidencias/otra/delivery_boucher_comercio.jpg'))
+  await assertFails(subirBoucherComercio('rbp5', 'evidencias/rbp5/delivery_boucher_gestor.jpg'))
+  await assertSucceeds(subirBoucherComercio('rbp5'))
 })

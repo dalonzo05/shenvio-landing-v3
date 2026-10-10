@@ -1472,6 +1472,13 @@ service cloud.firestore {
           && !('boucherComercio' in ant)
           && !('boucherGestor' in ant)
           && !('boucherVigente' in ant);
+        // A5-02 — el boucher solo tiene sentido en una orden cuyo contrato de pago es transferencia del comercio. El contrato sale de campos que
+        // este perímetro NO deja tocar (allowlist de raíz: solo cobroDelivery y updatedAt): pagoDelivery.quienPaga y tipoCliente, no el
+        // cobroDelivery.quienPaga que es informativo. Una orden donde paga el cliente ('entrega'/'recoleccion') o de crédito semanal no admite
+        // boucher del comercio: dejaría un 'en_revision_deposito' sin sentido, y el crédito se acumula por semana, nunca por orden (A2.5).
+        let pd = resource.data.get('pagoDelivery', {}) is map ? resource.data.get('pagoDelivery', {}) : {};
+        let ordenAdmiteBoucher = pd.get('quienPaga', '') == 'transferencia'
+          && resource.data.get('tipoCliente', '') != 'credito';
         let primeraCarga = (estadoAnt == '' || estadoAnt == 'pendiente') && sinRastro;
         // Reemplazo: solo sobre un comprobante propio, completo y VIGENTE. Si
         // el gestor ya corrigió, el comercio no reemplaza nada.
@@ -1490,6 +1497,7 @@ service cloud.firestore {
           // Defensa en profundidad: el submapa del gestor idéntico, no solo
           // "no listado como afectado".
           && nue.get('boucherGestor', null) == ant.get('boucherGestor', null)
+          && ordenAdmiteBoucher
           && (primeraCarga || reemplazoPropio)
           // Estado destino fijo: el comercio no elige a dónde va la orden.
           && nue.get('estado', '') == 'en_revision_deposito'

@@ -46,12 +46,10 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { FieldValue } from 'firebase-admin/firestore';
-import { semanaKeyDeFecha } from './cobro-semanal';
+import { construirCobroDelivery } from './cobro-delivery-entrega';
 import { exigirCreditoAutorizado } from './credito-elegibilidad';
-import { calcularMontoCobroDelivery } from './cobro-delivery-monto';
 import { responderAsignacionEnTransaccion, leerProtocoloRespuesta } from './asignacion-respuesta';
 import {
-  resolverFormaPago,
   permiteCierreSinConfirmaciones,
   calcularFlagsConfirmacion,
 } from './medio-pago';
@@ -295,90 +293,6 @@ const calcularShowFlags = (
   dep: DepositoInfo,
   nuevo: NuevoEstadoTransicion,
 ) => calcularFlagsConfirmacion(orden, dep, nuevo);
-
-/** cobroDelivery — misma fórmula que executeCambiar() en la transición a 'entregado'. */
-function construirCobroDelivery(
-  orden: FirebaseFirestore.DocumentData,
-  deliveryAnswer: RespuestaCobro | null,
-  productoAnswer: RespuestaCobro | null,
-): Record<string, unknown> {
-  // FIN-1C-A: la matemática del monto vive en cobro-delivery-monto.ts (la reutilizan las callables de cobro).
-  const productoNoRecibido = productoAnswer
-    ? productoAnswer.recibio === false
-    : orden.cobrosMotorizado?.producto?.recibio === false;
-  const { precioDelivery, quienPaga, esCredito, aplicaFaltante, cubiertoPorDeposito, faltanteDelivery, monto } =
-    calcularMontoCobroDelivery(orden, productoNoRecibido);
-  const esRecoleccion = quienPaga === 'recoleccion';
-  const motorizadoYaCobro =
-    deliveryAnswer?.recibio === true ||
-    (esRecoleccion && orden.cobrosMotorizado?.delivery?.recibio === true);
-
-  // ── B1.2: faltante parcial del delivery ──────────────────────────────────
-  //
-  // Cuando el delivery se deduce del cobro contra entrega, el motorizado no
-  // recauda el delivery aparte: sale del mismo efectivo del producto. Si ese
-  // efectivo no alcanza —o si declaró no haberlo recibido— el delivery queda
-  // cubierto solo en parte, y la diferencia NO puede exigírsele: no la tiene.
-  //
-  // Este es el único momento en que el faltante es factualmente cierto y hay
-  // una transacción abierta que ya escribe cobroDelivery. Se calcula acá para
-  // que nazca atómico con la confirmación del dinero recibido, sin agregar un
-  // segundo write ni un documento aparte (ver B1.2B, secciones 7-10).
-  const patch: Record<string, unknown> = {
-    // `monto` es el PENDIENTE real de cobro, no el precio de lista: es lo que
-    // leen Cobros y la vista del comercio. Sin deducción no cambia nada.
-    monto,
-    tipoCliente: esCredito ? 'credito' : 'contado',
-    quienPaga,
-    estado: precioDelivery === 0 ? 'no_cobrar' : esCredito ? 'pendiente' : motorizadoYaCobro ? 'pagado' : 'pendiente',
-    registradoAt: FieldValue.serverTimestamp(),
-  };
-
-  if (aplicaFaltante) {
-    // Trazabilidad: sin estos dos campos no habría forma de distinguir un
-    // delivery de 30 de uno de 130 con 100 ya cubiertos.
-    // Invariante: monto + cubiertoPorDeposito === montoDelivery.
-    patch.montoDelivery = precioDelivery;
-    patch.cubiertoPorDeposito = cubiertoPorDeposito;
-    // Con deducción el motorizado nunca recauda el delivery aparte, así que
-    // 'pagado' no aplica: o quedó cubierto por el CE (nada que cobrar) o
-    // falta una parte. No se inventa una deuda de 0.
-    patch.estado = faltanteDelivery > 0 ? 'pendiente' : 'pagado';
-  }
-  // semanaKey: se usa la fecha/hora del servidor en el momento de esta
-  // llamada, igual que el cliente usaba `new Date()` — pero anclado a
-  // America/Managua (semanaKeyDeFecha, ya usado por
-  // acumularCobroSemanalPorOrden) en vez de la zona horaria del navegador.
-  // Es un campo informativo del documento, no la clave de agrupación real
-  // de cobros_semanales (esa la calcula acumularCobroSemanalPorOrden por su
-  // cuenta a partir de entregadoAt) — anclarlo a Managua acá es una mejora
-  // estricta, no un cambio de contrato.
-  if (esCredito) {
-    patch.semanaKey = semanaKeyDeFecha(new Date());
-  }
-
-  // ── B2-PAGO-MEDIO: con qué se pagó ───────────────────────────────────────
-  //
-  // El motorizado no declara la forma de pago; se deriva del flujo, que ya
-  // está calculado arriba. `motorizadoYaCobro` solo puede ser true en un
-  // cobro FÍSICO: con crédito o con quienPaga 'transferencia',
-  // calcularDeposito() pone tieneDelivery = false y el modal del cobro ni
-  // siquiera se abre. Confirmar que recibió en ese contexto es la misma
-  // evidencia que ya obliga a depositar, así que afirma efectivo sin inferir.
-  //
-  // La transferencia NO se escribe acá: nace del comprobante que confirma el
-  // gestor en Cobros. Un motivo del tipo "indicó que pagará por transferencia"
-  // explica por qué no hubo efectivo — no confirma un pago.
-  const formaPago = resolverFormaPago({
-    formaPagoExistente: orden.cobroDelivery?.formaPago,
-    motorizadoYaCobro,
-    esCredito,
-    esPorTransferencia: quienPaga === 'transferencia',
-  });
-  if (formaPago) patch.formaPago = formaPago;
-
-  return patch;
-}
 
 export const confirmarTransicionConCobro = onCall<ConfirmarTransicionData>(async (request) => {
   const db = admin.firestore();

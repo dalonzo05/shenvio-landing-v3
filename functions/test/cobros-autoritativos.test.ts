@@ -694,9 +694,11 @@ test('FIN1C-S10 · race: dos pagos que juntos exceden el saldo ⇒ el segundo ve
 
 test('FIN1C-K1 · la fórmula del monto vive en UN módulo y la usan la entrega y las callables (sin copia)', () => {
   const src = (f: string) => readFileSync(join(__dirname, '..', '..', 'src', f), 'utf8');
-  assert.ok(src('motorizado-transiciones.ts').includes("from './cobro-delivery-monto'"));
+  // A5-02: construirCobroDelivery vive en cobro-delivery-entrega.ts (la callable lo importa); la fórmula sigue sin copia.
+  assert.ok(src('cobro-delivery-entrega.ts').includes("from './cobro-delivery-monto'"));
+  assert.ok(src('motorizado-transiciones.ts').includes("from './cobro-delivery-entrega'"));
   assert.ok(src('registrar-cobro-delivery.ts').includes('calcularMontoCobroDelivery'));
-  assert.ok(!/Math\.max\(0, precioDelivery/.test(src('motorizado-transiciones.ts')), 'la matemática del faltante ya no está duplicada');
+  assert.ok(!/Math\.max\(0, precioDelivery/.test(src('cobro-delivery-entrega.ts')) && !/Math\.max\(0, precioDelivery/.test(src('motorizado-transiciones.ts')), 'la matemática del faltante ya no está duplicada');
   assert.ok(/Math\.max\(0, precioDelivery/.test(src('cobro-delivery-monto.ts')));
 });
 
