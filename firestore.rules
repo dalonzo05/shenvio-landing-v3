@@ -1044,12 +1044,17 @@ service cloud.firestore {
                    'precioDesglose', 'tipoServicio', 'entregadoAt']);
       }
 
-      // FIN-1E — historial.entregadoAt (el respaldo de la fecha de entrega) no cambia ni se borra desde el cliente: ausente→valor, valor→otro y valor→ausente
-      // son todos DENY. El resto de historial (rechazadaAt, canceladaAt…) sigue siendo escribible por su flujo.
+      // FIN-1E / A4-04 — los sellos de transición del historial (entregadoAt: la semana de liquidación; retiradoAt: el sello irreversible del retiro que lee
+      // storage.rules para no dejar reescribir retiro.jpg) no cambian ni se borran desde el cliente: ausente→valor, valor→otro y valor→ausente son todos DENY.
+      // Los fija SOLO confirmarTransicionConCobro (Admin SDK, que no pasa por Rules). El resto de historial (rechazadaAt, canceladaAt…) sigue siendo escribible
+      // por su flujo. `historial` se lee UNA vez por lado (presupuesto de expresiones). Aplica a gestor, admin y motorizado: son las únicas ramas que tocan historial.
       function historialEntregadoIntacto() {
         let a = resource.data.get('historial', {});
         let n = request.resource.data.get('historial', {});
-        return (a is map ? a : {}).get('entregadoAt', null) == (n is map ? n : {}).get('entregadoAt', null);
+        let ah = a is map ? a : {};
+        let nh = n is map ? n : {};
+        return ah.get('entregadoAt', null) == nh.get('entregadoAt', null)
+          && ah.get('retiradoAt', null) == nh.get('retiradoAt', null);
       }
 
       // FIN-1E — punteros de depósito de la orden. confirmado* son SOLO del servidor. El id de vínculo (storkhubDepositoId / comercioDepositoId) solo nace

@@ -22,7 +22,7 @@ import {
   assertFails,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing'
-import { doc, setDoc, updateDoc, deleteDoc, writeBatch, serverTimestamp } from 'firebase/firestore'
+import { doc, setDoc, updateDoc, deleteDoc, deleteField, writeBatch, serverTimestamp } from 'firebase/firestore'
 import { ref, uploadBytes, deleteObject, getBytes } from 'firebase/storage'
 import {
   camposCreacionDepositoMotorizado,
@@ -1471,6 +1471,54 @@ test('ST-FIN-2 · abono ya registrado (abonos[] llegó a N+1) ⇒ overwrite DENY
   const huerfano = idA4('saldoHuerfano')
   await plantar(pathAbono(huerfano, 0))
   await assertFails(subir(UID_GESTOR, pathAbono(huerfano, 0), jpeg(2048)))
+})
+
+// ─── A4-04 · P1-B: Storage sella por abonos.length; el SERVIDOR garantiza que un abono aplicado solo apunta a su N ───
+test('ST-ABP-9 · ciclo real de un abono: retry de abono_N antes de aplicarlo ⇒ ALLOW; al aplicarse (abonos.length = N+1) ese N queda sellado y el siguiente libre', finalesYPuente, async () => {
+  const s = idA4('saldo')
+  await env.withSecurityRulesDisabled(async (ctx) => { await setDoc(doc(ctx.firestore(), 'saldos_cargo_motorizado', s), { estado: 'pendiente', abonos: [] }) })
+  // N = abonos.length = 0: se sube, la callable falla (error incierto), se reintenta el MISMO abono_0.
+  await assertSucceeds(subir(UID_GESTOR, pathAbono(s, 0)))
+  await assertSucceeds(subir(UID_GESTOR, pathAbono(s, 0), jpeg(2048)))
+  await assertSucceeds(subir(UID_ADMIN, pathAbono(s, 0), jpeg(4096)))
+  // registrarAbonoDirecto (Admin SDK) aplica el abono 0: abonos.length pasa a 1.
+  await env.withSecurityRulesDisabled(async (ctx) => { await updateDoc(doc(ctx.firestore(), 'saldos_cargo_motorizado', s), { estado: 'abonado_parcial', abonos: [{ operacionId: 'op0', comprobantePath: pathAbono(s, 0) }] }) })
+  for (const uid of [UID_GESTOR, UID_ADMIN]) await assertFails(subir(uid, pathAbono(s, 0), jpeg(2048)))
+  await assertSucceeds(subir(UID_GESTOR, pathAbono(s, 1))) // el siguiente, libre
+  await assertSucceeds(subir(UID_GESTOR, pathAbono(s, 1), jpeg(2048)))
+})
+
+test('ST-ABP-9b · la combinación SERVER + SELLO: un abono_N solo se sella si el servidor lo registró en su N; el path que el servidor rechazó (abono_5 con length 0) sigue mutable porque NO respalda dinero', finalesYPuente, async () => {
+  const s = await saldoA4([])
+  await plantar(pathAbono(s, 5))
+  // Storage por sí solo lo ve reemplazable (abonos.length = 0)... y es correcto: registrarAbonoDirecto/confirmarPropuestaAbono
+  // rechazan ese path (functions/test: ABP-2, ABP-10, ABP-P4), así que ningún abono aplicado puede apuntar a él.
+  await assertSucceeds(subir(UID_GESTOR, pathAbono(s, 5), jpeg(2048)))
+  // Cuando abonos.length alcanza 1 con abono_0, solo abono_0 se sella; abono_5 sigue siendo un archivo sin dinero detrás.
+  await env.withSecurityRulesDisabled(async (ctx) => { await updateDoc(doc(ctx.firestore(), 'saldos_cargo_motorizado', s), { abonos: [{ operacionId: 'op0', comprobantePath: pathAbono(s, 0) }] }) })
+  await plantar(pathAbono(s, 0))
+  await assertFails(subir(UID_GESTOR, pathAbono(s, 0), jpeg(2048)))
+})
+
+// ─── A4-04 · P1-A: historial.retiradoAt irreversible (Firestore + Storage extremo a extremo) ───
+test('ST-RET-1 · orden retirada: el gestor rebota el estado (Firestore ALLOW) y retiro.jpg SIGUE sellado en Storage; intentar quitar retiradoAt ⇒ Firestore DENY y retiro.jpg sigue sellado', finalesYPuente, async () => {
+  const retiradoAt = new Date('2026-09-30T14:00:00Z')
+  // (a) rebote que conserva el sello
+  const o = await ordenA4('retirado', { historial: { retiradoAt } })
+  await plantar(pathEv(o, 'retiro.jpg'))
+  await assertSucceeds(updateDoc(doc(firestoreDe(UID_GESTOR), 'solicitudes_envio', o), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() }))
+  for (const uid of [UID_GESTOR, UID_ADMIN, UID_MOTO]) await assertFails(subir(uid, pathEv(o, 'retiro.jpg'), jpeg(2048)))
+  // (b) rebote + quitar el sello: Firestore lo niega, el estado no cambia y Storage sigue sellado
+  for (const uid of [UID_GESTOR, UID_ADMIN]) {
+    const o2 = await ordenA4('retirado', { historial: { retiradoAt, creadaAt: retiradoAt } })
+    await plantar(pathEv(o2, 'retiro.jpg'))
+    const r = doc(firestoreDe(uid), 'solicitudes_envio', o2)
+    await assertFails(updateDoc(r, { estado: 'confirmada', asignacion: null, 'historial.retiradoAt': deleteField(), updatedAt: serverTimestamp() }))
+    await assertFails(updateDoc(r, { estado: 'confirmada', asignacion: null, historial: { creadaAt: retiradoAt }, updatedAt: serverTimestamp() }))
+    await assertFails(updateDoc(r, { 'historial.retiradoAt': deleteField() }))
+    await assertFails(subir(UID_GESTOR, pathEv(o2, 'retiro.jpg'), jpeg(2048)))
+    await assertFails(subir(UID_MOTO, pathEv(o2, 'retiro.jpg'), jpeg(2048)))
+  }
 })
 
 const pathLiq = (id: string) => `liquidaciones/${id}/comprobante.pdf`

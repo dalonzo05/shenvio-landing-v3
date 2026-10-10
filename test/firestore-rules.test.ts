@@ -5378,3 +5378,122 @@ test('FR-PATH-7 · RESIDUAL documentado: evidenciasCargotrans.fotos[] no se vali
   }))
   // Si algún día las Rules pudieran validarlo, este test debe pasar a assertFails.
 })
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A4-04 · P1-A — historial.retiradoAt es server-owned e inmutable desde el cliente
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// storage.rules usa historial.retiradoAt como el sello IRREVERSIBLE del retiro (retiro.jpg): el estado puede rebotar
+// (gestor/admin: retirado → confirmada), el sello no. Lo escribe SOLO confirmarTransicionConCobro con el Admin SDK
+// (functions/src/motorizado-transiciones.ts: `historial.${nuevo}At`), que no pasa por Rules; el cliente ni lo crea, ni
+// lo cambia, ni lo borra. Mismo contrato que historial.entregadoAt (FIN-1E).
+const TS_RETIRO = Timestamp.fromDate(new Date('2026-09-30T14:00:00Z'))
+const TS_RETIRO_OTRO = Timestamp.fromDate(new Date('2026-10-05T10:00:00Z'))
+const sembrarRetirada = (id: string, extra: Record<string, unknown> = {}) => sembrarOrdenFin1e(id, {
+  estado: 'retirado', entregadoAt: undefined, historial: { creadaAt: TS_ENTREGA, retiradoAt: TS_RETIRO }, ...extra,
+})
+const retiradoAtDe = async (id: string) => ((await leerDoc('solicitudes_envio', id)) as { historial?: { retiradoAt?: unknown } }).historial?.retiradoAt
+
+test('RET-1 · flujo legítimo SIN retiradoAt sigue: motorizado asignada→en_camino_retiro; el servidor fija retiradoAt (Admin SDK) y luego retirado→en_camino_entrega y el resto del historial siguen ⇒ ALLOW; el cliente no lo crea ⇒ DENY', async () => {
+  const id = await sembrarOrdenFin1e('ret1', { estado: 'asignada', entregadoAt: undefined, historial: { creadaAt: TS_ENTREGA } })
+  await assertSucceeds(updateDoc(ordenRef(UID_MOTO, id), { estado: 'en_camino_retiro', updatedAt: serverTimestamp(), 'historial.en_camino_retiroAt': serverTimestamp() }))
+  // Ningún cliente crea el sello: ausente → valor ⇒ DENY (staff y motorizado).
+  for (const uid of [...STAFF_UIDS, UID_MOTO]) {
+    await assertFails(updateDoc(ordenRef(uid, id), { 'historial.retiradoAt': serverTimestamp() }))
+    await assertFails(updateDoc(ordenRef(uid, id), { 'historial.retiradoAt': TS_RETIRO }))
+  }
+  assert.equal(await retiradoAtDe(id), undefined)
+  // El servidor (Admin SDK = Rules deshabilitadas) fija estado + sello juntos.
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'solicitudes_envio', id), { estado: 'retirado', 'historial.retiradoAt': TS_RETIRO })
+  })
+  assert.deepEqual(await retiradoAtDe(id), TS_RETIRO)
+  // Lo legítimo posterior del cliente no se rompe.
+  await assertSucceeds(updateDoc(ordenRef(UID_MOTO, id), { estado: 'en_camino_entrega', updatedAt: serverTimestamp(), 'historial.en_camino_entregaAt': serverTimestamp() }))
+  for (const uid of STAFF_UIDS) await assertSucceeds(updateDoc(ordenRef(uid, id), { 'historial.nota': 'otro campo del historial ' + uid, updatedAt: serverTimestamp() }))
+  assert.deepEqual(await retiradoAtDe(id), TS_RETIRO)
+})
+
+test('RET-2 · gestor intenta BORRAR historial.retiradoAt ⇒ DENY (dotted, mapa entero, historial null)', async () => {
+  const id = await sembrarRetirada('ret2')
+  await assertFails(updateDoc(ordenRef(UID_GESTOR, id), { 'historial.retiradoAt': deleteField() }))
+  await assertFails(updateDoc(ordenRef(UID_GESTOR, id), { historial: { creadaAt: TS_ENTREGA } }))      // reconstruir el historial sin el campo
+  await assertFails(updateDoc(ordenRef(UID_GESTOR, id), { historial: deleteField() }))
+  await assertFails(updateDoc(ordenRef(UID_GESTOR, id), { historial: null }))
+  assert.deepEqual(await retiradoAtDe(id), TS_RETIRO)
+})
+
+test('RET-3 · admin client-side intenta borrar historial.retiradoAt ⇒ DENY (sin excepción por rol)', async () => {
+  const id = await sembrarRetirada('ret3')
+  await assertFails(updateDoc(ordenRef(UID_ADMIN, id), { 'historial.retiradoAt': deleteField() }))
+  await assertFails(updateDoc(ordenRef(UID_ADMIN, id), { historial: { creadaAt: TS_ENTREGA } }))
+  await assertFails(updateDoc(ordenRef(UID_ADMIN, id), { historial: deleteField() }))
+  assert.deepEqual(await retiradoAtDe(id), TS_RETIRO)
+})
+
+test('RET-4 · cambiar el timestamp de historial.retiradoAt ⇒ DENY (gestor, admin y motorizado; también el mapa entero con otro valor)', async () => {
+  const id = await sembrarRetirada('ret4')
+  for (const uid of [...STAFF_UIDS, UID_MOTO]) {
+    await assertFails(updateDoc(ordenRef(uid, id), { 'historial.retiradoAt': TS_RETIRO_OTRO }))
+    await assertFails(updateDoc(ordenRef(uid, id), { 'historial.retiradoAt': serverTimestamp() }))
+    await assertFails(updateDoc(ordenRef(uid, id), { historial: { creadaAt: TS_ENTREGA, retiradoAt: TS_RETIRO_OTRO } }))
+  }
+  assert.deepEqual(await retiradoAtDe(id), TS_RETIRO)
+})
+
+test('RET-5 · poner historial.retiradoAt en null ⇒ DENY (gestor, admin y motorizado)', async () => {
+  const id = await sembrarRetirada('ret5')
+  for (const uid of [...STAFF_UIDS, UID_MOTO]) {
+    await assertFails(updateDoc(ordenRef(uid, id), { 'historial.retiradoAt': null }))
+    await assertFails(updateDoc(ordenRef(uid, id), { historial: { creadaAt: TS_ENTREGA, retiradoAt: null } }))
+  }
+  assert.deepEqual(await retiradoAtDe(id), TS_RETIRO)
+})
+
+test('RET-6 · rebotar el estado MANTENIENDO retiradoAt sigue permitido (el sello sobrevive al rebote) ⇒ ALLOW', async () => {
+  for (const uid of STAFF_UIDS) {
+    const id = await sembrarRetirada('ret6_' + uid)
+    await assertSucceeds(updateDoc(ordenRef(uid, id), { estado: 'confirmada', asignacion: null, updatedAt: serverTimestamp() }))
+    const d = (await leerDoc('solicitudes_envio', id)) as { estado: string }
+    assert.equal(d.estado, 'confirmada')
+    assert.deepEqual(await retiradoAtDe(id), TS_RETIRO)
+  }
+  // (Que con ese sello Storage mantiene retiro.jpg sellado tras el rebote lo prueba la suite de Storage: SV-RET-1.)
+})
+
+test('RET-7 · rebotar el estado Y quitar retiradoAt (en el mismo update) ⇒ DENY; el estado y el sello no cambian', async () => {
+  for (const uid of STAFF_UIDS) {
+    const id = await sembrarRetirada('ret7_' + uid)
+    await assertFails(updateDoc(ordenRef(uid, id), { estado: 'confirmada', asignacion: null, 'historial.retiradoAt': deleteField(), updatedAt: serverTimestamp() }))
+    await assertFails(updateDoc(ordenRef(uid, id), { estado: 'confirmada', asignacion: null, historial: { creadaAt: TS_ENTREGA }, updatedAt: serverTimestamp() }))
+    await assertFails(updateDoc(ordenRef(uid, id), { estado: 'confirmada', asignacion: null, 'historial.retiradoAt': null, updatedAt: serverTimestamp() }))
+    const d = (await leerDoc('solicitudes_envio', id)) as { estado: string }
+    assert.equal(d.estado, 'retirado')
+    assert.deepEqual(await retiradoAtDe(id), TS_RETIRO)
+  }
+  // El motorizado, que sí mueve retirado → en_camino_entrega, tampoco puede soltar el sello en esa transición.
+  const m = await sembrarRetirada('ret7_moto')
+  await assertFails(updateDoc(ordenRef(UID_MOTO, m), { estado: 'en_camino_entrega', 'historial.retiradoAt': deleteField(), updatedAt: serverTimestamp() }))
+  await assertFails(updateDoc(ordenRef(UID_MOTO, m), { estado: 'en_camino_entrega', historial: { creadaAt: TS_ENTREGA }, updatedAt: serverTimestamp() }))
+  assert.deepEqual(await retiradoAtDe(m), TS_RETIRO)
+})
+
+test('RET-8 · historial.entregadoAt conserva su contrato (FIN-1E) junto al nuevo: ausente→valor, valor→otro y valor→ausente ⇒ DENY; el resto del historial ⇒ ALLOW', async () => {
+  const id = await sembrarOrdenFin1e('ret8', { historial: { creadaAt: TS_ENTREGA, retiradoAt: TS_RETIRO, entregadoAt: TS_ENTREGA } })
+  const sin = await sembrarOrdenFin1e('ret8b', { historial: { creadaAt: TS_ENTREGA, retiradoAt: TS_RETIRO } })
+  for (const uid of STAFF_UIDS) {
+    await assertFails(updateDoc(ordenRef(uid, sin), { 'historial.entregadoAt': serverTimestamp() }))
+    await assertFails(updateDoc(ordenRef(uid, id), { 'historial.entregadoAt': TS_RETIRO_OTRO }))
+    await assertFails(updateDoc(ordenRef(uid, id), { 'historial.entregadoAt': deleteField() }))
+    await assertSucceeds(updateDoc(ordenRef(uid, id), { 'historial.nota': 'control ' + uid, updatedAt: serverTimestamp() }))
+  }
+  assert.deepEqual((await leerDoc('solicitudes_envio', id) as { historial: { entregadoAt: unknown } }).historial.entregadoAt, TS_ENTREGA)
+  assert.deepEqual(await retiradoAtDe(id), TS_RETIRO)
+})
+
+test('RET-9 · estructura: el sello de retiro lo protege la MISMA función en las dos ramas que tocan historial (gestor/admin y motorizado)', () => {
+  const reglas = readFileSync('firestore.rules', 'utf8').replace(/\r\n/g, '\n')
+  const f = reglas.slice(reglas.indexOf('function historialEntregadoIntacto()'))
+  assert.match(f.slice(0, f.indexOf('\n      }\n')), /'retiradoAt', null\) == nh\.get\('retiradoAt', null\)/)
+  assert.equal((reglas.match(/&& historialEntregadoIntacto\(\)/g) ?? []).length, 2)
+})

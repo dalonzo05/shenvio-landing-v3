@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DocumentData } from 'firebase-admin/firestore';
 import {
-  registrarAbonoDirectoCore, validarPeticionAbono, ESTADOS_ABONABLES,
+  registrarAbonoDirectoCore, validarPeticionAbono, ESTADOS_ABONABLES, esComprobanteAbonoEsperado,
   type DepsAbono, type TxAbono,
 } from '../src/abono-directo';
 
@@ -470,4 +470,109 @@ test('F4C-AT1 · el adaptador escribe saldo y movimiento SOLO con tx.* dentro de
   assert.ok(!nucleo.includes('registrarMovimiento') && !nucleo.includes('addDoc') && !nucleo.includes('arrayUnion'));
   assert.ok(nucleo.includes('tx.updateSaldo(') && nucleo.includes('tx.crearMovimiento(') && nucleo.includes('tx.updateIntencion('), 'saldo, ledger e intención en la MISMA transacción');
   assert.match(callable, /updateIntencion: \(id, campos\) => \{ tx\.update\(db\.collection\('intenciones_abono_directo'\)\.doc\(id\), campos\); \}/);
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A4-04 · P1-B — el path del comprobante lo autoriza el SERVIDOR (N = abonos.length releído)
+// ═════════════════════════════════════════════════════════════════════════════
+const abono = (n: number) => ({ monto: 10, metodoAbono: 'ajuste_manual', operacionId: OP(900 + n), movimientoId: 'abono_' + OP(900 + n) });
+const transf = (path: string, op = OP(1)) => ({ operacionId: op, metodoAbono: 'transferencia', monto: 10, comprobanteUrl: 'https://ex.test/c.jpg', comprobantePath: path });
+
+test('ABP-1 · N esperado 0 + abono_0.jpg ⇒ ALLOW (helper y callable); el path queda en el abono', async () => {
+  assert.equal(esComprobanteAbonoEsperado('s1', 0, 'saldos/s1/abono_0.jpg'), true);
+  const w = mundo(); sembrar(w);
+  assert.equal((await abonar(w, 'g1', transf('saldos/s1/abono_0.jpg'))).resultado, 'aplicado');
+  assert.equal((w.saldo().abonos as Doc[])[0].comprobantePath, 'saldos/s1/abono_0.jpg');
+});
+
+test('ABP-2 · N esperado 0 + abono_5.jpg ⇒ REJECT failed-precondition y CERO efecto financiero (saldo, abonos, ledger, monto, estado, intención)', async () => {
+  assert.equal(esComprobanteAbonoEsperado('s1', 0, 'saldos/s1/abono_5.jpg'), false);
+  const w = mundo(); sembrar(w);
+  w.put('intenciones_abono_directo/' + OP(1), { saldoId: 's1', monto: 10, metodoAbono: 'transferencia', actorUid: 'g1', actorRol: 'gestor', estado: 'preparada' });
+  const antes = w.snapshot();
+  const intencionAntes = JSON.stringify(w.intencion(OP(1)));
+  await assert.rejects(abonar(w, 'g1', transf('saldos/s1/abono_5.jpg')), codigo('failed-precondition', 'comprobante_path_invalido'));
+  assert.equal(w.snapshot(), antes, 'saldo, abonos[], movimientos y estado intactos');
+  assert.equal(JSON.stringify(w.intencion(OP(1))), intencionAntes, 'la intención sigue preparada: el retry con el path correcto es posible');
+  assert.equal(w.escrituras, 0);
+  assert.equal(w.saldo().saldoPendiente, 100);
+  assert.equal(w.saldo().estado, 'pendiente');
+  assert.deepEqual(w.saldo().abonos, []);
+  assert.equal(w.movimientos().length, 0);
+  assert.equal((await abonar(w, 'g1', transf('saldos/s1/abono_0.jpg'))).resultado, 'aplicado');
+});
+
+test('ABP-3..7 · otro saldo, subcarpeta, traversal, basename arbitrario y extensión incorrecta ⇒ REJECT y 0 efecto', async () => {
+  const malos = [
+    'saldos/s2/abono_0.jpg',             // ABP-3 otro saldo
+    'saldos/s1/x/abono_0.jpg',           // ABP-4 subcarpeta
+    'saldos/s1/propuestas/p1/comprobante.jpg',
+    'saldos/s1/../s2/abono_0.jpg',       // ABP-5 traversal
+    'saldos/s1/abono_0.jpg/../abono_0.jpg',
+    'saldos/s1/foto.jpg',                // ABP-6 basename arbitrario
+    'saldos/s1/abono_.jpg', 'saldos/s1/abono_00.jpg', 'saldos/s1/abono_-1.jpg', 'saldos/s1/abono_0 .jpg', 'saldos/s1/ABONO_0.jpg',
+    'saldos/s1/abono_0.png',             // ABP-7 extensión
+    'saldos/s1/abono_0.jpg.jpg', 'saldos/s1/abono_0', 'saldos/s1/abono_0.jpeg',
+    '/saldos/s1/abono_0.jpg', 'saldos/s1//abono_0.jpg', 'depositos/s1/abono_0.jpg', 'evidencias/o1/retiro.jpg',
+  ];
+  for (const m of malos) {
+    assert.equal(esComprobanteAbonoEsperado('s1', 0, m), false, m);
+    const w = mundo(); sembrar(w);
+    const antes = w.snapshot();
+    // Algunos los frena ya la validación de forma (invalid-argument); el resto, la autoridad del índice (failed-precondition). Ambos: 0 efecto.
+    await assert.rejects(abonar(w, 'g1', transf(m)), (e: unknown) => ['invalid-argument', 'failed-precondition'].includes((e as { code?: string }).code ?? ''), m);
+    assert.equal(w.snapshot(), antes, 'sin efectos: ' + m);
+    assert.equal(w.escrituras, 0);
+  }
+  for (const raro of [undefined, null, 5, {}, ['saldos/s1/abono_0.jpg']]) assert.equal(esComprobanteAbonoEsperado('s1', 0, raro), false);
+  for (const n of [-1, 1.5, NaN, Infinity]) assert.equal(esComprobanteAbonoEsperado('s1', n, `saldos/s1/abono_${n}.jpg`), false);
+});
+
+test('ABP-8 · retry del MISMO N antes de que el abono se aplique ⇒ permitido (la escritura falló: nada quedó aplicado)', async () => {
+  const w = mundo(); sembrar(w);
+  w.hooks.fallarSi = (_op, ruta) => ruta === 'saldos_cargo_motorizado/s1';
+  await assert.rejects(abonar(w, 'g1', transf('saldos/s1/abono_0.jpg')), /fallo simulado/);
+  assert.deepEqual(w.saldo().abonos, []);
+  w.hooks.fallarSi = undefined;
+  assert.equal((await abonar(w, 'g1', transf('saldos/s1/abono_0.jpg'))).resultado, 'aplicado');
+  // ...y el retry del abono ya aplicado (mismo operacionId, mismo path) sigue siendo idempotente: no se re-valida contra el N nuevo.
+  const antes = w.snapshot();
+  assert.equal((await abonar(w, 'g1', transf('saldos/s1/abono_0.jpg'))).resultado, 'ya_aplicado');
+  assert.equal(w.snapshot(), antes);
+});
+
+test('ABP-10 · el cliente no decide N: con abonos.length = 2 solo abono_2 aplica; abono_0, abono_1, abono_3 y abono_5 ⇒ 0 efecto', async () => {
+  for (const n of [0, 1, 3, 5, 99]) {
+    const w = mundo(); sembrar(w, { saldo: { saldoPendiente: 80, estado: 'abonado_parcial', abonos: [abono(0), abono(1)] } });
+    const antes = w.snapshot();
+    await assert.rejects(abonar(w, 'g1', transf(`saldos/s1/abono_${n}.jpg`)), codigo('failed-precondition', 'comprobante_path_invalido'), 'abono_' + n);
+    assert.equal(w.snapshot(), antes);
+    assert.equal(w.escrituras, 0);
+  }
+  const w = mundo(); sembrar(w, { saldo: { saldoPendiente: 80, estado: 'abonado_parcial', abonos: [abono(0), abono(1)] } });
+  assert.equal((await abonar(w, 'g1', transf('saldos/s1/abono_2.jpg'))).resultado, 'aplicado');
+  assert.equal((w.saldo().abonos as Doc[]).length, 3);
+});
+
+test('ABP-CONC · otro abono ganó entre el upload y el registro ⇒ el path viejo se rechaza contra el saldo RELEÍDO; el nuevo N aplica', async () => {
+  const w = mundo(); sembrar(w, { saldo: { montoOriginal: 100, saldoPendiente: 100 } });
+  // A y B suben ambos abono_0.jpg (mismo abonos.length = 0); gana A.
+  await abonar(w, 'g1', transf('saldos/s1/abono_0.jpg', OP(1)));
+  const antes = w.snapshot();
+  await assert.rejects(abonar(w, 'g2', transf('saldos/s1/abono_0.jpg', OP(2))), codigo('failed-precondition', 'comprobante_path_invalido'));
+  assert.equal(w.snapshot(), antes, 'el perdedor no escribe nada financiero');
+  assert.equal((await abonar(w, 'g2', transf('saldos/s1/abono_1.jpg', OP(2)))).resultado, 'aplicado');
+  assert.deepEqual((w.saldo().abonos as Doc[]).map((a) => a.comprobantePath), ['saldos/s1/abono_0.jpg', 'saldos/s1/abono_1.jpg']);
+});
+
+test('ABP-SIN · sin comprobantePath (ajuste_manual) el abono aplica igual: la regla solo ata el path cuando existe', async () => {
+  const w = mundo(); sembrar(w);
+  assert.equal((await abonar(w, 'g1', { monto: 10 })).resultado, 'aplicado');
+  assert.equal((w.saldo().abonos as Doc[])[0].comprobantePath, undefined);
+});
+
+test('ABP-SRC · el núcleo valida el path con el helper exacto y SIN startsWith como única defensa', () => {
+  const nucleo = readFileSync(join(__dirname, '..', '..', 'src', 'abono-directo.ts'), 'utf8').replace(/\/\/.*$/gm, '');
+  assert.match(nucleo, /esComprobanteAbonoEsperado\(req\.saldoId, abonos\.length, req\.comprobantePath\)/);
+  assert.match(nucleo, /path === `saldos\/\$\{saldoId\}\/abono_\$\{indiceEsperado\}\.jpg`/);
 });

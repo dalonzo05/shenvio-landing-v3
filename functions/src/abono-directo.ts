@@ -83,6 +83,7 @@ export type MotivoRechazoAbono =
   | 'intencion_ajena'
   | 'intencion_cerrada'
   | 'comprobante_requerido'
+  | 'comprobante_path_invalido'
   | 'operacion_pendiente_existente';
 
 export interface CamposAbono {
@@ -202,6 +203,35 @@ export function validarPeticionAbono(data: unknown): PeticionAbono {
     throw new HttpsError('invalid-argument', 'operacionId inválido: de 16 a 64 caracteres (letras, números, guion o guion bajo).');
   }
   return { saldoId, operacionId: d.operacionId, ...validarCamposAbono(d, saldoId) };
+}
+
+/**
+ * A4-04 · P1-B — el comprobante de un abono se ata al índice que el SERVIDOR autoriza. Storage sella
+ * saldos/{saldoId}/abono_N.jpg cuando N < abonos.length; eso solo respalda dinero si un abono aplicado
+ * únicamente puede apuntar al N que le tocaba (N == abonos.length al aplicarlo). Un cliente modificado
+ * podía registrar `abono_5.jpg` con abonos.length == 0: el abono quedaba aplicado con un comprobante que
+ * Storage seguía considerando reemplazable.
+ *
+ * Igualdad EXACTA de strings (no startsWith): otro saldo, subcarpeta, traversal, otro basename u otra
+ * extensión son todos distintos del único path esperado. El índice nunca lo decide el cliente.
+ */
+export function esComprobanteAbonoEsperado(saldoId: string, indiceEsperado: number, path: unknown): boolean {
+  return typeof path === 'string'
+    && typeof saldoId === 'string' && saldoId.length > 0 && !saldoId.includes('/')
+    && Number.isInteger(indiceEsperado) && indiceEsperado >= 0
+    && path === `saldos/${saldoId}/abono_${indiceEsperado}.jpg`;
+}
+
+/**
+ * A4-04 · P1-B (ruta alternativa) — el comprobante de una PROPUESTA confirmada es EXACTAMENTE el de esa propuesta
+ * (lo que sube uploadComprobantePropuesta). Storage lo sella al dejar de estar 'pendiente'. Cualquier otro path
+ * (p. ej. un abono_N.jpg que el digitador escribió en la propuesta) se rechaza antes de aplicar dinero.
+ */
+export function esComprobantePropuestaEsperado(saldoId: string, propuestaId: string, path: unknown): boolean {
+  return typeof path === 'string'
+    && typeof saldoId === 'string' && saldoId.length > 0 && !saldoId.includes('/')
+    && typeof propuestaId === 'string' && propuestaId.length > 0 && !propuestaId.includes('/')
+    && path === `saldos/${saldoId}/propuestas/${propuestaId}/comprobante.jpg`;
 }
 
 /** Mismo criterio que isAdminOrGestor() en firestore.rules: usuario ACTIVO con rol admin o gestor. */
@@ -337,6 +367,15 @@ export async function registrarAbonoDirectoCore(
     }
     if (montoC > pendienteC) {
       return cerrarSinAplicar(rechazo('monto_excede_saldo', `El monto (${req.monto}) supera el saldo pendiente actual (${saldo.saldoPendiente}).`, { saldoPendiente: saldo.saldoPendiente }), 'monto_excede_saldo');
+    }
+
+    // ── Path del comprobante: el índice lo decide el SERVIDOR (A4-04 · P1-B) ──
+    // N == abonos.length del saldo RELEÍDO en esta transacción (si otro abono ganó entre el upload y el registro,
+    // Firestore reintenta la transacción con el saldo nuevo y el path viejo se rechaza). Se lanza SIN cerrar la
+    // intención —igual que comprobante_requerido—: es un dato incorrecto, no un rechazo definitivo; la transacción
+    // se revierte (0 saldo, 0 abono, 0 movimiento) y el reintento con el path correcto sigue siendo posible.
+    if (req.comprobantePath !== undefined && !esComprobanteAbonoEsperado(req.saldoId, abonos.length, req.comprobantePath)) {
+      throw rechazo('comprobante_path_invalido', `El comprobante debe ser saldos/${req.saldoId}/abono_${abonos.length}.jpg. No se registró nada.`, { indiceEsperado: abonos.length });
     }
 
     // ── ESCRITURAS (todas dentro de esta transacción) ─────────────────────────

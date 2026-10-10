@@ -29,6 +29,7 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as admin from 'firebase-admin';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { cuentas } from './financial-types';
+import { esComprobantePropuestaEsperado } from './abono-directo';
 
 const MAX_ID = 200;
 const MAX_MOTIVO = 500;
@@ -50,21 +51,23 @@ function idValido(v: unknown): v is string {
   return typeof v === 'string' && v.trim().length > 0 && v.length <= MAX_ID;
 }
 
-export const confirmarPropuestaAbono = onCall<ConfirmarPayload>(async (request) => {
-  const db = admin.firestore();
+/** Núcleo testeable: la callable solo le pasa Firestore, la identidad y el payload. */
+export async function confirmarPropuestaAbonoCore(
+  db: FirebaseFirestore.Firestore,
+  uid: string | undefined,
+  data: unknown,
+): Promise<{ ok: true; movimientoId: string }> {
+  if (!uid) throw new HttpsError('unauthenticated', 'Debés iniciar sesión.');
 
-  if (!request.auth) throw new HttpsError('unauthenticated', 'Debés iniciar sesión.');
-  const uid = request.auth.uid;
-
-  const data = request.data;
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
     throw new HttpsError('invalid-argument', 'Payload inválido.');
   }
-  const claves = Object.keys(data);
-  if (claves.length !== 1 || claves[0] !== 'propuestaId' || !idValido(data.propuestaId)) {
+  const payload = data as ConfirmarPayload;
+  const claves = Object.keys(payload);
+  if (claves.length !== 1 || claves[0] !== 'propuestaId' || !idValido(payload.propuestaId)) {
     throw new HttpsError('invalid-argument', 'Solo se acepta el campo propuestaId.');
   }
-  const propuestaId = (data.propuestaId as string).trim();
+  const propuestaId = (payload.propuestaId as string).trim();
 
   await exigirGestorOAdmin(db, uid);
 
@@ -94,6 +97,13 @@ export const confirmarPropuestaAbono = onCall<ConfirmarPayload>(async (request) 
 
     if (saldo.estado !== 'pendiente' && saldo.estado !== 'abonado_parcial') {
       throw new HttpsError('failed-precondition', `No se puede abonar un saldo en estado "${saldo.estado}".`);
+    }
+
+    // A4-04 · P1-B (ruta alternativa) — el comprobante que se copia al abono tiene que ser el de ESTA propuesta. Antes se copiaba
+    // lo que el digitador hubiera escrito: un `saldos/{id}/abono_N.jpg` plantado quedaba como respaldo de un abono aplicado,
+    // y Storage seguía viéndolo reemplazable. Sin tocar nada: la propuesta sigue 'pendiente' y se puede corregir.
+    if (prop.comprobantePath != null && !esComprobantePropuestaEsperado(saldoId, propuestaId, prop.comprobantePath)) {
+      throw new HttpsError('failed-precondition', 'El comprobante de la propuesta no es el esperado. No se aplicó nada.', { motivo: 'comprobante_path_invalido' });
     }
 
     const pendienteActual = saldo.saldoPendiente as number;
@@ -154,6 +164,10 @@ export const confirmarPropuestaAbono = onCall<ConfirmarPayload>(async (request) 
   });
 
   return { ok: true as const, movimientoId: movRef.id };
+}
+
+export const confirmarPropuestaAbono = onCall<ConfirmarPayload>(async (request) => {
+  return confirmarPropuestaAbonoCore(admin.firestore(), request.auth?.uid, request.data);
 });
 
 export const rechazarPropuestaAbono = onCall<RechazarPayload>(async (request) => {
