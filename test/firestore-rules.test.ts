@@ -5137,6 +5137,16 @@ test('FIN1G-C15 · estado inicial: solo pendiente_confirmacion o programada ⇒ 
   for (const estado of ['confirmada', 'asignada', 'en_camino_retiro', 'retirado', 'en_camino_entrega', 'entregado', 'cancelada', 'rechazada']) await plantadoDenyG({ estado }, estado)
 })
 
+test('FIN1G-C17 · CAO-01 · digitador y motorizado NO crean órdenes, ni con el payload real de comercio ni de cliente (el rol no es creador); un gestor dado de baja tampoco', async () => {
+  for (const uid of [UID_DIGITADOR, UID_MOTO]) {
+    await assertFails(nacerG(uid, payloadComercioG()))
+    await assertFails(nacerG(uid, payloadClienteG({ userId: uid, comercioUid: uid, ownerSnapshot: { uid, companyName: 'x', nombre: 'x' } })))
+    await assertFails(nacerG(uid, payloadStaffG(uid)))
+  }
+  await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), 'usuarios', UID_GESTOR), { activo: false, rol: 'gestor' }))
+  await assertFails(nacerG(UID_GESTOR, payloadStaffG(UID_GESTOR)))
+})
+
 test('FIN1G-C16 · una orden creada de forma legítima sigue pudiendo crecer: el gestor la edita y el motorizado sube evidencias después (la allowlist es solo del CREATE)', async () => {
   const id = 'g_post'
   await assertSucceeds(setDoc(doc(como(UID_GESTOR), 'solicitudes_envio', id), payloadStaffG(UID_GESTOR)))
